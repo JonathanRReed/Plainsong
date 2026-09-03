@@ -1,5 +1,14 @@
 import type { AnalysisProvenance, ActionItemsProvenance } from "./asr";
 
+import type { MeetingAttendee } from "@/lib/attendees";
+
+/**
+ * The capture mode written for a meeting that came from a file rather than a
+ * microphone. Mirrors `IMPORTED_MEETING_CAPTURE_MODE` in
+ * rust-sidecar/src/lib.rs.
+ */
+export const MEETING_CAPTURE_MODE_IMPORTED = "imported";
+
 export interface Recording {
   id: string;
   title: string;
@@ -18,13 +27,25 @@ export interface Recording {
   actionItemsProvenance?: ActionItemsProvenance | null;
   meetingNotes?: string | null;
   meetingTemplateId?: string | null;
-  meetingCaptureMode?: "mic_only" | "me_and_them" | null;
+  meetingCaptureMode?: "mic_only" | "me_and_them" | typeof MEETING_CAPTURE_MODE_IMPORTED | null;
+  /**
+   * The file name an imported meeting came from, without its folder. Absent
+   * for every meeting Plainsong recorded itself. Mirrors
+   * `imported_source_name` in rust-sidecar/src/models.rs.
+   */
+  importedSourceName?: string | null;
   notesUpdatedAt?: string | null;
   consentPromptShown?: boolean;
   consentNoticeMode?: string | null;
   consentNoticeSurface?: string | null;
   consentNoticeMessage?: string | null;
   consentNoticeUpdatedAt?: string | null;
+  /**
+   * Who was in the meeting, from the calendar event that started it or typed
+   * in afterwards. Optional because a sidecar that predates the column omits
+   * it, and every meeting recorded before it exists has none.
+   */
+  attendees?: MeetingAttendee[];
   /**
    * Meeting data-integrity facts. Optional because a sidecar that predates
    * them omits them entirely, and the renderer must degrade to making no claim
@@ -35,6 +56,25 @@ export interface Recording {
   transcriptDegradedReason?: string | null;
   transcriptIncompleteAcknowledgedAt?: string | null;
   captureDegradedSummary?: string | null;
+  /**
+   * Every pause taken while recording, in order. The saved audio skips the
+   * pauses; `atSeconds` is where each gap sits in it. Absent or empty for a
+   * meeting that was never paused or that predates the feature.
+   */
+  pauseSpans?: PauseSpan[];
+  /**
+   * The conferencing service this meeting was on, when the calendar event or
+   * the detected call it started from named one. Mirrors `video_service` in
+   * rust-sidecar/src/models.rs, which only stores keys it recognizes.
+   */
+  videoService?: string | null;
+}
+
+/** Mirrors `PauseSpan` in rust-sidecar/src/recording_pause.rs. */
+export interface PauseSpan {
+  startedAtMs: number;
+  endedAtMs: number | null;
+  atSeconds: number;
 }
 
 interface RecordingMetadata {
@@ -82,6 +122,13 @@ export interface MeetingTranscriptDetails {
   sourceMode: "me_them" | "speaker_labels" | "single_source" | "unknown" | string;
   hasSourceAwareSpeakers: boolean;
   hasSpeakerLabels: boolean;
+  /**
+   * Which diarizer produced the speaker labels, recorded when they were
+   * written: an ASR provider's settings value (`deepgram`), or
+   * `plainsong:<embedding model id>`. Absent when no diarizer has run, which
+   * is not the same as one having run and found a single speaker.
+   */
+  diarizer?: string | null;
 }
 
 export interface Project {

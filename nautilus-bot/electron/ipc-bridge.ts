@@ -3,11 +3,13 @@ import { spawn, ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { getCommandTimeoutMs, getCommandWorkKey } from "./ipc-command-policy";
+import { diagnosticLogBuffer } from "./diagnostic-log-buffer";
 import { buildSidecarEnv } from "./sidecar-env";
 import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   isExpectedSidecarStdinClose,
   retryOnceAfterMicrophonePreparationTimeout,
+  shouldRestartTerminatedSidecar,
   SIDECAR_SHUTDOWN_MESSAGE,
 } from "./sidecar-recovery-policy";
 
@@ -115,8 +117,10 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "benchmark_asr_providers_bytes",
   "begin_meeting_capture",
   "cancel_analysis_run",
+  "cancel_apple_speech_language_install",
   "capture_selected_text_for_playback",
   "check_for_updates",
+  "create_support_bundle",
   "check_system_audio_availability",
   "clear_provider_secret",
   "create_backup_default",
@@ -126,15 +130,20 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "create_settings_backup_default",
   "delete_dictation_command_preset",
   "delete_dictation_dictionary_entry",
+  "delete_bundled_cleanup_model",
   "delete_dictation_snippet",
+  "delete_live_preview_engine_model",
   "delete_model",
   "delete_project",
   "delete_recording",
   "delete_transcript_segments",
+  "dismiss_detected_call",
   "dismiss_dictation_overlay",
   "dismiss_recording_overlay",
   "download_asr_models",
+  "download_bundled_cleanup_model",
   "download_diarization_model",
+  "download_live_preview_engine_model",
   "download_platform_assets",
   "download_silero_vad_model",
   "download_whisper_model",
@@ -148,6 +157,9 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "extract_action_items",
   "extract_action_items_grounded",
   "force_stop_dictation",
+  "forget_all_remembered_voices",
+  "forget_remembered_voice",
+  "get_apple_language_model_availability",
   "get_asr_provider_inventory",
   "get_asr_provider_model",
   "get_asr_provider_model_options",
@@ -157,7 +169,9 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_available_space",
   "get_backup_config",
   "get_backup_setup_report",
+  "get_bundled_cleanup_model_status",
   "get_calendar_snapshot",
+  "get_cli_tool_status",
   "get_default_asr_provider",
   "get_dictation_audio_level",
   "get_dictation_history_details",
@@ -165,10 +179,12 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_dictation_overlay_state",
   "get_dictation_shortcut_capability_status",
   "get_embedding_status",
+  "get_live_preview_engine_status",
   "get_loopback_device_name",
+  "get_meeting_call_status",
   "get_system_audio_capability",
   "get_meeting_chat_messages",
-  "get_meeting_consent_automation_status",
+  "get_meeting_consent_notice_status",
   "get_meeting_transcript_details",
   "get_ollama_status",
   "get_permission_diagnostics",
@@ -189,6 +205,8 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_waveform_data",
   "has_provider_secret",
   "import_dictation_dictionary_csv",
+  "install_apple_speech_language",
+  "install_cli_tool",
   "install_update",
   "is_diarization_model_available",
   "is_silero_vad_model_downloaded",
@@ -211,6 +229,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "list_ollama_models",
   "list_openai_asr_models",
   "list_openai_models",
+  "list_remembered_voices",
   "lock_vault",
   "migrate_to_encrypted_storage",
   "open_export_path",
@@ -220,32 +239,43 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "open_calendar_privacy_settings",
   "open_permission_settings",
   "open_recording_audio",
+  "pause_recording",
+  "prepare_meeting_brief",
+  "preview_support_bundle",
+  "prepare_recording_playback",
   "queue_dictation_correction_suggestion",
   "recopy_dictation_result",
   "refresh_asr_runtime_probes",
   "reindex_embeddings",
   "reject_dictation_correction_suggestion",
+  "release_recording_playback",
   "rename_recording",
   "rename_speaker",
   "repair_cursor_insert_permissions",
   "repair_local_model_cache",
   "repaste_dictation_result",
+  "reprocess_dictation",
   "reprocess_dictation_text",
   "request_apple_speech_permission",
   "request_calendar_access",
   "request_dictation_permissions",
   "register_capture_admission",
   "reset_app_state",
+  "resume_recording",
   "restore_backup_default",
   "retranscribe_recording",
   "retry_meeting_analysis",
   "retry_meeting_auto_name",
+  "reject_speaker_voice",
+  "remember_speaker_voice",
   "revalidate_recording_audio",
   "run_diarization",
   "run_storage_retention_maintenance",
   "save_backup_config",
   "save_settings",
+  "search_dictation_history",
   "search_transcripts",
+  "select_audio_file_to_import",
   "select_backup_location",
   "select_cloud_backup_location",
   "select_export_location",
@@ -259,6 +289,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "stop_dictation",
   "summarize_recording",
   "summarize_recording_grounded",
+  "suggest_speaker_voices",
   "sync_backup_to_cloud",
   // The command palette's selected-text actions have always called this
   // (src/lib/backend.ts transformSelectedText); it was never on the allowlist,
@@ -269,6 +300,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "update_dictation_snippet",
   "update_meeting_chat_messages",
   "update_recording_analysis",
+  "update_recording_attendees",
   "update_recording_notes",
   "update_recording_template",
   "upsert_dictation_command_preset",
@@ -388,7 +420,11 @@ export class IpcBridge {
     });
 
     this.process.stderr!.on("data", (chunk: Buffer) => {
-      process.stderr.write(`[sidecar] ${chunk.toString()}`);
+      const text = chunk.toString();
+      process.stderr.write(`[sidecar] ${text}`);
+      // Kept in memory only, for the support bundle the reader may ask for.
+      // See electron/diagnostic-log-buffer.ts.
+      diagnosticLogBuffer.record("sidecar", text);
     });
 
     this.process.stdin!.on("error", (error: NodeJS.ErrnoException) => {
@@ -410,12 +446,23 @@ export class IpcBridge {
       // A recycle we initiated knows why it killed the process; anything else
       // is classified from how the process actually died. A signal means
       // something killed it, no signal means it went away on its own.
+      const initiatedByThisProcess = this.pendingTerminationReason !== null;
       const reason =
         this.pendingTerminationReason ?? (signal ? "killed" : "crash");
       this.pendingTerminationReason = null;
+      const restart = shouldRestartTerminatedSidecar({
+        signal,
+        initiatedByThisProcess,
+      });
+      if (!restart) {
+        console.log(
+          `[sidecar] not restarting: ${signal} came from outside this process, so the app is being torn down`,
+        );
+      }
       this.handleSidecarTermination(
         reason,
         `Sidecar process exited (code=${code}, signal=${signal})`,
+        restart,
       );
     });
 
@@ -452,9 +499,15 @@ export class IpcBridge {
   // human-readable string, kept alongside it. The renderer used to receive only
   // the string and had to match on its wording to tell a crash from a failed
   // spawn, which broke silently whenever the wording changed.
+  //
+  // `restart` is false only when the caller has established that the sidecar
+  // died because the whole process group is going down (see
+  // shouldRestartTerminatedSidecar). Pending requests are still rejected and
+  // the renderer is still told the sidecar is gone.
   private handleSidecarTermination(
     reason: SidecarTerminationReason,
     message: string,
+    restart = true,
   ): void {
     this.sidecarHealthy = false;
     this.eventCallback?.("sidecar-runtime-changed", {
@@ -470,7 +523,7 @@ export class IpcBridge {
       this.restartTimer = null;
     }
 
-    if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
+    if (restart && !this.shuttingDown && this.restartAttempts < this.maxRestarts) {
       const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
       this.restartAttempts++;
       console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
@@ -481,7 +534,7 @@ export class IpcBridge {
         }
         this.spawnSidecar();
       }, delay);
-    } else if (this.restartAttempts >= this.maxRestarts) {
+    } else if (restart && this.restartAttempts >= this.maxRestarts) {
       console.error("[sidecar] max restarts reached, giving up");
     }
     // Reject all pending requests with a clear error message

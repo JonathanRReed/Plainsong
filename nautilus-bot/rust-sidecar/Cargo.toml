@@ -17,6 +17,16 @@ path = "src/lib.rs"
 name = "plainsong-sidecar"
 path = "src/bin/sidecar.rs"
 
+# The `plainsong` command-line tool and read-only MCP server. A separate
+# binary rather than a mode of the sidecar because the sidecar is spawned by
+# Electron over stdio with no socket: a terminal or an AI assistant has nothing
+# to connect to. This binary opens the same SQLCipher database read-only
+# (see `db::Database::open_read_only_at_path`) and reuses the library's query
+# and export code, so nothing in the running sidecar changes for reads.
+[[bin]]
+name = "plainsong-cli"
+path = "src/bin/plainsong-cli.rs"
+
 [dependencies]
 lazy_static = "1.4"
 serde = { version = "1", features = ["derive"] }
@@ -56,8 +66,39 @@ candle-transformers = { version = "0.10", optional = true }
 # Tokenizers for HuggingFace models
 tokenizers = { version = "0.23", optional = true }
 
-# SentencePiece tokenizer for the punctuation/casing model (pure Rust, no C++ dep)
-sentencepiece-rs = { version = "0.2", optional = true }
+# transcribe.cpp: one ggml runtime that hosts Parakeet TDT, Whisper, Nemotron
+# streaming, Qwen3-ASR, Cohere Transcribe, Voxtral and Moonshine v2 from a
+# single GGUF loader. Pulled in only by the `asr-transcribe-cpp` spike feature
+# (OFF by default, not in the release feature list) so the shipped binary is
+# unchanged; see artifacts/qa/transcribe-cpp-spike-2026-09-02.md for the
+# measurement and the adopt/defer recommendation. MIT-licensed, same as this
+# crate.
+#
+# The crates.io release, NOT the git rev it was cut from. A `git` source is not
+# resolvable from a cargo cache that only holds registry crates, so
+# `cargo metadata --locked --offline` failed for EVERY feature set -- including
+# the default and release ones that compile none of this -- which took
+# `lint:rust`, `test:rust`, `licenses:generate` and `release:mac` with it on an
+# offline box. Registry sources resolve from the local cache, and the lockfile
+# gains a checksum a git source cannot carry.
+#
+# Same bytes: transcribe-cpp 0.2.3 and transcribe-cpp-sys 0.2.3 were published
+# from 63a44d9239d610b3908e8a66b384924cd4a77217 (their `.cargo_vcs_info.json`
+# records that sha, which was the `release: 0.2.3` commit this used to pin),
+# and their `Cargo.toml.orig`, Rust sources, `include/`, `src/`, `cmake/` and
+# vendored `ggml/` trees diff clean against that checkout.
+#
+# `default-features = false, features = ["metal"]` rather than a `whisper-gpu`-
+# style `transcribe-cpp?/metal` feature in `default`. That shape was tried and
+# reverted: a `dep?/feature` reference from an ENABLED feature pulls the optional
+# crate into the release resolve graph even though nothing compiles it, which put
+# transcribe-cpp and transcribe-cpp-sys into the shipped THIRD-PARTY-NOTICES
+# (532 -> 534 Rust packages) -- notices for two crates the shipped binary does
+# not contain. Upstream's build.rs only forwards -DTRANSCRIBE_METAL on Apple
+# targets and documents `metal` as a no-op elsewhere, so naming it here does not
+# make this dependency macOS-only. A CPU measurement needs no rebuild either
+# way: PLAINSONG_TRANSCRIBE_CPP_BACKEND=cpu pins the device at runtime.
+transcribe-cpp = { version = "0.2.3", default-features = false, features = ["metal"], optional = true }
 
 # Audio preprocessing. Not optional: the mixed ("Me + Them") capture path
 # resamples whichever of the mic/loopback devices is running at the lower rate
@@ -96,6 +137,13 @@ hostname = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 walkdir = "2.5"
 
+# Speaker diarization via pyannote community-1 (spike, OFF by default).
+# Optional and gated behind the `diarization-speakrs` Cargo feature; see the
+# feature comment below for the build status on this platform. `online` is
+# deliberately disabled: it pulls hf-hub, which would fetch model weights
+# outside the pinned-hash download manager.
+speakrs = { version = "0.5.0", optional = true, default-features = false, features = ["default-linalg"] }
+
 # Optional progress bars
 indicatif = { version = "0.18", optional = true }
 
@@ -120,13 +168,30 @@ objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 tokio = { version = "1", features = ["test-util"] }
 
 [features]
-default = ["asr-all", "sqlcipher", "whisper-gpu"]
+default = ["asr-all", "sqlcipher", "whisper-gpu", "local-llm"]
+
+# The bundled zero-setup dictation cleanup model (S1-mini by Superwhisper),
+# run in-process through Candle's quantized Qwen3 GGUF path. Adds no new
+# crate: candle-core/-nn/-transformers and tokenizers are already pulled in by
+# `asr-canary`/`asr-parakeet`, and `candle-metal` (shipped on macOS) routes it
+# through the GPU. In `default` because "works out of the box" is the point --
+# a build without it falls back to telling the user to pick Ollama or a cloud
+# provider, which is the pre-B6 behavior.
+local-llm = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager"]
 
 # ASR Provider Features
 asr-whisper = ["whisper-rs", "download-manager"]
 asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing", "rustfft", "tokenizers"]
 asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
-asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization", "text-recasepunct"]
+asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
+
+# transcribe.cpp spike (OFF by default, and deliberately NOT in
+# scripts/sidecar-cargo-features.mjs, so neither the release build nor the
+# default `cargo build` compiles a byte of it). Adds one experimental local
+# route: Parakeet TDT 0.6B v3 in GGUF on Metal, through the same ggml runtime
+# Handy ships. Evidence lives in
+# artifacts/qa/transcribe-cpp-spike-2026-09-02.md.
+asr-transcribe-cpp = ["transcribe-cpp", "download-manager"]
 
 # Whisper GPU acceleration (Metal — macOS only). No CUDA feature is wired;
 # non-macOS builds must use --no-default-features and re-enable
@@ -150,17 +215,39 @@ whisper-gpu = ["whisper-rs?/metal"]
 
 # Candle Metal GPU acceleration (macOS only). Routes Candle-based models
 # (Whisper Large V3 Turbo, Distil Whisper) through the Metal backend instead
-# of CPU F32. Without this, Candle falls back to CPU which is multi-second
-# for large models. Note: candle-nn MUST also get the `metal` feature —
+# of CPU F32. Note: candle-nn MUST also get the `metal` feature —
 # without it, the Metal rms-norm kernel isn't compiled and inference crashes.
+#
+# SHIPPED on macOS: scripts/sidecar-cargo-features.mjs adds it to the release
+# build, to lint/test/benchmark, to CI, and to the third-party notices. Kept
+# out of `default` because it only compiles against Apple frameworks.
+# Measured on an M4 Pro with distil-large-v3.5, using a combined
+# candle-metal+ort-coreml dev binary on a loaded shared machine
+# (artifacts/qa/acceleration-receipt-2026-09-01.md; the shipped binary itself
+# still owes a quiet-machine re-run): CPU F32 takes 32.8 s p50 for a 5.3 s
+# utterance and 55.5 s for 44 s of audio; Metal takes 0.96 s and 2.6 s. The
+# first inference in a fresh process pays a Metal shader compile (1.1 s with a
+# warm shader cache, ~60 s observed under heavy memory pressure).
 candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 
-# ONNX Runtime CoreML Execution Provider (macOS only). Enables CoreML EP for
-# ONNX-based models (Silero VAD, Wespeaker diarization, Moonshine) on Apple
-# Silicon, routing eligible ops to the Neural Engine/GPU. CoreML is NOT
-# enabled for Parakeet (known to be unstable for transducer models). The EP
-# gracefully falls back to CPU if the prebuilt ONNX Runtime binary does not
-# include CoreML support or if CoreML initialization fails.
+# ONNX Runtime CoreML Execution Provider (macOS only). Registers the CoreML EP
+# on the ONNX sessions built through `ort_utils::build_session` (Silero VAD,
+# Wespeaker diarization, Moonshine, the Qwen3 encoder). Parakeet and the Qwen3
+# decoders bypass it (unstable / int4). The EP falls back to CPU if the
+# prebuilt ONNX Runtime binary lacks CoreML or initialization fails.
+#
+# Deliberately NOT shipped: scripts/sidecar-cargo-features.mjs leaves it out.
+# Measured on an M4 Pro with Moonshine base
+# (artifacts/qa/acceleration-receipt-2026-09-01.md): the encoder graph gets
+# split into 75 CoreML partitions (393 of 743 nodes supported), the merged
+# decoder is a single `If` node CoreML rejects outright, the first load spends
+# ~24 s compiling CoreML models (4.5 s on later launches, versus 0.7 s on CPU),
+# and steady state is slower than plain CPU (44 s fixture: 1.7 s p50 on CPU
+# versus 2.1 s p50 / 5.6 s p95 with CoreML). Silero VAD gains nothing either:
+# CoreML supports 0 of its 2 graph nodes (an `If` over the 8k/16k subgraphs),
+# so it stays on CPU with ~6% extra per-chunk overhead from the registered EP.
+# Re-enable only behind per-session opt-outs (plus `ModelCacheDirectory`,
+# `EnableOnSubgraphs`, `RequireStaticInputShapes`) and a new measurement.
 ort-coreml = ["ort/coreml"]
 
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)
@@ -175,9 +262,9 @@ desktop-shell = []
 
 # Speaker diarization (requires ONNX runtime)
 diarization = ["ort", "ndarray", "rustfft"]
-
-# ML-based punctuation/casing restoration (requires ONNX runtime + SentencePiece)
-text-recasepunct = ["ort", "ndarray", "sentencepiece-rs", "download-manager"]
+# EXPERIMENTAL, OFF by default and NOT shipped: swap the embedding+AHC
+# diarizer for speakrs (pyannote community-1 in Rust on ONNX Runtime).
+diarization-speakrs = ["diarization", "dep:speakrs"]
 
 [patch.crates-io]
 # CPAL 0.18.1's macOS loopback implementation links the macOS 14.2 process-tap

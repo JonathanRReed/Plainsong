@@ -1,0 +1,373 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-03T06:25:00Z",
+  "what": "Packaged gates that do not require notarization, run against the signed-but-unnotarized 0.9.0-beta.3 build produced by `bun run release:mac` on this Mac.",
+  "branch": "worktree-agent-a7989c7610bb925cf",
+  "commit": "59605fb116902b5c1bd28d5e3fdc639d0a7bd456",
+  "appVersion": "0.9.0-beta.3",
+  "machine": {
+    "cpu": "Apple M4 Pro (14 cores)",
+    "memoryBytes": 25769803776,
+    "os": "macOS 27.0 (26A5406e)",
+    "note": "Shared with other build lanes throughout. Every timing carries its own 1-minute load average; sizes and hashes are load-independent."
+  },
+  "artifacts": {
+    "app": {
+      "path": "release/mac-arm64/Plainsong.app",
+      "sizeBytes": 311358436,
+      "sizeMiB": 296.93
+    },
+    "dmg": {
+      "path": "release/Plainsong-0.9.0-beta.3-arm64.dmg",
+      "sizeBytes": 129140311,
+      "sha256": "1fcbe41d104219e389d7d2079800c671ef09182a4be37eb229bf8eda86298fb7",
+      "format": "UDIF read-only compressed (lzfse)",
+      "mounts": true
+    },
+    "zip": {
+      "path": "release/Plainsong-0.9.0-beta.3-arm64-mac.zip",
+      "sizeBytes": 130152737,
+      "sha256": "9372835a491ad7be9d2a45afe901b004046bfb6da328238d17a010041acf6985"
+    },
+    "blockmap": {
+      "path": "release/Plainsong-0.9.0-beta.3-arm64-mac.zip.blockmap",
+      "sizeBytes": 137651
+    },
+    "updateManifest": {
+      "path": "release/beta-mac.yml",
+      "version": "0.9.0-beta.3",
+      "channel": "beta"
+    }
+  },
+  "trust": {
+    "signed": true,
+    "signingIdentity": "Developer ID Application: Jonathan Reed (AJ9VWBRNZN)",
+    "teamIdentifier": "AJ9VWBRNZN",
+    "hardenedRuntime": true,
+    "secureTimestamp": "2026-09-03T06:19:35Z",
+    "codesignVerifyDeepStrict": "valid on disk; satisfies its Designated Requirement",
+    "dmgSigned": true,
+    "notarized": false,
+    "stapledTicket": false,
+    "spctlAssessment": "rejected, source=Unnotarized Developer ID",
+    "quarantineAttributeOnDmg": false,
+    "meaning": "Runs on this Mac because a locally built artifact carries no com.apple.quarantine attribute and Gatekeeper only enforces on quarantined items. A copy that is DOWNLOADED anywhere would be quarantined and refused."
+  },
+  "gates": {
+    "gate:size": {
+      "exitCode": 0,
+      "loadAverageBefore": "86.17 100.55 115.03",
+      "loadAverageAfter": "86.17 100.55 115.03",
+      "pass": true,
+      "result": {
+        "target": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app",
+        "sizeBytes": 311358436,
+        "sizeMb": 296.93,
+        "maxMb": 450,
+        "pass": true
+      }
+    },
+    "gate:cold-start": {
+      "exitCode": 0,
+      "loadAverageBefore": "86.17 100.55 115.03",
+      "loadAverageAfter": "84.48 99.96 114.74",
+      "pass": true,
+      "result": {
+        "ok": true,
+        "generatedAt": "2026-09-03T06:25:01.567Z",
+        "command": "release/mac-arm64/Plainsong.app/Contents/MacOS/Plainsong --user-data-dir=/var/folders/ph/7cfrg6mn3bj120hdsfs79d140000gn/T/plainsong-cold-start-WzGbDf/electron-profile",
+        "readinessCommand": null,
+        "readinessOutputPattern": "App rendered",
+        "isolatedPlainsongData": true,
+        "elapsedMs": 1940,
+        "thresholdMs": 2500
+      },
+      "samples": [
+        {
+          "elapsedMs": 850,
+          "load1m": 80.33
+        },
+        {
+          "elapsedMs": 848,
+          "load1m": 80.33
+        },
+        {
+          "elapsedMs": 727,
+          "load1m": 80.33
+        },
+        {
+          "elapsedMs": 849,
+          "load1m": 80.94
+        },
+        {
+          "elapsedMs": 849,
+          "load1m": 80.94
+        }
+      ],
+      "firstLaunchSamples": {
+        "note": "The FIRST launches of a freshly built bundle, before the page cache held it, took far longer and failed the 2500 ms threshold.",
+        "elapsedMs": [
+          3522,
+          4139,
+          5477,
+          2573,
+          3615,
+          6318
+        ],
+        "load1mRange": [
+          75.0,
+          102.06
+        ]
+      }
+    },
+    "gate:packaged:macos:native": {
+      "exitCode": 0,
+      "loadAverageBefore": "84.48 99.96 114.74",
+      "loadAverageAfter": "84.48 99.96 114.74",
+      "pass": true,
+      "result": {
+        "pass": true,
+        "allowUnsigned": false,
+        "unsignedSkips": []
+      }
+    },
+    "gate:release:dependencies": {
+      "exitCode": 1,
+      "loadAverageBefore": "84.48 99.96 114.74",
+      "loadAverageAfter": "81.32 99.04 114.33",
+      "pass": false,
+      "result": {
+        "generatedAt": "2026-09-03T06:25:05.039Z",
+        "appPath": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app",
+        "pass": false,
+        "checks": {
+          "auditCompleted": true,
+          "noUnexpectedAdvisories": false,
+          "auditMatchesInstalledState": false,
+          "rootBraceExpansionPatched": true,
+          "affectedCopiesLimitedToReviewedBuildTree": true,
+          "affectedCopiesExcludedFromPackagedApp": true
+        },
+        "acceptedException": false,
+        "advisory": null,
+        "counts": {
+          "advisories": 5,
+          "unexpectedAdvisories": 5,
+          "affectedLockEntries": 0,
+          "unexpectedAffectedLockEntries": 0,
+          "packagedExcludedModules": 0
+        },
+        "affectedLockEntries": [],
+        "unexpectedAffectedLockEntries": [],
+        "packagedExcludedModules": []
+      },
+      "advisories": [
+        {
+          "package": "@xmldom/xmldom",
+          "id": 1158518,
+          "severity": "moderate",
+          "vulnerableVersions": ">=0.7.0 <=0.8.14",
+          "title": "XML fragment injection via invalid EntityReference.nodeName"
+        },
+        {
+          "package": "fast-uri",
+          "id": 1158521,
+          "severity": "high",
+          "vulnerableVersions": ">=3.1.3 <3.1.6",
+          "title": "host confusion via skipped IDN canonicalization"
+        },
+        {
+          "package": "fast-uri",
+          "id": 1158524,
+          "severity": "high",
+          "vulnerableVersions": ">=3.0.0 <3.1.6",
+          "title": "SSRF via malformed IPv6 normalization"
+        },
+        {
+          "package": "fast-uri",
+          "id": 1158527,
+          "severity": "high",
+          "vulnerableVersions": ">=3.1.2 <3.1.6",
+          "title": "SSRF via repeated hostname percent-decoding"
+        },
+        {
+          "package": "fast-uri",
+          "id": 1158530,
+          "severity": "high",
+          "vulnerableVersions": ">=3.0.0 <3.1.6",
+          "title": "host confusion via percent-encoded scheme normalization"
+        }
+      ],
+      "shippedImpact": "Neither package is inside the packaged app.asar (checked with `@electron/asar list`), and the gate's own affectedLockEntries and packagedExcludedModules counts are both 0. Both are build-time only: @xmldom/xmldom via electron-builder's plist, fast-uri via ajv."
+    },
+    "gate:release:licenses": {
+      "exitCode": 0,
+      "loadAverageBefore": "81.32 99.04 114.33",
+      "loadAverageAfter": "80.01 98.48 114.04",
+      "pass": true,
+      "result": [
+        "PASS third-party notices: /Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app/Contents/Resources/THIRD-PARTY-NOTICES.txt (source and packaged copies match the regenerated notices, sha256 647eebd1363520e7358b63db3d1d3b40bf46f19ec55db9c3927aec724869e9ad)",
+        "PASS project LICENSE: /Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app/Contents/Resources/LICENSE",
+        "PASS Chromium attributions: /Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app/Contents/Resources/LICENSES.chromium.html"
+      ]
+    },
+    "qa:packaged:macos:update-metadata": {
+      "exitCode": 0,
+      "loadAverageBefore": "80.01 98.48 114.04",
+      "loadAverageAfter": "80.01 98.48 114.04",
+      "pass": true,
+      "result": {
+        "generatedAt": "2026-09-03T06:25:14.064Z",
+        "candidateIdentity": {
+          "schemaVersion": 1,
+          "complete": true,
+          "missing": [],
+          "appComponents": [
+            {
+              "name": "Contents/Resources/app.asar",
+              "bytes": 4313979,
+              "sha256": "70254ea7e0d6f6f9ad5b8bfe413f1e7109600129de4291fc231c4789271cf559"
+            },
+            {
+              "name": "Contents/Resources/sidecar/plainsong-sidecar",
+              "bytes": 41255024,
+              "sha256": "e2271c1fba9ee3bf9aaa2919788a3eaa9b412d35161893f844f0a14f424810a8"
+            },
+            {
+              "name": "Contents/MacOS/Plainsong",
+              "bytes": 54656,
+              "sha256": "9829607406102bbebd835c035251bb7aaa751ddca4d68d46a1728a36d4734674"
+            },
+            {
+              "name": "Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper",
+              "bytes": 135008,
+              "sha256": "91720e369904be17d6b45fb6f23773f4b1b54d02f0c5132c3dcf8c120743f8f2"
+            },
+            {
+              "name": "Contents/Resources/sidecar/nautilus-macos-speech-helper-aarch64-apple-darwin",
+              "bytes": 400240,
+              "sha256": "b86b9cdb129dbe3d20f81d47ceb50e2559f475c0f9cc07a4e490ac54db413702"
+            },
+            {
+              "name": "Contents/Resources/app-update.yml",
+              "bytes": 157,
+              "sha256": "01d995d4e0c318b960e27044c4811f324f7431d003eb53e750329626ec065bf6"
+            },
+            {
+              "name": "Contents/Info.plist",
+              "bytes": 5057,
+              "sha256": "871f57aff0599f72f5d855b24597184f5fe3744fceed1ec8f36d879dc5f59365"
+            }
+          ],
+          "artifacts": [
+            {
+              "name": "Plainsong-0.9.0-beta.3-arm64.dmg",
+              "bytes": 129140311,
+              "sha256": "1fcbe41d104219e389d7d2079800c671ef09182a4be37eb229bf8eda86298fb7"
+            },
+            {
+              "name": "Plainsong-0.9.0-beta.3-arm64-mac.zip",
+              "bytes": 130152737,
+              "sha256": "9372835a491ad7be9d2a45afe901b004046bfb6da328238d17a010041acf6985"
+            },
+            {
+              "name": "Plainsong-0.9.0-beta.3-arm64-mac.zip.blockmap",
+              "bytes": 137651,
+              "sha256": "29cdafae7df24291e8179b247fa7b15682b89f6fdc019a2dec2bd52dfa1b0c17"
+            },
+            {
+              "name": "beta-mac.yml",
+              "bytes": 376,
+              "sha256": "b6fb9a223a4644c827c933a4b34c6358588fd1f55d70aa62bf9766126a652a6b"
+            }
+          ],
+          "appComponentsSha256": "039f2bf4a00e20e3114efb81ac6bca3f7aa9271f0a9aba59df426946feb556fe",
+          "releaseSha256": "ce10111934bf27fdd508569b5eae2d41b4e494c3a9ebffca5ff027c2b7ca060f"
+        },
+        "mode": "full",
+        "pass": true,
+        "paths": {
+          "app": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app",
+          "appInfoPlist": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app/Contents/Info.plist",
+          "appUpdate": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/mac-arm64/Plainsong.app/Contents/Resources/app-update.yml",
+          "manifest": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/beta-mac.yml"
+        },
+        "packageVersion": "0.9.0-beta.3",
+        "appVersion": "0.9.0-beta.3",
+        "updateConfig": {
+          "provider": "generic",
+          "url": "https://updates.plainsong.jonathanrreed.com/beta/",
+          "useMultipleRangeRequest": false,
+          "updaterCacheDirName": "plainsong-updater"
+        },
+        "releaseChannel": "beta",
+        "channel": {
+          "requestedManifest": "beta-mac.yml",
+          "packagedManifest": "beta-mac.yml"
+        },
+        "manifest": {
+          "version": "0.9.0-beta.3",
+          "releaseDate": "2026-09-03T06:19:51.067Z",
+          "zipName": "Plainsong-0.9.0-beta.3-arm64-mac.zip",
+          "zipPath": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/Plainsong-0.9.0-beta.3-arm64-mac.zip",
+          "expectedSha512": "zbW/PQDCCu56ntguN4CYvntYqZV6cIzKTmYgZBOokHUR1ye4qnxW5tTFT58AA10ANiXfN0+HH8jCTYpvfNyuYQ==",
+          "actualSha512": "zbW/PQDCCu56ntguN4CYvntYqZV6cIzKTmYgZBOokHUR1ye4qnxW5tTFT58AA10ANiXfN0+HH8jCTYpvfNyuYQ==",
+          "expectedSize": 130152737,
+          "actualSize": 130152737,
+          "blockmapPath": "/Users/jonathanreed/Downloads/Plainsong/.claude/worktrees/agent-a7989c7610bb925cf/nautilus-bot/release/Plainsong-0.9.0-beta.3-arm64-mac.zip.blockmap"
+        },
+        "checks": {
+          "appUpdateMetadataExists": true,
+          "appInfoPlistExists": true,
+          "appVersionPresent": true,
+          "packageVersionMatchesPackagedApp": true,
+          "providerIsGeneric": true,
+          "betaFeedUrlMatchesExpected": true,
+          "multipleRangeRequestsDisabled": true,
+          "releaseChannelIsBeta": true,
+          "packagedChannelMatchesRelease": true,
+          "channelResolverLoaded": true,
+          "installedChannelRequestsPackagedManifest": true,
+          "releaseManifestExists": true,
+          "betaChannelManifestEmitted": true,
+          "versionMatchesPackagedApp": true,
+          "zipPathPresent": true,
+          "zipArtifactExists": true,
+          "zipSha512Present": true,
+          "zipSha512MatchesManifest": true,
+          "zipSizePresent": true,
+          "zipSizeMatchesManifest": true,
+          "blockmapExists": true
+        }
+      }
+    }
+  },
+  "smoke": {
+    "command": "launch release/mac-arm64/Plainsong.app against an isolated PLAINSONG_DATA_DIR/PLAINSONG_CONFIG_DIR, wait for '[main] App rendered', confirm the sidecar child process, SIGTERM the group",
+    "runs": [
+      {
+        "appRenderedMs": 2898,
+        "sidecarChildPids": 2,
+        "exitCode": 0,
+        "sidecarStillRunningAfterQuit": 0,
+        "sidecarRestarts": 1
+      },
+      {
+        "appRenderedMs": 1511,
+        "sidecarChildPids": 1,
+        "exitCode": 0,
+        "sidecarStillRunningAfterQuit": 0,
+        "sidecarRestarts": 0
+      },
+      {
+        "appRenderedMs": 1212,
+        "sidecarChildPids": 2,
+        "exitCode": 0,
+        "sidecarStillRunningAfterQuit": 0,
+        "sidecarRestarts": 0
+      }
+    ],
+    "osPermissionPromptSeen": false,
+    "note": "The first of these three runs restarted the sidecar once about a second after 'App rendered' ('restarting in 1000ms (attempt 1/5)') and recovered; not reproduced on the two runs after it. These three are the only launches held open long enough to observe it -- gate:cold-start SIGTERMs at 'App rendered'."
+  }
+}

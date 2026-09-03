@@ -157,7 +157,6 @@ function buildNormalProfile(base) {
   next.shortcuts = {
     ...next.shortcuts,
     toggleDictation: "Cmd+Shift+Space",
-    toggleDictationAlternates: [],
   };
   return next;
 }

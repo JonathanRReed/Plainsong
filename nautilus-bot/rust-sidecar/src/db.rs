@@ -3,6 +3,7 @@
 //! Manages recordings, transcripts, projects, and audit logs
 //! with full CRUD operations.
 
+use crate::diarization::voiceprints::{self, ClusterVoiceSignature, StoredVoiceProfile};
 use crate::models::*;
 use crate::recording_audio::{
     approved_regular_file, encrypted_path_for, historical_companion_candidates,
@@ -12,8 +13,9 @@ use crate::recording_audio::{
     ValidatedRecordingAudio,
 };
 use crate::store::{
-    CaptureSessionRecord, ContextSnapshotRecord, DictationInsightTotals, InsertionActionRecord,
-    MeetingArtifactRecord, PolicySnapshotRecord, RuntimeEventRecord, TranscriptArtifactRecord,
+    CaptureSessionRecord, ContextSnapshotRecord, DictationHistoryTextRecord,
+    DictationInsightTotals, InsertionActionRecord, MeetingArtifactRecord, PolicySnapshotRecord,
+    RuntimeEventRecord, TranscriptArtifactRecord,
 };
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -74,12 +76,26 @@ const AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS au
 /// Every application-owned table whose rows Reset Everything must remove.
 /// The delete SQL lives beside the classification so the schema-coverage test
 /// cannot classify a table as reset-scoped without also wiring it into purge.
-const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 22] = [
+const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 27] = [
+    // Samples before profiles: the foreign key points that way.
+    (
+        "speaker_profile_samples",
+        "DELETE FROM speaker_profile_samples",
+    ),
+    ("speaker_profiles", "DELETE FROM speaker_profiles"),
     ("speaker_aliases", "DELETE FROM speaker_aliases"),
     ("transcript_fts", "DELETE FROM transcript_fts"),
+    ("dictation_history_fts", "DELETE FROM dictation_history_fts"),
+    (
+        "dictation_history_text",
+        "DELETE FROM dictation_history_text",
+    ),
     ("transcript_embeddings", "DELETE FROM transcript_embeddings"),
     ("transcript_artifacts", "DELETE FROM transcript_artifacts"),
     ("meeting_artifacts", "DELETE FROM meeting_artifacts"),
+    // A cached brief is model-written text about the reader's meetings. It
+    // has to go with them.
+    ("meeting_briefs", "DELETE FROM meeting_briefs"),
     ("insertion_actions", "DELETE FROM insertion_actions"),
     ("transcripts", "DELETE FROM transcripts"),
     (
@@ -224,11 +240,11 @@ fn insert_recording_row(
     conn.execute(
         "INSERT INTO recordings (
             id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
-            meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
-            consent_prompt_shown, consent_notice_mode, consent_notice_surface,
-            consent_notice_message, consent_notice_updated_at
+            meeting_notes, meeting_template_id, meeting_capture_mode, imported_source_name,
+            notes_updated_at, consent_prompt_shown, consent_notice_mode, consent_notice_surface,
+            consent_notice_message, consent_notice_updated_at, video_service
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             &recording.id,
             &recording.title,
@@ -242,6 +258,7 @@ fn insert_recording_row(
             &recording.meeting_notes,
             &recording.meeting_template_id,
             &recording.meeting_capture_mode,
+            &recording.imported_source_name,
             recording
                 .notes_updated_at
                 .as_ref()
@@ -253,7 +270,8 @@ fn insert_recording_row(
             recording
                 .consent_notice_updated_at
                 .as_ref()
-                .map(|value| value.to_rfc3339())
+                .map(|value| value.to_rfc3339()),
+            &recording.video_service
         ],
     )?;
     Ok(())
@@ -279,6 +297,14 @@ fn normalize_category_scope(value: Option<&str>) -> Result<Option<String>> {
     Ok(Some(
         crate::settings::dictation_app_category_to_key(category).to_string(),
     ))
+}
+
+/// The `pause_spans` column, parsed. Unreadable JSON is an empty list: a
+/// meeting whose pause record is corrupt is still a meeting, and a read must
+/// not fail over a marker the timeline can simply omit.
+fn parse_pause_spans(raw: Option<String>) -> Vec<crate::recording_pause::PauseSpan> {
+    raw.and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }
 
 fn validated_summary_provenance(
@@ -354,6 +380,227 @@ fn preserve_matching_action_item_provenance(
     Some(next)
 }
 
+/// Hex-encode a database key for `PRAGMA key`/`rekey`/`ATTACH ... KEY`.
+///
+/// SQLCipher takes the key as a literal inside the pragma text, which cannot
+/// be a bound parameter, so the encoding is also the injection guard: the
+/// result is checked to be nothing but hex digits before it is interpolated.
+#[cfg(feature = "sqlcipher")]
+fn hex_database_key(key: &str) -> Result<String> {
+    let hex_key = hex::encode(key.as_bytes());
+    if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
+    }
+    Ok(hex_key)
+}
+
+/// SQLite refuses a bound parameter in `ATTACH`/`VACUUM INTO`, so paths are
+/// inlined as string literals with single quotes doubled.
+#[cfg(feature = "sqlcipher")]
+fn sql_string_literal(path: &Path) -> String {
+    path.to_string_lossy().replace('\'', "''")
+}
+
+/// Delete a database file and the journal/WAL companions SQLite may have left
+/// beside it. Only ever called on a staging file this process created.
+#[cfg(feature = "sqlcipher")]
+fn remove_database_file_set(db_path: &Path) {
+    let _ = fs::remove_file(db_path);
+    if let Some(name) = db_path.file_name().and_then(|name| name.to_str()) {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let _ = fs::remove_file(db_path.with_file_name(format!("{name}{suffix}")));
+        }
+    }
+}
+
+/// Whether the file at `db_path` opens as a plaintext SQLite database.
+#[cfg(feature = "sqlcipher")]
+fn database_reads_as_plaintext(db_path: &Path) -> bool {
+    Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|conn| {
+            conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        })
+        .is_ok()
+}
+
+/// Encrypt the plaintext SQLite database at `db_path` in place.
+///
+/// This is the operation the vault always claimed to perform. `PRAGMA rekey`
+/// does not do it — SQLCipher documents rekey as a no-op on a database that
+/// was never keyed, so the app was setting a durable key in the keychain,
+/// reporting "database encrypted", and leaving every byte in the clear.
+///
+/// The sequence is the one SQLCipher documents for exactly this case, plus the
+/// durability the app owes a file that holds every transcript on the machine:
+///
+/// 1. Prove the file really is plaintext, and read its `user_version`.
+/// 2. `ATTACH` a fresh keyed database beside it and `sqlcipher_export` into it.
+///    `sqlcipher_export` copies schema and rows but not `user_version`, so that
+///    is set explicitly — without it the reopened database looks like schema 0
+///    and migrations would run again.
+/// 3. `DETACH`, close, and fsync the staging file (and its directory) so the
+///    bytes are on the platter before anything replaces the original.
+/// 4. Verify the staging file: it opens with the key, does *not* open without
+///    it, carries the same `user_version`, and has a non-empty schema.
+/// 5. `rename` it over the original. Same directory, so this is atomic: a
+///    crash leaves either the whole old plaintext file or the whole new
+///    encrypted one, never a half-written mixture.
+/// 6. Verify once more through the final path.
+///
+/// Any failure before step 5 removes the staging file and leaves the plaintext
+/// original untouched and openable. What this cannot do is scrub the old
+/// plaintext blocks: `rename` unlinks the previous inode, it does not overwrite
+/// it, so the pre-encryption pages remain unallocated-but-recoverable on the
+/// volume until they are reused. On a FileVault volume they are still covered
+/// by full-disk encryption; the vault's promise from here forward is the
+/// SQLCipher key, and that is what the copy says.
+#[cfg(feature = "sqlcipher")]
+pub(crate) fn encrypt_plaintext_database_file(db_path: &Path, key: &str) -> Result<()> {
+    let hex_key = hex_database_key(key)?;
+    if !db_path.is_file() {
+        anyhow::bail!("No database to encrypt at {}", db_path.display());
+    }
+    let file_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("Database path has no file name")?;
+    // Beside the original, so the final rename stays inside one directory and
+    // is therefore atomic.
+    let staging = db_path.with_file_name(format!("{file_name}.new"));
+    remove_database_file_set(&staging);
+
+    let export = (|| -> Result<i64> {
+        let conn = Connection::open(db_path)
+            .with_context(|| format!("Failed to open {}", db_path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        // If this fails the file is already encrypted (or corrupt) and the
+        // export would produce nonsense; refuse before touching anything.
+        conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .context("The database did not open as plaintext, so it was left alone")?;
+        let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+
+        conn.execute_batch(&format!(
+            "ATTACH DATABASE '{}' AS plainsong_vault KEY \"x'{}'\";",
+            sql_string_literal(&staging),
+            hex_key
+        ))
+        .context("Could not create the encrypted database beside the original")?;
+        // `sqlcipher_export` returns a row, so it has to be a query: rusqlite
+        // refuses any row-returning statement passed to `execute`.
+        let exported = conn
+            .query_row(
+                "SELECT sqlcipher_export('plainsong_vault');",
+                [],
+                |_| Ok(()),
+            )
+            .context("Could not copy the database into its encrypted replacement")
+            .and_then(|()| {
+                conn.execute_batch(&format!(
+                    "PRAGMA plainsong_vault.user_version = {user_version};"
+                ))
+                .context("Could not carry the schema version into the encrypted database")
+            });
+        // Detach whatever happened above, so the staging file is closed and
+        // removable on the failure path.
+        let detached = conn
+            .execute_batch("DETACH DATABASE plainsong_vault;")
+            .context("Could not detach the encrypted database");
+        exported?;
+        detached?;
+        conn.close().map_err(|(_, error)| {
+            anyhow::Error::new(error).context("Could not close the plaintext database")
+        })?;
+        Ok(user_version)
+    })();
+
+    let user_version = match export {
+        Ok(version) => version,
+        Err(error) => {
+            remove_database_file_set(&staging);
+            return Err(error);
+        }
+    };
+
+    let verified = (|| -> Result<()> {
+        fsync_path(&staging).context("Could not flush the encrypted database to disk")?;
+        if let Some(parent) = staging.parent() {
+            // Best effort: some filesystems refuse a directory fsync. The
+            // rename below is still atomic; only its durability across a power
+            // loss is weakened, and that is worth a log line, not a failure.
+            if let Err(error) = fsync_path(parent) {
+                tracing::warn!(
+                    "Could not fsync {} after export: {}",
+                    parent.display(),
+                    error
+                );
+            }
+        }
+        if database_reads_as_plaintext(&staging) {
+            anyhow::bail!("The replacement database is still readable without a key");
+        }
+        let staged = Connection::open(&staging)?;
+        staged.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
+        let tables: i64 = staged
+            .query_row("SELECT count(*) FROM sqlite_master;", [], |row| row.get(0))
+            .context("The encrypted database did not open with its own key")?;
+        if tables == 0 {
+            anyhow::bail!("The encrypted database came out empty");
+        }
+        let staged_version: i64 = staged.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if staged_version != user_version {
+            anyhow::bail!(
+                "The encrypted database reports schema version {staged_version}, not {user_version}"
+            );
+        }
+        staged.close().map_err(|(_, error)| error)?;
+        Ok(())
+    })();
+
+    if let Err(error) = verified {
+        remove_database_file_set(&staging);
+        return Err(error);
+    }
+
+    // The one irreversible step, and the only one after which the plaintext
+    // original no longer has a name.
+    if let Err(error) = fs::rename(&staging, db_path) {
+        remove_database_file_set(&staging);
+        return Err(anyhow::Error::new(error).context(format!(
+            "Could not put the encrypted database in place at {}",
+            db_path.display()
+        )));
+    }
+
+    let final_check = Connection::open(db_path)
+        .context("Could not reopen the database after encrypting it")
+        .and_then(|conn| {
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
+            conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .context("The encrypted database did not open with its own key")
+        })?;
+    tracing::info!(
+        "Encrypted {} ({} schema objects, schema version {})",
+        db_path.display(),
+        final_check,
+        user_version
+    );
+    Ok(())
+}
+
+/// fsync one path (file or directory).
+#[cfg(feature = "sqlcipher")]
+fn fsync_path(path: &Path) -> std::io::Result<()> {
+    // A directory cannot be opened for writing, and fsync on a read-only
+    // descriptor is enough to flush metadata on both APFS and ext4.
+    fs::File::open(path)?.sync_all()
+}
+
 pub struct Database {
     conn: Connection,
     encrypted: bool,
@@ -374,21 +621,22 @@ impl Database {
         Self::open_at_path(&app_dir.join("plainsong.db"), key)
     }
 
-    fn open_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
+    pub(crate) fn open_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
         let conn = Connection::open(db_path)?;
 
         // SQLCipher reports its library version even for an unkeyed plaintext
         // database, so encryption state must come from the successful key path.
         #[cfg(feature = "sqlcipher")]
         let encrypted = if let Some(key) = key {
-            let hex_key = hex::encode(key.as_bytes());
-            // Validate hex encoding to prevent SQL injection
-            if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
-            }
+            let hex_key = hex_database_key(key)?;
             conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_key))?;
-            // Reading sqlite_master proves that this key actually opened the file.
-            conn.execute("SELECT count(*) FROM sqlite_master;", [])?;
+            // Reading sqlite_master proves that this key actually opened the
+            // file. It has to be a query: rusqlite's `execute` refuses any
+            // statement that returns rows, so the previous `execute` here made
+            // every keyed open fail before the key was ever tested.
+            conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
             true
         } else {
             false
@@ -409,6 +657,113 @@ impl Database {
     /// Create new database (default, no encryption)
     pub fn new() -> Result<Self> {
         Self::new_with_key(None)
+    }
+
+    /// The on-disk path `new_with_key` opens, without creating anything.
+    pub(crate) fn default_db_path() -> Result<PathBuf> {
+        Ok(crate::paths::data_dir()
+            .context("Could not find data directory")?
+            .join("Plainsong")
+            .join("plainsong.db"))
+    }
+
+    /// Open an existing database file for reading only.
+    ///
+    /// This is the `plainsong` CLI / MCP path. It differs from `open_at_path`
+    /// in every way that matters for a second process reading beside a live
+    /// sidecar:
+    ///
+    /// - `SQLITE_OPEN_READ_ONLY`: the connection cannot write, so a bug in the
+    ///   reader can never mutate user data, and no migration runs. A file that
+    ///   does not exist is an error rather than a freshly created empty store.
+    /// - `PRAGMA query_only = ON` as a second belt: even a statement that
+    ///   slipped past the flag is refused by SQLite itself.
+    /// - `busy_timeout`: the sidecar's writes hold the rollback journal for a
+    ///   few milliseconds; a reader waits instead of failing with `SQLITE_BUSY`.
+    /// - The schema version is checked but never bumped: a newer schema than
+    ///   this binary knows is refused with a plain message.
+    ///
+    /// The key handling is identical to `open_at_path` so the two paths cannot
+    /// drift: same hex-encoded `PRAGMA key`, same `sqlite_master` read that
+    /// proves the key actually opened the file.
+    pub(crate) fn open_read_only_at_path(db_path: &Path, key: Option<&str>) -> Result<Self> {
+        use rusqlite::OpenFlags;
+
+        if !db_path.is_file() {
+            anyhow::bail!("No Plainsong database at {}", db_path.display());
+        }
+        let conn = Connection::open_with_flags(
+            db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("Failed to open {} read-only", db_path.display()))?;
+
+        // Before `PRAGMA key` and the probe, not after: both of those touch the
+        // file, and the sidecar can be holding the rollback journal at exactly
+        // that moment. Set later, the very first statements of a read-only open
+        // were the ones that could still fail with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+
+        #[cfg(feature = "sqlcipher")]
+        let encrypted = if let Some(key) = key {
+            conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_database_key(key)?))?;
+            true
+        } else {
+            false
+        };
+        #[cfg(not(feature = "sqlcipher"))]
+        let encrypted = {
+            let _ = key;
+            false
+        };
+
+        // Proves the key (or its absence) actually opened the file; an
+        // encrypted database read without its key fails here, not on the
+        // first real query.
+        conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .context("Could not read the database; is the encryption key right?")?;
+        conn.execute_batch("PRAGMA query_only = ON;")?;
+
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version > CURRENT_SCHEMA_VERSION {
+            anyhow::bail!(
+                "Database schema version {} is newer than this binary supports ({})",
+                schema_version,
+                CURRENT_SCHEMA_VERSION
+            );
+        }
+
+        Ok(Self { conn, encrypted })
+    }
+
+    /// Open read-only, deciding whether the file is encrypted by trying, not
+    /// by asking the keychain.
+    ///
+    /// A key in the keychain is not evidence that the file on disk is
+    /// encrypted: the vault used to store the key and then fail to encrypt
+    /// anything, and even now the two are separate steps that a crash can land
+    /// between. A reader that assumed `key.is_some() == encrypted` therefore
+    /// both refused to open perfectly readable databases and reported
+    /// "encrypted: true" about plaintext ones.
+    ///
+    /// So: try the key if there is one, fall back to an unkeyed open, and let
+    /// [`Database::is_encrypted`] report whichever attempt actually worked.
+    pub(crate) fn open_read_only_probing(db_path: &Path, key: Option<&str>) -> Result<Self> {
+        let Some(key) = key else {
+            return Self::open_read_only_at_path(db_path, None);
+        };
+        match Self::open_read_only_at_path(db_path, Some(key)) {
+            Ok(db) => Ok(db),
+            Err(keyed_error) => {
+                Self::open_read_only_at_path(db_path, None).map_err(|plain_error| {
+                    keyed_error.context(format!(
+                        "and it is not a readable plaintext database either: {plain_error}"
+                    ))
+                })
+            }
+        }
     }
 
     #[cfg(test)]
@@ -447,21 +802,97 @@ impl Database {
         Ok(self.encrypted)
     }
 
-    /// Change database key (encrypt or re-encrypt)
+    /// Encrypt this database, or change the key of one that already is.
+    ///
+    /// The two cases are not the same operation, and conflating them is what
+    /// left the vault unencrypted for every user who turned it on:
+    ///
+    /// - **Already keyed** — `PRAGMA rekey` re-encrypts every page in place.
+    ///   That is what rekey is for and it works.
+    /// - **Plaintext** — `PRAGMA rekey` is a documented no-op on a connection
+    ///   that was never keyed. It returns success, the file stays plaintext,
+    ///   and the caller has no way to tell. The supported route is
+    ///   `sqlcipher_export` into a fresh keyed database; see
+    ///   [`encrypt_plaintext_database_file`].
+    ///
+    /// The branch is taken from `self.encrypted`, which is only ever true when
+    /// a keyed open actually read `sqlite_master`, so no call site can pick the
+    /// wrong one.
     #[cfg(feature = "sqlcipher")]
     pub fn change_key(&mut self, new_key: &str) -> Result<()> {
-        let hex_key = hex::encode(new_key.as_bytes());
-        // Validate hex encoding to prevent SQL injection
-        if !hex_key.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(anyhow::anyhow!("Invalid hex encoding in database key"));
+        if !self.encrypted {
+            return self.encrypt_plaintext_file(new_key);
         }
+        let hex_key = hex_database_key(new_key)?;
         self.conn
             .execute_batch(&format!("PRAGMA rekey = \"x'{}'\";", hex_key))?;
+        // A query, not `execute`, for the same reason as in `open_at_path`.
         self.conn
-            .execute("SELECT count(*) FROM sqlite_master;", [])?;
-        self.encrypted = true;
+            .query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
         tracing::info!("Database encryption key changed");
         Ok(())
+    }
+
+    /// Migrate this handle's plaintext file to an encrypted one and reopen
+    /// against the result.
+    ///
+    /// The live connection is closed first: the migration writes a sibling
+    /// file and then renames it over the original, and an open handle on the
+    /// old inode would keep reading a file that no longer has a name.
+    #[cfg(feature = "sqlcipher")]
+    fn encrypt_plaintext_file(&mut self, key: &str) -> Result<()> {
+        let db_path = self
+            .conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .context("Cannot encrypt a database that has no file on disk")?;
+
+        let placeholder = Connection::open_in_memory()
+            .context("Could not prepare the connection swap for encryption")?;
+        let live = std::mem::replace(&mut self.conn, placeholder);
+        if let Err((restored, error)) = live.close() {
+            // Something is still borrowing the connection; nothing has been
+            // touched on disk, so put it back and report.
+            self.conn = restored;
+            return Err(anyhow::Error::new(error)
+                .context("Could not close the database before encrypting it"));
+        }
+
+        match encrypt_plaintext_database_file(&db_path, key) {
+            Ok(()) => {
+                let conn = Connection::open(&db_path)
+                    .with_context(|| format!("Failed to reopen {}", db_path.display()))?;
+                conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_database_key(key)?))?;
+                conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .context("The encrypted database did not open with its own key")?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+                self.conn = conn;
+                self.encrypted = true;
+                tracing::info!("Database encrypted at {}", db_path.display());
+                Ok(())
+            }
+            Err(error) => {
+                // The migration leaves the plaintext original in place on every
+                // failure path, so the app keeps working on it.
+                match Connection::open(&db_path) {
+                    Ok(conn) => {
+                        let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
+                        self.conn = conn;
+                    }
+                    Err(reopen) => {
+                        return Err(error.context(format!(
+                            "and the plaintext database could not be reopened afterwards: {reopen}"
+                        )));
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Log an audit event
@@ -500,6 +931,22 @@ impl Database {
         details: Option<serde_json::Value>,
         severity: &str,
     ) -> Result<()> {
+        Self::log_audit_event_on(&self.conn, event, details, severity)
+    }
+
+    /// The audit write itself, against any connection.
+    ///
+    /// Split out so a change and the record of that change can be written in
+    /// one transaction. Two writes under two separate acquisitions of the
+    /// database lock leave a window in which a reader sees the change with no
+    /// audit record -- and, if the second write fails, leave that disagreement
+    /// permanently.
+    fn log_audit_event_on(
+        conn: &rusqlite::Connection,
+        event: &str,
+        details: Option<serde_json::Value>,
+        severity: &str,
+    ) -> Result<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let timestamp = Utc::now();
         let details_json = details
@@ -510,7 +957,7 @@ impl Database {
             .transpose()?
             .unwrap_or_else(|| "{}".to_string());
 
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO audit_log (id, timestamp, event, details, severity) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, timestamp.to_rfc3339(), event, details_json, severity],
         )?;
@@ -1130,6 +1577,12 @@ impl Database {
                 );
             }
         }
+        if let Err(error) = self.backfill_dictation_history_text_if_needed() {
+            tracing::warn!(
+                "Failed to run dictation history text startup backfill check: {}",
+                error
+            );
+        }
         self.scrub_sensitive_audit_details()?;
         Ok(())
     }
@@ -1164,12 +1617,14 @@ impl Database {
                 meeting_notes TEXT,
                 meeting_template_id TEXT,
                 meeting_capture_mode TEXT,
+                imported_source_name TEXT,
                 notes_updated_at TEXT,
                 consent_prompt_shown INTEGER NOT NULL DEFAULT 0,
                 consent_notice_mode TEXT,
                 consent_notice_surface TEXT,
                 consent_notice_message TEXT,
-                consent_notice_updated_at TEXT
+                consent_notice_updated_at TEXT,
+                video_service TEXT
             )",
             [],
         )?;
@@ -1295,6 +1750,12 @@ impl Database {
         self.ensure_table_column("transcripts", "requested_provider", "TEXT")?;
         self.ensure_table_column("transcripts", "actual_provider", "TEXT")?;
         self.ensure_table_column("transcripts", "revision", "INTEGER NOT NULL DEFAULT 0")?;
+        // Which diarizer produced the speaker labels on this transcript, so the
+        // meeting header can name it instead of inferring it from the ASR
+        // provider (which would be wrong every time a provider-diarization
+        // attempt fell back to the local pipeline). NULL means no diarizer has
+        // run, which is not the same as "Plainsong ran and found one speaker".
+        self.ensure_table_column("transcripts", "diarizer", "TEXT")?;
         self.migrate_transcripts_drop_fallback_columns()?;
 
         self.conn.execute(
@@ -1482,6 +1943,57 @@ impl Database {
             )",
             [],
         )?;
+        // Voiceprints, all opt-in (`meetings.rememberVoices`). These five
+        // columns hold the *cluster* side of the feature — one voice signature
+        // per speaker turn-group in one meeting — and are written only while
+        // the setting is on. The remembered-voice side lives in
+        // `speaker_profiles` below.
+        self.ensure_table_column("speaker_aliases", "voice_centroid", "BLOB")?;
+        self.ensure_table_column("speaker_aliases", "voice_centroid_model_id", "TEXT")?;
+        self.ensure_table_column("speaker_aliases", "voice_profile_id", "TEXT")?;
+        self.ensure_table_column("speaker_aliases", "voice_match_state", "TEXT")?;
+        self.ensure_table_column("speaker_aliases", "voice_rejected_profiles", "TEXT")?;
+
+        // A voice this Mac has been told to remember. Local only: never
+        // exported, never readable through the CLI or MCP server, removed by
+        // Reset Everything, and encrypted with the rest of the database when
+        // the vault is on.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS speaker_profiles (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                linked_identity_hash TEXT,
+                embedding_model_id TEXT NOT NULL,
+                centroid BLOB NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_speaker_profiles_embedding_model
+             ON speaker_profiles(embedding_model_id)",
+            [],
+        )?;
+        // The samples a profile's centroid is the mean of. Capped per profile
+        // (`MAX_SAMPLES_PER_PROFILE`) so remembering a voice for a year does
+        // not grow without bound, and so one bad sample ages out.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS speaker_profile_samples (
+                id TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL REFERENCES speaker_profiles(id) ON DELETE CASCADE,
+                embedding BLOB NOT NULL,
+                source_recording_id TEXT,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_speaker_profile_samples_profile
+             ON speaker_profile_samples(profile_id, created_at)",
+            [],
+        )?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS asr_benchmarks (
@@ -1619,8 +2131,42 @@ impl Database {
             [],
         )?;
 
+        // The searchable text of one dictation: what was delivered and what the
+        // recognizer heard before the pipeline touched it. `transcripts` keeps
+        // only the delivered text (or the raw text when nothing changed), so
+        // the raw side lives here; `reprocessed_from_id` links a "Process
+        // again" entry back to the dictation whose audio it re-ran.
         self.conn.execute(
-            "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at) 
+            "CREATE TABLE IF NOT EXISTS dictation_history_text (
+                recording_id TEXT PRIMARY KEY,
+                final_text TEXT NOT NULL,
+                raw_text TEXT NOT NULL,
+                reprocessed_from_id TEXT,
+                mode_preset TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+        // Same optional-index contract as transcript_fts above: kept in step
+        // by the writers in the same transaction, backfilled at startup, and
+        // its absence degrades history search to a LIKE scan.
+        if let Err(error) = self.conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS dictation_history_fts USING fts5(
+                recording_id UNINDEXED,
+                final_text,
+                raw_text
+            )",
+            [],
+        ) {
+            tracing::warn!(
+                "dictation_history_fts table unavailable; dictation history search will be limited: {}",
+                error
+            );
+        }
+
+        self.conn.execute(
+            "INSERT OR IGNORE INTO projects (id, name, description, created_at, updated_at)
              VALUES ('default', 'Inbox', 'Default inbox for new recordings', ?1, ?1)",
             [Utc::now().to_rfc3339()],
         )?;
@@ -1636,6 +2182,7 @@ impl Database {
         self.ensure_table_column("recordings", "meeting_template_id", "TEXT")?;
         self.ensure_table_column("recordings", "notes_updated_at", "TEXT")?;
         self.ensure_table_column("recordings", "meeting_capture_mode", "TEXT")?;
+        self.ensure_table_column("recordings", "imported_source_name", "TEXT")?;
         self.ensure_table_column(
             "recordings",
             "consent_prompt_shown",
@@ -1650,6 +2197,38 @@ impl Database {
         // install pointed at an uninstalled Ollama produced no summary, no
         // action items, and no title, and the app said nothing at all.
         self.ensure_table_column("recordings", "analysis_failure", "TEXT")?;
+        // Who was in the meeting, as a JSON array of {name, email, isOrganizer}.
+        // A column rather than a table because the list is written once, read
+        // whole, and never queried across meetings by SQL -- the pre-meeting
+        // brief's attendee overlap is computed in Rust over recordings it has
+        // already loaded. NULL for every meeting recorded before this existed,
+        // which reads back as an empty list.
+        self.ensure_table_column("recordings", "attendees", "TEXT")?;
+
+        // The pauses taken during capture, as a JSON list of spans. The audio
+        // file skips them, so this is the only record of where the gaps are
+        // and how long they were.
+        self.ensure_table_column("recordings", "pause_spans", "TEXT")?;
+        // The conferencing service the meeting was on, when the calendar event
+        // or the detected call it started from named one. A tag from a fixed
+        // list, not free text -- see `models::known_video_service`.
+        self.ensure_table_column("recordings", "video_service", "TEXT")?;
+        // Cached pre-meeting briefs, one row per calendar event.
+        //
+        // `cache_key` is a hash of everything that went into the answer (see
+        // `meeting_brief::brief_cache_key`), so a row whose key no longer
+        // matches the current inputs is simply not returned -- there is no
+        // expiry to tune and no way to hand back a brief written from
+        // evidence that has since changed.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS meeting_briefs (
+                event_id TEXT PRIMARY KEY,
+                cache_key TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
 
         // Chunked meeting transcription survives per-chunk ASR failures and
         // still returns a transcript, so "completed" alone never meant "the
@@ -2058,6 +2637,288 @@ impl Database {
         Ok(())
     }
 
+    /// One-time migration for dictations saved before `dictation_history_text`
+    /// existed, plus the FTS rebuild that follows a fresh (or FTS-less) open.
+    ///
+    /// Older rows never stored the raw transcript, so the delivered text
+    /// stands in for both sides: search over them still works, it just cannot
+    /// distinguish "what was heard" from "what was delivered".
+    fn backfill_dictation_history_text_if_needed(&self) -> Result<()> {
+        let _inserted_rows = self.conn.execute(
+            "INSERT INTO dictation_history_text (
+                recording_id, final_text, raw_text, reprocessed_from_id, mode_preset, created_at
+             )
+             SELECT r.id, COALESCE(t.full_text, ''), COALESCE(t.full_text, ''), NULL, NULL, r.created_at
+             FROM recordings r
+             JOIN transcripts t ON t.recording_id = r.id
+             WHERE r.source_type = 'dictation'
+               AND r.id NOT IN (SELECT recording_id FROM dictation_history_text)",
+            [],
+        )?;
+
+        if !table_exists(&self.conn, "dictation_history_fts")? {
+            return Ok(());
+        }
+        let fts_row_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM dictation_history_fts", [], |row| {
+                    row.get(0)
+                })?;
+        if fts_row_count > 0 {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO dictation_history_fts (recording_id, final_text, raw_text)
+             SELECT recording_id, final_text, raw_text FROM dictation_history_text",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Writes (or replaces) a dictation's searchable text and its FTS row in
+    /// the caller's transaction, so a transcript can never land without the
+    /// text that makes it findable.
+    fn write_dictation_history_text_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        record: &DictationHistoryTextRecord,
+    ) -> Result<()> {
+        tx.execute(
+            "INSERT INTO dictation_history_text (
+                recording_id, final_text, raw_text, reprocessed_from_id, mode_preset, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(recording_id) DO UPDATE SET
+                final_text = excluded.final_text,
+                raw_text = excluded.raw_text,
+                reprocessed_from_id = excluded.reprocessed_from_id,
+                mode_preset = excluded.mode_preset",
+            params![
+                &record.recording_id,
+                &record.final_text,
+                &record.raw_text,
+                &record.reprocessed_from_id,
+                &record.mode_preset,
+                record.created_at.to_rfc3339(),
+            ],
+        )?;
+        if table_exists(tx, "dictation_history_fts")? {
+            tx.execute(
+                "DELETE FROM dictation_history_fts WHERE recording_id = ?1",
+                params![&record.recording_id],
+            )?;
+            tx.execute(
+                "INSERT INTO dictation_history_fts (recording_id, final_text, raw_text)
+                 VALUES (?1, ?2, ?3)",
+                params![&record.recording_id, &record.final_text, &record.raw_text],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Atomically persist a completed dictation: its recording row, transcript
+    /// and searchable text. Same contract as `create_recording_with_transcript`
+    /// (nothing is visible in history unless all of it committed), plus the
+    /// text that history search reads.
+    pub fn create_dictation_history_entry(
+        &mut self,
+        recording: &Recording,
+        transcript: &Transcript,
+        history_text: &DictationHistoryTextRecord,
+        kept_audio: Option<&ValidatedRecordingAudio>,
+    ) -> Result<()> {
+        if recording.id != transcript.recording_id || recording.id != history_text.recording_id {
+            anyhow::bail!(
+                "Recording id '{}' does not match transcript '{}' / history text '{}'",
+                recording.id,
+                transcript.recording_id,
+                history_text.recording_id
+            );
+        }
+        if kept_audio.is_some() && recording.audio_path.trim().is_empty() {
+            anyhow::bail!(
+                "Recording '{}' declares kept audio without an audio path",
+                recording.id
+            );
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("Failed to start dictation result transaction")?;
+        insert_recording_row(&tx, recording, &recording.audio_path)?;
+        if let Some(audio) = kept_audio {
+            // A kept dictation WAV is owned exactly like a meeting's primary
+            // track: the asset row is what manual delete, vault migration and
+            // the runtime resolver read, so without it the file would be an
+            // orphan the moment the row went away.
+            let now = Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO recording_audio_assets (
+                    recording_id, role, path, lifecycle, protection,
+                    plaintext_bytes, plaintext_sha256, created_at, updated_at
+                 ) VALUES (?1, 'primary', ?2, 'ready', 'plaintext', ?3, ?4, ?5, ?5)",
+                params![
+                    &recording.id,
+                    &recording.audio_path,
+                    i64::try_from(audio.plaintext_bytes)
+                        .context("Kept dictation audio is too large for SQLite metadata")?,
+                    &audio.plaintext_sha256,
+                    &now,
+                ],
+            )?;
+        }
+        Self::write_transcript_transaction(&tx, transcript)?;
+        Self::write_dictation_history_text_transaction(&tx, history_text)?;
+        tx.commit()
+            .context("Failed to commit dictation recording, transcript and history text")?;
+        Ok(())
+    }
+
+    pub fn get_dictation_history_text(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<DictationHistoryTextRecord>> {
+        self.conn
+            .query_row(
+                "SELECT recording_id, final_text, raw_text, reprocessed_from_id, mode_preset, created_at
+                 FROM dictation_history_text WHERE recording_id = ?1",
+                params![recording_id],
+                |row| {
+                    Ok(DictationHistoryTextRecord {
+                        recording_id: row.get(0)?,
+                        final_text: row.get(1)?,
+                        raw_text: row.get(2)?,
+                        reprocessed_from_id: row.get(3)?,
+                        mode_preset: row.get(4)?,
+                        created_at: row
+                            .get::<_, String>(5)?
+                            .parse()
+                            .unwrap_or_else(|_| Utc::now()),
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Ranked full-text search over saved dictations, newest-first among
+    /// equal scores. Falls back to a LIKE scan when FTS5 is unavailable.
+    pub fn search_dictation_history(
+        &self,
+        query: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<DictationHistorySearchHit>> {
+        let fts_query = build_fts_query(query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 200) as i64;
+        let offset = offset.min(10_000) as i64;
+
+        // `snippet()` column -1 picks whichever indexed column matched best;
+        // the CASE beside it reports which one that was so the row can say
+        // "heard" or "delivered". Ties on bm25 break newest-first.
+        //
+        // The bm25 weight list covers EVERY column of the table, `recording_id
+        // UNINDEXED` included, and an omitted trailing weight defaults to 1.0.
+        // So the three weights below are (recording_id, final_text, raw_text):
+        // a two-weight list silently scored raw_text at its default 1.0 and
+        // reported "delivered" for a row only the raw side matched.
+        let sql = "SELECT
+                f.recording_id,
+                COALESCE(r.title, ''),
+                r.created_at,
+                snippet(dictation_history_fts, -1, '[[', ']]', '…', 14),
+                CASE WHEN bm25(dictation_history_fts, 0.0, 1.0, 0.0)
+                          <= bm25(dictation_history_fts, 0.0, 0.0, 1.0)
+                     THEN 'final' ELSE 'raw' END,
+                bm25(dictation_history_fts)
+             FROM dictation_history_fts f
+             JOIN recordings r ON r.id = f.recording_id
+             WHERE dictation_history_fts MATCH ?1 AND r.source_type = 'dictation'
+             ORDER BY bm25(dictation_history_fts) ASC, r.created_at DESC
+             LIMIT ?2 OFFSET ?3";
+        let mut stmt = match self.conn.prepare(sql) {
+            Ok(statement) => statement,
+            Err(error) => {
+                tracing::warn!(
+                    "Dictation history FTS query unavailable ({}); using LIKE fallback search",
+                    error
+                );
+                return self.search_dictation_history_without_fts(query, limit, offset);
+            }
+        };
+        let rows = stmt.query_map(params![fts_query, limit, offset], |row| {
+            Ok(DictationHistorySearchHit {
+                recording_id: row.get(0)?,
+                recording_title: row.get(1)?,
+                created_at: row
+                    .get::<_, String>(2)?
+                    .parse()
+                    .unwrap_or_else(|_| Utc::now()),
+                snippet: row.get(3)?,
+                matched_field: row.get(4)?,
+                score: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn search_dictation_history_without_fts(
+        &self,
+        query: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DictationHistorySearchHit>> {
+        let terms = search_terms(query);
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT h.recording_id, COALESCE(r.title, ''), r.created_at, h.final_text, h.raw_text
+             FROM dictation_history_text h
+             JOIN recordings r ON r.id = h.recording_id
+             WHERE r.source_type = 'dictation'
+             ORDER BY r.created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+
+        let mut hits = Vec::new();
+        for row in rows {
+            let (recording_id, title, created_at, final_text, raw_text) = row?;
+            let (text, matched_field) = if terms_match(&final_text, &terms) {
+                (final_text.as_str(), "final")
+            } else if terms_match(&raw_text, &terms) {
+                (raw_text.as_str(), "raw")
+            } else {
+                continue;
+            };
+            hits.push(DictationHistorySearchHit {
+                recording_id,
+                recording_title: title,
+                created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
+                snippet: like_snippet(text, &terms, 14),
+                matched_field: matched_field.to_string(),
+                // LIKE has no ranking; every hit ties and the newest-first
+                // ORDER BY above decides.
+                score: 0.0,
+            });
+        }
+        Ok(hits
+            .into_iter()
+            .skip(offset.max(0) as usize)
+            .take(limit.max(0) as usize)
+            .collect())
+    }
+
     pub fn create_project(&mut self, project: &CreateProjectRequest) -> Result<Project> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -2118,7 +2979,27 @@ impl Database {
             .map_err(|e| e.into())
     }
 
+    /// Every recording, newest first (optionally in one project).
     pub fn get_recordings(&self, project_id: Option<&str>) -> Result<Vec<Recording>> {
+        self.query_recordings(project_id, None)
+    }
+
+    /// The `limit` newest recordings, across every project.
+    ///
+    /// The cap belongs in SQL. A caller that only wants the recent few used to
+    /// call `get_recordings(None)` and `.take(n)` the result, which deserializes
+    /// every row in the library -- action items, provenance JSON, attendee JSON,
+    /// pause spans -- to throw all but `n` away. On a Mac with years of
+    /// meetings that is the whole library read for a handful of rows.
+    pub fn get_recent_recordings(&self, limit: usize) -> Result<Vec<Recording>> {
+        self.query_recordings(None, Some(limit))
+    }
+
+    fn query_recordings(
+        &self,
+        project_id: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Recording>> {
         let mut stmt = self.conn.prepare(
             "SELECT recordings.id,
                     COALESCE(meeting_artifacts.title, recordings.title),
@@ -2148,16 +3029,27 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.imported_source_name,
+                    recordings.pause_spans,
+                    recordings.video_service,
+                    recordings.attendees
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
-             ORDER BY recordings.created_at DESC",
+             ORDER BY recordings.created_at DESC
+             LIMIT ?2",
         )?;
 
         let pid_param: Option<&str> = project_id;
+        // SQLite reads a negative LIMIT as no limit, which is how the
+        // unlimited call shares one prepared statement with the capped one.
+        let limit_param: i64 = match limit {
+            Some(limit) => i64::try_from(limit).unwrap_or(i64::MAX),
+            None => -1,
+        };
 
-        let recordings = stmt.query_map(params![pid_param], |row| {
+        let recordings = stmt.query_map(params![pid_param, limit_param], |row| {
             let summary: Option<String> = row.get(9)?;
             let action_items_json: Option<String> = row.get(10)?;
             let action_items: Option<Vec<String>> =
@@ -2206,6 +3098,20 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                imported_source_name: row
+                    .get::<_, Option<String>>(23)?
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                pause_spans: parse_pause_spans(row.get::<_, Option<String>>(24)?),
+                video_service: known_video_service(row.get::<_, Option<String>>(25)?.as_deref()),
+                // Sanitized on the way back out as well as on the way in: a
+                // hand-edited row is exactly as capable of holding 5000
+                // duplicates as a crafted command payload is.
+                attendees: crate::models::sanitize_meeting_attendees(
+                    row.get::<_, Option<String>>(26)?
+                        .and_then(|value| serde_json::from_str(&value).ok())
+                        .unwrap_or_default(),
+                ),
             })
         })?;
 
@@ -2244,7 +3150,11 @@ impl Database {
                     recordings.consent_notice_updated_at,
                     meeting_artifacts.summary_provenance,
                     meeting_artifacts.action_items_provenance,
-                    recordings.analysis_failure
+                    recordings.analysis_failure,
+                    recordings.imported_source_name,
+                    recordings.pause_spans,
+                    recordings.video_service,
+                    recordings.attendees
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -2299,6 +3209,20 @@ impl Database {
                     .get::<_, Option<String>>(22)?
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                imported_source_name: row
+                    .get::<_, Option<String>>(23)?
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                pause_spans: parse_pause_spans(row.get::<_, Option<String>>(24)?),
+                video_service: known_video_service(row.get::<_, Option<String>>(25)?.as_deref()),
+                // Sanitized on the way back out as well as on the way in: a
+                // hand-edited row is exactly as capable of holding 5000
+                // duplicates as a crafted command payload is.
+                attendees: crate::models::sanitize_meeting_attendees(
+                    row.get::<_, Option<String>>(26)?
+                        .and_then(|value| serde_json::from_str(&value).ok())
+                        .unwrap_or_default(),
+                ),
             })
         });
 
@@ -2371,6 +3295,45 @@ impl Database {
         Ok(self
             .get_transcript_with_revision(recording_id)?
             .map(|(transcript, _revision)| transcript))
+    }
+
+    /// Does this recording have a transcript with any text in it?
+    ///
+    /// The predicate mirrors what a loaded [`Transcript`] would report — a
+    /// segment list that is not empty, or a non-blank `full_text` — without
+    /// deserializing the segment JSON. `save_transcript` writes compact
+    /// `serde_json` output, so an empty list is exactly the two characters
+    /// `[]`.
+    ///
+    /// The point of not loading it: the CLI's `stats` asked this about every
+    /// recording on the machine, which meant reading and parsing every
+    /// transcript in the database to answer a question about counts.
+    const TRANSCRIPT_HAS_CONTENT_SQL: &'static str =
+        "(full_text IS NOT NULL AND trim(full_text) <> '') \
+         OR (segments IS NOT NULL AND trim(segments) NOT IN ('', '[]', 'null'))";
+
+    pub(crate) fn has_transcript_content(&self, recording_id: &str) -> Result<bool> {
+        let found: i64 = self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM transcripts WHERE recording_id = ?1 AND ({}))",
+                Self::TRANSCRIPT_HAS_CONTENT_SQL
+            ),
+            [recording_id],
+            |row| row.get(0),
+        )?;
+        Ok(found != 0)
+    }
+
+    /// Every recording id whose transcript has content, in one query.
+    pub(crate) fn recording_ids_with_transcript_content(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DISTINCT recording_id FROM transcripts WHERE {}",
+            Self::TRANSCRIPT_HAS_CONTENT_SQL
+        ))?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<String>>>()?;
+        Ok(ids)
     }
 
     pub fn get_transcript_with_revision(
@@ -2488,11 +3451,11 @@ impl Database {
         tx.execute(
             "INSERT INTO recordings (
                 id, title, project_id, duration, created_at, updated_at, source_type, audio_path, status,
-                meeting_notes, meeting_template_id, meeting_capture_mode, notes_updated_at,
-                consent_prompt_shown, consent_notice_mode, consent_notice_surface,
-                consent_notice_message, consent_notice_updated_at
+                meeting_notes, meeting_template_id, meeting_capture_mode, imported_source_name,
+                notes_updated_at, consent_prompt_shown, consent_notice_mode, consent_notice_surface,
+                consent_notice_message, consent_notice_updated_at, video_service
              )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 &recording.id,
                 &recording.title,
@@ -2506,6 +3469,7 @@ impl Database {
                 &recording.meeting_notes,
                 &recording.meeting_template_id,
                 &recording.meeting_capture_mode,
+                &recording.imported_source_name,
                 recording
                     .notes_updated_at
                     .as_ref()
@@ -2517,7 +3481,8 @@ impl Database {
                 recording
                     .consent_notice_updated_at
                     .as_ref()
-                    .map(|value| value.to_rfc3339())
+                    .map(|value| value.to_rfc3339()),
+                &recording.video_service
             ],
         )?;
         for (role, path) in plan.paths() {
@@ -3480,6 +4445,24 @@ impl Database {
     /// `updated_at` is deliberately left alone: a failed analysis pass does not
     /// change the recording's own content, and bumping it would reorder the
     /// user's library on a background failure they did not cause.
+    /// Persist the pauses taken during a meeting's capture.
+    pub fn set_recording_pause_spans(
+        &mut self,
+        recording_id: &str,
+        spans: &[crate::recording_pause::PauseSpan],
+    ) -> Result<()> {
+        let json = if spans.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(spans)?)
+        };
+        self.conn.execute(
+            "UPDATE recordings SET pause_spans = ?1 WHERE id = ?2",
+            params![json, recording_id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_recording_analysis_failure(
         &mut self,
         recording_id: &str,
@@ -3864,6 +4847,61 @@ impl Database {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The cached brief for an event, but only when it was written from the
+    /// same inputs. A key mismatch reads as "no cached brief".
+    pub fn get_meeting_brief(&self, event_id: &str, cache_key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload FROM meeting_briefs WHERE event_id = ?1 AND cache_key = ?2")?;
+        let result = stmt.query_row(params![event_id, cache_key], |row| row.get::<_, String>(0));
+        match result {
+            Ok(payload) => Ok(Some(payload)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_meeting_brief(
+        &mut self,
+        event_id: &str,
+        cache_key: &str,
+        payload: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meeting_briefs (event_id, cache_key, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(event_id) DO UPDATE SET
+                 cache_key = excluded.cache_key,
+                 payload = excluded.payload,
+                 created_at = excluded.created_at",
+            params![event_id, cache_key, payload, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Replace a meeting's attendee list.
+    ///
+    /// Called once when a meeting starts from a calendar cue, and again for
+    /// every manual add or remove. Sanitized here rather than trusted from
+    /// the caller: this is the boundary the renderer writes through.
+    pub fn update_recording_attendees(
+        &mut self,
+        recording_id: &str,
+        attendees: Vec<crate::models::MeetingAttendee>,
+    ) -> Result<Vec<crate::models::MeetingAttendee>> {
+        let sanitized = crate::models::sanitize_meeting_attendees(attendees);
+        let encoded = serde_json::to_string(&sanitized)
+            .context("Failed to serialize the meeting attendee list")?;
+        let updated = self.conn.execute(
+            "UPDATE recordings SET attendees = ?1, updated_at = ?2 WHERE id = ?3",
+            params![encoded, Utc::now().to_rfc3339(), recording_id],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("Recording not found: {}", recording_id);
+        }
+        Ok(sanitized)
     }
 
     pub fn update_recording_meeting_chat(
@@ -5160,12 +6198,28 @@ impl Database {
         Ok(())
     }
 
+    /// `diarizer` is the stable identifier of whatever produced these speaker
+    /// labels -- `deepgram`, `gemini_transcribe`, or
+    /// `plainsong:<embedding model id>`. It is written in the same transaction
+    /// as the segments so the record and the labels cannot disagree.
+    /// Store diarized segments, the speaker aliases they imply, and the name of
+    /// the diarizer that produced them.
+    ///
+    /// `audit_details`, when present, is written as a
+    /// `meeting_diarization_applied` entry *inside the same transaction*. The
+    /// `diarizer` column and that entry record the same fact -- which diarizer
+    /// produced the labels now stored -- and they used to be two writes under
+    /// two separate acquisitions of the database lock. Between them the column
+    /// read as changed with no audit record, and a failure of the second write
+    /// left that disagreement permanently. Both now land or neither does.
     pub fn apply_diarization_enrichment(
         &mut self,
         recording_id: &str,
         expected_revision: i64,
         segments: &[TranscriptSegment],
         aliases: &[SpeakerAliasUpsert],
+        diarizer: Option<&str>,
+        audit_details: Option<serde_json::Value>,
     ) -> Result<bool> {
         let segments_json = serde_json::to_string(segments)?;
         let full_text = segments
@@ -5177,9 +6231,15 @@ impl Database {
         let tx = self.conn.transaction()?;
         let updated = tx.execute(
             "UPDATE transcripts
-             SET segments = ?1, full_text = ?2, revision = revision + 1
+             SET segments = ?1, full_text = ?2, revision = revision + 1, diarizer = ?5
              WHERE recording_id = ?3 AND revision = ?4",
-            params![segments_json, full_text, recording_id, expected_revision],
+            params![
+                segments_json,
+                full_text,
+                recording_id,
+                expected_revision,
+                diarizer
+            ],
         )?;
         if updated == 0 {
             return Ok(false);
@@ -5198,8 +6258,28 @@ impl Database {
                 true,
             )?;
         }
+        if let Some(details) = audit_details {
+            Self::log_audit_event_on(&tx, "meeting_diarization_applied", Some(details), "info")?;
+        }
         tx.commit()?;
         Ok(true)
+    }
+
+    /// The diarizer recorded against this recording's transcript, if any has
+    /// run. Read separately from `get_transcript` so the transcript model
+    /// itself does not grow a field forty-odd construction sites would have to
+    /// spell out.
+    pub fn get_transcript_diarizer(&self, recording_id: &str) -> Result<Option<String>> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT diarizer FROM transcripts WHERE recording_id = ?1")?;
+        let mut rows = statement.query(params![recording_id])?;
+        match rows.next()? {
+            Some(row) => Ok(row
+                .get::<_, Option<String>>(0)?
+                .filter(|value| !value.trim().is_empty())),
+            None => Ok(None),
+        }
     }
 
     fn upsert_speaker_alias_transaction(
@@ -5293,7 +6373,20 @@ impl Database {
             );
         }
 
-        self.upsert_speaker_alias(recording_id, speaker_id, Some(new_name), None, 0)
+        self.upsert_speaker_alias(recording_id, speaker_id, Some(new_name), None, 0)?;
+        // A hand-typed name settles the question the voice link was asking.
+        // Leaving `voice_profile_id` and `voice_match_state` behind would keep
+        // the transcript saying "auto" over a name a human just chose, and
+        // would keep the cluster pointed at a remembered voice the rename was
+        // most likely correcting. `remember_speaker_voice` renames first and
+        // writes `confirmed` after, so the confirm path is unaffected.
+        self.conn.execute(
+            "UPDATE speaker_aliases
+             SET voice_profile_id = NULL, voice_match_state = NULL
+             WHERE recording_id = ?1 AND speaker_id = ?2",
+            params![recording_id, speaker_id],
+        )?;
+        Ok(())
     }
 
     pub fn get_speaker_aliases(&self, recording_id: &str) -> Result<HashMap<String, SpeakerAlias>> {
@@ -5315,6 +6408,464 @@ impl Database {
 
         rows.collect::<Result<HashMap<_, _>, _>>()
             .map_err(|e| e.into())
+    }
+
+    // ── Voiceprints (opt-in, local only) ─────────────────────────────────
+    //
+    // Nothing in this block runs unless `meetings.rememberVoices` is on: the
+    // callers in lib.rs read the setting first, and the gating test
+    // `voiceprint_storage_is_untouched_while_the_setting_is_off` proves the
+    // rows stay empty when it is off.
+
+    /// Record one speaker cluster's voice signature against its alias row.
+    ///
+    /// Overwrites rather than accumulates: a cluster has exactly one current
+    /// signature, and re-running speaker identification replaces it.
+    pub fn set_cluster_voice_signature(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        centroid: &[f32],
+        embedding_model_id: &str,
+    ) -> Result<()> {
+        if !voiceprints::is_usable_embedding(centroid) {
+            anyhow::bail!("Refusing to store an unusable voice signature");
+        }
+        let blob = f32_slice_to_blob(centroid);
+        self.conn.execute(
+            "INSERT INTO speaker_aliases (
+                 recording_id, speaker_id, updated_at,
+                 voice_centroid, voice_centroid_model_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(recording_id, speaker_id) DO UPDATE SET
+                 voice_centroid = excluded.voice_centroid,
+                 voice_centroid_model_id = excluded.voice_centroid_model_id,
+                 updated_at = excluded.updated_at",
+            params![
+                recording_id,
+                speaker_id,
+                Utc::now().to_rfc3339(),
+                blob,
+                embedding_model_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Persist one cluster's voice signature, at the moment that cluster is
+    /// given a name — and only when the user turned remembering on.
+    ///
+    /// This is the *only* path that writes a signature, and it is deliberately
+    /// per-cluster. Settings and `docs/beta/PRIVACY-AND-CLOUD.md` both say a
+    /// signature is written for a speaker you name, or one Plainsong offers to
+    /// name and you confirm; storing one for every cluster a meeting happened
+    /// to contain would be a larger privacy surface than the one the reader
+    /// agreed to. Unnamed clusters' centroids stay in
+    /// [`crate::diarization::voiceprints::SessionClusterVoices`] instead, in
+    /// memory, for as long as the app is open.
+    ///
+    /// The switch is a parameter rather than a settings lookup so that
+    /// "nothing is written while it is off" is a property a test can prove
+    /// against a real database, without a settings file or a running app.
+    /// Returns whether a signature was written.
+    ///
+    /// Best effort: a signature that could not be stored costs a suggestion,
+    /// not the meeting, so an unusable vector is logged rather than raised.
+    pub fn record_named_cluster_voice_signature(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        centroid: &[f32],
+        embedding_model_id: &str,
+        remember_voices: bool,
+    ) -> Result<bool> {
+        if !remember_voices {
+            return Ok(false);
+        }
+        match self.set_cluster_voice_signature(
+            recording_id,
+            speaker_id,
+            centroid,
+            embedding_model_id,
+        ) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                tracing::warn!(
+                    "Could not store the voice signature for speaker {} of {}: {}",
+                    speaker_id,
+                    recording_id,
+                    error
+                );
+                Ok(false)
+            }
+        }
+    }
+
+    /// Every speaker cluster in one recording that carries a voice signature.
+    pub fn get_cluster_voice_signatures(
+        &self,
+        recording_id: &str,
+    ) -> Result<Vec<ClusterVoiceSignature>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT speaker_id, name, voice_centroid, voice_centroid_model_id,
+                    voice_profile_id, voice_match_state, voice_rejected_profiles
+             FROM speaker_aliases
+             WHERE recording_id = ?1 AND voice_centroid IS NOT NULL
+             ORDER BY speaker_id",
+        )?;
+        let rows = stmt.query_map(params![recording_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+            ))
+        })?;
+
+        let mut signatures = Vec::new();
+        for row in rows {
+            let (speaker_id, name, blob, model_id, profile_id, match_state, rejected) = row?;
+            let Some(embedding_model_id) = model_id else {
+                continue;
+            };
+            signatures.push(ClusterVoiceSignature {
+                speaker_id,
+                name,
+                centroid: blob_to_f32_vec(&blob),
+                embedding_model_id,
+                applied_profile_id: profile_id,
+                match_state,
+                rejected_profile_ids: rejected
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                    .unwrap_or_default(),
+            });
+        }
+        Ok(signatures)
+    }
+
+    /// Attach a remembered voice to a cluster. `state` is `"auto"` while the
+    /// app applied it on its own and `"confirmed"` once a human said so.
+    pub fn set_cluster_voice_match(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        profile_id: &str,
+        state: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE speaker_aliases
+             SET voice_profile_id = ?3, voice_match_state = ?4, updated_at = ?5
+             WHERE recording_id = ?1 AND speaker_id = ?2",
+            params![
+                recording_id,
+                speaker_id,
+                profile_id,
+                state,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remember that the reader said "Not them" about one profile, so the same
+    /// wrong suggestion does not come back on every visit.
+    pub fn reject_cluster_voice_match(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        profile_id: &str,
+    ) -> Result<()> {
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT voice_rejected_profiles FROM speaker_aliases
+                 WHERE recording_id = ?1 AND speaker_id = ?2",
+                params![recording_id, speaker_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let mut rejected: Vec<String> = existing
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+            .unwrap_or_default();
+        if !rejected.iter().any(|id| id == profile_id) {
+            rejected.push(profile_id.to_string());
+        }
+        let encoded = serde_json::to_string(&rejected)?;
+        // An upsert, not an update: a cluster nobody has named has no alias
+        // row, and since signatures are only written for named clusters that
+        // is the common case for "Not them". Dropping the rejection on the
+        // floor would bring the same wrong suggestion back on every visit.
+        self.conn.execute(
+            "INSERT INTO speaker_aliases (
+                 recording_id, speaker_id, updated_at, voice_rejected_profiles
+             ) VALUES (?1, ?2, ?5, ?3)
+             ON CONFLICT(recording_id, speaker_id) DO UPDATE SET
+                 voice_rejected_profiles = excluded.voice_rejected_profiles,
+                 voice_profile_id = CASE
+                     WHEN speaker_aliases.voice_profile_id = ?4 THEN NULL
+                     ELSE speaker_aliases.voice_profile_id END,
+                 voice_match_state = CASE
+                     WHEN speaker_aliases.voice_profile_id = ?4 THEN NULL
+                     ELSE speaker_aliases.voice_match_state END,
+                 updated_at = excluded.updated_at",
+            params![
+                recording_id,
+                speaker_id,
+                encoded,
+                profile_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every "Not them" this recording carries, keyed by speaker id.
+    ///
+    /// Read separately from [`Self::get_cluster_voice_signatures`] because a
+    /// rejection outlives the row that prompted it: an unnamed cluster has a
+    /// rejection but no signature, and its centroid is only in memory.
+    pub fn get_cluster_voice_rejections(
+        &self,
+        recording_id: &str,
+    ) -> Result<HashMap<String, Vec<String>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT speaker_id, voice_rejected_profiles
+             FROM speaker_aliases
+             WHERE recording_id = ?1 AND voice_rejected_profiles IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![recording_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        let mut rejections = HashMap::new();
+        for row in rows {
+            let (speaker_id, raw) = row?;
+            let parsed: Vec<String> = raw
+                .as_deref()
+                .and_then(|value| serde_json::from_str(value).ok())
+                .unwrap_or_default();
+            if !parsed.is_empty() {
+                rejections.insert(speaker_id, parsed);
+            }
+        }
+        Ok(rejections)
+    }
+
+    /// The alias name on each cluster of one recording, for callers that need
+    /// to tell a named cluster from an unnamed one.
+    pub fn get_cluster_alias_names(&self, recording_id: &str) -> Result<HashMap<String, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT speaker_id, name FROM speaker_aliases
+             WHERE recording_id = ?1 AND name IS NOT NULL AND TRIM(name) != ''",
+        )?;
+        let rows = stmt.query_map(params![recording_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<HashMap<_, _>, _>>()
+            .map_err(|e| e.into())
+    }
+
+    /// Every remembered voice, newest name first.
+    pub fn list_speaker_profiles(&self) -> Result<Vec<StoredVoiceProfile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, display_name, linked_identity_hash, embedding_model_id,
+                    centroid, sample_count, created_at, updated_at
+             FROM speaker_profiles
+             ORDER BY display_name COLLATE NOCASE, id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StoredVoiceProfile {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                linked_identity_hash: row.get(2)?,
+                embedding_model_id: row.get(3)?,
+                centroid: blob_to_f32_vec(&row.get::<_, Vec<u8>>(4)?),
+                sample_count: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    /// Remember a voice, or fold a new sample into the one already stored
+    /// under this name and embedder.
+    ///
+    /// Names are matched case-insensitively so "dana" and "Dana" do not become
+    /// two profiles for one person, but a name remembered under a *different*
+    /// embedder gets its own profile: the two centroids live in unrelated
+    /// spaces and averaging them would produce a vector describing nobody.
+    pub fn remember_speaker_voice(
+        &mut self,
+        display_name: &str,
+        embedding_model_id: &str,
+        centroid: &[f32],
+        source_recording_id: Option<&str>,
+        linked_identity_hash: Option<&str>,
+    ) -> Result<String> {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            anyhow::bail!("A remembered voice needs a name");
+        }
+        if !voiceprints::is_usable_embedding(centroid) {
+            anyhow::bail!("Refusing to remember an unusable voice signature");
+        }
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM speaker_profiles
+                 WHERE display_name = ?1 COLLATE NOCASE AND embedding_model_id = ?2",
+                params![display_name, embedding_model_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let profile_id = match existing {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                self.conn.execute(
+                    "INSERT INTO speaker_profiles (
+                         id, display_name, linked_identity_hash, embedding_model_id,
+                         centroid, sample_count, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)",
+                    params![
+                        id,
+                        display_name,
+                        linked_identity_hash,
+                        embedding_model_id,
+                        f32_slice_to_blob(centroid),
+                        now
+                    ],
+                )?;
+                id
+            }
+        };
+
+        self.add_speaker_profile_sample(&profile_id, centroid, source_recording_id)?;
+        Ok(profile_id)
+    }
+
+    /// Append one sample to a profile, prune to the cap, and recompute the
+    /// centroid from what is left.
+    pub fn add_speaker_profile_sample(
+        &mut self,
+        profile_id: &str,
+        embedding: &[f32],
+        source_recording_id: Option<&str>,
+    ) -> Result<()> {
+        if !voiceprints::is_usable_embedding(embedding) {
+            anyhow::bail!("Refusing to store an unusable voice sample");
+        }
+        let tx = self.conn.transaction()?;
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM speaker_profiles WHERE id = ?1",
+            params![profile_id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            anyhow::bail!("Remembered voice '{}' was not found", profile_id);
+        }
+        tx.execute(
+            "INSERT INTO speaker_profile_samples (
+                 id, profile_id, embedding, source_recording_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                profile_id,
+                f32_slice_to_blob(embedding),
+                source_recording_id,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        // Oldest first out. `rowid` breaks ties so two samples written inside
+        // the same RFC 3339 second still have a deterministic order.
+        tx.execute(
+            "DELETE FROM speaker_profile_samples
+             WHERE profile_id = ?1
+               AND rowid NOT IN (
+                   SELECT rowid FROM speaker_profile_samples
+                   WHERE profile_id = ?1
+                   ORDER BY created_at DESC, rowid DESC
+                   LIMIT ?2
+               )",
+            params![profile_id, voiceprints::MAX_SAMPLES_PER_PROFILE as i64],
+        )?;
+
+        let samples: Vec<Vec<f32>> = {
+            let mut stmt =
+                tx.prepare("SELECT embedding FROM speaker_profile_samples WHERE profile_id = ?1")?;
+            let rows = stmt.query_map(params![profile_id], |row| {
+                Ok(blob_to_f32_vec(&row.get::<_, Vec<u8>>(0)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let centroid = voiceprints::centroid_of(&samples)
+            .ok_or_else(|| anyhow::anyhow!("Voice samples did not produce a usable centroid"))?;
+        tx.execute(
+            "UPDATE speaker_profiles
+             SET centroid = ?2, sample_count = ?3, updated_at = ?4
+             WHERE id = ?1",
+            params![
+                profile_id,
+                f32_slice_to_blob(&centroid),
+                samples.len() as i64,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Forget one voice: the profile, its samples, and every cluster this Mac
+    /// had attached to it.
+    pub fn forget_speaker_voice(&mut self, profile_id: &str) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM speaker_profile_samples WHERE profile_id = ?1",
+            params![profile_id],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM speaker_profiles WHERE id = ?1",
+            params![profile_id],
+        )?;
+        tx.execute(
+            "UPDATE speaker_aliases
+             SET voice_profile_id = NULL, voice_match_state = NULL
+             WHERE voice_profile_id = ?1",
+            params![profile_id],
+        )?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
+    /// Forget every voice, and every cluster signature that was kept so a
+    /// voice could be recognized again. Returns how many voices were removed.
+    pub fn forget_all_speaker_voices(&mut self) -> Result<usize> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM speaker_profile_samples", [])?;
+        let removed = tx.execute("DELETE FROM speaker_profiles", [])?;
+        // The per-cluster signatures are voice data too. "Delete all" that
+        // left them behind would be a lie by omission.
+        tx.execute(
+            "UPDATE speaker_aliases
+             SET voice_centroid = NULL, voice_centroid_model_id = NULL,
+                 voice_profile_id = NULL, voice_match_state = NULL,
+                 voice_rejected_profiles = NULL",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(removed)
     }
 
     /// Delete a recording and all of its derived content: transcript, FTS rows,
@@ -5368,6 +6919,16 @@ impl Database {
             "DELETE FROM transcript_fts WHERE recording_id = ?1",
             params![recording_id],
         )?;
+        tx.execute(
+            "DELETE FROM dictation_history_text WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        if table_exists(&tx, "dictation_history_fts")? {
+            tx.execute(
+                "DELETE FROM dictation_history_fts WHERE recording_id = ?1",
+                params![recording_id],
+            )?;
+        }
         tx.execute(
             "DELETE FROM meeting_artifacts WHERE recording_id = ?1",
             params![recording_id],
@@ -5671,10 +7232,74 @@ fn legacy_asset_metadata(
     }
 }
 
+fn f32_slice_to_blob(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
 fn blob_to_f32_vec(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
+}
+
+/// The lowercase terms of a free-text query, using the same tokenization and
+/// two-character floor as `build_fts_query`, so the LIKE fallback and the FTS
+/// path agree on what counts as a match.
+fn search_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|token| token.trim().to_lowercase())
+        .filter(|token| token.len() >= 2)
+        .collect()
+}
+
+/// Case-insensitive "any term is a prefix of some word" match, mirroring the
+/// `term*` OR-query `build_fts_query` sends to FTS5.
+fn terms_match(text: &str, terms: &[String]) -> bool {
+    let lowered = text.to_lowercase();
+    lowered
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| terms.iter().any(|term| word.starts_with(term.as_str())))
+}
+
+/// A short window around the first matched word with every matched word
+/// wrapped in `[[`/`]]`, shaped like FTS5's `snippet()` output so the renderer
+/// highlights both the same way. `context_words` is the number of words kept
+/// on each side of the first match.
+fn like_snippet(text: &str, terms: &[String], context_words: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let is_match = |word: &str| {
+        let lowered = word.to_lowercase();
+        lowered
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|part| terms.iter().any(|term| part.starts_with(term.as_str())))
+    };
+    let first = words.iter().position(|word| is_match(word)).unwrap_or(0);
+    let start = first.saturating_sub(context_words);
+    let end = (first + context_words + 1).min(words.len());
+    let mut snippet = String::new();
+    if start > 0 {
+        snippet.push('…');
+    }
+    for (index, word) in words[start..end].iter().enumerate() {
+        if index > 0 {
+            snippet.push(' ');
+        }
+        if is_match(word) {
+            snippet.push_str("[[");
+            snippet.push_str(word);
+            snippet.push_str("]]");
+        } else {
+            snippet.push_str(word);
+        }
+    }
+    if end < words.len() {
+        snippet.push('…');
+    }
+    snippet
 }
 
 fn build_fts_query(query: &str) -> String {
@@ -5713,6 +7338,748 @@ mod tests {
         };
         db.init_tables().expect("init tables");
         db
+    }
+
+    fn dictation_fixture(
+        id: &str,
+        created_at: chrono::DateTime<Utc>,
+        final_text: &str,
+        raw_text: &str,
+    ) -> (Recording, Transcript, DictationHistoryTextRecord) {
+        let recording = Recording {
+            id: id.to_string(),
+            title: format!("Dictation {id}"),
+            project_id: "inbox".to_string(),
+            duration: 4,
+            created_at,
+            updated_at: created_at,
+            source_type: "dictation".to_string(),
+            audio_path: String::new(),
+            status: "completed".to_string(),
+            summary: None,
+            action_items: None,
+            summary_provenance: None,
+            action_items_provenance: None,
+            meeting_notes: None,
+            meeting_template_id: None,
+            meeting_capture_mode: None,
+            imported_source_name: None,
+            notes_updated_at: None,
+            consent_prompt_shown: false,
+            consent_notice_mode: None,
+            consent_notice_surface: None,
+            consent_notice_message: None,
+            consent_notice_updated_at: None,
+            analysis_failure: None,
+            pause_spans: Vec::new(),
+            video_service: None,
+            attendees: Vec::new(),
+        };
+        let transcript = Transcript {
+            id: format!("{id}-transcript"),
+            recording_id: id.to_string(),
+            segments: vec![TranscriptSegment {
+                id: format!("{id}-segment"),
+                start_time: 0.0,
+                end_time: 4.0,
+                text: final_text.to_string(),
+                speaker_id: None,
+                confidence: 0.9,
+            }],
+            full_text: final_text.to_string(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            model: "test".to_string(),
+            model_id: Some("test".to_string()),
+            requested_provider: Some("parakeet".to_string()),
+            actual_provider: Some("parakeet".to_string()),
+            created_at,
+        };
+        let history = DictationHistoryTextRecord {
+            recording_id: id.to_string(),
+            final_text: final_text.to_string(),
+            raw_text: raw_text.to_string(),
+            reprocessed_from_id: None,
+            mode_preset: Some("voice".to_string()),
+            created_at,
+        };
+        (recording, transcript, history)
+    }
+
+    fn seed_dictation_history(db: &mut Database) {
+        let base = Utc::now();
+        let rows = [
+            (
+                "dictation-old",
+                base - chrono::Duration::hours(3),
+                "Ship the quarterly budget summary to finance.",
+                "ship the quarterly budget summary to finance",
+            ),
+            (
+                "dictation-new",
+                base - chrono::Duration::hours(1),
+                "Remind me to water the plants.",
+                "remind me to water the plants and email finance",
+            ),
+            (
+                "dictation-other",
+                base - chrono::Duration::hours(2),
+                "Nothing relevant here.",
+                "nothing relevant here",
+            ),
+        ];
+        for (id, created_at, final_text, raw_text) in rows {
+            let (recording, transcript, history) =
+                dictation_fixture(id, created_at, final_text, raw_text);
+            db.create_dictation_history_entry(&recording, &transcript, &history, None)
+                .expect("dictation entry");
+        }
+    }
+
+    #[test]
+    fn dictation_history_search_ranks_hits_and_marks_matched_terms() {
+        let mut db = in_memory_db();
+        seed_dictation_history(&mut db);
+
+        let hits = db
+            .search_dictation_history("finance", 10, 0)
+            .expect("search");
+        let ids: Vec<&str> = hits.iter().map(|hit| hit.recording_id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "both texts mentioning finance match: {ids:?}");
+        assert!(ids.contains(&"dictation-old"));
+        assert!(ids.contains(&"dictation-new"));
+        assert!(!ids.contains(&"dictation-other"));
+
+        for hit in &hits {
+            assert!(
+                hit.snippet.contains("[[") && hit.snippet.contains("]]"),
+                "snippet must mark the matched term: {}",
+                hit.snippet
+            );
+        }
+        let newest = hits
+            .iter()
+            .find(|hit| hit.recording_id == "dictation-new")
+            .expect("raw-only hit");
+        assert_eq!(
+            newest.matched_field, "raw",
+            "finance appears only in what was heard for the newest row"
+        );
+        let oldest = hits
+            .iter()
+            .find(|hit| hit.recording_id == "dictation-old")
+            .expect("final hit");
+        assert_eq!(oldest.matched_field, "final");
+
+        // Prefix matching, like transcript search.
+        let prefix = db.search_dictation_history("quart", 10, 0).expect("search");
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].recording_id, "dictation-old");
+
+        // Paging is honoured.
+        let page = db
+            .search_dictation_history("finance", 1, 1)
+            .expect("search");
+        assert_eq!(page.len(), 1);
+
+        // A query with no usable term is empty, not an error.
+        assert!(db
+            .search_dictation_history("a", 10, 0)
+            .expect("search")
+            .is_empty());
+    }
+
+    #[test]
+    fn dictation_history_search_falls_back_to_like_without_fts() {
+        let mut db = in_memory_db();
+        seed_dictation_history(&mut db);
+        db.conn
+            .execute("DROP TABLE dictation_history_fts", [])
+            .unwrap();
+
+        let hits = db
+            .search_dictation_history("finance", 10, 0)
+            .expect("fallback search must not error");
+        let ids: Vec<&str> = hits.iter().map(|hit| hit.recording_id.as_str()).collect();
+        assert_eq!(ids, vec!["dictation-new", "dictation-old"], "newest first");
+        assert!(
+            hits[0].snippet.contains("[[finance]]"),
+            "{}",
+            hits[0].snippet
+        );
+        assert_eq!(hits[0].matched_field, "raw");
+        assert_eq!(hits[1].matched_field, "final");
+
+        // Writes still succeed with the index gone.
+        let (recording, transcript, history) = dictation_fixture(
+            "dictation-late",
+            Utc::now(),
+            "Budget follow-up.",
+            "budget follow up",
+        );
+        db.create_dictation_history_entry(&recording, &transcript, &history, None)
+            .expect("write without fts");
+        let budget = db
+            .search_dictation_history("budget", 10, 0)
+            .expect("search");
+        assert_eq!(budget.len(), 2);
+    }
+
+    #[test]
+    fn like_snippet_windows_around_the_first_match() {
+        let text = "one two three four five six seven eight finance nine ten eleven twelve";
+        let terms = search_terms("finance");
+        let snippet = like_snippet(text, &terms, 2);
+        assert_eq!(snippet, "…seven eight [[finance]] nine ten…");
+        assert!(terms_match("Email FINANCE now", &terms));
+        assert!(!terms_match("nothing here", &terms));
+        assert!(search_terms("a").is_empty());
+    }
+
+    #[test]
+    fn deleting_a_dictation_removes_its_searchable_text() {
+        let mut db = in_memory_db();
+        seed_dictation_history(&mut db);
+
+        db.delete_recording("dictation-old").expect("delete");
+
+        assert!(db
+            .get_dictation_history_text("dictation-old")
+            .expect("read")
+            .is_none());
+        let hits = db
+            .search_dictation_history("quarterly", 10, 0)
+            .expect("search");
+        assert!(
+            hits.is_empty(),
+            "deleted rows must leave the index: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_dictations_are_backfilled_into_history_text_and_fts() {
+        let mut db = in_memory_db();
+        let (recording, transcript, _) = dictation_fixture(
+            "dictation-legacy",
+            Utc::now(),
+            "Legacy words about a rota.",
+            "",
+        );
+        // The pre-history write path: recording + transcript only.
+        db.create_recording_with_transcript(&recording, &transcript)
+            .expect("legacy write");
+        assert!(db
+            .get_dictation_history_text("dictation-legacy")
+            .expect("read")
+            .is_none());
+
+        db.backfill_dictation_history_text_if_needed()
+            .expect("backfill");
+
+        let text = db
+            .get_dictation_history_text("dictation-legacy")
+            .expect("read")
+            .expect("backfilled row");
+        assert_eq!(text.final_text, "Legacy words about a rota.");
+        assert_eq!(text.raw_text, text.final_text, "raw was never stored");
+        assert_eq!(text.reprocessed_from_id, None);
+        let hits = db.search_dictation_history("rota", 10, 0).expect("search");
+        assert_eq!(hits.len(), 1);
+
+        // Idempotent: a second pass neither duplicates nor fails.
+        db.backfill_dictation_history_text_if_needed()
+            .expect("second backfill");
+        let count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM dictation_history_text", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn reprocessed_entries_keep_their_link_to_the_source_dictation() {
+        let mut db = in_memory_db();
+        seed_dictation_history(&mut db);
+        let (recording, transcript, mut history) = dictation_fixture(
+            "dictation-redo",
+            Utc::now(),
+            "- Water the plants",
+            "water the plants",
+        );
+        history.reprocessed_from_id = Some("dictation-new".to_string());
+        history.mode_preset = Some("notes".to_string());
+        db.create_dictation_history_entry(&recording, &transcript, &history, None)
+            .expect("write");
+
+        let stored = db
+            .get_dictation_history_text("dictation-redo")
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored, history);
+    }
+
+    #[test]
+    fn read_only_open_refuses_writes_and_skips_migrations() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("plainsong.db");
+        // A writer creates the schema and one row the reader can see.
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            let recording = sample_recording("ro-1", "inbox");
+            db.create_recording(&recording).unwrap();
+        }
+
+        let reader = Database::open_read_only_at_path(&path, None).unwrap();
+        assert_eq!(reader.get_recordings(None).unwrap().len(), 1);
+
+        // Every write path is refused by SQLite itself, not only by policy.
+        let insert = reader.conn.execute(
+            "INSERT INTO projects (id, name, created_at, updated_at) VALUES ('p', 'p', '', '')",
+            [],
+        );
+        assert!(
+            insert.is_err(),
+            "insert must fail on a read-only connection"
+        );
+        let bump = reader.conn.execute_batch("PRAGMA user_version = 99;");
+        assert!(
+            bump.is_err(),
+            "pragma write must fail on a read-only connection"
+        );
+        let query_only: i64 = reader
+            .conn
+            .query_row("PRAGMA query_only", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(query_only, 1);
+
+        // The file on disk still carries the writer's schema version.
+        let check = Connection::open(&path).unwrap();
+        let version: i64 = check
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn read_only_open_refuses_a_missing_file_instead_of_creating_one() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("absent.db");
+        let error = Database::open_read_only_at_path(&path, None)
+            .err()
+            .expect("open must fail");
+        assert!(error.to_string().contains("No Plainsong database"));
+        assert!(
+            !path.exists(),
+            "a read-only open must never create the file"
+        );
+    }
+
+    #[test]
+    fn read_only_open_refuses_a_newer_schema() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("future.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!(
+                "PRAGMA user_version = {};",
+                CURRENT_SCHEMA_VERSION + 1
+            ))
+            .unwrap();
+        }
+        let error = Database::open_read_only_at_path(&path, None)
+            .err()
+            .expect("open must fail");
+        assert!(error
+            .to_string()
+            .contains("newer than this binary supports"));
+    }
+
+    /// The keyed open used to verify the key with `Connection::execute`,
+    /// which rusqlite rejects for any row-returning statement — so every
+    /// encrypted open failed before the key was tested. Nothing caught it
+    /// because no install had a vault key yet.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn keyed_open_round_trip() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("keyed.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, Some(key)).expect("keyed create");
+            assert!(db.is_encrypted().unwrap());
+            db.create_recording(&sample_recording("k-1", "inbox"))
+                .unwrap();
+        }
+        let reopened = Database::open_at_path(&path, Some(key)).expect("keyed reopen");
+        assert_eq!(reopened.get_recordings(None).unwrap().len(), 1);
+        assert!(Database::open_at_path(&path, None).is_err());
+        // Not covered here: `change_key` on a database that was opened
+        // WITHOUT a key. SQLCipher's `PRAGMA rekey` is a silent no-op on an
+        // unkeyed connection (the file stays plaintext and a keyed reopen
+        // then fails with "file is not a database"), so the vault's
+        // plaintext-to-encrypted step needs `sqlcipher_export`, not `rekey`.
+        // That is a separate fix with its own migration story; it is
+        // recorded, not papered over, here.
+    }
+
+    /// A second process reading the live database must not leave anything
+    /// behind for the writer to trip over. A `-wal`/`-shm` pair would also
+    /// mean the reader had written to the directory, which the read-only flag
+    /// is supposed to make impossible.
+    #[test]
+    fn read_only_open_creates_no_sidecar_files_and_the_writer_is_not_in_wal_mode() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("plainsong.db");
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("ro-wal", "inbox"))
+                .unwrap();
+            // The read-only open in this repo does not attach to a WAL, so the
+            // writer must not be using one. If that ever changes, this test is
+            // the thing that says so before a user's CLI stops working.
+            let mode: String = db
+                .conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_ne!(mode.to_ascii_lowercase(), "wal", "writer journal_mode");
+        }
+        let before: BTreeSet<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(before, BTreeSet::from(["plainsong.db".to_string()]));
+
+        let reader = Database::open_read_only_at_path(&path, None).unwrap();
+        assert_eq!(reader.get_recordings(None).unwrap().len(), 1);
+        assert!(!reader.has_transcript_content("ro-wal").unwrap());
+        assert!(reader
+            .recording_ids_with_transcript_content()
+            .unwrap()
+            .is_empty());
+        drop(reader);
+
+        let after: BTreeSet<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            after, before,
+            "a read-only open must not create journal, WAL or shm files"
+        );
+    }
+
+    /// The pre-meeting brief only ever looks at the newest few hundred
+    /// meetings. It used to get them by loading the whole library and calling
+    /// `.take()`, so the cap bounded the ranking and nothing else. The cap is
+    /// in SQL now, and this pins both halves: the right rows, and only those.
+    #[test]
+    fn get_recent_recordings_caps_in_sql_and_returns_the_newest_first() {
+        let dir = crate::test_fs::TempDir::new("recent-recordings");
+        let path = dir.path().join("plainsong.db");
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        for index in 0..8 {
+            let mut recording = sample_recording(&format!("r{index}"), "inbox");
+            recording.created_at =
+                chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 1 + index, 12, 0, 0)
+                    .single()
+                    .expect("valid fixture timestamp");
+            db.create_recording(&recording).unwrap();
+        }
+
+        let recent = db.get_recent_recordings(3).unwrap();
+        assert_eq!(
+            recent.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["r7", "r6", "r5"],
+            "the newest three, newest first"
+        );
+
+        // The rows never left SQLite: the statement itself is capped, so the
+        // count that comes back is the cap and not a slice of a larger read.
+        assert_eq!(db.get_recent_recordings(1).unwrap().len(), 1);
+        assert_eq!(db.get_recent_recordings(0).unwrap().len(), 0);
+        // A cap larger than the library is not an error, and the unlimited
+        // call still returns everything.
+        assert_eq!(db.get_recent_recordings(500).unwrap().len(), 8);
+        assert_eq!(db.get_recordings(None).unwrap().len(), 8);
+    }
+
+    #[test]
+    fn transcript_content_predicate_matches_the_loaded_transcript() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("plainsong.db");
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        for id in ["with-segments", "text-only", "empty"] {
+            db.create_recording(&sample_recording(id, "inbox")).unwrap();
+        }
+        db.conn
+            .execute(
+                "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, created_at)
+                 VALUES ('t1', 'with-segments', '[{\"id\":\"s\",\"start_time\":0.0,\"end_time\":1.0,\"text\":\"hi\",\"speaker_id\":null,\"confidence\":0.9}]', '', 'en', 0.9, 'test', '2026-08-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, created_at)
+                 VALUES ('t2', 'text-only', '[]', 'a sentence', 'en', 0.9, 'test', '2026-08-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, created_at)
+                 VALUES ('t3', 'empty', '[]', '   ', 'en', 0.9, 'test', '2026-08-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+
+        assert!(db.has_transcript_content("with-segments").unwrap());
+        assert!(db.has_transcript_content("text-only").unwrap());
+        assert!(!db.has_transcript_content("empty").unwrap());
+        assert!(!db.has_transcript_content("no-such-recording").unwrap());
+        assert_eq!(
+            db.recording_ids_with_transcript_content().unwrap(),
+            HashSet::from(["with-segments".to_string(), "text-only".to_string()])
+        );
+    }
+
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn read_only_open_needs_the_same_key_the_writer_used() {
+        let dir = crate::test_fs::TempDir::new("local-tools");
+        let path = dir.path().join("cipher.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, Some(key)).unwrap();
+            db.create_recording(&sample_recording("enc-1", "inbox"))
+                .unwrap();
+        }
+        let keyed = Database::open_read_only_at_path(&path, Some(key)).unwrap();
+        assert!(keyed.is_encrypted().unwrap());
+        assert_eq!(keyed.get_recordings(None).unwrap().len(), 1);
+
+        assert!(Database::open_read_only_at_path(&path, None).is_err());
+        assert!(Database::open_read_only_at_path(&path, Some("wrong-key")).is_err());
+    }
+
+    /// The whole point of item B13. `PRAGMA rekey` on an unkeyed connection is
+    /// a documented no-op: it reported success, the file stayed plaintext, and
+    /// the app told the user "database encrypted". This is the real migration.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn plaintext_database_is_really_encrypted_and_keeps_its_schema_version() {
+        let dir = crate::test_fs::TempDir::new("vault-migrate");
+        let path = dir.path().join("plainsong.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("v-1", "inbox"))
+                .unwrap();
+            assert!(!db.is_encrypted().unwrap());
+        }
+        // Before: readable by anyone with the file.
+        assert!(Database::open_read_only_at_path(&path, None).is_ok());
+
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        db.change_key(key).expect("plaintext migration");
+        assert!(db.is_encrypted().unwrap());
+        // The handle kept working, against the encrypted file.
+        assert_eq!(db.get_recordings(None).unwrap().len(), 1);
+        db.create_recording(&sample_recording("v-2", "inbox"))
+            .unwrap();
+        drop(db);
+
+        // After: the plaintext open that worked a moment ago now fails, and
+        // the keyed one sees both rows.
+        assert!(
+            Database::open_read_only_at_path(&path, None).is_err(),
+            "the file must no longer open without the key"
+        );
+        let keyed = Database::open_read_only_at_path(&path, Some(key)).unwrap();
+        assert_eq!(keyed.get_recordings(None).unwrap().len(), 2);
+        let version: i64 = keyed
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            version, CURRENT_SCHEMA_VERSION,
+            "sqlcipher_export does not carry user_version; it has to be set"
+        );
+
+        // No staging file survives a successful migration.
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "plainsong.db")
+            .collect();
+        assert!(leftovers.is_empty(), "leftovers: {leftovers:?}");
+    }
+
+    /// Re-keying a database that IS encrypted is the case `PRAGMA rekey` is
+    /// actually for; the branch has to keep working.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn an_encrypted_database_still_rekeys_in_place() {
+        let dir = crate::test_fs::TempDir::new("vault-rekey");
+        let path = dir.path().join("plainsong.db");
+        let first = "0123456789abcdef0123456789abcdef";
+        let second = "fedcba9876543210fedcba9876543210";
+        {
+            let mut db = Database::open_at_path(&path, Some(first)).unwrap();
+            db.create_recording(&sample_recording("rk-1", "inbox"))
+                .unwrap();
+            db.change_key(second).expect("rekey");
+            assert!(db.is_encrypted().unwrap());
+        }
+        assert!(Database::open_read_only_at_path(&path, Some(first)).is_err());
+        let reopened = Database::open_read_only_at_path(&path, Some(second)).unwrap();
+        assert_eq!(reopened.get_recordings(None).unwrap().len(), 1);
+    }
+
+    /// A migration that cannot finish must leave the user with the database
+    /// they had, not a half-written one and not nothing.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn a_failed_migration_leaves_the_plaintext_original_intact() {
+        let dir = crate::test_fs::TempDir::new("vault-fail");
+        let path = dir.path().join("plainsong.db");
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("f-1", "inbox"))
+                .unwrap();
+        }
+
+        // A directory where the staging file wants to be: ATTACH cannot create
+        // the database, so the export fails at the first step that touches disk.
+        let staging = dir.path().join("plainsong.db.new");
+        std::fs::create_dir(&staging).unwrap();
+
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        let error = db
+            .change_key("0123456789abcdef0123456789abcdef")
+            .expect_err("migration must fail");
+        assert!(!db.is_encrypted().unwrap(), "{error:#}");
+        // The handle was reopened against the surviving plaintext file and is
+        // still usable, both for reads and for writes.
+        assert_eq!(db.get_recordings(None).unwrap().len(), 1);
+        db.create_recording(&sample_recording("f-2", "inbox"))
+            .unwrap();
+        drop(db);
+
+        // The original is still a plaintext database with the user's rows in
+        // it, and the failure did not put a key on it.
+        let reopened = Database::open_read_only_at_path(&path, None)
+            .expect("the plaintext original must still open");
+        assert_eq!(reopened.get_recordings(None).unwrap().len(), 2);
+        assert!(!reopened.is_encrypted().unwrap());
+        drop(reopened);
+        std::fs::remove_dir(&staging).unwrap();
+    }
+
+    /// The staging file is cleaned up when the export itself fails partway,
+    /// so a retry is not blocked by the previous attempt's leftovers.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn a_failed_migration_removes_its_staging_file() {
+        let dir = crate::test_fs::TempDir::new("vault-staging");
+        let path = dir.path().join("plainsong.db");
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("s-1", "inbox"))
+                .unwrap();
+        }
+        // An already-encrypted file: the migration refuses at the "prove it is
+        // plaintext" step, which is after the staging path has been chosen.
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.change_key("0123456789abcdef0123456789abcdef").unwrap();
+        }
+        let error = encrypt_plaintext_database_file(&path, "0123456789abcdef0123456789abcdef")
+            .expect_err("an encrypted file must not be exported again");
+        assert!(
+            error.to_string().contains("did not open as plaintext"),
+            "{error:#}"
+        );
+        assert!(
+            !dir.path().join("plainsong.db.new").exists(),
+            "the staging file must not survive a failed migration"
+        );
+        // And the encrypted database is untouched.
+        let keyed =
+            Database::open_read_only_at_path(&path, Some("0123456789abcdef0123456789abcdef"))
+                .unwrap();
+        assert_eq!(keyed.get_recordings(None).unwrap().len(), 1);
+    }
+
+    /// What startup keys off: a keyed open of a plaintext file fails, and a
+    /// plaintext open of the same file succeeds. That pair is the whole
+    /// "key stored, database never encrypted" detection.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn a_keyed_open_of_a_plaintext_file_fails_and_the_plaintext_open_does_not() {
+        let dir = crate::test_fs::TempDir::new("vault-detect");
+        let path = dir.path().join("plainsong.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("d-1", "inbox"))
+                .unwrap();
+        }
+        assert!(
+            Database::open_at_path(&path, Some(key)).is_err(),
+            "a keyed open of a plaintext file must fail; that failure is the signal"
+        );
+        let mut plaintext =
+            Database::open_at_path(&path, None).expect("the plaintext open must succeed");
+        assert!(!plaintext.is_encrypted().unwrap());
+
+        // Which is exactly what the startup repair then does.
+        plaintext.change_key(key).unwrap();
+        assert!(plaintext.is_encrypted().unwrap());
+        drop(plaintext);
+        assert!(Database::open_at_path(&path, Some(key)).is_ok());
+    }
+
+    /// The state every existing vault user is in: a key in the keychain, a
+    /// plaintext file on disk. The CLI's read-only open has to survive it and
+    /// report it honestly rather than claim encryption that is not there.
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn read_only_probe_reports_the_files_real_state_not_the_keychains() {
+        let dir = crate::test_fs::TempDir::new("vault-probe");
+        let path = dir.path().join("plainsong.db");
+        let key = "0123456789abcdef0123456789abcdef";
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&sample_recording("p-1", "inbox"))
+                .unwrap();
+        }
+        // Key present, file plaintext: opens, and says so.
+        let probed = Database::open_read_only_probing(&path, Some(key)).unwrap();
+        assert!(!probed.is_encrypted().unwrap());
+        assert_eq!(probed.get_recordings(None).unwrap().len(), 1);
+        drop(probed);
+
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        db.change_key(key).unwrap();
+        drop(db);
+
+        // Now genuinely encrypted: the keyed attempt wins.
+        let probed = Database::open_read_only_probing(&path, Some(key)).unwrap();
+        assert!(probed.is_encrypted().unwrap());
+        assert_eq!(probed.get_recordings(None).unwrap().len(), 1);
+        drop(probed);
+
+        // Encrypted file, no key: refused with both reasons, not a silent
+        // empty result.
+        let error = Database::open_read_only_probing(&path, None)
+            .err()
+            .expect("unkeyed open of an encrypted database must fail");
+        assert!(error.to_string().contains("Could not read the database"));
+        // A wrong key falls back to the plaintext attempt, which also fails.
+        assert!(Database::open_read_only_probing(&path, Some("nope")).is_err());
     }
 
     #[test]
@@ -5806,6 +8173,78 @@ mod tests {
     }
 
     #[test]
+    fn pause_spans_round_trip_through_list_and_detail_reads() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-paused", "inbox"))
+            .unwrap();
+        assert!(db
+            .get_recording("meeting-paused")
+            .expect("read")
+            .expect("row")
+            .pause_spans
+            .is_empty());
+
+        let spans = vec![
+            crate::recording_pause::PauseSpan {
+                started_at_ms: 1_000,
+                ended_at_ms: Some(4_000),
+                at_seconds: 1.0,
+            },
+            crate::recording_pause::PauseSpan {
+                started_at_ms: 9_000,
+                ended_at_ms: Some(9_500),
+                at_seconds: 6.0,
+            },
+        ];
+        db.set_recording_pause_spans("meeting-paused", &spans)
+            .expect("persist spans");
+        assert_eq!(
+            db.get_recording("meeting-paused")
+                .expect("read")
+                .expect("row")
+                .pause_spans,
+            spans
+        );
+        let listed = db.get_recordings(None).expect("list");
+        assert_eq!(listed[0].pause_spans, spans);
+
+        // Clearing writes NULL, not "[]", and reads back as no spans.
+        db.set_recording_pause_spans("meeting-paused", &[])
+            .expect("clear spans");
+        assert!(db
+            .get_recording("meeting-paused")
+            .expect("read")
+            .expect("row")
+            .pause_spans
+            .is_empty());
+        // Garbage in the column is treated as no spans rather than a failed read.
+        assert!(parse_pause_spans(Some("not json".to_string())).is_empty());
+    }
+
+    #[test]
+    fn a_pause_still_open_is_persisted_so_a_crash_keeps_the_marker() {
+        // Spans are written on every pause and resume, not only at stop, so a
+        // meeting that crashes while paused still has its markers. The open
+        // span (no `endedAtMs`) has to survive the round trip.
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-open-pause", "inbox"))
+            .unwrap();
+        let open = vec![crate::recording_pause::PauseSpan {
+            started_at_ms: 12_000,
+            ended_at_ms: None,
+            at_seconds: 42.5,
+        }];
+        db.set_recording_pause_spans("meeting-open-pause", &open)
+            .expect("persist an open span");
+        let read = db
+            .get_recording("meeting-open-pause")
+            .expect("read")
+            .expect("row");
+        assert_eq!(read.pause_spans, open);
+        assert_eq!(read.pause_spans[0].ended_at_ms, None);
+    }
+
+    #[test]
     fn analysis_failure_round_trips_through_list_and_detail_reads() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("meeting-1", "inbox"))
@@ -5880,6 +8319,55 @@ mod tests {
     }
 
     #[test]
+    fn the_video_service_tag_round_trips_and_only_known_keys_survive() {
+        let mut db = in_memory_db();
+        let mut tagged = sample_recording("meeting-zoom", "inbox");
+        tagged.video_service = Some("zoom".to_string());
+        db.create_recording(&tagged).unwrap();
+        assert_eq!(
+            db.get_recording("meeting-zoom")
+                .expect("read")
+                .expect("row")
+                .video_service
+                .as_deref(),
+            Some("zoom")
+        );
+        assert_eq!(
+            db.get_recordings(None).expect("list")[0]
+                .video_service
+                .as_deref(),
+            Some("zoom")
+        );
+
+        // A meeting that began from "New meeting" carries no tag.
+        db.create_recording(&sample_recording("meeting-plain", "inbox"))
+            .unwrap();
+        assert_eq!(
+            db.get_recording("meeting-plain")
+                .expect("read")
+                .expect("row")
+                .video_service,
+            None
+        );
+
+        // A key an older or newer build wrote that this one does not know is
+        // read as no tag rather than shown to the reader verbatim.
+        db.conn
+            .execute(
+                "UPDATE recordings SET video_service = 'carrier_pigeon' WHERE id = 'meeting-plain'",
+                [],
+            )
+            .expect("write an unknown key");
+        assert_eq!(
+            db.get_recording("meeting-plain")
+                .expect("read")
+                .expect("row")
+                .video_service,
+            None
+        );
+    }
+
+    #[test]
     fn recording_analysis_failure_serializes_as_camel_case() {
         let mut recording = sample_recording("meeting-4", "inbox");
         recording.analysis_failure = Some("summary: boom".to_string());
@@ -5918,6 +8406,7 @@ mod tests {
             meeting_notes: None,
             meeting_template_id: None,
             meeting_capture_mode: None,
+            imported_source_name: None,
             notes_updated_at: None,
             consent_prompt_shown: false,
             consent_notice_mode: None,
@@ -5925,6 +8414,9 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            attendees: Vec::new(),
+            pause_spans: Vec::new(),
+            video_service: None,
         }
     }
 
@@ -6365,6 +8857,64 @@ mod tests {
                 .state,
             "db_switched"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Kept dictation audio is registered as `protection 'plaintext'`, which is
+    /// correct as an intermediate state but was also its final state: nothing
+    /// ever encrypted it, so with the vault on the words the reader chose to
+    /// keep stayed in the clear and `count_encrypted_recordings` reported the
+    /// store as partly unencrypted forever. The stop path's encryption step now
+    /// runs for it too; this is the database half of that, showing the asset is
+    /// one the vault operation can actually pick up and switch.
+    #[test]
+    fn kept_dictation_audio_is_an_asset_the_vault_operation_can_encrypt() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-dictation-vault-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let kept = root.join("dictation.wav");
+        write_test_wav(&kept);
+        let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(&kept) else {
+            panic!("valid wav fixture");
+        };
+
+        let (mut recording, transcript, history) = dictation_fixture(
+            "kept-dictation",
+            Utc::now(),
+            "Water the plants.",
+            "water the plants",
+        );
+        recording.audio_path = kept.to_string_lossy().to_string();
+        db.create_dictation_history_entry(&recording, &transcript, &history, Some(&metadata))
+            .expect("dictation entry with kept audio");
+
+        // As written, it is plaintext and the store is not fully encrypted.
+        let bundle = db.load_recording_audio_bundle(&recording.id).unwrap();
+        assert_eq!(
+            bundle.primary.as_ref().unwrap().protection,
+            RecordingAudioProtection::Plaintext
+        );
+        assert_eq!(db.count_encrypted_recordings().unwrap(), (0, 1));
+
+        // The vault's own operation covers it, exactly like a meeting track.
+        let operation = db
+            .begin_recording_audio_encryption(&recording.id)
+            .unwrap()
+            .expect("kept dictation audio must open an encryption operation");
+        assert_eq!(operation.items.len(), 1);
+        assert_eq!(operation.items[0].source_path, kept);
+
+        db.switch_recording_audio_encryption(&operation).unwrap();
+        let switched = db.load_recording_audio_bundle(&recording.id).unwrap();
+        assert_eq!(
+            switched.primary.as_ref().unwrap().protection,
+            RecordingAudioProtection::Encrypted
+        );
+        assert_eq!(db.count_encrypted_recordings().unwrap(), (1, 1));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -6871,7 +9421,7 @@ mod tests {
             confidence: 0.95,
         }];
         assert!(!db
-            .apply_diarization_enrichment("edited", edit_revision, &stale_segments, &[])
+            .apply_diarization_enrichment("edited", edit_revision, &stale_segments, &[], None, None)
             .unwrap());
         let edited = db.get_transcript("edited").unwrap().unwrap();
         assert_eq!(edited.full_text, "User correction");
@@ -6885,7 +9435,14 @@ mod tests {
         db.delete_transcript_segments("deleted", &["s1".to_string()])
             .unwrap();
         assert!(!db
-            .apply_diarization_enrichment("deleted", delete_revision, &stale_segments, &[])
+            .apply_diarization_enrichment(
+                "deleted",
+                delete_revision,
+                &stale_segments,
+                &[],
+                None,
+                None
+            )
             .unwrap());
         let deleted = db.get_transcript("deleted").unwrap().unwrap();
         assert!(deleted.segments.is_empty());
@@ -6945,7 +9502,14 @@ mod tests {
         ];
 
         let error = db
-            .apply_diarization_enrichment("r1", revision, &enriched, &aliases)
+            .apply_diarization_enrichment(
+                "r1",
+                revision,
+                &enriched,
+                &aliases,
+                Some("plainsong:ecapa_tdnn_speaker"),
+                Some(serde_json::json!({ "recording_id": "r1" })),
+            )
             .expect_err("alias failure must roll back the full enrichment transaction");
         assert!(error.to_string().contains("injected alias failure"));
 
@@ -6958,6 +9522,72 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(db.get_speaker_aliases("r1").unwrap().is_empty());
+    }
+
+    /// The `diarizer` column and the `meeting_diarization_applied` entry record
+    /// the same fact, so neither may exist without the other.
+    ///
+    /// They used to be two writes under two separate acquisitions of the
+    /// database lock: a reader between them saw the column changed with nothing
+    /// saying why, and a failure of the second write made that permanent.
+    #[test]
+    fn the_diarizer_column_and_its_audit_entry_are_one_write() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_completed_transcript(&sample_transcript("r1"))
+            .unwrap();
+        let (_, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        let diarized = vec![TranscriptSegment {
+            id: "enriched-0".to_string(),
+            start_time: 0.0,
+            end_time: 2.5,
+            text: "Diarized first".to_string(),
+            speaker_id: Some("speaker_0".to_string()),
+            confidence: 0.95,
+        }];
+
+        // A stale revision: the enrichment does not apply, so nothing may be
+        // recorded about a diarizer that did not land.
+        assert!(!db
+            .apply_diarization_enrichment(
+                "r1",
+                revision + 99,
+                &diarized,
+                &[],
+                Some("plainsong:campplus_speaker"),
+                Some(serde_json::json!({ "recording_id": "r1" })),
+            )
+            .unwrap());
+        assert!(db
+            .get_all_audit_log()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.event != "meeting_diarization_applied"));
+        assert_eq!(db.get_transcript_diarizer("r1").unwrap(), None);
+
+        // The real write: column and entry together.
+        assert!(db
+            .apply_diarization_enrichment(
+                "r1",
+                revision,
+                &diarized,
+                &[],
+                Some("deepgram"),
+                Some(serde_json::json!({ "recording_id": "r1", "diarizer": "deepgram" })),
+            )
+            .unwrap());
+        assert_eq!(
+            db.get_transcript_diarizer("r1").unwrap().as_deref(),
+            Some("deepgram")
+        );
+        let entries = db.get_all_audit_log().unwrap();
+        let applied = entries
+            .iter()
+            .filter(|entry| entry.event == "meeting_diarization_applied")
+            .collect::<Vec<_>>();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].details["diarizer"], "deepgram");
     }
 
     #[test]
@@ -7201,7 +9831,7 @@ mod tests {
         let (mut diarized, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
         diarized.segments[0].speaker_id = Some("speaker_9".to_string());
         assert!(db
-            .apply_diarization_enrichment("r1", revision, &diarized.segments, &[])
+            .apply_diarization_enrichment("r1", revision, &diarized.segments, &[], None, None)
             .unwrap());
         assert!(!db.has_embeddings("r1"));
         let recording = db.get_recording("r1").unwrap().unwrap();
@@ -7397,8 +10027,24 @@ mod tests {
                      '2026-01-01', '2026-01-01'
                  );
                  INSERT INTO speaker_aliases (
-                     recording_id, speaker_id, name, sample_count, updated_at
-                 ) VALUES ('recording-1', 'speaker-1', 'Private Person', 1, '2026-01-01');
+                     recording_id, speaker_id, name, sample_count, updated_at,
+                     voice_centroid, voice_centroid_model_id
+                 ) VALUES (
+                     'recording-1', 'speaker-1', 'Private Person', 1, '2026-01-01',
+                     X'0000803F', 'ecapa_tdnn_speaker'
+                 );
+                 INSERT INTO speaker_profiles (
+                     id, display_name, embedding_model_id, centroid, sample_count,
+                     created_at, updated_at
+                 ) VALUES (
+                     'profile-1', 'Private Person', 'ecapa_tdnn_speaker', X'0000803F', 1,
+                     '2026-01-01', '2026-01-01'
+                 );
+                 INSERT INTO speaker_profile_samples (
+                     id, profile_id, embedding, source_recording_id, created_at
+                 ) VALUES (
+                     'sample-1', 'profile-1', X'0000803F', 'recording-1', '2026-01-01'
+                 );
                  INSERT INTO audit_log (id, timestamp, event, details, severity)
                      VALUES ('audit-1', '2026-01-01', 'private', '{}', 'info');
                  INSERT INTO runtime_events (id, event_type, payload, created_at)
@@ -7488,7 +10134,12 @@ mod tests {
     #[test]
     fn reset_schema_coverage_requires_every_application_table_to_be_classified() {
         const INTENTIONALLY_PRESERVED_APPLICATION_TABLES: [&str; 0] = [];
-        const FTS5_IMPLEMENTATION_TABLES: [&str; 5] = [
+        const FTS5_IMPLEMENTATION_TABLES: [&str; 10] = [
+            "dictation_history_fts_config",
+            "dictation_history_fts_content",
+            "dictation_history_fts_data",
+            "dictation_history_fts_docsize",
+            "dictation_history_fts_idx",
             "transcript_fts_config",
             "transcript_fts_content",
             "transcript_fts_data",
@@ -8360,6 +11011,100 @@ mod tests {
     }
 
     #[test]
+    fn attendees_round_trip_and_are_sanitized_on_the_way_in_and_out() {
+        use crate::models::MeetingAttendee;
+
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+
+        // A meeting recorded before the column existed reads back as nobody,
+        // not as a parse failure.
+        assert!(db
+            .get_recording("r1")
+            .unwrap()
+            .unwrap()
+            .attendees
+            .is_empty());
+
+        let stored = db
+            .update_recording_attendees(
+                "r1",
+                vec![
+                    MeetingAttendee {
+                        name: "  Alice   Brown ".to_string(),
+                        email: Some("Alice@Example.com".to_string()),
+                        is_organizer: true,
+                    },
+                    // Same address, different display name: one person.
+                    MeetingAttendee {
+                        name: "A. Brown".to_string(),
+                        email: Some("alice@example.com".to_string()),
+                        is_organizer: false,
+                    },
+                    MeetingAttendee {
+                        name: "   ".to_string(),
+                        email: None,
+                        is_organizer: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].name, "Alice Brown");
+        assert!(stored[0].is_organizer);
+
+        let reloaded = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(reloaded.attendees, stored);
+        let listed = db.get_recordings(None).unwrap();
+        assert_eq!(listed[0].attendees, stored);
+
+        // Removing the last attendee is an empty list, not a no-op.
+        assert!(db
+            .update_recording_attendees("r1", Vec::new())
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .get_recording("r1")
+            .unwrap()
+            .unwrap()
+            .attendees
+            .is_empty());
+    }
+
+    #[test]
+    fn a_cached_brief_only_comes_back_for_the_inputs_it_was_written_from() {
+        let mut db = in_memory_db();
+        assert!(db.get_meeting_brief("event-1", "key-a").unwrap().is_none());
+
+        db.save_meeting_brief("event-1", "key-a", "{\"brief\":\"first\"}")
+            .unwrap();
+        assert_eq!(
+            db.get_meeting_brief("event-1", "key-a").unwrap().as_deref(),
+            Some("{\"brief\":\"first\"}")
+        );
+        // A different input hash is a different brief, so the stored one is
+        // simply not offered -- there is no expiry to tune and no way to hand
+        // back an answer written from evidence that has since changed.
+        assert!(db.get_meeting_brief("event-1", "key-b").unwrap().is_none());
+
+        db.save_meeting_brief("event-1", "key-b", "{\"brief\":\"second\"}")
+            .unwrap();
+        assert_eq!(
+            db.get_meeting_brief("event-1", "key-b").unwrap().as_deref(),
+            Some("{\"brief\":\"second\"}"),
+            "one row per event; a refresh replaces rather than accumulates"
+        );
+        assert!(db.get_meeting_brief("event-1", "key-a").unwrap().is_none());
+    }
+
+    #[test]
+    fn updating_attendees_on_a_missing_recording_is_an_error() {
+        let mut db = in_memory_db();
+        assert!(db.update_recording_attendees("nope", Vec::new()).is_err());
+    }
+
+    #[test]
     fn partial_analysis_patch_preserves_previous_success_and_its_provenance() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("r1", "inbox"))
@@ -8453,6 +11198,473 @@ mod tests {
         assert!(db.rename_speaker("r1", "speaker_0", "   ").is_err());
         assert!(db.rename_speaker("r1", "missing", "Bob").is_err());
         assert_eq!(db.get_speaker_aliases("r1").unwrap().len(), 1);
+    }
+
+    // ── Voiceprints ──────────────────────────────────────────────────────
+
+    fn unit(values: &[f32]) -> Vec<f32> {
+        let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        values.iter().map(|v| v / norm).collect()
+    }
+
+    /// The promise on the switch: with remembering off, a finished meeting
+    /// leaves no trace of anyone's voice anywhere in the database.
+    #[test]
+    fn voiceprint_storage_is_untouched_while_the_setting_is_off() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut centroids: HashMap<String, Vec<f32>> = HashMap::new();
+        centroids.insert("S1".to_string(), unit(&[1.0, 0.0, 0.0]));
+        centroids.insert("S2".to_string(), unit(&[0.0, 1.0, 0.0]));
+
+        for (speaker_id, centroid) in &centroids {
+            let written = db
+                .record_named_cluster_voice_signature(
+                    "r1",
+                    speaker_id,
+                    centroid,
+                    "ecapa_tdnn_speaker",
+                    false,
+                )
+                .unwrap();
+            assert!(!written);
+        }
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
+        assert!(db.list_speaker_profiles().unwrap().is_empty());
+        let signature_rows: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_aliases WHERE voice_centroid IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(signature_rows, 0);
+
+        // And with it on, the same call writes the cluster it was given.
+        assert!(db
+            .record_named_cluster_voice_signature(
+                "r1",
+                "S1",
+                &centroids["S1"],
+                "ecapa_tdnn_speaker",
+                true,
+            )
+            .unwrap());
+        let stored = db.get_cluster_voice_signatures("r1").unwrap();
+        assert_eq!(
+            stored.len(),
+            1,
+            "one signature per named cluster, not one per cluster in the room"
+        );
+        assert_eq!(stored[0].speaker_id, "S1");
+    }
+
+    /// A vector that cannot be compared costs a suggestion, not the meeting:
+    /// the write is refused and reported as "nothing written", not as an error
+    /// that would fail an otherwise finished transcript.
+    #[test]
+    fn an_unusable_signature_is_declined_rather_than_raised() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        assert!(!db
+            .record_named_cluster_voice_signature(
+                "r1",
+                "S1",
+                &[f32::NAN, 1.0],
+                "ecapa_tdnn_speaker",
+                true,
+            )
+            .unwrap());
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn cluster_voice_signatures_round_trip_and_refuse_unusable_vectors() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let centroid = unit(&[0.3, 0.4, 0.5]);
+        db.set_cluster_voice_signature("r1", "S1", &centroid, "ecapa_tdnn_speaker")
+            .unwrap();
+
+        let signatures = db.get_cluster_voice_signatures("r1").unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert_eq!(signatures[0].speaker_id, "S1");
+        assert_eq!(signatures[0].embedding_model_id, "ecapa_tdnn_speaker");
+        for (stored, original) in signatures[0].centroid.iter().zip(centroid.iter()) {
+            assert!((stored - original).abs() < 1e-6, "blob round trip");
+        }
+        assert_eq!(signatures[0].applied_profile_id, None);
+        assert!(signatures[0].rejected_profile_ids.is_empty());
+
+        assert!(db
+            .set_cluster_voice_signature("r1", "S2", &[], "ecapa_tdnn_speaker")
+            .is_err());
+        assert!(db
+            .set_cluster_voice_signature("r1", "S2", &[0.0, 0.0], "ecapa_tdnn_speaker")
+            .is_err());
+        assert!(db
+            .set_cluster_voice_signature("r1", "S2", &[f32::NAN, 1.0], "ecapa_tdnn_speaker")
+            .is_err());
+        assert_eq!(db.get_cluster_voice_signatures("r1").unwrap().len(), 1);
+
+        // Re-running speaker identification replaces the signature rather than
+        // accumulating a second one for the same cluster.
+        let replacement = unit(&[0.0, 0.0, 1.0]);
+        db.set_cluster_voice_signature("r1", "S1", &replacement, "ecapa_tdnn_speaker")
+            .unwrap();
+        let signatures = db.get_cluster_voice_signatures("r1").unwrap();
+        assert_eq!(signatures.len(), 1);
+        assert!((signatures[0].centroid[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn remembering_a_voice_creates_one_profile_per_name_and_embedder() {
+        let mut db = in_memory_db();
+        let a = db
+            .remember_speaker_voice(
+                "  Dana  ",
+                "ecapa_tdnn_speaker",
+                &unit(&[1.0, 0.0, 0.0]),
+                Some("r1"),
+                None,
+            )
+            .unwrap();
+        // Same person, different capitalization: folded into the same profile.
+        let b = db
+            .remember_speaker_voice(
+                "dana",
+                "ecapa_tdnn_speaker",
+                &unit(&[0.9, 0.1, 0.0]),
+                Some("r2"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(a, b);
+        // Same name, different embedder: a separate profile, because the two
+        // centroids live in unrelated spaces.
+        let c = db
+            .remember_speaker_voice(
+                "Dana",
+                "resnet34_speaker",
+                &unit(&[1.0, 0.0, 0.0]),
+                Some("r3"),
+                None,
+            )
+            .unwrap();
+        assert_ne!(a, c);
+
+        let profiles = db.list_speaker_profiles().unwrap();
+        assert_eq!(profiles.len(), 2);
+        let folded = profiles.iter().find(|p| p.id == a).unwrap();
+        assert_eq!(folded.display_name, "Dana", "the name is trimmed");
+        assert_eq!(folded.sample_count, 2);
+        assert_eq!(folded.linked_identity_hash, None);
+        let norm = folded
+            .centroid
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "the centroid stays unit length");
+
+        assert!(db
+            .remember_speaker_voice("   ", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .is_err());
+        assert!(db
+            .remember_speaker_voice("Ravi", "ecapa_tdnn_speaker", &[0.0, 0.0], None, None)
+            .is_err());
+    }
+
+    #[test]
+    fn a_profile_keeps_at_most_the_sample_cap_and_averages_what_is_left() {
+        let mut db = in_memory_db();
+        let cap = crate::diarization::voiceprints::MAX_SAMPLES_PER_PROFILE;
+        let profile_id = db
+            .remember_speaker_voice("Dana", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .unwrap();
+        for _ in 0..(cap + 5) {
+            db.add_speaker_profile_sample(&profile_id, &unit(&[0.0, 1.0]), Some("r1"))
+                .unwrap();
+        }
+        let stored: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_profile_samples WHERE profile_id = ?1",
+                params![&profile_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored as usize, cap, "samples are capped");
+        let profile = db
+            .list_speaker_profiles()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == profile_id)
+            .unwrap();
+        assert_eq!(profile.sample_count as usize, cap);
+        // The very first sample has aged out, so the centroid is now the
+        // second vector rather than a blend of the two.
+        assert!(profile.centroid[1] > 0.99, "oldest samples age out");
+
+        assert!(db
+            .add_speaker_profile_sample("no-such-profile", &unit(&[1.0, 0.0]), None)
+            .is_err());
+        assert!(db
+            .add_speaker_profile_sample(&profile_id, &[f32::NAN, 0.0], None)
+            .is_err());
+    }
+
+    #[test]
+    fn rejecting_a_voice_is_remembered_and_clears_an_applied_match() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "S1", "p-dana", "auto")
+            .unwrap();
+        let before = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(before.applied_profile_id.as_deref(), Some("p-dana"));
+        assert_eq!(before.match_state.as_deref(), Some("auto"));
+
+        db.reject_cluster_voice_match("r1", "S1", "p-dana").unwrap();
+        let after = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(after.rejected_profile_ids, vec!["p-dana".to_string()]);
+        assert_eq!(after.applied_profile_id, None, "the wrong name is removed");
+        assert_eq!(after.match_state, None);
+
+        // A second rejection accumulates; the same one does not duplicate.
+        db.reject_cluster_voice_match("r1", "S1", "p-devon")
+            .unwrap();
+        db.reject_cluster_voice_match("r1", "S1", "p-dana").unwrap();
+        let after = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(
+            after.rejected_profile_ids,
+            vec!["p-dana".to_string(), "p-devon".to_string()]
+        );
+    }
+
+    /// A cluster nobody has named has no alias row at all, and since
+    /// signatures are only written for named clusters that is the ordinary
+    /// case for "Not them". The rejection has to create the row, or the same
+    /// wrong suggestion comes back on every visit.
+    #[test]
+    fn a_rejection_sticks_on_a_cluster_that_has_no_alias_row() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        assert!(db.get_speaker_aliases("r1").unwrap().is_empty());
+
+        db.reject_cluster_voice_match("r1", "S2", "p-dana").unwrap();
+
+        let rejections = db.get_cluster_voice_rejections("r1").unwrap();
+        assert_eq!(
+            rejections.get("S2").cloned(),
+            Some(vec!["p-dana".to_string()])
+        );
+        assert!(
+            db.get_cluster_voice_signatures("r1").unwrap().is_empty(),
+            "rejecting a suggestion must not invent a signature"
+        );
+        let named: Option<Option<String>> = db
+            .conn
+            .query_row(
+                "SELECT name FROM speaker_aliases WHERE recording_id = 'r1' AND speaker_id = 'S2'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            named,
+            Some(None),
+            "the row exists and carries no name of its own"
+        );
+
+        // And a second rejection on the same unnamed cluster accumulates.
+        db.reject_cluster_voice_match("r1", "S2", "p-devon")
+            .unwrap();
+        assert_eq!(
+            db.get_cluster_voice_rejections("r1").unwrap().get("S2"),
+            Some(&vec!["p-dana".to_string(), "p-devon".to_string()])
+        );
+    }
+
+    /// Typing a name over a name Plainsong applied by itself has to settle the
+    /// question: the transcript stops saying "auto", and the cluster stops
+    /// pointing at the remembered voice the rename was most likely correcting.
+    #[test]
+    fn renaming_a_speaker_clears_the_auto_marker_and_the_voice_link() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+        db.set_cluster_voice_signature("r1", "speaker_0", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "speaker_0", "p-dana", "auto")
+            .unwrap();
+
+        db.rename_speaker("r1", "speaker_0", "Ravi").unwrap();
+
+        let signature = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(signature.name.as_deref(), Some("Ravi"));
+        assert_eq!(
+            signature.applied_profile_id, None,
+            "a hand-typed name unlinks the remembered voice it replaced"
+        );
+        assert_eq!(signature.match_state, None, "and stops saying \"auto\"");
+        assert!(
+            !signature.centroid.is_empty(),
+            "the meeting's own signature is untouched"
+        );
+    }
+
+    /// The confirm path renames first and marks the match afterwards, so
+    /// clearing the link on rename must not undo the confirmation.
+    #[test]
+    fn confirming_after_a_rename_still_leaves_the_match_confirmed() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_transcript("r1")).unwrap();
+        db.set_cluster_voice_signature("r1", "speaker_0", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+
+        db.rename_speaker("r1", "speaker_0", "Dana").unwrap();
+        db.set_cluster_voice_match("r1", "speaker_0", "p-dana", "confirmed")
+            .unwrap();
+
+        let signature = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(signature.applied_profile_id.as_deref(), Some("p-dana"));
+        assert_eq!(signature.match_state.as_deref(), Some("confirmed"));
+    }
+
+    #[test]
+    fn forgetting_one_voice_removes_its_samples_and_detaches_its_clusters() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let dana = db
+            .remember_speaker_voice("Dana", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .unwrap();
+        let devon = db
+            .remember_speaker_voice(
+                "Devon",
+                "ecapa_tdnn_speaker",
+                &unit(&[0.0, 1.0]),
+                None,
+                None,
+            )
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "S1", &dana, "confirmed")
+            .unwrap();
+
+        assert!(db.forget_speaker_voice(&dana).unwrap());
+        assert!(!db.forget_speaker_voice(&dana).unwrap(), "already gone");
+        let remaining = db.list_speaker_profiles().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, devon);
+        let orphaned_samples: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_profile_samples WHERE profile_id = ?1",
+                params![&dana],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphaned_samples, 0);
+        let cluster = &db.get_cluster_voice_signatures("r1").unwrap()[0];
+        assert_eq!(cluster.applied_profile_id, None);
+        assert_eq!(cluster.match_state, None);
+        assert!(
+            !cluster.centroid.is_empty(),
+            "forgetting one voice keeps the meeting's own signature"
+        );
+    }
+
+    /// "Delete all" has to mean all: the profiles, their samples, and the
+    /// per-cluster signatures that are themselves voice data.
+    #[test]
+    fn forgetting_all_voices_also_clears_every_cluster_signature() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let dana = db
+            .remember_speaker_voice("Dana", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .unwrap();
+        db.remember_speaker_voice(
+            "Devon",
+            "ecapa_tdnn_speaker",
+            &unit(&[0.0, 1.0]),
+            None,
+            None,
+        )
+        .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "S1", &dana, "confirmed")
+            .unwrap();
+        // S2 was never named, so it has no alias row until the rejection
+        // creates one. Asserting it landed is the point: before the upsert
+        // this leg wrote nothing and the assertion below passed vacuously.
+        db.reject_cluster_voice_match("r1", "S2", "p-other")
+            .unwrap();
+        assert_eq!(
+            db.get_cluster_voice_rejections("r1")
+                .unwrap()
+                .get("S2")
+                .cloned(),
+            Some(vec!["p-other".to_string()]),
+            "a rejection on an unnamed cluster is stored"
+        );
+
+        assert_eq!(db.forget_all_speaker_voices().unwrap(), 2);
+        assert!(db.list_speaker_profiles().unwrap().is_empty());
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
+        let leftovers: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_aliases
+                 WHERE voice_centroid IS NOT NULL
+                    OR voice_profile_id IS NOT NULL
+                    OR voice_match_state IS NOT NULL
+                    OR voice_rejected_profiles IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftovers, 0);
+        let samples: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM speaker_profile_samples", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(samples, 0);
+    }
+
+    /// Deleting a meeting takes its cluster signatures with it, but leaves the
+    /// remembered voices alone — those belong to the person, not the meeting.
+    #[test]
+    fn deleting_a_recording_removes_its_signatures_and_keeps_remembered_voices() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.remember_speaker_voice("Dana", "ecapa_tdnn_speaker", &unit(&[1.0, 0.0]), None, None)
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+        db.update_recording_status("r1", "completed").unwrap();
+
+        db.delete_recording("r1").unwrap();
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
+        assert_eq!(db.list_speaker_profiles().unwrap().len(), 1);
     }
 
     #[test]

@@ -1,6 +1,27 @@
-import { BrowserWindow } from "electron/main";
+import { app, BrowserWindow } from "electron/main";
 import path from "path";
+import { appLocaleArgument, resolveAppLocale } from "./app-locale";
 import { OVERLAY_BASE_SIZE } from "./overlay-placement";
+
+let cachedRendererArguments: readonly string[] | null = null;
+
+/**
+ * Extra argv every renderer is started with. Today that is one entry: the
+ * locale the renderer must format dates, times and numbers in, because the
+ * packaged bundle ships only Chromium's English locale and the default ICU
+ * locale inside it is `en-US` whatever the Mac is set to. See
+ * `electron/app-locale.ts` for the measurement.
+ *
+ * Read once — the system language cannot change under a running app without
+ * macOS restarting it — and shared by the main window and both overlays so
+ * every surface formats the same way.
+ */
+export function rendererAdditionalArguments(): readonly string[] {
+  cachedRendererArguments ??= [
+    appLocaleArgument(resolveAppLocale(app.getPreferredSystemLanguages())),
+  ];
+  return cachedRendererArguments;
+}
 
 // Initial bounds are placeholders — the windows are created hidden (show: false)
 // at bootstrap (see prepareOverlayWindows in main.ts, so the first hotkey press
@@ -28,6 +49,7 @@ export function createDictationOverlayWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      additionalArguments: [...rendererAdditionalArguments()],
     },
   });
 }
@@ -49,6 +71,7 @@ export function createRecordingOverlayWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      additionalArguments: [...rendererAdditionalArguments()],
     },
   });
 }

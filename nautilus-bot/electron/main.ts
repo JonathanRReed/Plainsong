@@ -6,6 +6,7 @@ import {
   ipcMain,
   Menu,
   net,
+  Notification,
   protocol,
   screen,
   session,
@@ -14,20 +15,56 @@ import {
 } from "electron/main";
 import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "fs";
+import {
+  createReadStream,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
+import { stat } from "node:fs/promises";
+import { Readable } from "node:stream";
 import path from "path";
 import { pathToFileURL } from "url";
 import { autoUpdater, type AppUpdater } from "electron-updater";
+import {
+  buildNativeHelperBindingTable,
+  cycleDictationMode,
+  dictationBindingConflictSources,
+  electronFallbackDictationBindings,
+  registrableDictationBindings,
+  resolveDictationBindingBehavior,
+  resolveDictationBindings,
+  resolveDictationModeOverride,
+  routeDictationBindingEvent,
+  validateDictationBindings,
+  type DictationBinding,
+  type DictationBindingIssue,
+} from "./dictation-bindings";
 import {
   createDictationShortcutSignalRuntime,
   dictationShortcutFailureMessage,
   resolveDictationShortcutBehavior,
   resolveDictationShortcutCapability,
   shouldHandleDictationShortcutSource,
+  type DictationShortcutStartOptions,
 } from "./dictation-shortcut-controller";
 import { IpcBridge } from "./ipc-bridge";
+import os from "node:os";
+import {
+  captureMainProcessConsole,
+  diagnosticLogBuffer,
+} from "./diagnostic-log-buffer";
 import {
   normalizeNativeShortcutEvent,
+  normalizeNativeShortcutHelperShortcut,
+  resolveNativeHelperConfigApplication,
+  synthesizeNativeShortcutRelease,
+  trackNativeShortcutDownBindings,
   type NativeShortcutController,
   type NativeShortcutRawEvent,
 } from "./native-macos-shortcut";
@@ -71,22 +108,39 @@ import {
 } from "./macos-code-signature";
 import { overlayVisibilityAllowed, resolveWindowUiSettings } from "./window-ui-settings";
 import {
+  nextMeetingNotificationMemory,
+  notificationForCallDetected,
+  notificationForSidecarEvent,
+  resolveNotificationSettings,
+  type NotificationContext,
+  type NotificationSettings,
+  type PlainsongNotification,
+} from "./notification-policy";
+import {
   clampWindowSizeToWorkArea,
   isFiniteWindowNumber,
 } from "./window-bounds-policy";
 import {
   isRendererUrl,
+  playbackTokenFromUrl,
+  playbackUrl,
   RENDERER_HOST,
   RENDERER_SCHEME,
   rendererUrl,
   resolveRendererAssetPath,
   withRendererSecurityHeaders,
 } from "./renderer-protocol";
+import { parsePreparedPlayback, PlaybackTokenMap } from "./playback-tokens";
+import { buildPlaybackResponse } from "./playback-range";
 import {
   RENDERER_READY_LOG_MESSAGE,
   shouldForwardRendererConsoleMessage,
 } from "./renderer-readiness";
-import { createDictationOverlayWindow, createRecordingOverlayWindow } from "./windows";
+import {
+  createDictationOverlayWindow,
+  createRecordingOverlayWindow,
+  rendererAdditionalArguments,
+} from "./windows";
 import {
   cloudLocationConfirmationDetail,
   parseCloudLocationRequest,
@@ -105,6 +159,25 @@ import {
   type MeetingFinalizationOutcome,
   type MeetingLifecycleEvent,
 } from "./meeting-lifecycle";
+import {
+  DeepLinkRateLimiter,
+  LINK_RECORDING_NOTICE,
+  LINK_RECORDING_NOTICE_MS,
+  deepLinkActionName,
+  deepLinkFromArgv,
+  deepLinkNeedsRecordingNotice,
+  parseDeepLink,
+  resolveDictationModeSelection,
+  type DeepLinkCommand,
+} from "./deep-link-policy";
+import {
+  CLI_LINK_PATH,
+  describeCliToolStatus,
+  manualInstallCommand,
+  planCliInstall,
+  type CliInstallResult,
+  type ExistingLinkPath,
+} from "./cli-install";
 
 // Packaging is the only thing that decides development mode. This used to also
 // honour `NODE_ENV=development`, which meant an ambient environment variable
@@ -149,6 +222,9 @@ protocol.registerSchemesAsPrivileged([
       standard: true,
       secure: true,
       supportFetchAPI: true,
+      // The playback route answers `<audio>` with Range responses; media
+      // elements only stream from a scheme registered as streamable.
+      stream: true,
     },
   },
 ]);
@@ -160,9 +236,90 @@ if (isDev) {
 
 let mainWindow: BrowserWindow | null = null;
 let ipcBridge: IpcBridge | null = null;
+
+/**
+ * Live playback tokens. The sidecar's answer to `prepare_recording_playback`
+ * carries a filesystem path; it is kept here and never forwarded, so the
+ * renderer only ever holds a token. See playback-tokens.ts.
+ */
+const playbackTokens = new PlaybackTokenMap();
+
+/**
+ * Forget every playback token. `notifySidecar` is false when the sidecar is
+ * already gone: its restart sweeps the decrypted temporaries itself, and a
+ * release sent to a dead process would only log a rejection.
+ */
+function releaseAllPlayback(reason: string, notifySidecar: boolean): void {
+  const drained = playbackTokens.drain();
+  if (drained.length === 0) {
+    return;
+  }
+  console.log(`[playback] releasing ${drained.length} token(s): ${reason}`);
+  if (!notifySidecar || !ipcBridge) {
+    return;
+  }
+  for (const { token } of drained) {
+    void ipcBridge.invokeSidecar("release_recording_playback", { token }).catch((error) => {
+      console.warn("[playback] release failed", { reason, error });
+    });
+  }
+}
+
+function rendererNotFoundResponse(): Response {
+  return new Response("Not found", {
+    status: 404,
+    headers: { "content-type": "text/plain; charset=utf-8" },
+  });
+}
+
+/**
+ * Answer `plainsong://playback/<token>`. The token must be one this process
+ * registered from a successful prepare; the file is streamed for exactly the
+ * requested byte window so seeking is a Range request, not a full download.
+ */
+async function servePlayback(request: Request, token: string): Promise<Response> {
+  const entry = playbackTokens.resolve(token);
+  if (!entry) {
+    console.warn("[playback] refused unknown token");
+    return withRendererSecurityHeaders(rendererNotFoundResponse());
+  }
+  let size: number;
+  try {
+    const info = await stat(entry.path);
+    if (!info.isFile()) {
+      throw new Error("playback path is not a regular file");
+    }
+    size = info.size;
+  } catch (error) {
+    // The file can vanish under a live token: locking the vault deletes the
+    // decrypted temporary before the revoke event reaches this process.
+    console.warn("[playback] audio file unavailable", {
+      recordingId: entry.recordingId,
+      error,
+    });
+    playbackTokens.release(token);
+    return withRendererSecurityHeaders(rendererNotFoundResponse());
+  }
+  return withRendererSecurityHeaders(
+    buildPlaybackResponse({
+      method: request.method,
+      rangeHeader: request.headers.get("range"),
+      size,
+      contentType: "audio/wav",
+      openStream: (start, end) =>
+        Readable.toWeb(createReadStream(entry.path, { start, end })) as ReadableStream<Uint8Array>,
+    }),
+  );
+}
 let dictationPhase = "idle";
 let dictationShortcutFailureResetTimer: ReturnType<typeof setTimeout> | null = null;
 const captureAdmission = new CaptureAdmissionController();
+// The containers "Import audio…" offers in the open dialog. Mirrors
+// SUPPORTED_IMPORT_EXTENSIONS in rust-sidecar/src/audio_import.rs, which is
+// what actually enforces the list — this only shapes the picker.
+// .webm is absent on purpose: CoreAudio has no Matroska demuxer, so afconvert
+// answers "Couldn't open input file" for every one of them.
+const IMPORTABLE_AUDIO_EXTENSIONS = ["wav", "mp3", "m4a", "aac", "mp4", "ogg", "flac"];
 // Session id from the most recent `dictation-state-changed` event, used to
 // drop stale VAD `silence_stop` signals emitted for an earlier session.
 let dictationSessionId: number | null = null;
@@ -180,6 +337,9 @@ let minimizeToTrayEnabled = false;
 let alwaysOnTopEnabled = false;
 let showDictationOverlayEnabled = true;
 let showRecordingOverlayEnabled = true;
+// Mirror of `automation.localToolsEnabled`. Gates every `plainsong://` deep
+// link; the CLI/MCP read the same switch from settings.json themselves.
+let localToolsEnabled = false;
 let isQuitting = false;
 let forcedQuitTimer: ReturnType<typeof setTimeout> | null = null;
 const FORCED_QUIT_TIMEOUT_MS = 5_000;
@@ -187,15 +347,48 @@ const DICTATION_SHORTCUT_FAILURE_VISIBLE_MS = 8_000;
 let nativeShortcutController: NativeShortcutController | null = null;
 let nativeShortcutAvailable = false;
 let appliedNativeShortcutConfig: string | null = null;
+// Bindings the helper reported down and has not reported up. A helper
+// restart owes each of these a synthetic release, otherwise a hold that was
+// in progress never stops and the session runs to the watchdog.
+let nativeShortcutDownBindings: ReadonlySet<string> = new Set<string>();
+// A helper table that could not be applied because a session (or a held
+// binding) was live. Applied on the next idle; see
+// `resolveNativeHelperConfigApplication`.
+let pendingNativeShortcutSettings: AppSettings | null = null;
 // Latest settings snapshot the shortcut handlers should act on. The native
 // helper survives settings saves that don't change its shortcut, so its
 // onEvent closure must not act on the settings captured at spawn time.
 let latestShortcutSettings: AppSettings = {};
 let shortcutConflicts: ShortcutConflictInfo[] = [];
+// Per-binding problems from the last registration pass (a mouse button with
+// no helper, two bindings on one trigger, ...). Mirrored to the Settings
+// screen alongside the helper availability flag.
+let dictationBindingIssues: DictationBindingIssue[] = [];
 // Mirrors the sidecar's recent-result list so the menu-bar menu can offer
 // "Paste" for each without an async round trip while the menu is being built.
 let recentDictationResults: Array<{ text: string }> = [];
 let dictationPermissionSummary: string | null = null;
+// OS notifications. The policy that decides what to say is pure
+// (notification-policy.ts); this is the memory it needs between events and
+// the settings it is gated on.
+let notificationSettings: NotificationSettings = resolveNotificationSettings(null);
+let notificationMemory: Pick<
+  NotificationContext,
+  "previousMeetingPhase" | "previousMeetingRecordingId" | "lastAutoStoppedRecordingId"
+> = {
+  previousMeetingPhase: null,
+  previousMeetingRecordingId: null,
+  lastAutoStoppedRecordingId: null,
+};
+// The same news must reach the reader once, whichever sidecar event carried
+// it first. Bounded, oldest first.
+const recentNotificationKeys: string[] = [];
+const RECENT_NOTIFICATION_KEYS_MAX = 32;
+// Notifications currently on screen. A shown `Notification` has no other owner
+// in this process, and a collected one takes its click handler with it — so a
+// banner the reader comes back to minutes later would do nothing. Emptied as
+// each one is clicked, closed or fails.
+const liveNotifications = new Set<Notification>();
 
 function qaLog(message: string, payload?: unknown): void {
   if (process.env.PLAINSONG_QA_PACKAGED_HOTKEY === "1") {
@@ -233,16 +426,27 @@ type AppSettings = {
     openWindow?: string;
     repasteLastDictation?: string;
     recopyLastDictation?: string;
+    dictationBindings?: DictationBinding[];
   };
   transcription?: {
     dictationPushToTalk?: boolean;
     dictationHandsFreeEnabled?: boolean;
+    dictationModePreset?: string;
+    dictationSelectedCustomModeId?: string | null;
+    dictationCustomModes?: Array<{ id: string; name: string }>;
   };
   ui?: {
     minimizeToTray?: boolean;
     alwaysOnTop?: boolean;
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
+  };
+  notifications?: {
+    meetingEvents?: boolean;
+    dictationFailures?: boolean;
+  };
+  automation?: {
+    localToolsEnabled?: boolean;
   };
 };
 
@@ -407,6 +611,33 @@ function createTray(): void {
   // A menu (not a popover) on click, per Apple HIG for menu-bar extras.
   refreshTray();
   void refreshDictationPermissionSummary();
+}
+
+// `did-finish-load` fires before React has mounted and subscribed, so a
+// window that was still loading gets the event once on load and once a beat
+// later. The popup's handlers are idempotent (the same label re-sets the same
+// state), so a duplicate costs nothing and a miss costs the whole notice.
+const OVERLAY_EVENT_SETTLE_MS = 200;
+
+/**
+ * Deliver an event again to a window that was still loading when it was
+ * first broadcast. Only for that case -- an already-loaded window has its
+ * listeners and needs no duplicate.
+ */
+function resendOverlayEventWhenReady(
+  window: BrowserWindow,
+  eventName: string,
+  payload: unknown,
+): void {
+  const send = () => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(`sidecar:event:${eventName}`, payload);
+    }
+  };
+  window.webContents.once("did-finish-load", () => {
+    send();
+    setTimeout(send, OVERLAY_EVENT_SETTLE_MS);
+  });
 }
 
 function broadcastRendererEvent(eventName: string, payload: unknown): void {
@@ -970,8 +1201,78 @@ function applyUiSettings(settings: AppSettings | null | undefined): void {
   alwaysOnTopEnabled = resolved.alwaysOnTop;
   showDictationOverlayEnabled = resolved.showDictationOverlay;
   showRecordingOverlayEnabled = resolved.showRecordingOverlay;
+  notificationSettings = resolveNotificationSettings(settings);
+  localToolsEnabled = settings?.automation?.localToolsEnabled === true;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(alwaysOnTopEnabled);
+  }
+}
+
+function dictationOverlayIsVisible(): boolean {
+  if (!showDictationOverlayEnabled) {
+    return false;
+  }
+  const overlay = findWindowByLabel("dictation-overlay");
+  return Boolean(overlay && !overlay.isDestroyed() && overlay.isVisible());
+}
+
+function mainWindowIsFocused(): boolean {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
+}
+
+/**
+ * Show one notification and route its click.
+ *
+ * The first notification an install ever shows is what makes macOS ask the
+ * reader whether Plainsong may notify at all; nothing here asks ahead of
+ * time. A click brings the main window up and asks the renderer for the view
+ * the news is about — the same `main-view-requested` channel the tray uses —
+ * or, for a detected call, hands the renderer the prefill for the consent
+ * dialog.
+ */
+function presentNotification(notification: PlainsongNotification): void {
+  if (recentNotificationKeys.includes(notification.dedupeKey)) {
+    return;
+  }
+  recentNotificationKeys.push(notification.dedupeKey);
+  if (recentNotificationKeys.length > RECENT_NOTIFICATION_KEYS_MAX) {
+    recentNotificationKeys.shift();
+  }
+  if (!Notification.isSupported()) {
+    return;
+  }
+  try {
+    const note = new Notification({
+      title: notification.title,
+      body: notification.body,
+    });
+    // Held until the banner is done with. Nothing else in the main process
+    // refers to a shown notification, so without this the object — and the
+    // click handler that is the whole point of a "Zoom call started" banner —
+    // is eligible for collection the moment `presentNotification` returns.
+    liveNotifications.add(note);
+    const release = () => {
+      liveNotifications.delete(note);
+    };
+    note.on("click", () => {
+      showAndFocusMainWindow();
+      const focus = notification.focus;
+      if (focus.view === "recordings" && focus.callCapture) {
+        broadcastRendererEvent("meeting-call-capture-requested", focus.callCapture);
+        release();
+        return;
+      }
+      broadcastRendererEvent("main-view-requested", {
+        view: focus.view,
+        recordingId: focus.view === "recordings" ? focus.recordingId : null,
+      });
+      release();
+    });
+    note.on("close", release);
+    note.on("failed", release);
+    note.show();
+  } catch (error) {
+    console.warn("[main] could not show a notification", error);
   }
 }
 
@@ -1047,6 +1348,45 @@ function prepareOverlayWindows(): void {
       console.error(`[main] Failed to pre-create ${kind} overlay window:`, error);
     }
   }
+}
+
+/**
+ * A file name a reader can recognise a week later, with no account name in it.
+ */
+function supportBundleFileName(): string {
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  return `plainsong-support-bundle-${stamp}.zip`;
+}
+
+/** Hardware and OS facts, none of which name the reader. */
+function supportBundleHost(): Record<string, unknown> {
+  const cpus = os.cpus();
+  return {
+    platform: process.platform,
+    osRelease: os.release(),
+    arch: process.arch,
+    logicalCpus: cpus.length,
+    cpuModel: cpus[0]?.model ?? null,
+    memoryGiB: Math.round((os.totalmem() / 1024 ** 3) * 10) / 10,
+  };
+}
+
+/**
+ * What this build can prove about itself.
+ *
+ * Not a signed release receipt -- Plainsong does not ship one into the app
+ * bundle yet -- so this says only what the running process knows: its version,
+ * the runtimes under it, and whether it is a packaged app at all.
+ */
+function supportBundleBuildIdentity(): Record<string, unknown> {
+  return {
+    appVersion: app.getVersion(),
+    packaged: app.isPackaged,
+    electron: process.versions.electron ?? null,
+    chrome: process.versions.chrome ?? null,
+    node: process.versions.node ?? null,
+    note: "Plainsong does not embed a signed release receipt in the app bundle; these are the versions the running process reports.",
+  };
 }
 
 async function handleLocalCommand(
@@ -1230,7 +1570,7 @@ async function handleLocalCommand(
     case "get_dictation_shortcut_capability_status":
       return {
         handled: true,
-        result: { nativeShortcutAvailable },
+        result: { nativeShortcutAvailable, bindingIssues: dictationBindingIssues },
       };
     case "get_shortcut_conflicts":
       return {
@@ -1284,6 +1624,14 @@ async function handleLocalCommand(
       );
       return { handled: true, result: true };
     }
+    case "get_cli_tool_status":
+      return { handled: true, result: currentCliToolStatus() };
+    case "install_cli_tool": {
+      // Writes outside the app's own data: a real click in the main window,
+      // consumed before anything touches /usr/local/bin.
+      requireMainWindowGesture("Installing the command-line tool");
+      return { handled: true, result: installCliTool() };
+    }
     case "select_export_location": {
       const parent = requireMainWindowGesture("Choosing an export folder");
       const selectedPath = await chooseDirectory(
@@ -1300,6 +1648,85 @@ async function handleLocalCommand(
         handled: true,
         result: await ipcBridge.invokeSidecar("approve_export_location_privileged", {
           path: selectedPath,
+        }),
+      };
+    }
+    case "select_audio_file_to_import": {
+      // The renderer never names a path. It asks for the picker; the path the
+      // user chooses goes straight from this handler to the sidecar, so a
+      // compromised renderer cannot hand the sidecar a file of its choosing.
+      const parent = requireMainWindowGesture("Importing an audio file");
+      if (!ipcBridge) {
+        throw new Error("Audio import service is not ready");
+      }
+      const selection = await dialog.showOpenDialog(parent, {
+        title: "Choose an audio file to transcribe",
+        buttonLabel: "Import audio",
+        properties: ["openFile"],
+        filters: [
+          {
+            name: "Audio and video",
+            extensions: IMPORTABLE_AUDIO_EXTENSIONS,
+          },
+        ],
+      });
+      const selectedPath = selection.canceled ? null : (selection.filePaths[0] ?? null);
+      if (!selectedPath) {
+        return { handled: true, result: null };
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar("import_audio_file", {
+          path: selectedPath,
+        }),
+      };
+    }
+    case "preview_support_bundle": {
+      // Read-only: says what a bundle would contain and how it would be
+      // redacted, so the reader decides before a file exists. No gesture is
+      // required because nothing is written and no dialog is opened.
+      if (!ipcBridge) {
+        throw new Error("Diagnostics service is not ready");
+      }
+      const description = (await ipcBridge.invokeSidecar(
+        "describe_support_bundle",
+        {},
+      )) as Record<string, unknown>;
+      return {
+        handled: true,
+        result: {
+          ...description,
+          logLineCount: diagnosticLogBuffer.size,
+          suggestedFileName: supportBundleFileName(),
+        },
+      };
+    }
+    case "create_support_bundle": {
+      // Gated like every other native modal in this handler, and for the same
+      // reason. The renderer never names the path: it asks for the picker, and
+      // the path the reader chooses goes from here straight to the sidecar.
+      const parent = requireMainWindowGesture("Creating a support bundle");
+      if (!ipcBridge) {
+        throw new Error("Diagnostics service is not ready");
+      }
+      const selection = await dialog.showSaveDialog(parent, {
+        title: "Save the support bundle",
+        buttonLabel: "Save bundle",
+        defaultPath: path.join(app.getPath("desktop"), supportBundleFileName()),
+        filters: [{ name: "Zip archive", extensions: ["zip"] }],
+        properties: ["createDirectory", "showOverwriteConfirmation"],
+      });
+      const targetPath = selection.canceled ? null : (selection.filePath ?? null);
+      if (!targetPath) {
+        return { handled: true, result: null };
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar("write_support_bundle_privileged", {
+          targetPath,
+          host: supportBundleHost(),
+          buildIdentity: supportBundleBuildIdentity(),
+          logLines: diagnosticLogBuffer.snapshot(),
         }),
       };
     }
@@ -1426,6 +1853,69 @@ async function handleLocalCommand(
       await ipcBridge.invokeSidecar("stop_recording", { recordingId });
       return { handled: true, result: null };
     }
+    case "prepare_recording_playback": {
+      // Main window only: the overlays have no transcript to play against, and
+      // a token minted for a hidden window would be a token nobody can see.
+      if (!senderWindow || senderWindow !== mainWindow) {
+        throw new Error("Playback can only be prepared from the main Plainsong window");
+      }
+      if (!ipcBridge) {
+        throw new Error("Playback service is not ready");
+      }
+      const payload = (args ?? {}) as { recordingId?: unknown };
+      if (typeof payload.recordingId !== "string" || !payload.recordingId) {
+        throw new Error("Playback needs a recording id");
+      }
+      let prepared;
+      try {
+        prepared = parsePreparedPlayback(
+          await ipcBridge.invoke("prepare_recording_playback", {
+            recordingId: payload.recordingId,
+          }),
+        );
+      } catch (error) {
+        // The sidecar may have registered a token anyway — a five-minute
+        // timeout on a long decrypt is the case that happens — and its id
+        // never reached anyone who could release it. Ask for the recording's
+        // tokens by name so the plaintext is not pinned until the vault locks.
+        void ipcBridge
+          .invokeSidecar("release_recording_playback", {
+            recordingId: payload.recordingId,
+          })
+          .catch((releaseError) => {
+            console.warn("[playback] abandoned prepare not released", releaseError);
+          });
+        throw error;
+      }
+      playbackTokens.register(prepared.token, {
+        path: prepared.path,
+        recordingId: prepared.recordingId,
+        protection: prepared.protection,
+      });
+      // The path stays in this process. The renderer gets the token and the
+      // URL the protocol handler answers for it, nothing else.
+      return {
+        handled: true,
+        result: {
+          token: prepared.token,
+          url: playbackUrl(prepared.token),
+          recordingId: prepared.recordingId,
+          protection: prepared.protection,
+          durationSeconds: prepared.durationSeconds,
+        },
+      };
+    }
+    case "release_recording_playback": {
+      const payload = (args ?? {}) as { token?: unknown };
+      const released = playbackTokens.release(payload.token);
+      if (!released || !ipcBridge) {
+        return { handled: true, result: { released: false } };
+      }
+      return {
+        handled: true,
+        result: await ipcBridge.invoke("release_recording_playback", { token: payload.token }),
+      };
+    }
     default:
       return { handled: false };
   }
@@ -1467,17 +1957,115 @@ const dictationShortcutSignalRuntime = createDictationShortcutSignalRuntime({
 async function handleDictationShortcutSignal(
   settings: AppSettings,
   signal: DictationShortcutSignal,
+  binding?: DictationBinding,
 ): Promise<void> {
   if (!ipcBridge) {
     return;
   }
 
-  const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
+  const settingsBehavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
+  // A binding may pin its own activation behavior (hold / toggle); "inherit"
+  // and every non-binding signal (Escape, the VAD watchdog) use the setting.
+  const behavior =
+    binding?.action.kind === "dictation"
+      ? resolveDictationBindingBehavior(binding.action.behavior, settingsBehavior)
+      : settingsBehavior;
   const capability = resolveDictationShortcutCapability({
     nativeShortcutAvailable,
     behavior,
   });
-  await dictationShortcutSignalRuntime.handleSignal({ behavior, capability, signal });
+  // A per-mode binding runs this one session under its mode; the selected
+  // mode in Settings is left alone.
+  const modeOverride =
+    binding?.action.kind === "dictation"
+      ? resolveDictationModeOverride(
+          binding.action.modeId,
+          settings.transcription?.dictationCustomModes ?? [],
+        )
+      : null;
+  const startOptions: DictationShortcutStartOptions | undefined = modeOverride
+    ? { modeOverride: { preset: modeOverride.preset, customModeId: modeOverride.customModeId } }
+    : undefined;
+  await dictationShortcutSignalRuntime.handleSignal({
+    behavior,
+    capability,
+    signal,
+    startOptions,
+  });
+}
+
+/**
+ * The mode a `cycleMode` binding lands on is persisted through the sidecar
+ * (it is the same setting the Dictation view's profile tiles write), then
+ * announced to the popup for a moment so the user knows what the next
+ * dictation will run as.
+ */
+async function handleCycleDictationModeBinding(settings: AppSettings): Promise<void> {
+  if (!ipcBridge) {
+    return;
+  }
+  const transcription = settings.transcription ?? {};
+  const next = cycleDictationMode(
+    {
+      modePreset: transcription.dictationModePreset ?? "voice",
+      selectedCustomModeId: transcription.dictationSelectedCustomModeId ?? null,
+    },
+    transcription.dictationCustomModes ?? [],
+  );
+  const fresh = (await ipcBridge.invoke("get_settings")) as AppSettings & {
+    transcription?: Record<string, unknown>;
+  };
+  const updated = {
+    ...fresh,
+    transcription: {
+      ...(fresh.transcription ?? {}),
+      dictationModePreset: next.modePreset,
+      dictationSelectedCustomModeId: next.selectedCustomModeId,
+    },
+  };
+  await ipcBridge.invoke("save_settings", { settings: updated });
+  qaLog("dictation mode cycled", next);
+  // A dictation overlay that had to be created for this notice has not
+  // loaded its renderer yet, so a broadcast in the same tick lands before
+  // `listen()` has registered anything and is simply dropped -- the notice
+  // never appears, on exactly the launch where the user needs it most.
+  let freshOverlay: BrowserWindow | null = null;
+  if (showDictationOverlayEnabled) {
+    const overlay = getOrCreateOverlayWindow("dictation");
+    freshOverlay = overlay.webContents.isLoadingMainFrame() ? overlay : null;
+    showOverlayWindow(overlay);
+  }
+  const payload = {
+    modePreset: next.modePreset,
+    selectedCustomModeId: next.selectedCustomModeId,
+    label: next.label,
+  };
+  broadcastRendererEvent("dictation-mode-cycled", payload);
+  if (freshOverlay) {
+    resendOverlayEventWhenReady(freshOverlay, "dictation-mode-cycled", payload);
+  }
+}
+
+async function handleDictationBindingTransition(
+  settings: AppSettings,
+  binding: DictationBinding,
+  event: "down" | "up",
+): Promise<void> {
+  const route = routeDictationBindingEvent({ binding, event });
+  qaLog("dictation binding routed", { bindingId: binding.id, event, route });
+  switch (route.kind) {
+    case "dictation":
+      await handleDictationShortcutSignal(settings, route.signal, binding);
+      return;
+    case "cycleMode":
+      await handleCycleDictationModeBinding(settings);
+      return;
+    case "cancel":
+      await handleDictationShortcutSignal(settings, "cancelled");
+      return;
+    case "ignore":
+      return;
+  }
 }
 
 function scheduleDictationErrorReset(): void {
@@ -1595,11 +2183,15 @@ async function handleDictationVadSignal(payload: unknown): Promise<void> {
   }
 }
 
-async function handleDictationGlobalShortcut(settings: AppSettings): Promise<void> {
+async function handleDictationGlobalShortcut(
+  settings: AppSettings,
+  binding: DictationBinding,
+): Promise<void> {
   if (!shouldHandleDictationShortcutSource({ source: "electron", nativeShortcutAvailable })) {
     return;
   }
-  await handleDictationShortcutSignal(settings, "pressed");
+  // Electron only reports presses, so a fallback registration is press-only.
+  await handleDictationBindingTransition(settings, binding, "down");
 }
 
 async function handleNativeDictationShortcutEvent(
@@ -1607,17 +2199,39 @@ async function handleNativeDictationShortcutEvent(
   rawEvent: NativeShortcutRawEvent,
 ): Promise<void> {
   qaLog("dictation native shortcut event", {
-    type: rawEvent.type,
-    key: rawEvent.key,
+    event: rawEvent.event,
+    bindingId: rawEvent.bindingId,
     phase: dictationPhase,
     nativeShortcutAvailable,
   });
   if (!shouldHandleDictationShortcutSource({ source: "native", nativeShortcutAvailable })) {
     return;
   }
+  // Tracked before any await: a helper restart between here and the release
+  // has to know this binding is owed an `up`.
+  nativeShortcutDownBindings = trackNativeShortcutDownBindings(
+    nativeShortcutDownBindings,
+    rawEvent,
+  );
+  if (rawEvent.event === "up") {
+    applyDeferredNativeShortcutConfig("binding released");
+  }
 
-  const { signal } = normalizeNativeShortcutEvent(rawEvent);
-  await handleDictationShortcutSignal(settings, signal);
+  const { signal, bindingId } = normalizeNativeShortcutEvent(rawEvent);
+  if (signal === "cancelled") {
+    await handleDictationShortcutSignal(settings, "cancelled");
+    return;
+  }
+  const binding = resolveDictationBindings(settings.shortcuts).find(
+    (candidate) => candidate.id === bindingId,
+  );
+  if (!binding) {
+    // The helper was spawned with an older table; the next registration pass
+    // replaces it. Nothing to act on.
+    qaLog("dictation native event for unknown binding", { bindingId });
+    return;
+  }
+  await handleDictationBindingTransition(settings, binding, rawEvent.event);
 }
 
 // Keeps the flag and the renderers in sync: Settings copy (e.g. the
@@ -1640,25 +2254,93 @@ function disposeNativeShortcutController(): void {
   setNativeShortcutAvailable(false);
 }
 
-function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
-  const desiredConfig = settings.shortcuts?.toggleDictation ?? null;
-  // Only respawn the helper when its shortcut actually changed (or it died).
-  // An unconditional respawn on every settings save would reset the helper's
-  // key-down tracking, swallowing the release of a hold that is in progress.
-  if (
-    nativeShortcutController &&
-    nativeShortcutController.status.available &&
-    appliedNativeShortcutConfig === desiredConfig
-  ) {
+/**
+ * Deliver the `up` a helper that is about to die will never send. Runs
+ * before the dispose, while `nativeShortcutAvailable` is still true, so the
+ * synthetic release takes the same path a real one would and the session
+ * stops instead of running to the watchdog.
+ */
+function releaseHeldNativeShortcutBindings(reason: string): void {
+  if (nativeShortcutDownBindings.size === 0) {
     return;
   }
+  const releases = synthesizeNativeShortcutRelease(nativeShortcutDownBindings);
+  nativeShortcutDownBindings = new Set<string>();
+  for (const release of releases) {
+    console.warn("[shortcuts] synthesizing release for a held binding", {
+      reason,
+      bindingId: release.bindingId,
+    });
+    void handleNativeDictationShortcutEvent(latestShortcutSettings, release).catch((error) => {
+      surfaceDictationShortcutFailure("native dictation shortcut", error);
+    });
+  }
+}
 
+/**
+ * Apply a helper table that was deferred because a session (or a held
+ * binding) was live. Called whenever dictation reaches an idle-ish phase and
+ * whenever the last held binding is released.
+ */
+function applyDeferredNativeShortcutConfig(reason: string): void {
+  const pending = pendingNativeShortcutSettings;
+  if (!pending) {
+    return;
+  }
+  console.log("[shortcuts] applying deferred native helper table", { reason });
+  startNativeShortcutControllerIfNeeded(pending);
+}
+
+function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
+  // Every binding the helper can watch goes into its table. Validation here
+  // assumes the helper is present (that is what is being started); a mouse or
+  // lone-modifier binding is only dropped later, by the Electron fallback,
+  // when the helper turns out not to run.
+  const bindings = registrableDictationBindings(resolveDictationBindings(settings.shortcuts), {
+    nativeShortcutAvailable: true,
+    customModes: settings.transcription?.dictationCustomModes ?? [],
+  });
+  const helperTable = buildNativeHelperBindingTable(
+    bindings,
+    normalizeNativeShortcutHelperShortcut,
+  );
+  const desiredConfig = JSON.stringify(helperTable);
+  // The helper takes its table on argv, so applying a new one means killing
+  // it. Only respawn when the table actually changed (or it died), and never
+  // in the middle of a session or a held key: every binding edit in Settings
+  // saves immediately, and a SIGTERM landing between `down` and `up` left the
+  // release unowed and the session running to the watchdog.
+  const decision = resolveNativeHelperConfigApplication({
+    desiredConfig,
+    appliedConfig: appliedNativeShortcutConfig,
+    helperAvailable: Boolean(nativeShortcutController?.status.available),
+    dictationPhase,
+    bindingsDown: nativeShortcutDownBindings.size,
+  });
+  if (decision.action === "unchanged") {
+    pendingNativeShortcutSettings = null;
+    return;
+  }
+  if (decision.action === "defer") {
+    // The running helper keeps delivering the OLD table -- the one the
+    // in-flight press came from -- so the release lands on the binding that
+    // started the session. Applied on the next idle.
+    console.log("[shortcuts] deferring native helper table", { reason: decision.reason });
+    pendingNativeShortcutSettings = settings;
+    return;
+  }
+  pendingNativeShortcutSettings = null;
+
+  // Belt and braces for a restart that happens anyway (a helper crash, or a
+  // table change while a stale `down` is still tracked): hand the handler the
+  // `up` the dying helper will never send.
+  releaseHeldNativeShortcutBindings("helper restart");
   disposeNativeShortcutController();
 
   const controller = startNativeMacosShortcutController({
     platform: process.platform,
     helperPath: getNativeShortcutHelperPath(),
-    shortcut: settings.shortcuts?.toggleDictation,
+    helperBindings: helperTable,
     onEvent: (event) => {
       void handleNativeDictationShortcutEvent(latestShortcutSettings, event).catch((error) => {
         surfaceDictationShortcutFailure("native dictation shortcut", error);
@@ -1696,7 +2378,34 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   latestShortcutSettings = settings;
   startNativeShortcutControllerIfNeeded(settings);
 
-  const conflicts = findConflictingShortcuts(settings.shortcuts ?? {});
+  // The dictation binding table (B4). Issues are computed against the helper
+  // that actually came up, so a mouse-button binding on a machine without
+  // Accessibility reads "needs the native helper" in Settings instead of
+  // silently doing nothing.
+  const allBindings = resolveDictationBindings(settings.shortcuts);
+  const bindingContext = {
+    nativeShortcutAvailable,
+    customModes: settings.transcription?.dictationCustomModes ?? [],
+  };
+  dictationBindingIssues = validateDictationBindings(allBindings, bindingContext);
+  for (const issue of dictationBindingIssues) {
+    console.warn("[shortcuts] dictation binding skipped", { reason, ...issue });
+  }
+  broadcastRendererEvent("dictation-shortcut-capability-changed", {
+    nativeShortcutAvailable,
+    bindingIssues: dictationBindingIssues,
+  });
+  const registrableBindings = registrableDictationBindings(allBindings, bindingContext);
+
+  // Conflicts are computed against the bindings that will actually be
+  // registered, not just the four legacy shortcut fields. The registration
+  // loop below takes the bindings first, so a binding on Open window's keys
+  // silently won and left nothing but a `console.error`; now Settings shows
+  // Open window losing, and names the binding it lost to.
+  const conflicts = findConflictingShortcuts(
+    settings.shortcuts ?? {},
+    dictationBindingConflictSources(registrableBindings, bindingContext.customModes),
+  );
   shortcutConflicts = conflicts;
   if (conflicts.length > 0) {
     for (const conflict of conflicts) {
@@ -1711,9 +2420,19 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   broadcastRendererEvent("shortcut-conflicts-changed", { conflicts });
   const skippedFields = new Set(conflicts.map((conflict) => conflict.field));
 
-  const dictationShortcut = skippedFields.has("toggleDictation")
-    ? null
-    : convertShortcutToAccelerator(settings.shortcuts?.toggleDictation);
+  // Electron's globalShortcut stands in for key bindings when the helper is
+  // not delivering (press-only, so hold degrades to toggle exactly as
+  // before). These are registered whether or not the helper is up, as they
+  // always were: `shouldHandleDictationShortcutSource` ignores the Electron
+  // press while the helper is delivering, so a helper that dies mid-session
+  // leaves a working hotkey behind instead of nothing until the next restart.
+  // Mouse buttons and lone modifiers have no Electron equivalent and are
+  // filtered out by `electronFallbackDictationBindings`. No conflict filter
+  // is applied to them: the bindings are first in the precedence list above,
+  // so dictation always wins its keys and it is the other field that gets
+  // skipped -- which is the documented rule ("Dictation is the app's primary
+  // interaction").
+  const fallbackBindings = electronFallbackDictationBindings(registrableBindings);
   const openWindowShortcut = skippedFields.has("openWindow")
     ? null
     : convertShortcutToAccelerator(settings.shortcuts?.openWindow);
@@ -1730,9 +2449,9 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
 
   globalShortcut.unregisterAll();
 
-  if (dictationShortcut) {
-    const registered = globalShortcut.register(dictationShortcut, () => {
-      void handleDictationGlobalShortcut(settings).catch((error) => {
+  for (const { binding, accelerator } of fallbackBindings) {
+    const registered = globalShortcut.register(accelerator, () => {
+      void handleDictationGlobalShortcut(latestShortcutSettings, binding).catch((error) => {
         surfaceDictationShortcutFailure("dictation shortcut", error);
       });
     });
@@ -1740,12 +2459,14 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
     if (!registered) {
       console.error("[shortcuts] failed to register dictation shortcut", {
         reason,
-        dictationShortcut,
+        bindingId: binding.id,
+        accelerator,
       });
     } else {
       console.log("[shortcuts] registered dictation shortcut", {
         reason,
-        dictationShortcut,
+        bindingId: binding.id,
+        accelerator,
         usesPressOnlyElectronFallback,
       });
     }
@@ -1837,6 +2558,115 @@ function getMacosCalendarRuntime(): MacosCalendarRuntime {
     });
   }
   return macosCalendarRuntime;
+}
+
+function getCliBinaryName(): string {
+  return process.platform === "win32" ? "plainsong-cli.exe" : "plainsong-cli";
+}
+
+/** The `plainsong` command-line tool ships beside the sidecar. */
+function getCliBinaryPath(): string {
+  const binaryName = getCliBinaryName();
+  if (isDev) {
+    const debugPath = path.join(__dirname, "../rust-sidecar/target/debug", binaryName);
+    if (existsSync(debugPath)) {
+      return debugPath;
+    }
+    return path.join(__dirname, "../rust-sidecar/target/release", binaryName);
+  }
+  return path.join(process.resourcesPath, "sidecar", binaryName);
+}
+
+function inspectCliLinkPath(): ExistingLinkPath {
+  try {
+    const stat = lstatSync(CLI_LINK_PATH);
+    if (stat.isSymbolicLink()) {
+      return { kind: "symlink", target: readlinkSync(CLI_LINK_PATH) };
+    }
+    return stat.isDirectory() ? { kind: "directory" } : { kind: "file" };
+  } catch {
+    return null;
+  }
+}
+
+function currentCliToolStatus() {
+  const binaryPath = getCliBinaryPath();
+  return describeCliToolStatus({
+    binaryPath,
+    binaryExists: existsSync(binaryPath),
+    existing: inspectCliLinkPath(),
+  });
+}
+
+/**
+ * Symlink `/usr/local/bin/plainsong` at the packaged CLI. No privilege
+ * escalation: when the directory is not writable (root-owned on a stock
+ * macOS) the answer is the one-line command for the user to run, not an
+ * admin-password prompt carrying Plainsong's name (see cli-install.ts).
+ */
+function installCliTool(): CliInstallResult {
+  const binaryPath = getCliBinaryPath();
+  const plan = planCliInstall({
+    platform: process.platform,
+    binaryPath,
+    binaryExists: existsSync(binaryPath),
+    existing: inspectCliLinkPath(),
+  });
+  switch (plan.action) {
+    case "already_installed":
+      return { status: "installed", linkPath: CLI_LINK_PATH };
+    case "refuse":
+      if (plan.reason === "path_occupied") {
+        return {
+          status: "unavailable",
+          reason: `${CLI_LINK_PATH} already exists and is not a Plainsong link, so it was left alone.`,
+        };
+      }
+      if (plan.reason === "binary_missing") {
+        return {
+          status: "unavailable",
+          reason: "The command-line tool is not part of this build.",
+        };
+      }
+      return { status: "unavailable", reason: "The command-line tool installs on macOS and Linux only." };
+    case "link":
+    case "replace_link": {
+      // Never unlink-then-symlink. That left two problems: a failure between
+      // the two steps leaves the machine with no `plainsong` command at all,
+      // and the gap between deciding (lstat) and acting (unlink) is a window
+      // where the path can become something else. Writing the link under a
+      // temporary name in the same directory and renaming it over the old one
+      // closes both: rename(2) replaces a symlink atomically and operates on
+      // the link itself, never following it.
+      const stagingPath = `${CLI_LINK_PATH}.plainsong-install-${process.pid}`;
+      try {
+        try {
+          unlinkSync(stagingPath);
+        } catch {
+          // Nothing there, which is the normal case.
+        }
+        symlinkSync(binaryPath, stagingPath);
+        try {
+          renameSync(stagingPath, CLI_LINK_PATH);
+        } catch (error) {
+          try {
+            unlinkSync(stagingPath);
+          } catch {
+            // Best effort; the staging name is ours and unused.
+          }
+          throw error;
+        }
+        return { status: "installed", linkPath: CLI_LINK_PATH };
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        const reason =
+          code === "EACCES" || code === "EPERM"
+            ? `Plainsong cannot write to ${path.dirname(CLI_LINK_PATH)} without administrator rights.`
+            : `Plainsong could not create the link (${code ?? "unknown error"}).`;
+        return { status: "manual", reason, command: manualInstallCommand(binaryPath) };
+      }
+    }
+  }
 }
 
 function getSidecarBinaryName(): string {
@@ -1971,12 +2801,14 @@ function createMainWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      additionalArguments: [...rendererAdditionalArguments()],
     },
   });
   configureWindowSecurity(win);
 
   win.on("closed", () => {
     mainWindow = null;
+    releaseAllPlayback("main window closed", true);
     // The overlay windows are created hidden at bootstrap and outlive the main
     // window, so `window-all-closed` never fires; keep the non-macOS "closing
     // the window quits the app" behavior explicit rather than relying on it.
@@ -1991,6 +2823,21 @@ function createMainWindow(): BrowserWindow {
       event.preventDefault();
       win.hide();
     }
+  });
+
+  // A reload or an in-app navigation replaces the renderer that holds the
+  // tokens: it will never release them, and the decrypted audio behind them
+  // would stay on disk until the vault locked. Same for a renderer that dies,
+  // which is why that release is registered here rather than beside the dev
+  // logging it used to sit in.
+  win.webContents.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) {
+      return;
+    }
+    releaseAllPlayback("renderer navigated", true);
+  });
+  win.webContents.on("render-process-gone", () => {
+    releaseAllPlayback("renderer process gone", true);
   });
 
   win.webContents.on(
@@ -2202,47 +3049,227 @@ ipcMain.handle("window:get-label", (event) => {
 });
 
 
+// ── plainsong:// deep links ─────────────────────────────────────────────────
+
+const deepLinkLimiter = new DeepLinkRateLimiter();
+// Links that arrived before the sidecar was up (a URL that launched the app).
+const pendingDeepLinks: string[] = [];
+const MAX_PENDING_DEEP_LINKS = 4;
+
+function recordAutomationAudit(action: string, outcome: string): void {
+  if (!ipcBridge) {
+    return;
+  }
+  ipcBridge
+    .invokeSidecar("record_automation_audit_event", { source: "deep_link", action, outcome })
+    .catch((error) => {
+      console.warn("[deep-link] audit write failed", { action, outcome, error });
+    });
+}
+
+/**
+ * Put the dictation HUD on screen carrying "Recording from a link" for a
+ * second. The overlay is shown here rather than waiting for the sidecar's own
+ * show command so the notice is up before the microphone is.
+ */
+function announceLinkStartedRecording(): void {
+  if (showDictationOverlayEnabled) {
+    showOverlayWindow(getOrCreateOverlayWindow("dictation"));
+  }
+  broadcastRendererEvent("dictation-source-notice", {
+    source: "deep_link",
+    message: LINK_RECORDING_NOTICE,
+    durationMs: LINK_RECORDING_NOTICE_MS,
+  });
+}
+
+async function performDeepLink(command: DeepLinkCommand): Promise<string> {
+  switch (command.kind) {
+    case "open":
+      showAndFocusMainWindow();
+      return "performed";
+    case "record": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      // The same toggle the menu-bar item performs: a link never chooses a
+      // hold-to-talk or hands-free behaviour on the user's behalf.
+      const live = isDictationLive();
+      if (deepLinkNeedsRecordingNotice(command, live)) {
+        // A `plainsong://` link is reachable from any web page, and this is
+        // the one command that opens the microphone. Show the HUD with the
+        // reason on it before the capture starts, so the microphone never
+        // comes on without something on screen saying why.
+        announceLinkStartedRecording();
+      }
+      await ipcBridge.invoke(
+        live ? "stop_dictation" : "start_dictation",
+        live ? { stopReason: "deep_link" } : {},
+      );
+      return "performed";
+    }
+    case "stop": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      if (!isDictationLive()) {
+        return "ignored_not_dictating";
+      }
+      await ipcBridge.invoke("stop_dictation", { stopReason: "deep_link" });
+      return "performed";
+    }
+    case "mode": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      const settings = (await ipcBridge.invoke("get_settings")) as AppSettings;
+      const resolved = resolveDictationModeSelection(command.key, settings.transcription ?? {});
+      if (!resolved) {
+        return "ignored_unknown_mode";
+      }
+      if (!resolved.changed) {
+        return "performed";
+      }
+      await ipcBridge.invoke("save_settings", {
+        settings: {
+          ...settings,
+          transcription: { ...settings.transcription, ...resolved.selection },
+        },
+      });
+      return "performed";
+    }
+    case "meeting_start":
+      // Opens the consent sheet and nothing more; recording starts only when
+      // the person clicks Start there, exactly as with the New meeting button.
+      showAndFocusMainWindow();
+      broadcastRendererEvent("main-view-requested", { view: "recordings" });
+      broadcastRendererEvent("meeting-start-requested", {});
+      return "performed";
+    case "meeting_stop": {
+      if (!ipcBridge) {
+        return "failed_no_sidecar";
+      }
+      if (!activeMeetingRecordingId) {
+        return "ignored_no_meeting";
+      }
+      await ipcBridge.invokeSidecar("stop_recording", { recordingId: activeMeetingRecordingId });
+      return "performed";
+    }
+  }
+}
+
+/**
+ * Act on one `plainsong://` URL. The URL text itself is never logged or
+ * written to the audit log — only the parsed action and what became of it.
+ */
+async function handleDeepLink(rawUrl: string): Promise<void> {
+  if (!bootstrapComplete) {
+    if (pendingDeepLinks.length < MAX_PENDING_DEEP_LINKS) {
+      pendingDeepLinks.push(rawUrl);
+    }
+    return;
+  }
+  const parsed = parseDeepLink(rawUrl);
+  if (!parsed.ok) {
+    console.warn("[deep-link] ignored", { reason: parsed.reason });
+    return;
+  }
+  const action = deepLinkActionName(parsed.command);
+  if (!localToolsEnabled) {
+    console.warn("[deep-link] refused: Local tools is off in Settings > General", { action });
+    recordAutomationAudit(action, "refused_local_tools_off");
+    return;
+  }
+  if (!deepLinkLimiter.admit()) {
+    console.warn("[deep-link] dropped: too many links in a short time", { action });
+    recordAutomationAudit(action, "rate_limited");
+    return;
+  }
+  let outcome: string;
+  try {
+    outcome = await performDeepLink(parsed.command);
+  } catch (error) {
+    console.error("[deep-link] failed", { action, error });
+    outcome = "failed";
+  }
+  console.log("[deep-link]", { action, outcome });
+  recordAutomationAudit(action, outcome);
+}
+
+function flushPendingDeepLinks(): void {
+  for (const url of pendingDeepLinks.splice(0)) {
+    void handleDeepLink(url);
+  }
+}
+
 async function bootstrap() {
+  // Mirror this process's own logging into the in-memory tail the support
+  // bundle reads. Nothing is written to disk and nothing leaves the Mac;
+  // see electron/diagnostic-log-buffer.ts.
+  captureMainProcessConsole();
   const gotLock = app.requestSingleInstanceLock();
   if (!gotLock) {
     app.quit();
     return;
   }
 
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
     showAndFocusMainWindow();
+    // Windows and Linux deliver a protocol launch as a second instance with
+    // the URL in argv; macOS delivers `open-url` below instead.
+    const url = deepLinkFromArgv(argv);
+    if (url) {
+      void handleDeepLink(url);
+    }
+  });
+
+  // Registered before `ready` so a URL that launched the app is caught and
+  // queued until the sidecar is up.
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    void handleDeepLink(url);
   });
 
   await app.whenReady();
 
+  if (app.isPackaged) {
+    // Pairs with `protocols:` in electron-builder.yml (CFBundleURLTypes).
+    // Packaged-only: in development this would register the bare Electron
+    // binary as the handler for every `plainsong://` link on the machine.
+    app.setAsDefaultProtocolClient("plainsong");
+  }
+
   installRendererPermissionHandlers();
 
-  if (!devServerUrlIsUsable) {
-    await protocol.handle(RENDERER_SCHEME, async (request) => {
-      try {
-        const rendererRoot = path.join(__dirname, "../dist");
-        const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
-        // Headers, not just the index.html meta tag: a meta CSP is parsed by
-        // the document that carries it and covers nothing else the handler
-        // serves, and `frame-ancestors` has no effect in a meta tag at all.
-        return withRendererSecurityHeaders(
-          await net.fetch(pathToFileURL(assetPath).toString()),
-        );
-      } catch (error) {
-        console.error("[renderer] refused packaged asset request", {
-          host: RENDERER_HOST,
-          url: request.url,
-          error,
-        });
-        return withRendererSecurityHeaders(
-          new Response("Not found", {
-            status: 404,
-            headers: { "content-type": "text/plain; charset=utf-8" },
-          }),
-        );
-      }
-    });
-  }
+  // Registered in every mode: the playback route has to exist when the
+  // renderer comes from the dev server too, or the in-app player would only
+  // work packaged. Bundle assets are still served only when packaged.
+  await protocol.handle(RENDERER_SCHEME, async (request) => {
+    const playbackToken = playbackTokenFromUrl(request.url);
+    if (playbackToken !== null) {
+      return servePlayback(request, playbackToken);
+    }
+    if (devServerUrlIsUsable) {
+      return withRendererSecurityHeaders(rendererNotFoundResponse());
+    }
+    try {
+      const rendererRoot = path.join(__dirname, "../dist");
+      const assetPath = resolveRendererAssetPath(rendererRoot, request.url);
+      // Headers, not just the index.html meta tag: a meta CSP is parsed by
+      // the document that carries it and covers nothing else the handler
+      // serves, and `frame-ancestors` has no effect in a meta tag at all.
+      return withRendererSecurityHeaders(
+        await net.fetch(pathToFileURL(assetPath).toString()),
+      );
+    } catch (error) {
+      console.error("[renderer] refused packaged asset request", {
+        host: RENDERER_HOST,
+        url: request.url,
+        error,
+      });
+      return withRendererSecurityHeaders(rendererNotFoundResponse());
+    }
+  });
 
   if (devServerUrlIsUsable) {
     const timeout = new Promise<never>((_, reject) => {
@@ -2283,6 +3310,9 @@ async function bootstrap() {
   // resolves to a failing stop_dictation, and the hotkey is wedged. Reset the
   // mirror and tell renderers so their UI resyncs too.
   ipcBridge.onTerminated(() => {
+    // The registry died with the process; its restart sweeps the decrypted
+    // temporaries. Tokens minted against it must not resolve any more.
+    releaseAllPlayback("sidecar terminated", false);
     // Any hold-to-talk session died with the process: drop its watchdog even
     // if the cached phase never left "idle" (start acked, recording event
     // never observed before the crash).
@@ -2315,6 +3345,16 @@ async function bootstrap() {
   });
 
   ipcBridge.onEvent((eventName: string, payload: unknown) => {
+    if (
+      eventName === "recording-playback-revoked" &&
+      payload &&
+      typeof payload === "object"
+    ) {
+      // Vault locked: the sidecar already deleted the plaintext, so the token
+      // must stop resolving here as well. The renderer gets the same event.
+      playbackTokens.release((payload as { token?: unknown }).token);
+    }
+
     if (eventName === "settings-changed" && payload && typeof payload === "object") {
       applyUiSettings(payload as AppSettings);
       // The sidecar emits this after both normal saves and backup restores.
@@ -2361,6 +3401,8 @@ async function bootstrap() {
       }
       dictationPhase = nextPhase;
       refreshTray();
+      // A helper table held back while this session was live can go in now.
+      applyDeferredNativeShortcutConfig(`phase ${nextPhase}`);
       const sessionId = (payload as { sessionId?: unknown }).sessionId;
       if (typeof sessionId === "number") {
         dictationSessionId = sessionId;
@@ -2388,6 +3430,32 @@ async function bootstrap() {
       void handleDictationVadSignal(payload).catch((error) => {
         surfaceDictationShortcutFailure("dictation voice activation", error);
       });
+    }
+
+    // Decide against the memory as it was BEFORE this event, then advance it:
+    // "meeting started" is the edge into `recording`, not the state.
+    const notification = notificationForSidecarEvent(eventName, payload, {
+      settings: notificationSettings,
+      mainWindowFocused: mainWindowIsFocused(),
+      dictationOverlayVisible: dictationOverlayIsVisible(),
+      ...notificationMemory,
+    });
+    notificationMemory = nextMeetingNotificationMemory(eventName, payload, notificationMemory);
+    if (notification) {
+      presentNotification(notification);
+    }
+    if (eventName === "meeting-call-detected") {
+      // Never starts anything: the click opens the consent dialog, and the
+      // reader decides there. `activeMeetingRecordingId` was already advanced
+      // above for this event's ordering, and a meeting in progress has
+      // nothing to be offered.
+      const offer = notificationForCallDetected(payload, {
+        activeMeetingRecordingId,
+        mainWindowFocused: mainWindowIsFocused(),
+      });
+      if (offer) {
+        presentNotification(offer);
+      }
     }
 
     broadcastRendererEvent(eventName, payload);
@@ -2441,6 +3509,7 @@ async function bootstrap() {
   prepareOverlayWindows();
   createTray();
   bootstrapComplete = true;
+  flushPendingDeepLinks();
 }
 
 void bootstrap();

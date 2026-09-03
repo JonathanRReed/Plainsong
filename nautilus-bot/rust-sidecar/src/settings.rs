@@ -49,8 +49,19 @@ pub struct Settings {
     pub shortcuts: KeyboardShortcuts,
     /// Update preferences
     pub updates: UpdateSettings,
+    /// Meeting behaviours that live around a capture rather than inside it:
+    /// noticing a call, ending a meeting nobody is in any more.
+    pub meetings: MeetingsSettings,
+    /// Which events may reach macOS Notification Center.
+    pub notifications: NotificationsSettings,
+    /// Local automation surfaces (command-line tool, MCP server, deep links).
+    pub automation: AutomationSettings,
     /// Theme
     pub theme: String,
+    /// Reusable chat prompts. New section: a settings.json written before it
+    /// existed simply has no `ai` key, and `#[serde(default)]` on this struct
+    /// fills it in without a migration.
+    pub ai: AiSettings,
 }
 
 impl Default for Settings {
@@ -63,9 +74,58 @@ impl Default for Settings {
             privacy: PrivacySettings::default(),
             shortcuts: KeyboardShortcuts::default(),
             updates: UpdateSettings::default(),
+            meetings: MeetingsSettings::default(),
+            notifications: NotificationsSettings::default(),
+            automation: AutomationSettings::default(),
             theme: "system".to_string(),
+            ai: AiSettings::default(),
         }
     }
+}
+
+/// Settings for the chat surfaces that talk to an AI lane.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiSettings {
+    /// The reader's prompt library, offered by the "/" picker in both the
+    /// per-meeting chat and the dashboard's "ask your meetings".
+    pub saved_prompts: Vec<SavedPrompt>,
+}
+
+/// One reusable question. Mirrors `SavedPrompt` in `src/types/settings.ts`.
+///
+/// An entry whose `id` is in `BUILTIN_SAVED_PROMPT_IDS` is an *override* of
+/// that starter prompt rather than a separate prompt -- that is how an edited
+/// or hidden built-in is persisted. `built_in` is recomputed from the id on
+/// every load and save (see `sanitize_saved_prompts`), so the renderer can
+/// neither claim built-in status for a user prompt nor strip it from a real
+/// one.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedPrompt {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    /// "meeting", "memory" or "both"; anything else normalizes to "both".
+    pub scope: String,
+    pub built_in: bool,
+    pub hidden: bool,
+}
+
+/// Local automation surfaces: the `plainsong` command-line tool, the read-only
+/// MCP server it serves, and `plainsong://` deep links.
+///
+/// One switch gates all three because they share one consequence: another
+/// process on this Mac can read meeting notes, transcripts and dictation
+/// history (the CLI/MCP) or trigger a dictation/meeting gesture (deep links).
+/// Off by default; nothing else in the app reads this section, so a fresh
+/// install behaves exactly as it did before the section existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AutomationSettings {
+    /// Allow the `plainsong` CLI / MCP server to open the local database
+    /// read-only, and the app to act on `plainsong://` deep links.
+    pub local_tools_enabled: bool,
 }
 
 /// Audio recording settings
@@ -146,13 +206,37 @@ pub struct TranscriptionSettings {
     pub dictation_keep_warm: String,
     /// Dictation: show live partial text in popup/inline surfaces.
     pub dictation_live_preview_enabled: bool,
+    /// Dictation: which engine draws that live preview.
+    ///
+    /// `auto` (the default) uses the streaming engine when it is compiled in,
+    /// downloaded, integrity-verified and covers the selected language, and
+    /// falls back to the re-decode preview otherwise. `redecode` pins the
+    /// original behaviour -- re-transcribing a growing copy of the audio with
+    /// the dictation engine every few hundred milliseconds. `streaming` asks
+    /// for the streaming engine and still falls back rather than showing
+    /// nothing. None of the three changes the inserted text, which is always
+    /// the batch decode of the dictation engine.
+    pub dictation_live_preview_engine: String,
     /// Dictation: Smart Format, LLM polishes text before insert
     pub dictation_ai_formatting: bool,
+    /// Dictation: translate whatever was spoken into English before the text
+    /// is formatted and inserted. This is the built-in modes' setting; a saved
+    /// custom mode carries its own `translate_to_english` flag instead. How
+    /// the translation actually runs depends on the selected model -- see
+    /// `resolve_dictation_translation_route` in `lib.rs`.
+    pub dictation_translate_to_english: bool,
     /// Dictation mode preset: voice, messages, email, notes, meeting_follow_up,
     /// custom. (`translate_english` is only valid as a custom mode's
     /// `base_mode_preset`, not as the top-level preset — see
     /// `normalize_dictation_mode_preset` in `lib.rs`.)
     pub dictation_mode_preset: String,
+    /// Dictation: inverse text normalization per mode preset ("voice",
+    /// "messages", "email", "notes", "meeting_follow_up"). Sparse: an absent
+    /// key means the preset default from
+    /// `default_dictation_numbers_as_digits`, so a settings file written
+    /// before this setting existed keeps behaving like a fresh install.
+    /// Unknown keys are dropped on load.
+    pub dictation_numbers_as_digits: HashMap<String, bool>,
     /// Selected saved custom dictation mode id, if any.
     pub dictation_selected_custom_mode_id: Option<String>,
     /// Saved reusable custom dictation modes.
@@ -198,6 +282,11 @@ pub struct TranscriptionSettings {
     pub dictation_retention_preset: String,
     /// Dictation retention custom duration in hours.
     pub dictation_retention_custom_hours: u32,
+    /// Keep each dictation's captured audio in the recordings store so history
+    /// entries can be run through the recognizer again ("Process again").
+    /// Off by default: it is a privacy trade the user makes knowingly, and the
+    /// audio is deleted with the entry (retention sweep or manual delete).
+    pub dictation_keep_audio: bool,
     /// Meeting audio storage mode: always or transcript_only.
     pub meeting_audio_storage_mode: String,
     /// Meeting retention policy.
@@ -277,6 +366,9 @@ pub struct DictationCustomMode {
     pub route_preference: Option<String>,
     pub language_override: Option<String>,
     pub live_preview_enabled: Option<bool>,
+    /// `None` inherits the base preset's `dictation_numbers_as_digits` value,
+    /// which is what a profile saved before this setting existed carries.
+    pub numbers_as_digits: Option<bool>,
     pub insertion_mode: String,
     pub context_source: String,
     pub save_to_inbox: bool,
@@ -288,6 +380,9 @@ pub struct DictationCustomMode {
     pub ai_model_id: Option<String>,
     pub activation_app_matcher: Option<String>,
     pub activation_domain_matcher: Option<String>,
+    /// Translate the spoken words into English for this mode. Mirrors the
+    /// built-in modes' `dictation_translate_to_english`.
+    pub translate_to_english: bool,
 }
 
 impl Default for TranscriptionSettings {
@@ -307,8 +402,16 @@ impl Default for TranscriptionSettings {
             use_shared_asr_selection: true,
             dictation_provider: "parakeet".to_string(),
             dictation_model_id: "parakeet-tdt-0.6b-v3".to_string(),
-            meeting_provider: "whisper".to_string(),
-            meeting_model_id: "base.en".to_string(),
+            // The stored meeting slot names the route the meeting lane
+            // actually resolves to. whisper.cpp is not a meeting-supported
+            // provider (`meeting_provider_is_supported` in lib.rs), so the
+            // old "whisper"/"base.en" default was a slot nothing ever read:
+            // the effective route already fell through to Parakeet TDT
+            // 0.6B v3. Storing that route removes the lie without changing
+            // behavior; `migrate_dead_whisper_meeting_slot` rewrites files
+            // that still carry the old pair.
+            meeting_provider: "parakeet".to_string(),
+            meeting_model_id: "parakeet-tdt-0.6b-v3".to_string(),
             meeting_route_policy: "prefer_local".to_string(),
             provider_model_ids: HashMap::new(),
             mlx_accelerated_providers: Vec::new(),
@@ -334,8 +437,11 @@ impl Default for TranscriptionSettings {
             dictation_route_override_enabled: true,
             dictation_keep_warm: "on".to_string(),
             dictation_live_preview_enabled: true,
+            dictation_live_preview_engine: "auto".to_string(),
             dictation_ai_formatting: false,
+            dictation_translate_to_english: false,
             dictation_mode_preset: "voice".to_string(),
+            dictation_numbers_as_digits: HashMap::new(),
             dictation_selected_custom_mode_id: None,
             dictation_custom_modes: Vec::new(),
             dictation_context_source: "none".to_string(),
@@ -355,6 +461,7 @@ impl Default for TranscriptionSettings {
             dictation_project_id: "inbox".to_string(),
             dictation_retention_preset: "never".to_string(),
             dictation_retention_custom_hours: 24,
+            dictation_keep_audio: false,
             meeting_audio_storage_mode: "always".to_string(),
             meeting_retention_preset: "never".to_string(),
             meeting_retention_custom_months: 1,
@@ -506,7 +613,7 @@ pub enum AiLane {
 }
 
 /// Privacy settings
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PrivacySettings {
     /// Allow remote provider processing (local-first default)
@@ -531,6 +638,54 @@ pub struct PrivacySettings {
     pub vault_salt: Option<String>,
 }
 
+/// The two lanes start on different providers, which is why this is written
+/// out instead of derived.
+///
+/// Dictation cleanup defaults to the bundled on-device model: it is the only
+/// route that works on a fresh install with nothing installed and no key
+/// pasted, which is the whole point of shipping it. Meetings stay on Ollama,
+/// because the bundled model is a dictation normalizer and cannot write a
+/// summary (see `Provider::supports_meeting_analysis`).
+///
+/// `#[serde(default)]` on the container means a settings file with no
+/// `privacy` section at all lands here. A file that *has* a `privacy` section
+/// but no `dictationAi` is the interesting case, and it does not simply land
+/// here: two things run after the deserializer and either of them may move
+/// that lane.
+///
+/// * A pre-lane file carrying `privacy.llmProvider` has it copied onto the
+///   missing lane by `migrate_legacy_ai_lane_settings`. That value is the
+///   user's own earlier choice, so it outranks a default shipped later.
+/// * `apply_zero_setup_dictation_default` moves an *auto-selected* bundled
+///   lane to `DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION` where the backend
+///   cannot meet the dictation budget (see `llm::bundled_local`).
+///
+/// So this default is where a file lands only when it names neither the lane
+/// nor the retired pair *and* the machine can run the bundled model fast
+/// enough. A file that *has* a `dictationAi` keeps whatever it says: an
+/// existing user's choice is not overwritten by shipping a new default, and
+/// naming this provider explicitly is exempt from the backend check too.
+/// `a_file_missing_only_the_dictation_lane_lands_on_the_shipped_default`
+/// pins all of that through the real load path.
+impl Default for PrivacySettings {
+    fn default() -> Self {
+        Self {
+            remote_processing_enabled: false,
+            dictation_ai: AiLaneSettings {
+                provider: DEFAULT_DICTATION_AI_PROVIDER.to_string(),
+                model_id: None,
+            },
+            meetings_ai: AiLaneSettings::default(),
+            export_root: None,
+            export_location_id: None,
+            export_location_label: None,
+            export_location_approved: false,
+            vault_initialized: false,
+            vault_salt: None,
+        }
+    }
+}
+
 impl PrivacySettings {
     /// The provider/model pair that runs `lane`.
     pub fn ai_lane(&self, lane: AiLane) -> &AiLaneSettings {
@@ -541,14 +696,112 @@ impl PrivacySettings {
     }
 }
 
+/// What physically fires a dictation binding.
+///
+/// Mirrors `DictationBindingTrigger` in `src/types/settings.ts`. A `key`
+/// accelerator uses the same `Cmd+Shift+Space` spelling as `toggle_dictation`;
+/// a lone modifier (`Fn`, `Cmd`, ...) is allowed and means "that modifier on
+/// its own", which only the native macOS helper can deliver. A `mouse` trigger
+/// names an extra mouse button (3, 4 or 5 -- middle, back, forward) plus any
+/// modifiers that must be held with it; those are helper-only too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DictationBindingTrigger {
+    Key {
+        accelerator: String,
+    },
+    Mouse {
+        button: u8,
+        #[serde(default)]
+        modifiers: Vec<String>,
+    },
+}
+
+/// What a dictation binding does when its trigger fires.
+///
+/// Mirrors `DictationBindingAction` in `src/types/settings.ts`. `Dictation`
+/// starts (or stops) a dictation session: `mode_id` is `None` for "whichever
+/// mode is selected", a built-in preset id, or a saved custom mode id, used for
+/// that session only; `behavior` is `toggle`, `hold`, or `inherit` (follow the
+/// activation setting). `CycleMode` moves the selected mode to the next one;
+/// `Cancel` discards a running session, the same as Escape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum DictationBindingAction {
+    #[serde(rename_all = "camelCase")]
+    Dictation {
+        #[serde(default)]
+        mode_id: Option<String>,
+        #[serde(default = "default_dictation_binding_behavior")]
+        behavior: String,
+    },
+    CycleMode,
+    Cancel,
+}
+
+fn default_dictation_binding_behavior() -> String {
+    "inherit".to_string()
+}
+
+/// One entry of the dictation binding table (roadmap item B4). The first
+/// binding whose action is `Dictation { mode_id: None, .. }` with a `key`
+/// trigger is the "primary" binding, and `toggle_dictation` is kept equal to
+/// its accelerator so an older build that only reads that key still has a
+/// hotkey.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationBinding {
+    pub id: String,
+    pub trigger: DictationBindingTrigger,
+    pub action: DictationBindingAction,
+}
+
+/// The id the migration gives the binding built from the legacy
+/// `toggleDictation` key.
+pub const PRIMARY_DICTATION_BINDING_ID: &str = "primary";
+
+pub const DICTATION_BINDING_BEHAVIORS: &[&str] = &["inherit", "toggle", "hold"];
+pub const DICTATION_MOUSE_BUTTONS: &[u8] = &[3, 4, 5];
+const MAX_DICTATION_BINDINGS: usize = 16;
+
+#[cfg(test)]
+#[path = "settings_dictation_binding_tests.rs"]
+mod dictation_binding_tests;
+
+/// A malformed entry must not take the whole settings file down with it: an
+/// unreadable binding is dropped on load (and the file rewritten without it
+/// by the normal save path), the rest of the table survives.
+fn deserialize_tolerant_dictation_bindings<'de, D>(
+    deserializer: D,
+) -> Result<Vec<DictationBinding>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(
+            |value| match serde_json::from_value::<DictationBinding>(value) {
+                Ok(binding) => Some(binding),
+                Err(error) => {
+                    tracing::warn!("Dropping an unreadable dictation binding: {}", error);
+                    None
+                }
+            },
+        )
+        .collect())
+}
+
 /// Keyboard shortcuts
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct KeyboardShortcuts {
-    /// Toggle dictation mode
+    /// Toggle dictation mode. Since the binding table below arrived this is a
+    /// derived value -- the primary binding's accelerator, or empty when there
+    /// is no primary key binding -- written so a downgrade keeps a hotkey.
+    /// The retired `toggleDictationAlternates` list is dropped on load (see
+    /// `REMOVED_SETTINGS_KEYS`).
     pub toggle_dictation: String,
-    /// Additional dictation bindings for platform parity (macOS command key, etc.)
-    pub toggle_dictation_alternates: Vec<String>,
     /// Open main window
     pub open_window: String,
     /// Re-insert the last dictation result at the cursor. The recovery path
@@ -558,16 +811,256 @@ pub struct KeyboardShortcuts {
     /// Copy the last dictation result to the clipboard again. Empty means
     /// unbound.
     pub recopy_last_dictation: String,
+    /// The dictation binding table. Empty on a file written before it existed;
+    /// `normalize_keyboard_shortcuts` builds the first entry from
+    /// `toggle_dictation` in that case.
+    ///
+    /// The field-level `default` matters: the struct-level one would fill an
+    /// absent `dictationBindings` with `KeyboardShortcuts::default()`'s
+    /// primary binding on the *product default* accelerator, and the
+    /// reconciliation below would then overwrite a pre-B4 file's own
+    /// `toggleDictation` with it. An empty vec is how "this file predates the
+    /// table" is spelled.
+    #[serde(default, deserialize_with = "deserialize_tolerant_dictation_bindings")]
+    pub dictation_bindings: Vec<DictationBinding>,
 }
 
 impl Default for KeyboardShortcuts {
     fn default() -> Self {
         Self {
             toggle_dictation: default_dictation_shortcut().to_string(),
-            toggle_dictation_alternates: Vec::new(),
             open_window: "Ctrl+Shift+N".to_string(),
             repaste_last_dictation: default_repaste_shortcut().to_string(),
             recopy_last_dictation: default_recopy_shortcut().to_string(),
+            dictation_bindings: vec![primary_dictation_binding(default_dictation_shortcut())],
+        }
+    }
+}
+
+fn primary_dictation_binding(accelerator: &str) -> DictationBinding {
+    DictationBinding {
+        id: PRIMARY_DICTATION_BINDING_ID.to_string(),
+        trigger: DictationBindingTrigger::Key {
+            accelerator: accelerator.to_string(),
+        },
+        action: DictationBindingAction::Dictation {
+            mode_id: None,
+            behavior: "inherit".to_string(),
+        },
+    }
+}
+
+fn is_primary_dictation_binding(binding: &DictationBinding) -> bool {
+    matches!(binding.trigger, DictationBindingTrigger::Key { .. })
+        && matches!(
+            binding.action,
+            DictationBindingAction::Dictation { mode_id: None, .. }
+        )
+}
+
+const SHORTCUT_MODIFIER_TOKENS: &[&str] = &["cmd", "ctrl", "alt", "shift", "fn"];
+
+/// Chords macOS itself owns, as `(sorted modifiers, key)` in the canonical
+/// spelling `dictation_binding_trigger_key` produces. Binding one either does
+/// nothing (the system swallows it first) or takes a gesture the user needs
+/// more than a dictation hotkey -- quit, close, app switch, Spotlight, hide,
+/// minimize. Mirrored by `RESERVED_SHORTCUT_ACCELERATORS` in
+/// `electron/dictation-bindings.ts`.
+const RESERVED_SHORTCUT_CHORDS: &[(&str, &str)] = &[
+    ("cmd", "q"),
+    ("cmd", "w"),
+    ("cmd", "tab"),
+    ("cmd", "space"),
+    ("cmd", "h"),
+    ("cmd", "m"),
+];
+
+/// `f1` through `f24` and nothing else. The old check accepted `f` followed
+/// by any digits, so `f0`, `f99` and `f12345` all passed as "a function key"
+/// and skipped the needs-a-modifier rule. Mirrors the TS side's
+/// `/^f([1-9]|1[0-9]|2[0-4])$/`, leading zeros included.
+fn is_function_key_token(key: &str) -> bool {
+    let Some(digits) = key.strip_prefix('f') else {
+        return false;
+    };
+    if digits.is_empty() || digits.starts_with('0') {
+        return false;
+    }
+    digits
+        .parse::<u32>()
+        .is_ok_and(|number| (1..=24).contains(&number))
+}
+
+fn normalize_shortcut_token(token: &str) -> String {
+    match token.trim().to_ascii_lowercase().as_str() {
+        "⌘" | "cmd" | "command" | "meta" | "super" => "cmd".to_string(),
+        "⌃" | "ctrl" | "control" => "ctrl".to_string(),
+        "⌥" | "alt" | "option" | "opt" => "alt".to_string(),
+        "⇧" | "shift" => "shift".to_string(),
+        "fn" | "function" => "fn".to_string(),
+        "spacebar" | "space" => "space".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Canonical form of a trigger for duplicate detection: modifiers sorted,
+/// tokens lower-cased, so `Shift+Cmd+Space` and `cmd shift space` collide.
+pub(crate) fn dictation_binding_trigger_key(trigger: &DictationBindingTrigger) -> String {
+    match trigger {
+        DictationBindingTrigger::Key { accelerator } => {
+            // The symbols are separated out, NOT deleted. Replacing them with
+            // a space dropped the modifier entirely, so "⌘+Q" normalized to
+            // the bare key "q" -- which made it look like ordinary typing to
+            // the validator and made "⌘⇧Space" and "Space" the same trigger
+            // for duplicate detection. Mirrors `splitShortcutTokens` in
+            // `electron/shortcut-registration.ts`, which pads them the same
+            // way; `normalize_shortcut_token` maps each symbol to its word.
+            let tokens: Vec<String> = accelerator
+                .replace('⌘', " ⌘ ")
+                .replace('⌃', " ⌃ ")
+                .replace('⌥', " ⌥ ")
+                .replace('⇧', " ⇧ ")
+                .split(|c: char| c == '+' || c.is_whitespace())
+                .filter(|part| !part.trim().is_empty())
+                .map(normalize_shortcut_token)
+                .collect();
+            let mut modifiers: Vec<&str> = tokens
+                .iter()
+                .map(String::as_str)
+                .filter(|token| SHORTCUT_MODIFIER_TOKENS.contains(token))
+                .collect();
+            modifiers.sort_unstable();
+            modifiers.dedup();
+            let keys: Vec<&str> = tokens
+                .iter()
+                .map(String::as_str)
+                .filter(|token| !SHORTCUT_MODIFIER_TOKENS.contains(token))
+                .collect();
+            format!("key:{}:{}", modifiers.join("+"), keys.join("+"))
+        }
+        DictationBindingTrigger::Mouse { button, modifiers } => {
+            let mut normalized: Vec<String> = modifiers
+                .iter()
+                .map(|modifier| normalize_shortcut_token(modifier))
+                .filter(|modifier| SHORTCUT_MODIFIER_TOKENS.contains(&modifier.as_str()))
+                .collect();
+            normalized.sort_unstable();
+            normalized.dedup();
+            format!("mouse:{}:{}", normalized.join("+"), button)
+        }
+    }
+}
+
+/// Validation the save path applies to the binding table. Mirrors
+/// `validateDictationBindings` in `electron/dictation-bindings.ts`, which
+/// additionally knows whether the native helper is present (a mouse or
+/// lone-modifier binding needs it); this side owns the checks that do not
+/// depend on the machine.
+///
+/// Only a malformed *trigger* is rejected here, because there is no sane way
+/// to guess what the user meant. Collisions are not rejected:
+/// `drop_duplicate_dictation_bindings` runs first on both the load and save
+/// paths and has already removed them, so the duplicate-id and
+/// duplicate-trigger arms below are unreachable invariant assertions for
+/// direct callers rather than something a settings save can trip over.
+pub(crate) fn validate_dictation_bindings(bindings: &[DictationBinding]) -> Result<(), String> {
+    if bindings.len() > MAX_DICTATION_BINDINGS {
+        return Err(format!(
+            "At most {} dictation bindings are supported.",
+            MAX_DICTATION_BINDINGS
+        ));
+    }
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_triggers = std::collections::HashSet::new();
+    for binding in bindings {
+        if binding.id.trim().is_empty() {
+            return Err("Every dictation binding needs an id.".to_string());
+        }
+        if !seen_ids.insert(binding.id.trim().to_string()) {
+            return Err(format!(
+                "Dictation binding id '{}' is used twice.",
+                binding.id
+            ));
+        }
+        match &binding.trigger {
+            DictationBindingTrigger::Key { accelerator } => {
+                let key = dictation_binding_trigger_key(&binding.trigger);
+                let body = key.trim_start_matches("key:");
+                let (modifiers, keys) = body.split_once(':').unwrap_or(("", ""));
+                if accelerator.trim().is_empty() || (modifiers.is_empty() && keys.is_empty()) {
+                    return Err("A key binding needs at least one key.".to_string());
+                }
+                if keys.contains('+') {
+                    return Err(format!(
+                        "'{}' names more than one non-modifier key.",
+                        accelerator
+                    ));
+                }
+                if keys.is_empty() {
+                    // A modifier on its own. Only Fn is offered and only Fn is
+                    // safe: the helper matches `.maskCommand` (either Cmd key)
+                    // and arms after 150 ms with nothing else pressed, so a
+                    // lone Cmd would start dictation from an ordinary pause
+                    // mid-chord. Fn is the one modifier nothing else on macOS
+                    // treats as a hold.
+                    if modifiers != "fn" {
+                        return Err(format!(
+                            "'{}' cannot be a trigger on its own. Fn is the only modifier that can.",
+                            accelerator
+                        ));
+                    }
+                } else if modifiers.is_empty() && !is_function_key_token(keys) {
+                    return Err(format!(
+                        "'{}' would fire on ordinary typing. Add a modifier such as Cmd or Ctrl.",
+                        accelerator
+                    ));
+                }
+                if RESERVED_SHORTCUT_CHORDS
+                    .iter()
+                    .any(|(reserved_modifiers, reserved_key)| {
+                        *reserved_modifiers == modifiers && *reserved_key == keys
+                    })
+                {
+                    return Err(format!(
+                        "'{}' is reserved by macOS. Pick a different combination.",
+                        accelerator
+                    ));
+                }
+            }
+            DictationBindingTrigger::Mouse { button, .. } => {
+                if !DICTATION_MOUSE_BUTTONS.contains(button) {
+                    return Err(format!(
+                        "Mouse button {} cannot be bound; use button 3, 4 or 5.",
+                        button
+                    ));
+                }
+            }
+        }
+        if !seen_triggers.insert(dictation_binding_trigger_key(&binding.trigger)) {
+            return Err(format!(
+                "Two dictation bindings use the same trigger ({}).",
+                describe_dictation_binding_trigger(&binding.trigger)
+            ));
+        }
+        if let DictationBindingAction::Dictation { behavior, .. } = &binding.action {
+            if !DICTATION_BINDING_BEHAVIORS.contains(&behavior.as_str()) {
+                return Err(format!(
+                    "Dictation binding behavior '{}' is not one of inherit, toggle, hold.",
+                    behavior
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn describe_dictation_binding_trigger(trigger: &DictationBindingTrigger) -> String {
+    match trigger {
+        DictationBindingTrigger::Key { accelerator } => accelerator.clone(),
+        DictationBindingTrigger::Mouse { button, modifiers } => {
+            let mut parts = modifiers.clone();
+            parts.push(format!("Mouse {}", button));
+            parts.join("+")
         }
     }
 }
@@ -610,29 +1103,150 @@ fn default_dictation_shortcut() -> &'static str {
     }
 }
 
-fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
-    if shortcuts.toggle_dictation.trim().is_empty() {
-        shortcuts.toggle_dictation = default_dictation_shortcut().to_string();
-    }
+/// Load-time reconciliation between the legacy `toggle_dictation` key and the
+/// binding table.
+///
+/// - A file with no bindings (written before B4) gets one built from
+///   `toggle_dictation`; an empty `toggle_dictation` on such a file falls back
+///   to the product default exactly as it did before the table existed.
+/// - A file with bindings treats them as the source of truth and rewrites
+///   `toggle_dictation` from the primary binding, so the legacy key can never
+///   disagree with what the app actually registers.
+pub(crate) fn normalize_keyboard_shortcuts(shortcuts: &mut KeyboardShortcuts) {
+    reconcile_keyboard_shortcuts(shortcuts, true);
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        let has_cmd_alternate = shortcuts
-            .toggle_dictation_alternates
+/// The save-path counterpart of `normalize_keyboard_shortcuts`.
+///
+/// A writer that predates the binding table (the first-run wizard, a hand
+/// edit, an older build's settings screen) changes `toggle_dictation` and
+/// nothing else. When the incoming legacy key differs from what is stored
+/// while the binding table is unchanged, that key is the user's edit and is
+/// applied to the primary binding; otherwise the table is authoritative, as on
+/// load. An emptied table is honoured (no default springs back), because
+/// removing every binding is how the hotkey is switched off until the next
+/// launch, exactly as clearing the legacy key used to work.
+pub(crate) fn reconcile_saved_keyboard_shortcuts(
+    shortcuts: &mut KeyboardShortcuts,
+    previous: &KeyboardShortcuts,
+) {
+    let legacy_key_edited = shortcuts.toggle_dictation.trim() != previous.toggle_dictation.trim();
+    let bindings_unchanged = shortcuts.dictation_bindings == previous.dictation_bindings;
+    if legacy_key_edited && bindings_unchanged {
+        let legacy = shortcuts.toggle_dictation.trim().to_string();
+        let primary_index = shortcuts
+            .dictation_bindings
             .iter()
-            .any(|value| value.eq_ignore_ascii_case("Cmd+Shift+Space"));
-        if shortcuts
-            .toggle_dictation
-            .eq_ignore_ascii_case("Ctrl+Shift+Space")
-            && has_cmd_alternate
-        {
-            shortcuts.toggle_dictation = "Cmd+Shift+Space".to_string();
+            .position(is_primary_dictation_binding);
+        match (primary_index, legacy.is_empty()) {
+            (Some(index), true) => {
+                shortcuts.dictation_bindings.remove(index);
+            }
+            (Some(index), false) => {
+                shortcuts.dictation_bindings[index].trigger = DictationBindingTrigger::Key {
+                    accelerator: legacy,
+                };
+            }
+            (None, true) => {}
+            (None, false) => {
+                shortcuts
+                    .dictation_bindings
+                    .insert(0, primary_dictation_binding(&legacy));
+            }
         }
     }
+    reconcile_keyboard_shortcuts(shortcuts, false);
+}
 
-    // New policy: one shortcut per action. Keep legacy field for compatibility,
-    // but clear persisted alternates during load/migration.
-    shortcuts.toggle_dictation_alternates.clear();
+/// Keep the first binding for each id and each trigger; drop the rest with a
+/// warning.
+///
+/// A duplicate trigger used to be a hard `Err` out of
+/// `validate_dictation_bindings`, which `save_settings_for_sidecar`
+/// propagated -- so one colliding row failed the *entire* batched settings
+/// save, taking every unrelated edit in the same payload with it, while the
+/// renderer's own validator (`validateDictationBindings` in
+/// `electron/dictation-bindings.ts`) only warned in the row. Only one of two
+/// identical triggers can ever fire, so dropping the later one loses nothing
+/// the user had; failing the save loses everything else they changed.
+pub(crate) fn drop_duplicate_dictation_bindings(bindings: &mut Vec<DictationBinding>) {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_triggers = std::collections::HashSet::new();
+    bindings.retain(|binding| {
+        if !seen_ids.insert(binding.id.clone()) {
+            tracing::warn!(
+                "Dropping dictation binding with duplicate id '{}'",
+                binding.id
+            );
+            return false;
+        }
+        if !seen_triggers.insert(dictation_binding_trigger_key(&binding.trigger)) {
+            tracing::warn!(
+                "Dropping dictation binding '{}': {} is already bound",
+                binding.id,
+                describe_dictation_binding_trigger(&binding.trigger)
+            );
+            return false;
+        }
+        true
+    });
+}
+
+fn reconcile_keyboard_shortcuts(
+    shortcuts: &mut KeyboardShortcuts,
+    restore_default_when_empty: bool,
+) {
+    for binding in &mut shortcuts.dictation_bindings {
+        binding.id = binding.id.trim().to_string();
+        if let DictationBindingTrigger::Key { accelerator } = &mut binding.trigger {
+            *accelerator = accelerator.trim().to_string();
+        }
+        if let DictationBindingAction::Dictation { mode_id, behavior } = &mut binding.action {
+            *mode_id = mode_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let normalized = behavior.trim().to_ascii_lowercase();
+            *behavior = if DICTATION_BINDING_BEHAVIORS.contains(&normalized.as_str()) {
+                normalized
+            } else {
+                "inherit".to_string()
+            };
+        }
+    }
+    shortcuts.dictation_bindings.retain(|binding| {
+        !binding.id.is_empty()
+            && match &binding.trigger {
+                DictationBindingTrigger::Key { accelerator } => !accelerator.is_empty(),
+                DictationBindingTrigger::Mouse { button, .. } => {
+                    DICTATION_MOUSE_BUTTONS.contains(button)
+                }
+            }
+    });
+    drop_duplicate_dictation_bindings(&mut shortcuts.dictation_bindings);
+
+    if shortcuts.dictation_bindings.is_empty() {
+        if restore_default_when_empty && shortcuts.toggle_dictation.trim().is_empty() {
+            shortcuts.toggle_dictation = default_dictation_shortcut().to_string();
+        }
+        let legacy = shortcuts.toggle_dictation.trim().to_string();
+        if !legacy.is_empty() {
+            shortcuts.dictation_bindings = vec![primary_dictation_binding(&legacy)];
+        }
+        shortcuts.toggle_dictation = legacy;
+        return;
+    }
+
+    shortcuts.toggle_dictation = shortcuts
+        .dictation_bindings
+        .iter()
+        .find(|binding| is_primary_dictation_binding(binding))
+        .and_then(|binding| match &binding.trigger {
+            DictationBindingTrigger::Key { accelerator } => Some(accelerator.clone()),
+            DictationBindingTrigger::Mouse { .. } => None,
+        })
+        .unwrap_or_default();
 }
 
 /// Collapse a stored provider name onto one that still exists.
@@ -658,7 +1272,15 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "openai_cloud" => "openai_cloud".to_string(),
         "groq" => "groq".to_string(),
         "cohere_transcribe" => "cohere_transcribe".to_string(),
+        "cohere_local" => "cohere_local".to_string(),
         "qwen3_asr" => "qwen3_asr".to_string(),
+        "deepgram" => "deepgram".to_string(),
+        "gemini_transcribe" => "gemini_transcribe".to_string(),
+        // Only when the spike is compiled in. A default build has no engine
+        // that answers to this name, so it must land on `whisper` through the
+        // fallback below rather than become a ghost route in the settings file.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => "transcribe_cpp".to_string(),
         _ => "whisper".to_string(),
     }
 }
@@ -706,10 +1328,38 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             "" => "cohere-transcribe-03-2026".to_string(),
             value => value.to_string(),
         },
+        "cohere_local" => match model_id.trim() {
+            // The export publishes fp32/fp16/int8/int4 variants; only the
+            // int4 one is pinned, so an empty or legacy id resolves to it.
+            "" | "cohere-transcribe-03-2026" => {
+                crate::asr::cohere_local::COHERE_LOCAL_MODEL_ID.to_string()
+            }
+            value => value.to_string(),
+        },
         "qwen3_asr" => match model_id.trim() {
             "" | "qwen3-asr-0.6b" => "qwen3-asr-0.6b".to_string(),
             value => value.to_string(),
         },
+        "deepgram" => match model_id.trim() {
+            "" => "nova-3".to_string(),
+            value => value.to_string(),
+        },
+        "gemini_transcribe" => match model_id.trim() {
+            // gemini-3.5-transcribe-live is the websocket model; the batch
+            // interactions endpoint cannot serve it (see
+            // gemini_transcribe.rs's sanitize_gemini_asr_model_id).
+            "" | "gemini-3.5-transcribe-live" => "gemini-3.5-transcribe".to_string(),
+            value => value.to_string(),
+        },
+        // `route_spec_for`, not `spec_for`: the latter also resolves the
+        // Nemotron streaming GGUF that the benchmark loads to prove the runtime
+        // path and that `model_options()` deliberately never offers. Normalizing
+        // through it would let a saved settings file pin the route to a model
+        // the picker does not list and the app cannot download.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => crate::asr::transcribe_cpp::route_spec_for(model_id)
+            .model_id
+            .to_string(),
         _ => "base.en".to_string(),
     }
 }
@@ -725,6 +1375,20 @@ fn normalize_dictation_keep_warm(value: &str) -> String {
     match value.trim() {
         "off" => "off".to_string(),
         _ => "on".to_string(),
+    }
+}
+
+/// Normalize the live-preview engine choice to the three the app implements.
+///
+/// Anything else -- a value from a newer build, a typo hand-edited into the
+/// settings file -- lands on `auto`, which picks the best engine that is
+/// actually present. It can never land on a value that would leave the preview
+/// dark.
+fn normalize_dictation_live_preview_engine(value: &str) -> String {
+    match value.trim() {
+        "redecode" => "redecode".to_string(),
+        "streaming" => "streaming".to_string(),
+        _ => "auto".to_string(),
     }
 }
 
@@ -765,6 +1429,22 @@ pub const PARAKEET_V3_LANGUAGES: &[&str] = &[
 
 const ENGLISH_ONLY_LANGUAGES: &[&str] = &["en"];
 
+/// The 30 languages the Qwen3-ASR model card lists. Mirrors
+/// `asr::qwen3_asr::QWEN3_ASR_LANGUAGES` (a test keeps the two in step) and
+/// `QWEN3_ASR_LANGUAGE_CODES` in src/lib/asr-capabilities.ts.
+pub const QWEN3_ASR_LANGUAGES: &[&str] = &[
+    "ar", "cs", "da", "de", "el", "en", "es", "fa", "fi", "fil", "fr", "hi", "hu", "id", "it",
+    "ja", "ko", "mk", "ms", "nl", "pl", "pt", "ro", "ru", "sv", "th", "tr", "vi", "yue", "zh",
+];
+
+/// The 14 languages the Cohere Transcribe processor accepts. Mirrors
+/// `asr::cohere_local::COHERE_LOCAL_LANGUAGES` (a test keeps the two in step).
+/// Unlike every other local route this one cannot detect a language, so the
+/// list is also the set of choices the user must pick from.
+pub const COHERE_LOCAL_LANGUAGES: &[&str] = &[
+    "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
+];
+
 /// Which languages the *selected* dictation model can actually transcribe.
 ///
 /// `None` means the model imposes no set Plainsong can enumerate -- a cloud
@@ -801,7 +1481,8 @@ pub fn dictation_supported_languages(
             }
         }
         "moonshine" => Some(ENGLISH_ONLY_LANGUAGES),
-        "qwen3_asr" => Some(WHISPER_MULTILINGUAL_LANGUAGES),
+        "qwen3_asr" => Some(QWEN3_ASR_LANGUAGES),
+        "cohere_local" => Some(COHERE_LOCAL_LANGUAGES),
         // Cloud and platform routes follow their own service/OS language list,
         // which Plainsong cannot enumerate locally.
         _ => None,
@@ -929,6 +1610,69 @@ pub(crate) fn normalize_loaded_audio_settings(audio: &mut AudioSettings) {
     }
 }
 
+/// Rewrite the retired "whisper"/"base.en" meeting slot to the route the
+/// meeting lane resolves it to anyway.
+///
+/// whisper.cpp has never been a meeting-supported provider, so a stored
+/// whisper meeting slot was dead: `preferred_meeting_provider` in lib.rs
+/// skipped it and fell through to Parakeet TDT 0.6B v3. Storing that route
+/// instead changes nothing at runtime and stops the settings file from
+/// claiming a route that never ran. Only the old default pair is rewritten;
+/// any other explicit whisper model in the slot is left for the resolver.
+fn migrate_dead_whisper_meeting_slot(transcription: &mut TranscriptionSettings) {
+    if transcription.meeting_provider == "whisper" && transcription.meeting_model_id == "base.en" {
+        transcription.meeting_provider = "parakeet".to_string();
+        transcription.meeting_model_id = "parakeet-tdt-0.6b-v3".to_string();
+    }
+}
+
+/// Whether a raw settings.json still stores the retired meeting slot pair,
+/// so the load path rewrites the file the way it does for removed keys.
+fn raw_settings_carry_dead_whisper_meeting_slot(raw: &serde_json::Value) -> bool {
+    let Some(transcription) = raw.get("transcription") else {
+        return false;
+    };
+    transcription
+        .get("meetingProvider")
+        .and_then(serde_json::Value::as_str)
+        == Some("whisper")
+        && transcription
+            .get("meetingModelId")
+            .and_then(serde_json::Value::as_str)
+            == Some("base.en")
+}
+
+/// Mode presets that may carry a `dictation_numbers_as_digits` override.
+/// Mirrors `DICTATION_NUMBER_MODE_IDS` in `src/lib/dictation-numbers.ts`.
+/// "custom" is absent on purpose: a custom profile stores its own
+/// `numbers_as_digits` and inherits its base preset's value when unset.
+pub(crate) const DICTATION_NUMBERS_AS_DIGITS_MODES: &[&str] =
+    &["voice", "messages", "email", "notes", "meeting_follow_up"];
+
+/// Whether a mode preset writes spoken numbers as digits when the user has
+/// not said otherwise.
+///
+/// On for the drafting presets, where "$12.50" and "3:30 pm" are what the
+/// text is going to have to say anyway. Off for the plain Voice preset,
+/// whose promise is that it keeps your words as spoken -- the Settings copy
+/// in `src/lib/dictation-numbers.ts` has to say the same thing.
+pub fn default_dictation_numbers_as_digits(mode_preset: &str) -> bool {
+    match mode_preset.trim() {
+        "messages" | "email" | "notes" | "meeting_follow_up" => true,
+        // "voice", "custom" and anything unrecognized take the conservative
+        // reading.
+        _ => false,
+    }
+}
+
+/// Drops overrides keyed by a mode preset that does not exist -- otherwise
+/// one would sit in the settings file forever. Applied on both load and save
+/// (`update_settings` in `lib.rs`), like every other sanitizer here: a save is
+/// just as capable of carrying a stale key as a hand-edited settings.json is.
+pub(crate) fn sanitize_dictation_numbers_as_digits(map: &mut HashMap<String, bool>) {
+    map.retain(|mode, _| DICTATION_NUMBERS_AS_DIGITS_MODES.contains(&mode.as_str()));
+}
+
 fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSettings) {
     transcription.default_provider =
         normalize_transcription_provider_value(&transcription.default_provider);
@@ -949,6 +1693,7 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
         transcription.meeting_provider.as_str(),
         &transcription.meeting_model_id,
     );
+    migrate_dead_whisper_meeting_slot(transcription);
 
     let mut normalized_provider_models = HashMap::new();
     for (provider, model_id) in std::mem::take(&mut transcription.provider_model_ids) {
@@ -961,6 +1706,8 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
 
     transcription.dictation_keep_warm =
         normalize_dictation_keep_warm(&transcription.dictation_keep_warm);
+    transcription.dictation_live_preview_engine =
+        normalize_dictation_live_preview_engine(&transcription.dictation_live_preview_engine);
     transcription.dictation_active_languages = normalize_dictation_active_languages(
         &transcription.dictation_provider,
         &transcription.dictation_model_id,
@@ -1017,6 +1764,8 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
             }
         });
     }
+
+    sanitize_dictation_numbers_as_digits(&mut transcription.dictation_numbers_as_digits);
 
     transcription.dictation_insertion_mode =
         normalize_dictation_insertion_mode(&transcription.dictation_insertion_mode);
@@ -1131,6 +1880,93 @@ pub(crate) fn sanitize_meeting_custom_templates(
     sanitized
 }
 
+/// Ids of the starter prompts declared in `src/lib/saved-prompts.ts`.
+///
+/// A stored entry carrying one of these ids is an override of that starter,
+/// which is what makes "editable and hideable but not deletable" a single
+/// storage shape rather than two. Kept in sync by hand with the renderer, the
+/// same arrangement `BUILTIN_MEETING_TEMPLATE_IDS` has.
+pub(crate) const BUILTIN_SAVED_PROMPT_IDS: &[&str] = &[
+    "builtin_decisions",
+    "builtin_open_questions",
+    "builtin_my_commitments",
+    "builtin_risks_blockers",
+    "builtin_follow_up_message",
+    "builtin_catch_me_up",
+];
+
+/// Beyond this a prompt library is a sync loop or a corrupted file, not a
+/// reader with 40 genuine questions they reuse.
+const MAX_SAVED_PROMPTS: usize = 40;
+/// A prompt name reads as a short label in a picker row.
+const MAX_SAVED_PROMPT_NAME_LEN: usize = 80;
+/// The prompt text is handed to the grounded chat path as the instruction, so
+/// it gets a ceiling of its own rather than the 4000 a summary playbook gets:
+/// a question is not a playbook, and a shorter cap keeps a pasted transcript
+/// from becoming a "prompt".
+const MAX_SAVED_PROMPT_TEXT_LEN: usize = 2000;
+
+fn normalize_saved_prompt_scope(scope: &str) -> String {
+    match scope.trim() {
+        "meeting" => "meeting".to_string(),
+        "memory" => "memory".to_string(),
+        // Includes the empty string: a prompt with no stated scope is
+        // offered everywhere rather than nowhere, which is the failure a
+        // reader can see and fix.
+        _ => "both".to_string(),
+    }
+}
+
+/// Sanitize a saved (or about-to-be-saved) prompt library.
+///
+/// Same discipline as `sanitize_meeting_custom_templates`: trim and cap every
+/// free-text field, drop anything unresolvable, and run on both load and save
+/// so a dropped entry stays dropped rather than round-tripping back in from
+/// whichever path didn't just sanitize it.
+///
+/// `built_in` is not read from the input at all -- it is recomputed from the
+/// id. That is the whole protection for the starter prompts: the renderer
+/// decides what a built-in row can do (hide, not delete) from this flag, so
+/// letting the wire set it would let a crafted settings.json turn a user
+/// prompt into an undeletable one.
+pub(crate) fn sanitize_saved_prompts(prompts: Vec<SavedPrompt>) -> Vec<SavedPrompt> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for mut prompt in prompts {
+        prompt.id = prompt.id.trim().to_string();
+        prompt.name = prompt.name.trim().to_string();
+        prompt.prompt = prompt.prompt.trim().to_string();
+
+        // No identity, no label, or no question: all three make the row
+        // unusable in the picker, so it is dropped rather than repaired. For
+        // an override of a starter prompt, dropping it restores the starter's
+        // shipped text, which is the better of the two failures.
+        if prompt.id.is_empty() || prompt.name.is_empty() || prompt.prompt.is_empty() {
+            continue;
+        }
+        if !seen_ids.insert(prompt.id.clone()) {
+            continue;
+        }
+
+        prompt
+            .name
+            .truncate_to_char_count(MAX_SAVED_PROMPT_NAME_LEN);
+        prompt
+            .prompt
+            .truncate_to_char_count(MAX_SAVED_PROMPT_TEXT_LEN);
+        prompt.scope = normalize_saved_prompt_scope(&prompt.scope);
+        prompt.built_in = BUILTIN_SAVED_PROMPT_IDS.contains(&prompt.id.as_str());
+
+        sanitized.push(prompt);
+        if sanitized.len() >= MAX_SAVED_PROMPTS {
+            break;
+        }
+    }
+
+    sanitized
+}
+
 /// Caps by *character* count, not byte length. The renderer's editor dialog
 /// enforces the same ceilings with a plain HTML `maxLength`, which counts
 /// UTF-16 code units -- for any non-ASCII text (accented names, CJK, emoji
@@ -1151,11 +1987,71 @@ impl TruncateToCharCount for String {
     }
 }
 
-fn normalize_ai_lane_settings(lane: &mut AiLaneSettings) {
+/// The dictation lane's default on a fresh install.
+///
+/// Mirrors `llm::bundled_local::PROVIDER_SETTINGS_VALUE`. Spelled out here
+/// rather than imported so `settings.rs` stays loadable in a build without
+/// the `local-llm` feature -- the value is still the right *setting*, and the
+/// provider itself explains that the build cannot serve it.
+pub const DEFAULT_DICTATION_AI_PROVIDER: &str = "bundled_local";
+
+/// Where the dictation lane starts when the built-in model cannot meet the
+/// pre-insert budget on this machine.
+///
+/// The built-in route is only the right *default* where it is fast enough. On
+/// a CPU-only backend a 200-word dictation takes 11-13 s against a 6 s budget
+/// (`artifacts/qa/bundled-cleanup-receipt-2026-09-02.md`), so auto-selecting it
+/// there would hand every new user a route that warns and drops its work on
+/// every long capture. Ollama is not zero-setup, but the Models screen says
+/// plainly that it needs installing -- a default that announces what it needs
+/// is better than one that silently underdelivers.
+pub const DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION: &str = "ollama";
+
+/// Providers that can only run dictation cleanup.
+///
+/// A settings file that names one of these for the meetings lane would fail
+/// every summary with a refusal the user cannot act on from that screen, so
+/// load-time normalization moves the meetings lane back to Ollama. The
+/// dictation lane is left exactly as written.
+const DICTATION_ONLY_AI_PROVIDERS: [&str; 2] = ["bundled_local", "apple_language_model"];
+
+/// Every provider the sidecar can route to. Kept in sync with
+/// `llm::Provider::from_settings_value`, which is the enforcing copy: a
+/// provider missing here is normalized away at load rather than failing at
+/// the first dictation.
+const KNOWN_AI_PROVIDERS: [&str; 8] = [
+    "bundled_local",
+    "apple_language_model",
+    "ollama",
+    "openai",
+    "anthropic",
+    "gemini",
+    "deepseek",
+    "ollama-cloud",
+];
+
+fn normalize_ai_lane_settings(lane: &mut AiLaneSettings, which: AiLane) {
     // Normalize LLM provider to ensure it's a valid value
     lane.provider = lane.provider.trim().to_lowercase();
-    if lane.provider.is_empty() {
+    // Accept the hyphenated spelling of the two snake_case ids so a
+    // hand-edited settings file is repaired rather than reset.
+    if lane.provider == "bundled-local" {
+        lane.provider = "bundled_local".to_string();
+    }
+    if lane.provider == "apple-language-model" {
+        lane.provider = "apple_language_model".to_string();
+    }
+
+    let fallback = match which {
+        AiLane::Dictation => DEFAULT_DICTATION_AI_PROVIDER,
+        AiLane::Meetings => "ollama",
+    };
+    if lane.provider.is_empty() || !KNOWN_AI_PROVIDERS.contains(&lane.provider.as_str()) {
+        lane.provider = fallback.to_string();
+    }
+    if which == AiLane::Meetings && DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str()) {
         lane.provider = "ollama".to_string();
+        lane.model_id = None;
     }
 
     // Normalize model ID if present
@@ -1165,11 +2061,17 @@ fn normalize_ai_lane_settings(lane: &mut AiLaneSettings) {
             lane.model_id = None;
         }
     }
+
+    // The two on-device providers serve exactly one model each, so a stale
+    // model id left over from a previous provider must not travel with them.
+    if DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str()) {
+        lane.model_id = None;
+    }
 }
 
 fn normalize_loaded_privacy_settings(privacy: &mut PrivacySettings) {
-    normalize_ai_lane_settings(&mut privacy.dictation_ai);
-    normalize_ai_lane_settings(&mut privacy.meetings_ai);
+    normalize_ai_lane_settings(&mut privacy.dictation_ai, AiLane::Dictation);
+    normalize_ai_lane_settings(&mut privacy.meetings_ai, AiLane::Meetings);
 }
 
 /// Update channel (stable or beta)
@@ -1223,6 +2125,101 @@ impl Default for UpdateSettings {
             last_check_at: None,
             last_seen_version: None,
         }
+    }
+}
+
+/// Longest silence auto-stop a user can configure, in minutes. Four hours is
+/// past any meeting; beyond it the setting is a typo, not an intent.
+pub const MEETING_AUTO_STOP_SILENCE_MINUTES_MAX: u32 = 240;
+
+/// Meeting behaviours that live around a capture. Mirrors `MeetingsSettings`
+/// in `src/types/settings.ts`; every field has a runtime reader
+/// (`meeting_detect.rs` for detection, the meeting capture monitor in lib.rs
+/// for the two auto-stops).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeetingsSettings {
+    /// Poll the running applications on this Mac for a conferencing app with
+    /// a call in progress, and offer to record it. Local only; nothing leaves
+    /// the machine and nothing is recorded until the user says so.
+    pub call_detection_enabled: bool,
+    /// End a running meeting when the call app it was recorded alongside quits
+    /// (or its call window closes).
+    pub auto_stop_when_call_app_quits: bool,
+    /// End a running meeting after this many minutes with nothing audible on
+    /// any captured source. `0` turns it off.
+    pub auto_stop_after_silence_minutes: u32,
+    /// Keep a numeric voice signature per speaker on this Mac, so a voice
+    /// named once can be suggested in later meetings.
+    ///
+    /// Off by default and never inferred: while it is off, diarization runs
+    /// exactly as before and no signature is written anywhere. Read by the
+    /// `run_diarization` handler and the post-meeting enrichment path in
+    /// lib.rs.
+    pub remember_voices: bool,
+    /// Apply a remembered name without asking when the match clears the
+    /// stricter per-model threshold. Off by default; the transcript still
+    /// marks such a name "auto" until a human confirms it. Meaningless while
+    /// `remember_voices` is off, and the readers check both.
+    pub auto_apply_confident_voices: bool,
+    /// When a meeting was transcribed by a cloud provider that returned
+    /// speaker labels, keep those labels instead of running Plainsong's own
+    /// diarizer over the same audio again.
+    ///
+    /// Default on, because at that point the audio has already been sent and
+    /// already been paid for, and re-deriving speakers locally is strictly
+    /// more work for a worse answer. It changes nothing for a local route: no
+    /// local model returns speaker labels, so those meetings always use
+    /// Plainsong's diarizer whatever this is set to.
+    pub prefer_provider_diarization: bool,
+}
+
+impl Default for MeetingsSettings {
+    fn default() -> Self {
+        Self {
+            call_detection_enabled: true,
+            auto_stop_when_call_app_quits: true,
+            auto_stop_after_silence_minutes: 15,
+            remember_voices: false,
+            auto_apply_confident_voices: false,
+            prefer_provider_diarization: true,
+        }
+    }
+}
+
+/// Which events may become an OS notification. Mirrors `NotificationsSettings`
+/// in `src/types/settings.ts`; read by `electron/notification-policy.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NotificationsSettings {
+    /// Meeting started, stopped, auto-stopped, transcript ready, notes ready
+    /// or failed.
+    pub meeting_events: bool,
+    /// A dictation that could not be delivered, shown only while the dictation
+    /// mini window is hidden (when it is visible it already says so).
+    pub dictation_failures: bool,
+}
+
+impl Default for NotificationsSettings {
+    fn default() -> Self {
+        Self {
+            meeting_events: true,
+            dictation_failures: true,
+        }
+    }
+}
+
+/// Keep the silence auto-stop inside the range the UI offers, so a hand-edited
+/// file cannot make the monitor wait for a value it will never reach.
+fn normalize_loaded_meetings_settings(meetings: &mut MeetingsSettings) {
+    meetings.auto_stop_after_silence_minutes = meetings
+        .auto_stop_after_silence_minutes
+        .min(MEETING_AUTO_STOP_SILENCE_MINUTES_MAX);
+    // Auto-apply is a refinement of remembering, not an independent switch. A
+    // hand-edited file that turns it on while remembering is off would
+    // otherwise describe a state the code cannot produce.
+    if !meetings.remember_voices {
+        meetings.auto_apply_confident_voices = false;
     }
 }
 
@@ -1397,6 +2394,9 @@ const REMOVED_SETTINGS_KEYS: &[(&str, &str)] = &[
     ("shortcuts", "toggleRecording"),
     ("shortcuts", "quickExport"),
     ("shortcuts", "focusSearch"),
+    // Only ever written as an empty list; real multi-binding support arrives
+    // with its own schema (roadmap item B4), not through this key.
+    ("shortcuts", "toggleDictationAlternates"),
 ];
 
 /// Whether a raw settings.json payload still carries any key that was
@@ -1463,6 +2463,64 @@ fn migrate_legacy_ai_lane_settings(raw: &serde_json::Value, privacy: &mut Privac
     }
 }
 
+/// Whether the settings file itself names the built-in cleanup model for the
+/// dictation lane.
+///
+/// Only a value written into `privacy.dictationAi.provider` counts. Landing on
+/// the provider because the key was absent, or because a malformed value was
+/// repaired to the shipped default, is the app choosing -- and the app is only
+/// allowed to choose this route where it runs fast enough. The same spelling
+/// repairs `normalize_ai_lane_settings` performs are applied here so a
+/// hand-edited `bundled-local` still reads as a deliberate choice.
+fn raw_settings_choose_the_bundled_dictation_lane(raw: &serde_json::Value) -> bool {
+    raw.get("privacy")
+        .and_then(|privacy| privacy.get("dictationAi"))
+        .and_then(|lane| lane.get("provider"))
+        .and_then(serde_json::Value::as_str)
+        .map(|provider| provider.trim().to_lowercase().replace('-', "_"))
+        .is_some_and(|provider| provider == DEFAULT_DICTATION_AI_PROVIDER)
+}
+
+/// Keep the zero-setup dictation default off machines it cannot serve.
+///
+/// `PrivacySettings::default()` names the built-in model, which is right on
+/// every Mac the release ships to (the macOS binary always compiles
+/// `candle-metal`) and wrong wherever the runtime falls back to CPU, where the
+/// route misses its budget on any long dictation. This runs last in the load
+/// path, so it sees the provider the user will actually get, and it moves only
+/// an *auto-selected* lane -- a settings file that names the route keeps it,
+/// because that is the user's choice to make and the Models screen tells them
+/// what it costs.
+fn apply_zero_setup_dictation_default(
+    privacy: &mut PrivacySettings,
+    chosen_in_file: bool,
+    backend_meets_budget: bool,
+) {
+    if chosen_in_file || backend_meets_budget {
+        return;
+    }
+    if privacy.dictation_ai.provider != DEFAULT_DICTATION_AI_PROVIDER {
+        return;
+    }
+    tracing::info!(
+        "The built-in cleanup model cannot meet the dictation budget on this machine's backend; starting the dictation lane on {} instead",
+        DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION
+    );
+    privacy.dictation_ai.provider = DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION.to_string();
+    privacy.dictation_ai.model_id = None;
+}
+
+/// Whether the built-in cleanup model would run fast enough on this machine.
+///
+/// Asked of the provider rather than answered here so there is one definition
+/// of "fast enough", and so a build without the runtime (which reports no
+/// backend at all) answers no by the same rule.
+fn bundled_cleanup_backend_meets_budget() -> bool {
+    crate::llm::bundled_local::backend_meets_dictation_budget(
+        crate::llm::bundled_local::available_backend(),
+    )
+}
+
 /// Settings manager
 pub struct SettingsManager {
     settings: Settings,
@@ -1477,10 +2535,16 @@ impl SettingsManager {
 
     fn load_from_path(config_path: PathBuf) -> Result<Self> {
         let mut needs_migration_rewrite = false;
+        // A file that never named the built-in cleanup route counts as not
+        // having chosen it, and so does no file at all.
+        let mut bundled_dictation_lane_chosen_in_file = false;
         let mut settings = if config_path.exists() {
             match Self::load_from_file(&config_path) {
                 Ok((mut settings, raw)) => {
-                    needs_migration_rewrite = raw_settings_contain_removed_keys(&raw);
+                    needs_migration_rewrite = raw_settings_contain_removed_keys(&raw)
+                        || raw_settings_carry_dead_whisper_meeting_slot(&raw);
+                    bundled_dictation_lane_chosen_in_file =
+                        raw_settings_choose_the_bundled_dictation_lane(&raw);
                     // Must run before the removed keys are dropped from disk
                     // by the rewrite below: it is the only thing that reads
                     // the retired single AI provider/model pair.
@@ -1517,6 +2581,16 @@ impl SettingsManager {
         normalize_keyboard_shortcuts(&mut settings.shortcuts);
         normalize_loaded_transcription_settings(&mut settings.transcription);
         normalize_loaded_privacy_settings(&mut settings.privacy);
+        // Loaded straight from disk, so a hand-edited or pre-upgrade file gets
+        // the same treatment `update_settings` gives a fresh write.
+        settings.ai.saved_prompts =
+            sanitize_saved_prompts(std::mem::take(&mut settings.ai.saved_prompts));
+        normalize_loaded_meetings_settings(&mut settings.meetings);
+        apply_zero_setup_dictation_default(
+            &mut settings.privacy,
+            bundled_dictation_lane_chosen_in_file,
+            bundled_cleanup_backend_meets_budget(),
+        );
 
         let manager = Self {
             settings,
@@ -1620,24 +2694,75 @@ impl Default for SettingsManager {
 #[cfg(test)]
 mod tests {
     use super::{
+        apply_zero_setup_dictation_default, default_dictation_numbers_as_digits,
         dictation_app_category_from_key, dictation_app_category_to_key,
         dictation_supported_languages, migrate_legacy_ai_lane_settings,
         normalize_audio_input_device_preference, validate_dictation_active_languages,
-        ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES, WHISPER_MULTILINGUAL_LANGUAGES,
+        AutomationSettings, DEFAULT_DICTATION_AI_PROVIDER,
+        DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION, ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES,
+        WHISPER_MULTILINGUAL_LANGUAGES,
     };
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
         normalize_loaded_transcription_settings, normalize_transcription_model_id,
-        resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates, AiLane,
-        AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
-        DictationCustomMode, MeetingCustomTemplate, PlatformOptimizationSettings, PrivacySettings,
-        Settings, SettingsManager, TranscriptionSettings, MAX_MEETING_CUSTOM_TEMPLATES,
+        resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates,
+        sanitize_saved_prompts, AiLane, AiLaneSettings, AudioInputDevicePreference,
+        DictationAppCategoryOverride, DictationCustomMode, MeetingCustomTemplate, MeetingsSettings,
+        PlatformOptimizationSettings, PrivacySettings, SavedPrompt, Settings, SettingsManager,
+        TranscriptionSettings, BUILTIN_SAVED_PROMPT_IDS, MAX_MEETING_CUSTOM_TEMPLATES,
         MAX_MEETING_TEMPLATE_NAME_LEN, MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS,
         MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN, MAX_MEETING_TEMPLATE_PROMPT_LEN,
+        MAX_SAVED_PROMPTS, MAX_SAVED_PROMPT_NAME_LEN, MAX_SAVED_PROMPT_TEXT_LEN,
+        MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A settings file written before the live-preview engine setting existed
+    /// still loads, keeps every choice it recorded, and comes back on `auto` --
+    /// which is the behaviour that file already had.
+    #[test]
+    fn a_settings_file_without_a_live_preview_engine_loads_on_auto() {
+        let raw = serde_json::json!({
+            "defaultProvider": "parakeet",
+            "selectedModelId": "parakeet-tdt-0.6b-v3",
+            "dictationLivePreviewEnabled": false,
+            "dictationKeepWarm": "off",
+        });
+        let mut transcription: TranscriptionSettings =
+            serde_json::from_value(raw).expect("an older transcription blob still loads");
+        normalize_loaded_transcription_settings(&mut transcription);
+        assert_eq!(transcription.dictation_live_preview_engine, "auto");
+        assert!(!transcription.dictation_live_preview_enabled);
+        assert_eq!(transcription.dictation_keep_warm, "off");
+    }
+
+    /// The three values the app implements survive; anything else lands on
+    /// `auto`, which picks whatever engine is actually present. There is no
+    /// value that can leave the preview dark by accident.
+    #[test]
+    fn only_the_three_live_preview_engines_survive_a_load() {
+        for (written, expected) in [
+            ("auto", "auto"),
+            ("redecode", "redecode"),
+            ("streaming", "streaming"),
+            ("  streaming  ", "streaming"),
+            ("", "auto"),
+            ("nemotron", "auto"),
+            ("STREAMING", "auto"),
+        ] {
+            let mut transcription = TranscriptionSettings {
+                dictation_live_preview_engine: written.to_string(),
+                ..TranscriptionSettings::default()
+            };
+            normalize_loaded_transcription_settings(&mut transcription);
+            assert_eq!(
+                transcription.dictation_live_preview_engine, expected,
+                "'{written}' should load as '{expected}'"
+            );
+        }
+    }
 
     #[test]
     fn settings_written_before_the_python_providers_were_deleted_land_on_whisper() {
@@ -1671,6 +2796,123 @@ mod tests {
         normalize_loaded_transcription_settings(&mut retired_model);
         assert_eq!(retired_model.dictation_provider, "parakeet");
         assert_eq!(retired_model.dictation_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn qwen3_asr_language_list_matches_the_provider_and_names_cjk() {
+        let supported = dictation_supported_languages("qwen3_asr", "qwen3-asr-0.6b")
+            .expect("Qwen3-ASR enumerates its languages");
+        assert_eq!(supported.len(), 30);
+        for code in ["en", "zh", "ja", "ko", "yue", "fil"] {
+            assert!(supported.contains(&code), "missing {code}");
+        }
+        let mut from_provider: Vec<&str> = crate::asr::qwen3_asr::QWEN3_ASR_LANGUAGES
+            .iter()
+            .map(|(_, code)| *code)
+            .collect();
+        from_provider.sort_unstable();
+        let mut from_settings: Vec<&str> = supported.to_vec();
+        from_settings.sort_unstable();
+        assert_eq!(from_settings, from_provider);
+
+        assert!(validate_dictation_active_languages(
+            "qwen3_asr",
+            "qwen3-asr-0.6b",
+            &["zh".to_string(), "ja".to_string(), "ko".to_string()]
+        )
+        .is_ok());
+        assert!(validate_dictation_active_languages(
+            "qwen3_asr",
+            "qwen3-asr-0.6b",
+            &["uk".to_string()]
+        )
+        .is_err());
+    }
+
+    /// A settings file that names the transcribe.cpp spike must survive a
+    /// reload on a build that has it, and must NOT resurrect a route on a
+    /// build that does not -- the same rule that keeps `mlx_audio` from
+    /// coming back as a ghost.
+    #[test]
+    fn transcribe_cpp_is_kept_only_by_a_build_that_can_run_it() {
+        let mut settings = TranscriptionSettings {
+            default_provider: "transcribe_cpp".to_string(),
+            dictation_provider: "transcribe_cpp".to_string(),
+            meeting_provider: "transcribe_cpp".to_string(),
+            selected_model_id: "parakeet-tdt-0.6b-v3-q8_0".to_string(),
+            dictation_model_id: "parakeet-tdt-0.6b-v3-q8_0".to_string(),
+            meeting_model_id: "totally-unknown".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut settings);
+
+        #[cfg(feature = "asr-transcribe-cpp")]
+        {
+            assert_eq!(settings.default_provider, "transcribe_cpp");
+            assert_eq!(settings.dictation_provider, "transcribe_cpp");
+            assert_eq!(settings.meeting_provider, "transcribe_cpp");
+            assert_eq!(settings.selected_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+            assert_eq!(settings.dictation_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+            // An unknown model id falls back to the one offered route rather
+            // than being persisted verbatim.
+            assert_eq!(settings.meeting_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+        }
+        #[cfg(not(feature = "asr-transcribe-cpp"))]
+        {
+            assert_eq!(settings.default_provider, "whisper");
+            assert_eq!(settings.dictation_provider, "whisper");
+            assert_eq!(settings.selected_model_id, "base.en");
+            assert_eq!(settings.dictation_model_id, "base.en");
+            // The meeting slot lands on the shipped meeting route rather than
+            // whisper/base.en, through the existing dead-slot migration --
+            // exactly what any other unrunnable provider name gets.
+            assert_eq!(settings.meeting_provider, "parakeet");
+            assert_eq!(settings.meeting_model_id, "parakeet-tdt-0.6b-v3");
+        }
+    }
+
+    /// The Nemotron streaming GGUF is loadable (the benchmark proves the
+    /// runtime path with it) but is not a route: `model_options()` never offers
+    /// it, so normalization must not persist it either.
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn a_settings_file_cannot_pin_the_route_to_a_model_the_picker_never_offers() {
+        let mut settings = TranscriptionSettings {
+            default_provider: "transcribe_cpp".to_string(),
+            dictation_provider: "transcribe_cpp".to_string(),
+            meeting_provider: "transcribe_cpp".to_string(),
+            selected_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            dictation_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            meeting_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut settings);
+
+        for model_id in [
+            &settings.selected_model_id,
+            &settings.dictation_model_id,
+            &settings.meeting_model_id,
+        ] {
+            assert_eq!(
+                model_id, "parakeet-tdt-0.6b-v3-q8_0",
+                "the streaming GGUF must not survive normalization"
+            );
+            assert!(
+                crate::asr::AsrProviderType::TranscribeCpp
+                    .model_options()
+                    .iter()
+                    .any(|option| &option.id == model_id),
+                "normalization must land on a model the picker offers"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shipped_default_provider_is_never_the_transcribe_cpp_spike() {
+        let settings = TranscriptionSettings::default();
+        assert_ne!(settings.default_provider, "transcribe_cpp");
+        assert_ne!(settings.dictation_provider, "transcribe_cpp");
+        assert_ne!(settings.meeting_provider, "transcribe_cpp");
     }
 
     #[test]
@@ -1860,6 +3102,182 @@ mod tests {
     }
 
     #[test]
+    fn meeting_slot_default_names_the_route_the_meeting_lane_runs() {
+        let settings = Settings::default();
+        assert_eq!(settings.transcription.meeting_provider, "parakeet");
+        assert_eq!(
+            settings.transcription.meeting_model_id,
+            "parakeet-tdt-0.6b-v3"
+        );
+        assert!(settings.transcription.use_shared_asr_selection);
+    }
+
+    #[test]
+    fn dead_whisper_meeting_slot_migrates_to_parakeet_without_touching_sharing() {
+        for shared in [true, false] {
+            let mut transcription = TranscriptionSettings {
+                use_shared_asr_selection: shared,
+                meeting_provider: "whisper".to_string(),
+                meeting_model_id: "base.en".to_string(),
+                ..Default::default()
+            };
+            normalize_loaded_transcription_settings(&mut transcription);
+            assert_eq!(transcription.meeting_provider, "parakeet");
+            assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
+            assert_eq!(transcription.use_shared_asr_selection, shared);
+        }
+
+        // Only the retired default pair is rewritten. Another whisper model
+        // in the slot is an explicit choice the route resolver judges.
+        let mut explicit = TranscriptionSettings {
+            meeting_provider: "whisper".to_string(),
+            meeting_model_id: "small".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut explicit);
+        assert_eq!(explicit.meeting_provider, "whisper");
+        assert_eq!(explicit.meeting_model_id, "small");
+    }
+
+    #[test]
+    fn stored_whisper_meeting_default_is_rewritten_on_load() {
+        use super::raw_settings_carry_dead_whisper_meeting_slot;
+
+        let legacy = serde_json::json!({
+            "transcription": { "meetingProvider": "whisper", "meetingModelId": "base.en" }
+        });
+        assert!(raw_settings_carry_dead_whisper_meeting_slot(&legacy));
+        assert!(!raw_settings_carry_dead_whisper_meeting_slot(
+            &serde_json::to_value(Settings::default()).expect("settings serialize")
+        ));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-meeting-slot-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager =
+            SettingsManager::load_from_path(settings_path.clone()).expect("load legacy settings");
+        assert_eq!(
+            manager.settings().transcription.meeting_provider,
+            "parakeet"
+        );
+        assert_eq!(
+            manager.settings().transcription.meeting_model_id,
+            "parakeet-tdt-0.6b-v3"
+        );
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).expect("read rewritten file"))
+                .expect("rewritten settings parse");
+        assert_eq!(
+            rewritten["transcription"]["meetingProvider"],
+            serde_json::json!("parakeet")
+        );
+        assert_eq!(
+            rewritten["transcription"]["meetingModelId"],
+            serde_json::json!("parakeet-tdt-0.6b-v3")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_file_predating_keep_dictation_audio_loads_with_it_off() {
+        // A file written before `dictationKeepAudio` existed carries no key for
+        // it. It must load, and the new behaviour must stay off: keeping audio
+        // is opt-in, never something an upgrade turns on.
+        let legacy = serde_json::json!({
+            "transcription": {
+                "dictationRetentionPreset": "72h",
+                "dictationRetentionCustomHours": 24
+            }
+        });
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-keep-audio-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager = SettingsManager::load_from_path(settings_path)
+            .expect("a file without the key must still load");
+        assert!(!manager.settings().transcription.dictation_keep_audio);
+        assert_eq!(
+            manager.settings().transcription.dictation_retention_preset,
+            "72h"
+        );
+        let _ = fs::remove_dir_all(&root);
+
+        // And the key round-trips under its camelCase name once set.
+        let mut settings = Settings::default();
+        settings.transcription.dictation_keep_audio = true;
+        let raw = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(raw["transcription"]["dictationKeepAudio"], true);
+    }
+
+    #[test]
+    fn settings_file_with_retired_toggle_dictation_alternates_loads_cleanly() {
+        use super::raw_settings_contain_removed_keys;
+
+        let legacy = serde_json::json!({
+            "shortcuts": {
+                "toggleDictation": "Cmd+Shift+Space",
+                "toggleDictationAlternates": ["Ctrl+Shift+Space"],
+                "openWindow": "Ctrl+Shift+N"
+            }
+        });
+        assert!(raw_settings_contain_removed_keys(&legacy));
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-alternates-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager = SettingsManager::load_from_path(settings_path.clone())
+            .expect("a file carrying the retired key must still load");
+        assert_eq!(
+            manager.settings().shortcuts.toggle_dictation,
+            "Cmd+Shift+Space"
+        );
+        assert_eq!(manager.settings().shortcuts.open_window, "Ctrl+Shift+N");
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).expect("read rewritten file"))
+                .expect("rewritten settings parse");
+        assert!(rewritten["shortcuts"]
+            .get("toggleDictationAlternates")
+            .is_none());
+        assert!(
+            serde_json::to_value(Settings::default()).expect("settings serialize")["shortcuts"]
+                .get("toggleDictationAlternates")
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn removed_settings_keys_trigger_migration_rewrite() {
         use super::raw_settings_contain_removed_keys;
 
@@ -1896,6 +3314,312 @@ mod tests {
         assert_eq!(parsed.theme, "system");
     }
 
+    /// A settings.json written before the `meetings` and `notifications`
+    /// sections existed must load with their defaults: detection on, both
+    /// auto-stops on at 15 minutes, both notification classes on.
+    #[test]
+    fn settings_without_meetings_or_notifications_sections_take_the_defaults() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "audio": {},
+                "transcription": { "defaultProvider": "parakeet" },
+                "ui": { "minimizeToTray": false },
+                "theme": "dark"
+            }"#,
+        )
+        .expect("pre-meetings settings should deserialize");
+        assert!(parsed.meetings.call_detection_enabled);
+        assert!(parsed.meetings.auto_stop_when_call_app_quits);
+        assert_eq!(parsed.meetings.auto_stop_after_silence_minutes, 15);
+        assert!(parsed.notifications.meeting_events);
+        assert!(parsed.notifications.dictation_failures);
+
+        // And a partial section keeps the defaults for what it does not name.
+        let parsed: Settings = serde_json::from_str(
+            r#"{ "meetings": { "callDetectionEnabled": false }, "notifications": { "meetingEvents": false } }"#,
+        )
+        .expect("partial meetings section should deserialize");
+        assert!(!parsed.meetings.call_detection_enabled);
+        assert!(parsed.meetings.auto_stop_when_call_app_quits);
+        assert_eq!(parsed.meetings.auto_stop_after_silence_minutes, 15);
+        assert!(!parsed.notifications.meeting_events);
+        assert!(parsed.notifications.dictation_failures);
+    }
+
+    /// Voiceprints are opt-in, so a settings file written before they existed
+    /// — which is every settings file on every machine today — must load with
+    /// both switches off. Nothing about remembering a voice may be inherited.
+    #[test]
+    fn settings_written_before_voiceprints_leave_them_off() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "meetings": {
+                    "callDetectionEnabled": true,
+                    "autoStopWhenCallAppQuits": true,
+                    "autoStopAfterSilenceMinutes": 20
+                }
+            }"#,
+        )
+        .expect("pre-voiceprint settings should deserialize");
+        assert!(!parsed.meetings.remember_voices);
+        assert!(!parsed.meetings.auto_apply_confident_voices);
+        assert_eq!(parsed.meetings.auto_stop_after_silence_minutes, 20);
+    }
+
+    /// Auto-apply cannot outlive the switch it refines: a hand-edited file
+    /// that turns it on with remembering off is normalized back to off.
+    #[test]
+    fn auto_apply_is_turned_off_when_remembering_voices_is_off() {
+        let mut orphaned = MeetingsSettings {
+            remember_voices: false,
+            auto_apply_confident_voices: true,
+            ..MeetingsSettings::default()
+        };
+        super::normalize_loaded_meetings_settings(&mut orphaned);
+        assert!(!orphaned.auto_apply_confident_voices);
+
+        let mut enabled = MeetingsSettings {
+            remember_voices: true,
+            auto_apply_confident_voices: true,
+            ..MeetingsSettings::default()
+        };
+        super::normalize_loaded_meetings_settings(&mut enabled);
+        assert!(enabled.auto_apply_confident_voices);
+    }
+
+    /// A settings.json written before provider diarization existed must load
+    /// with it on -- that is the default, and an old file is not a user who
+    /// opted out.
+    #[test]
+    fn settings_written_before_provider_diarization_default_to_preferring_it() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "meetings": {
+                    "callDetectionEnabled": true,
+                    "autoStopWhenCallAppQuits": true,
+                    "autoStopAfterSilenceMinutes": 15
+                }
+            }"#,
+        )
+        .expect("pre-provider-diarization settings should deserialize");
+        assert!(parsed.meetings.prefer_provider_diarization);
+
+        // And an explicit opt-out survives the round trip.
+        let parsed: Settings =
+            serde_json::from_str(r#"{ "meetings": { "preferProviderDiarization": false } }"#)
+                .expect("explicit opt-out should deserialize");
+        assert!(!parsed.meetings.prefer_provider_diarization);
+        assert!(parsed.meetings.call_detection_enabled);
+    }
+
+    #[test]
+    fn deepgram_and_gemini_survive_settings_reload_with_their_model_slots() {
+        let mut transcription = TranscriptionSettings {
+            default_provider: "deepgram".to_string(),
+            meeting_provider: "gemini_transcribe".to_string(),
+            selected_model_id: "nova-3".to_string(),
+            meeting_model_id: "gemini-3.5-transcribe".to_string(),
+            ..Default::default()
+        };
+        transcription
+            .provider_model_ids
+            .insert("deepgram".to_string(), "nova-3-medical".to_string());
+        transcription.provider_model_ids.insert(
+            "gemini_transcribe".to_string(),
+            "gemini-3.5-transcribe".to_string(),
+        );
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        assert_eq!(transcription.default_provider, "deepgram");
+        assert_eq!(transcription.meeting_provider, "gemini_transcribe");
+        assert_eq!(transcription.selected_model_id, "nova-3");
+        assert_eq!(
+            transcription.provider_model_ids.get("deepgram"),
+            Some(&"nova-3-medical".to_string())
+        );
+    }
+
+    #[test]
+    fn the_websocket_only_gemini_model_never_survives_a_reload() {
+        // gemini-3.5-transcribe-live is the streaming model; the batch
+        // interactions endpoint this provider posts to cannot serve it, so a
+        // hand-edited settings file must not be able to select it.
+        assert_eq!(
+            normalize_transcription_model_id("gemini_transcribe", "gemini-3.5-transcribe-live"),
+            "gemini-3.5-transcribe"
+        );
+        assert_eq!(
+            normalize_transcription_model_id("gemini_transcribe", ""),
+            "gemini-3.5-transcribe"
+        );
+        assert_eq!(normalize_transcription_model_id("deepgram", ""), "nova-3");
+    }
+
+    #[test]
+    fn silence_auto_stop_minutes_are_capped_on_load() {
+        let mut meetings = MeetingsSettings {
+            auto_stop_after_silence_minutes: 10_000,
+            ..MeetingsSettings::default()
+        };
+        super::normalize_loaded_meetings_settings(&mut meetings);
+        assert_eq!(
+            meetings.auto_stop_after_silence_minutes,
+            MEETING_AUTO_STOP_SILENCE_MINUTES_MAX
+        );
+
+        // Zero means off and must survive untouched.
+        let mut off = MeetingsSettings {
+            auto_stop_after_silence_minutes: 0,
+            ..MeetingsSettings::default()
+        };
+        super::normalize_loaded_meetings_settings(&mut off);
+        assert_eq!(off.auto_stop_after_silence_minutes, 0);
+    }
+
+    /// A settings.json written before the `automation` section existed must
+    /// load with local tools OFF: the section gates other processes reading
+    /// meeting data, so its absence has to mean "not granted", never a panic
+    /// or a silently-on default.
+    #[test]
+    fn settings_file_without_automation_section_loads_with_local_tools_off() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "audio": {},
+                "transcription": {},
+                "ui": { "minimizeToTray": false },
+                "privacy": {},
+                "shortcuts": {},
+                "updates": {},
+                "theme": "dark"
+            }"#,
+        )
+        .expect("pre-automation settings should deserialize");
+        assert!(!parsed.automation.local_tools_enabled);
+        assert_eq!(parsed.theme, "dark");
+        assert_eq!(parsed.automation, AutomationSettings::default());
+    }
+
+    /// A settings file written before `numbersAsDigits` existed has to load,
+    /// keep every other value, and behave like a fresh install for the new
+    /// one (empty map, `None` on any saved custom profile).
+    #[test]
+    fn settings_without_numbers_as_digits_still_load() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "audio": {},
+                "transcription": {
+                    "dictationModePreset": "email",
+                    "dictationCustomModes": [
+                        { "id": "gmail", "name": "Gmail", "baseModePreset": "email" }
+                    ]
+                },
+                "ui": {},
+                "export": {},
+                "privacy": {},
+                "shortcuts": {},
+                "updates": {}
+            }"#,
+        )
+        .expect("pre-ITN settings should deserialize");
+
+        assert!(parsed.transcription.dictation_numbers_as_digits.is_empty());
+        assert_eq!(parsed.transcription.dictation_mode_preset, "email");
+        assert_eq!(
+            parsed.transcription.dictation_custom_modes[0].numbers_as_digits, None,
+            "a profile saved before the setting inherits its base style"
+        );
+    }
+
+    #[test]
+    fn numbers_as_digits_round_trips_in_camel_case() {
+        let mut settings = Settings::default();
+        settings
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("voice".to_string(), true);
+        settings
+            .transcription
+            .dictation_custom_modes
+            .push(DictationCustomMode {
+                id: "gmail".to_string(),
+                name: "Gmail".to_string(),
+                numbers_as_digits: Some(false),
+                ..Default::default()
+            });
+
+        let json = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(
+            json["transcription"]["dictationNumbersAsDigits"]["voice"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            json["transcription"]["dictationCustomModes"][0]["numbersAsDigits"],
+            serde_json::Value::Bool(false)
+        );
+
+        let parsed: Settings = serde_json::from_value(json).expect("round trip");
+        assert_eq!(
+            parsed
+                .transcription
+                .dictation_numbers_as_digits
+                .get("voice"),
+            Some(&true)
+        );
+        assert_eq!(
+            parsed.transcription.dictation_custom_modes[0].numbers_as_digits,
+            Some(false)
+        );
+    }
+
+    /// The map is keyed by mode preset, so a key for a preset that does not
+    /// exist would sit in the file forever. Load drops it; known keys stay.
+    #[test]
+    fn unknown_numbers_as_digits_mode_keys_are_dropped_on_load() {
+        let mut transcription = TranscriptionSettings {
+            dictation_numbers_as_digits: [
+                ("voice".to_string(), true),
+                ("translate_english".to_string(), true),
+                ("custom".to_string(), false),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        assert_eq!(transcription.dictation_numbers_as_digits.len(), 1);
+        assert_eq!(
+            transcription.dictation_numbers_as_digits.get("voice"),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn numbers_as_digits_defaults_are_off_only_for_voice() {
+        assert!(!default_dictation_numbers_as_digits("voice"));
+        assert!(default_dictation_numbers_as_digits("messages"));
+        assert!(default_dictation_numbers_as_digits("email"));
+        assert!(default_dictation_numbers_as_digits("notes"));
+        assert!(default_dictation_numbers_as_digits("meeting_follow_up"));
+        // Unrecognized presets take the conservative reading.
+        assert!(!default_dictation_numbers_as_digits("who_knows"));
+    }
+
+    #[test]
+    fn automation_section_round_trips_in_camel_case() {
+        let mut settings = Settings::default();
+        settings.automation.local_tools_enabled = true;
+        let json = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(
+            json["automation"]["localToolsEnabled"],
+            serde_json::Value::Bool(true)
+        );
+        let parsed: Settings = serde_json::from_value(json).expect("round trip");
+        assert!(parsed.automation.local_tools_enabled);
+    }
+
     fn lane(provider: &str, model_id: Option<&str>) -> AiLaneSettings {
         AiLaneSettings {
             provider: provider.to_string(),
@@ -1903,13 +3627,217 @@ mod tests {
         }
     }
 
-    /// A fresh install must not silently change which model runs anything, so
-    /// both lanes start where the single setting used to.
+    /// The two lanes start in different places, and deliberately so.
+    ///
+    /// This test used to assert both lanes started on Ollama, "so a fresh
+    /// install does not silently change which model runs anything". That was
+    /// right while Ollama was the only local option -- but it meant a fresh
+    /// install's dictation cleanup was pointed at software the user had not
+    /// installed, so Smart Format simply never ran. The dictation lane now
+    /// starts on the bundled on-device model, which needs nothing installed;
+    /// the meetings lane stays on Ollama because the bundled model cannot
+    /// write a summary. Existing settings files are untouched: this default
+    /// only reaches a file that has no `dictationAi` key at all.
     #[test]
-    fn ai_lane_defaults_match_the_single_setting_they_replaced() {
+    fn dictation_defaults_to_the_bundled_model_and_meetings_to_ollama() {
         let privacy = PrivacySettings::default();
-        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
         assert_eq!(privacy.meetings_ai, lane("ollama", None));
+    }
+
+    /// The zero-setup default is only honest where the route is fast enough.
+    /// On a CPU-only backend a 199-word dictation measured 11.26 s p50 against
+    /// a 6 s budget, so auto-selecting it there would hand a new user a route
+    /// that warns and discards its work on every long capture.
+    #[test]
+    fn the_bundled_route_is_not_auto_selected_without_an_accelerated_backend() {
+        let mut privacy = PrivacySettings::default();
+        apply_zero_setup_dictation_default(&mut privacy, false, false);
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION, None)
+        );
+        // The meetings lane is not this decision's business.
+        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+    }
+
+    #[test]
+    fn the_bundled_route_stays_the_default_on_an_accelerated_backend() {
+        let mut privacy = PrivacySettings::default();
+        apply_zero_setup_dictation_default(&mut privacy, false, true);
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
+    }
+
+    /// Choosing it is the user's call to make; the app only refuses to make it
+    /// *for* them. The Models screen states the CPU cost beside the choice.
+    #[test]
+    fn a_user_who_chose_the_bundled_route_keeps_it_on_a_slow_backend() {
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane(DEFAULT_DICTATION_AI_PROVIDER, None),
+            ..PrivacySettings::default()
+        };
+        apply_zero_setup_dictation_default(&mut privacy, true, false);
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
+    }
+
+    #[test]
+    fn a_lane_pointing_somewhere_else_is_never_touched_by_the_backend_check() {
+        for existing in ["ollama", "openai", "apple_language_model", "anthropic"] {
+            let mut privacy = PrivacySettings {
+                dictation_ai: lane(existing, Some("their-model")),
+                ..PrivacySettings::default()
+            };
+            apply_zero_setup_dictation_default(&mut privacy, false, false);
+            assert_eq!(
+                privacy.dictation_ai,
+                lane(existing, Some("their-model")),
+                "{existing} must survive the backend check"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_written_provider_counts_as_choosing_the_bundled_route() {
+        use super::raw_settings_choose_the_bundled_dictation_lane;
+
+        assert!(raw_settings_choose_the_bundled_dictation_lane(
+            &serde_json::json!({ "privacy": { "dictationAi": { "provider": "bundled_local" } } })
+        ));
+        // The same spelling repairs the normalizer performs.
+        assert!(raw_settings_choose_the_bundled_dictation_lane(
+            &serde_json::json!({ "privacy": { "dictationAi": { "provider": " Bundled-Local " } } })
+        ));
+        // Absent key, absent lane, absent privacy, another provider, and a
+        // malformed value that only *normalizes* to the default: all the app
+        // choosing, not the user.
+        for raw in [
+            serde_json::json!({ "privacy": { "dictationAi": { "modelId": null } } }),
+            serde_json::json!({ "privacy": { "meetingsAi": { "provider": "ollama" } } }),
+            serde_json::json!({ "privacy": { "llmProvider": "ollama" } }),
+            serde_json::json!({ "theme": "dark" }),
+            serde_json::json!({ "privacy": { "dictationAi": { "provider": "groq" } } }),
+            serde_json::json!({ "privacy": { "dictationAi": { "provider": "" } } }),
+        ] {
+            assert!(
+                !raw_settings_choose_the_bundled_dictation_lane(&raw),
+                "{raw} must not read as a deliberate choice"
+            );
+        }
+    }
+
+    #[test]
+    fn an_existing_dictation_lane_is_never_overwritten_by_the_new_default() {
+        // The whole migration promise: a user who chose Ollama (or a cloud
+        // provider) before this shipped keeps it.
+        for existing in [
+            "ollama",
+            "openai",
+            "anthropic",
+            "gemini",
+            "deepseek",
+            "ollama-cloud",
+        ] {
+            let mut privacy = PrivacySettings {
+                dictation_ai: lane(existing, Some("their-model")),
+                ..PrivacySettings::default()
+            };
+            normalize_loaded_privacy_settings(&mut privacy);
+            assert_eq!(
+                privacy.dictation_ai,
+                lane(existing, Some("their-model")),
+                "{existing} must survive load untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_or_unknown_dictation_provider_falls_back_to_the_bundled_model() {
+        for written in ["", "   ", "groq", "s1-mini", "ollmaa"] {
+            let mut privacy = PrivacySettings {
+                dictation_ai: lane(written, None),
+                ..PrivacySettings::default()
+            };
+            normalize_loaded_privacy_settings(&mut privacy);
+            assert_eq!(
+                privacy.dictation_ai.provider, DEFAULT_DICTATION_AI_PROVIDER,
+                "{written:?} should have been filled with the zero-setup default"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hyphenated_spelling_of_the_on_device_ids_is_repaired_not_reset() {
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("bundled-local", None),
+            ..PrivacySettings::default()
+        };
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.dictation_ai.provider, "bundled_local");
+
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("apple-language-model", None),
+            ..PrivacySettings::default()
+        };
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.dictation_ai.provider, "apple_language_model");
+    }
+
+    #[test]
+    fn a_dictation_only_provider_never_survives_on_the_meetings_lane() {
+        // Neither on-device provider can write a summary. A settings file
+        // that names one for meetings would otherwise fail every analysis
+        // with a refusal the Meetings screen cannot act on.
+        for dictation_only in ["bundled_local", "apple_language_model"] {
+            let mut privacy = PrivacySettings {
+                meetings_ai: lane(dictation_only, Some("whatever")),
+                ..PrivacySettings::default()
+            };
+            normalize_loaded_privacy_settings(&mut privacy);
+            assert_eq!(privacy.meetings_ai, lane("ollama", None));
+        }
+    }
+
+    #[test]
+    fn the_on_device_providers_never_carry_a_stale_model_id() {
+        let mut privacy = PrivacySettings {
+            dictation_ai: lane("bundled_local", Some("qwen3.5:4b")),
+            ..PrivacySettings::default()
+        };
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.dictation_ai.model_id, None);
+    }
+
+    /// An old settings file -- written before either on-device provider
+    /// existed -- still loads, and keeps every choice it recorded.
+    #[test]
+    fn a_pre_b6_settings_file_loads_with_its_choices_intact() {
+        let raw = serde_json::json!({
+            "privacy": {
+                "remoteProcessingEnabled": true,
+                "dictationAi": { "provider": "ollama", "modelId": "qwen3.5:4b" },
+                "meetingsAi": { "provider": "anthropic", "modelId": "claude-opus-5" },
+                "vaultInitialized": true
+            }
+        });
+        let mut privacy: PrivacySettings =
+            serde_json::from_value(raw["privacy"].clone()).expect("old privacy blob still loads");
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.dictation_ai, lane("ollama", Some("qwen3.5:4b")));
+        assert_eq!(
+            privacy.meetings_ai,
+            lane("anthropic", Some("claude-opus-5"))
+        );
+        assert!(privacy.remote_processing_enabled);
+        assert!(privacy.vault_initialized);
     }
 
     #[test]
@@ -2022,14 +3950,20 @@ mod tests {
         let mut privacy = PrivacySettings::default();
 
         migrate_legacy_ai_lane_settings(&serde_json::json!({ "theme": "dark" }), &mut privacy);
-        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
         assert_eq!(privacy.meetings_ai, lane("ollama", None));
 
         migrate_legacy_ai_lane_settings(
             &serde_json::json!({ "privacy": { "remoteProcessingEnabled": true } }),
             &mut privacy,
         );
-        assert_eq!(privacy.dictation_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.dictation_ai,
+            lane(DEFAULT_DICTATION_AI_PROVIDER, None)
+        );
         assert_eq!(privacy.meetings_ai, lane("ollama", None));
     }
 
@@ -2049,6 +3983,60 @@ mod tests {
         assert!(!raw_settings_contain_removed_keys(
             &serde_json::to_value(Settings::default()).expect("settings serialize")
         ));
+    }
+
+    /// Where a file that is missing only `dictationAi` actually lands, through
+    /// the real load path rather than by reading the attribute macro.
+    ///
+    /// Three different answers, which is why the doc comment on
+    /// `PrivacySettings::default` could not describe it in one clause:
+    /// container-level `#[serde(default)]` fills the missing lane from
+    /// `PrivacySettings::default()`; a pre-lane file's `llmProvider` overrides
+    /// that through `migrate_legacy_ai_lane_settings`; and
+    /// `apply_zero_setup_dictation_default` has the last word where the
+    /// backend cannot serve the bundled route.
+    #[test]
+    fn a_file_missing_only_the_dictation_lane_lands_on_the_shipped_default() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-missing-lane-{suffix}"));
+        fs::create_dir_all(&root).expect("create settings test directory");
+
+        // (1) privacy present, no dictationAi, no legacy pair: the container
+        // default fills it from PrivacySettings::default().
+        let plain = root.join("plain.json");
+        fs::write(
+            &plain,
+            r#"{ "privacy": { "remoteProcessingEnabled": true, "meetingsAi": { "provider": "anthropic" } } }"#,
+        )
+        .expect("write settings without a dictation lane");
+        let manager = SettingsManager::load_from_path(plain).expect("load");
+        let landed = manager.settings().privacy.dictation_ai.provider.clone();
+        assert!(
+            landed == DEFAULT_DICTATION_AI_PROVIDER
+                || landed == DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION,
+            "a missing lane lands on the shipped default, or on the fallback where the backend cannot serve it; got {landed:?}"
+        );
+        assert_eq!(manager.settings().privacy.meetings_ai.provider, "anthropic");
+
+        // (2) a pre-lane `llmProvider` instead: the migration wins, because
+        // that value is the user's own earlier choice.
+        let legacy = root.join("legacy.json");
+        fs::write(
+            &legacy,
+            r#"{ "privacy": { "llmProvider": "gemini", "llmModelId": "gemini-2.5-pro" } }"#,
+        )
+        .expect("write pre-lane settings");
+        let manager = SettingsManager::load_from_path(legacy).expect("load");
+        assert_eq!(
+            manager.settings().privacy.dictation_ai,
+            lane("gemini", Some("gemini-2.5-pro")),
+            "a legacy provider is not overwritten by the shipped default"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     /// End to end through the real load path: a pre-split file on disk comes
@@ -2158,7 +4146,7 @@ mod tests {
         let settings = Settings::default();
         assert!(settings.transcription.use_shared_asr_selection);
         assert_eq!(settings.transcription.dictation_provider, "parakeet");
-        assert_eq!(settings.transcription.meeting_provider, "whisper");
+        assert_eq!(settings.transcription.meeting_provider, "parakeet");
         assert!(settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "auto");
@@ -2305,6 +4293,194 @@ mod tests {
             "Summarize board sentiment, asks, and follow-ups."
         );
         assert_eq!(template.notes_outline, vec!["Sentiment", "Asks"]);
+    }
+
+    fn saved_prompt(id: &str, name: &str, prompt: &str, scope: &str) -> SavedPrompt {
+        SavedPrompt {
+            id: id.to_string(),
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            scope: scope.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn saved_prompts_round_trip_and_normalize_scope() {
+        let sanitized = sanitize_saved_prompts(vec![
+            saved_prompt("p1", "  Decisions  ", "  What was decided?  ", "meeting"),
+            saved_prompt("p2", "Across", "What is still open?", "memory"),
+            // Unknown scope: offered everywhere rather than nowhere.
+            saved_prompt("p3", "Anywhere", "Anything?", "somewhere-else"),
+            saved_prompt("p4", "No scope", "Anything?", ""),
+        ]);
+
+        assert_eq!(sanitized.len(), 4);
+        assert_eq!(sanitized[0].name, "Decisions");
+        assert_eq!(sanitized[0].prompt, "What was decided?");
+        assert_eq!(sanitized[0].scope, "meeting");
+        assert_eq!(sanitized[1].scope, "memory");
+        assert_eq!(sanitized[2].scope, "both");
+        assert_eq!(sanitized[3].scope, "both");
+        assert!(
+            sanitized.iter().all(|prompt| !prompt.built_in),
+            "no user id is a built-in id"
+        );
+    }
+
+    #[test]
+    fn saved_prompts_drop_malformed_and_duplicate_entries() {
+        let sanitized = sanitize_saved_prompts(vec![
+            saved_prompt("", "No id", "Body", "both"),
+            saved_prompt("p1", "", "Body", "both"),
+            saved_prompt("p2", "No body", "   ", "both"),
+            saved_prompt("p3", "Keeper", "Body", "both"),
+            saved_prompt("p3", "Duplicate id", "Different body", "both"),
+        ]);
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].id, "p3");
+        assert_eq!(
+            sanitized[0].name, "Keeper",
+            "first occurrence of an id wins, like a custom template"
+        );
+    }
+
+    #[test]
+    fn saved_prompts_cap_lengths_and_count() {
+        let sanitized = sanitize_saved_prompts(vec![saved_prompt(
+            "p1",
+            &"n".repeat(MAX_SAVED_PROMPT_NAME_LEN + 40),
+            &"b".repeat(MAX_SAVED_PROMPT_TEXT_LEN + 500),
+            "both",
+        )]);
+        assert_eq!(sanitized[0].name.chars().count(), MAX_SAVED_PROMPT_NAME_LEN);
+        assert_eq!(
+            sanitized[0].prompt.chars().count(),
+            MAX_SAVED_PROMPT_TEXT_LEN
+        );
+
+        let too_many: Vec<SavedPrompt> = (0..(MAX_SAVED_PROMPTS + 10))
+            .map(|index| saved_prompt(&format!("p{index}"), "Name", "Body", "both"))
+            .collect();
+        assert_eq!(sanitize_saved_prompts(too_many).len(), MAX_SAVED_PROMPTS);
+    }
+
+    /// `built_in` decides what the manage dialog will let the reader do with a
+    /// row (hide, never delete). Reading it from the wire would let a crafted
+    /// settings.json mint an undeletable prompt, or strip the flag off a real
+    /// starter so "delete" appeared on it.
+    #[test]
+    fn saved_prompts_recompute_the_built_in_flag_from_the_id() {
+        let builtin_id = BUILTIN_SAVED_PROMPT_IDS[0];
+        let sanitized = sanitize_saved_prompts(vec![
+            SavedPrompt {
+                id: "not-a-builtin".to_string(),
+                name: "Impostor".to_string(),
+                prompt: "Body".to_string(),
+                scope: "both".to_string(),
+                built_in: true,
+                hidden: false,
+            },
+            SavedPrompt {
+                id: builtin_id.to_string(),
+                name: "Edited starter".to_string(),
+                prompt: "My own wording".to_string(),
+                scope: "both".to_string(),
+                built_in: false,
+                hidden: true,
+            },
+        ]);
+
+        assert!(!sanitized[0].built_in, "a user id can never claim built-in");
+        assert!(sanitized[1].built_in, "a built-in id always carries it");
+        assert!(
+            sanitized[1].hidden,
+            "hiding a starter is the reader's decision and must survive"
+        );
+    }
+
+    /// The `ai` section did not exist before saved prompts. A settings.json
+    /// written by any earlier build has no such key at all, and must load.
+    #[test]
+    fn settings_file_without_the_ai_section_loads_with_an_empty_prompt_library() {
+        let legacy = serde_json::json!({
+            "theme": "dark",
+            "shortcuts": { "toggleDictation": "Cmd+Shift+Space" }
+        });
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-no-ai-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager = SettingsManager::load_from_path(settings_path.clone())
+            .expect("a file predating the ai section must still load");
+        assert!(manager.settings().ai.saved_prompts.is_empty());
+        assert_eq!(manager.settings().theme, "dark");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A prompt library that a previous save already sanitized must survive
+    /// the load path unchanged, including a hidden starter override.
+    #[test]
+    fn saved_prompts_survive_a_settings_file_round_trip() {
+        let builtin_id = BUILTIN_SAVED_PROMPT_IDS[1];
+        let stored = serde_json::json!({
+            "ai": {
+                "savedPrompts": [
+                    {
+                        "id": builtin_id,
+                        "name": "Open questions",
+                        "prompt": "List every question left unanswered.",
+                        "scope": "both",
+                        "builtIn": true,
+                        "hidden": true
+                    },
+                    {
+                        "id": "mine-1",
+                        "name": "Budget asks",
+                        "prompt": "What did anyone ask for money for?",
+                        "scope": "memory"
+                    }
+                ]
+            }
+        });
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-prompts-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&stored).expect("serialize"),
+        )
+        .expect("write settings");
+
+        let manager =
+            SettingsManager::load_from_path(settings_path.clone()).expect("load saved prompts");
+        let prompts = &manager.settings().ai.saved_prompts;
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0].id, builtin_id);
+        assert!(prompts[0].built_in);
+        assert!(prompts[0].hidden);
+        assert_eq!(prompts[1].id, "mine-1");
+        assert_eq!(prompts[1].scope, "memory");
+        assert!(!prompts[1].built_in);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

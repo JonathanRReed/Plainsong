@@ -167,7 +167,13 @@ describe("privileged native dialog admission", () => {
     // the set is the claim, not the order.
     expect(reachesNativeSurface.map(({ command }) => command).sort()).toEqual(
       [
+        // The support-bundle save dialog: the reader picks the file, and the
+        // path goes from the dialog straight to the sidecar.
+        "create_support_bundle",
         "open_calendar_privacy_settings",
+        // The audio-import picker: a native open dialog like the storage
+        // ones, and gated the same way.
+        "select_audio_file_to_import",
         "select_backup_location",
         "select_cloud_backup_location",
         "select_export_location",

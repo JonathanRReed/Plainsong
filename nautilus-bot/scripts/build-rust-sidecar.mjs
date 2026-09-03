@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const manifestPath = path.join(repoRoot, "rust-sidecar", "Cargo.toml");
@@ -13,6 +14,10 @@ if (process.platform === "darwin") {
   env.MACOSX_DEPLOYMENT_TARGET = "13.0";
 }
 
+// On macOS the shipped sidecar also compiles the opt-in acceleration features
+// (currently Candle's Metal backend). The list, and why it is Darwin-only,
+// lives in scripts/sidecar-cargo-features.mjs so lint/test/benchmark and the
+// third-party notices resolve the same feature set. Other hosts get `[]`.
 const result = spawnSync(
   "cargo",
   [
@@ -21,8 +26,12 @@ const result = spawnSync(
     "--release",
     "--manifest-path",
     manifestPath,
+    ...sidecarCargoFeatureArgs(),
     "--bin",
     "plainsong-sidecar",
+    // The `plainsong` command-line tool / MCP server ships beside the sidecar.
+    "--bin",
+    "plainsong-cli",
   ],
   {
     cwd: repoRoot,

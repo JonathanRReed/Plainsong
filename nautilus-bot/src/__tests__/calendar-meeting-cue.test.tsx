@@ -205,6 +205,9 @@ describe("CalendarMeetingCue offer", () => {
       eventId: "event-1",
       title: "Design review",
       videoService: "google_meet",
+      // The fixture event carries no invitees, which is an empty list rather
+      // than a missing one -- see buildCalendarCapturePrefill.
+      attendees: [],
     });
   });
 

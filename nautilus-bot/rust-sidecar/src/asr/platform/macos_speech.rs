@@ -1,4 +1,6 @@
 use super::{EngineProbe, PlatformEngine};
+use crate::asr::VocabularyHint;
+use crate::dictation_parity::{VOCABULARY_HINT_MAX_CHARS, VOCABULARY_HINT_MAX_TERMS};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -12,10 +14,12 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::Duration;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -36,6 +40,52 @@ pub enum SpeechAuthorizationStatus {
     Restricted,
     Unavailable,
     Unknown(isize),
+}
+
+/// Which of the two Apple engines the helper will actually run.
+///
+/// `SpeechAnalyzer` (macOS 26+) is the purpose-built long-form on-device
+/// engine: per-segment timestamps, volatile/finalized streaming, and no bytes
+/// to download beyond the OS-managed locale assets. `SfSpeechRecognizer` is
+/// the older path, which is all a macOS 13-15 install has and which returns no
+/// usable segment timestamps.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppleSpeechEngine {
+    SpeechAnalyzer,
+    /// The default for anything that has not probed: an old macOS, a
+    /// non-Apple-Silicon build, or a settings file written before this field
+    /// existed all describe a machine that can only run SFSpeechRecognizer.
+    #[default]
+    SfSpeechRecognizer,
+}
+
+impl AppleSpeechEngine {
+    /// The `--engine` value the helper accepts, and the value the helper's own
+    /// probe reports.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::SpeechAnalyzer => "speech_analyzer",
+            Self::SfSpeechRecognizer => "sf_speech_recognizer",
+        }
+    }
+
+    /// The framework name, for copy that has to say which engine runs.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::SpeechAnalyzer => "SpeechAnalyzer",
+            Self::SfSpeechRecognizer => "SFSpeechRecognizer",
+        }
+    }
+
+    /// The inverse of `id`, for reading the engine the helper reported back.
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "speech_analyzer" => Some(Self::SpeechAnalyzer),
+            "sf_speech_recognizer" => Some(Self::SfSpeechRecognizer),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -68,12 +118,480 @@ pub struct AppleSpeechReadiness {
     pub recognizer_available: bool,
     pub message: String,
     pub setup_action: Option<String>,
-    /// Whether the new SpeechAnalyzer API (macOS 26+) is available.
+    /// Whether the helper can actually run SpeechAnalyzer here: the macOS 26+
+    /// API exists and `SpeechTranscriber` reports itself usable.
     #[serde(default)]
     pub speech_analyzer_available: bool,
+    /// Whether SpeechAnalyzer supports the requested locale at all.
+    #[serde(default)]
+    pub speech_analyzer_locale_supported: bool,
+    /// Whether that locale's assets are on disk. Nothing is downloaded to make
+    /// this true; the Models screen's "Install language" action is what asks
+    /// macOS for them.
+    #[serde(default)]
+    pub speech_analyzer_assets_installed: bool,
+    /// Raw asset state from `AssetInventory`, plus the helper's
+    /// `installed_not_allocated` case: macOS only reports `installed` once the
+    /// locale is allocated to the process, and that allocation does not
+    /// survive the helper exiting.
+    #[serde(default)]
+    pub speech_analyzer_asset_status: String,
+    /// Every locale SpeechAnalyzer supports on this Mac, from
+    /// `SpeechTranscriber.supportedLocales` at probe time.
+    #[serde(default)]
+    pub speech_analyzer_locales: Vec<String>,
+    /// The subset of those whose assets macOS already has.
+    #[serde(default)]
+    pub speech_analyzer_installed_locales: Vec<String>,
+    /// The engine this route will run for the probed locale.
+    #[serde(default)]
+    pub engine: AppleSpeechEngine,
     /// The OS version string reported by the helper (e.g. "26.0.0").
     #[serde(default)]
     pub operating_system_version: Option<String>,
+}
+
+/// Which engine the Apple Speech route runs for the probed locale.
+///
+/// Pure so the decision is testable without a Mac: SpeechAnalyzer only when
+/// the helper reports the API usable, the locale supported, and its assets
+/// already on disk. Anything else is the SFSpeechRecognizer path, which is
+/// what every macOS 13-15 install gets.
+pub fn selected_engine(readiness: &AppleSpeechReadiness) -> AppleSpeechEngine {
+    if readiness.speech_analyzer_available
+        && readiness.speech_analyzer_locale_supported
+        && readiness.speech_analyzer_assets_installed
+    {
+        AppleSpeechEngine::SpeechAnalyzer
+    } else {
+        AppleSpeechEngine::SfSpeechRecognizer
+    }
+}
+
+/// Whether the Apple Speech route may serve meetings.
+///
+/// A meeting transcript is assembled from per-chunk segments with real
+/// start/end times (`transcribe_recording_in_chunks` offsets and merges them).
+/// Only the SpeechAnalyzer path returns those; SFSpeechRecognizer returns one
+/// formatted string, so it stays dictation-only exactly as before.
+pub fn supports_meetings(readiness: &AppleSpeechReadiness) -> bool {
+    readiness.ready && selected_engine(readiness) == AppleSpeechEngine::SpeechAnalyzer
+}
+
+/// How long a language install may run in total before the helper is killed.
+///
+/// Generous on purpose: the download is Apple's, over the reader's connection,
+/// at a size this app does not control. The point is that a wedged helper
+/// eventually dies rather than holding a child process and the "Installing
+/// language…" button for the life of the app.
+pub const INSTALL_TOTAL_BUDGET: Duration = Duration::from_secs(20 * 60);
+
+/// How long the install may go without saying anything before it is killed.
+///
+/// The helper emits `progress` lines as macOS reports them, so silence this
+/// long means it is no longer making progress, not that the download is
+/// merely large.
+pub const INSTALL_PROGRESS_IDLE: Duration = Duration::from_secs(3 * 60);
+
+/// How long a live session may go with no helper output at all -- no partial,
+/// no error, no exit -- before the helper is killed. Silence is normal in
+/// dictation; silence for this long is a wedged process.
+pub const LIVE_HELPER_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// How long to wait for a killed or finished helper to actually exit before
+/// killing it again and stopping the wait.
+pub const HELPER_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// How often the install loop wakes to notice a cancel or an expired wait.
+/// Short enough that "Cancel" feels immediate, long enough to be free.
+pub const INSTALL_CANCEL_POLL: Duration = Duration::from_millis(250);
+
+/// Why a language install stopped waiting on the helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallWaitExpiry {
+    /// The whole install ran past `INSTALL_TOTAL_BUDGET`.
+    TotalBudget,
+    /// No progress line for `INSTALL_PROGRESS_IDLE`.
+    NoProgress,
+}
+
+impl InstallWaitExpiry {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::TotalBudget => {
+                "The macOS language install ran too long and was stopped. Try again, or install the language from System Settings."
+            }
+            Self::NoProgress => {
+                "The macOS language install stopped reporting progress and was stopped. Try again, or install the language from System Settings."
+            }
+        }
+    }
+}
+
+/// Whether a language install has waited long enough to give up.
+///
+/// Pure, so the policy is testable without a Mac or a real download: the two
+/// clocks are passed in rather than read.
+pub fn install_wait_expiry(
+    total_elapsed: Duration,
+    since_last_progress: Duration,
+) -> Option<InstallWaitExpiry> {
+    if total_elapsed >= INSTALL_TOTAL_BUDGET {
+        return Some(InstallWaitExpiry::TotalBudget);
+    }
+    if since_last_progress >= INSTALL_PROGRESS_IDLE {
+        return Some(InstallWaitExpiry::NoProgress);
+    }
+    None
+}
+
+/// Set by `cancel_language_install`, cleared when an install starts.
+///
+/// A flag rather than a channel because the install is a single OS-owned
+/// operation with one button behind it: there is nothing to route, and the
+/// reader who pressed "Cancel" is the same one who pressed "Install".
+static APPLE_SPEECH_INSTALL_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Asks the running language install to stop. Safe to call when none is
+/// running: the next install clears the flag before it spawns.
+pub fn cancel_language_install() {
+    APPLE_SPEECH_INSTALL_CANCELLED.store(true, Ordering::Relaxed);
+}
+
+/// Reads and clears the cancel flag.
+fn take_install_cancellation() -> bool {
+    APPLE_SPEECH_INSTALL_CANCELLED.swap(false, Ordering::Relaxed)
+}
+
+/// The exact error a cancelled install returns, so callers that have to tell
+/// "stopped on purpose" from "failed" can assert against it rather than
+/// rebuilding the payload.
+pub fn install_language_cancelled_error() -> anyhow::Error {
+    typed_error(
+        "cancelled",
+        "The macOS language install was cancelled.",
+        false,
+    )
+}
+
+/// Refuses a helper result that did not come from the engine the caller
+/// required.
+///
+/// Two ways the contract can break, and both are silent without this: the
+/// helper reports a different engine than the one it was told to run, or it
+/// reports SpeechAnalyzer and returns no timed segments. Either one produces a
+/// text-only result, and a text-only result reaching the meeting chunker
+/// becomes a saved transcript with zero timestamps and no error anywhere.
+///
+/// Pure, so the contract is testable without a Mac.
+pub fn engine_mismatch_refusal(
+    required_engine: Option<AppleSpeechEngine>,
+    reported_engine: Option<&str>,
+    segment_count: usize,
+) -> Option<anyhow::Error> {
+    let required = required_engine?;
+    if reported_engine != Some(required.id()) {
+        return Some(typed_error_with_details(
+            "engine_mismatch",
+            format!(
+                "Apple Speech ran {} after {} was required, so the transcript has no usable timestamps.",
+                reported_engine
+                    .and_then(AppleSpeechEngine::from_id)
+                    .map(AppleSpeechEngine::display_name)
+                    .unwrap_or("an unknown engine"),
+                required.display_name()
+            ),
+            true,
+            BTreeMap::from([
+                ("required_engine".to_string(), required.id().to_string()),
+                (
+                    "reported_engine".to_string(),
+                    reported_engine.unwrap_or("unknown").to_string(),
+                ),
+            ]),
+        ));
+    }
+    if required == AppleSpeechEngine::SpeechAnalyzer && segment_count == 0 {
+        return Some(typed_error_with_details(
+            "engine_mismatch",
+            "Apple Speech reported SpeechAnalyzer but returned no timed segments, so the transcript has no usable timestamps."
+                .to_string(),
+            true,
+            BTreeMap::from([("required_engine".to_string(), required.id().to_string())]),
+        ));
+    }
+    None
+}
+
+/// What the last readiness probe found about the Apple Speech meeting route.
+///
+/// Three states, not two: "nothing has probed yet" is not the same answer as
+/// "probed, and this Mac cannot serve meetings", and collapsing them is what
+/// made a perfectly capable macOS 26 Mac drop Apple Speech from the meeting
+/// candidates until something else happened to refresh the inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleSpeechMeetingCapability {
+    /// No probe has run in this process yet.
+    Unknown,
+    Supported,
+    Unsupported,
+}
+
+const MEETING_CAPABILITY_UNKNOWN: u8 = 0;
+const MEETING_CAPABILITY_SUPPORTED: u8 = 1;
+const MEETING_CAPABILITY_UNSUPPORTED: u8 = 2;
+
+/// Set by every readiness probe so the meeting-route policy can ask whether
+/// Apple Speech is meeting-capable without spawning the helper on a hot path.
+static SPEECH_ANALYZER_MEETING_CAPABILITY: AtomicU8 = AtomicU8::new(MEETING_CAPABILITY_UNKNOWN);
+
+/// What the process currently knows, without looking.
+pub fn meeting_capability() -> AppleSpeechMeetingCapability {
+    match SPEECH_ANALYZER_MEETING_CAPABILITY.load(Ordering::Relaxed) {
+        MEETING_CAPABILITY_SUPPORTED => AppleSpeechMeetingCapability::Supported,
+        MEETING_CAPABILITY_UNSUPPORTED => AppleSpeechMeetingCapability::Unsupported,
+        _ => AppleSpeechMeetingCapability::Unknown,
+    }
+}
+
+fn store_meeting_capability(supported: bool) {
+    SPEECH_ANALYZER_MEETING_CAPABILITY.store(
+        if supported {
+            MEETING_CAPABILITY_SUPPORTED
+        } else {
+            MEETING_CAPABILITY_UNSUPPORTED
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// The meeting-capability policy, with the probe passed in so it is testable
+/// without a Mac.
+///
+/// `Unknown` means nothing has looked yet, and the honest response to that is
+/// to look -- not to answer "no". Answering "no" is what dropped Apple Speech
+/// from the meeting candidates before any inventory refresh and then refused
+/// it with a message about macOS 26 that had never been checked.
+pub fn resolve_meeting_capability(
+    cached: AppleSpeechMeetingCapability,
+    probe: impl FnOnce() -> bool,
+) -> bool {
+    match cached {
+        AppleSpeechMeetingCapability::Supported => true,
+        AppleSpeechMeetingCapability::Unsupported => false,
+        AppleSpeechMeetingCapability::Unknown => probe(),
+    }
+}
+
+/// Whether the Apple Speech route may serve meetings.
+///
+/// Reads the flag every readiness probe refreshes; when nothing has probed
+/// yet, it runs one bounded probe (`readiness()` spawns the helper with a
+/// 10-second timeout and coalesces concurrent callers) and remembers the
+/// answer, so the cost is paid at most once per process.
+pub fn meetings_supported() -> bool {
+    resolve_meeting_capability(meeting_capability(), || {
+        let supported = supports_meetings(&readiness());
+        store_meeting_capability(supported);
+        supported
+    })
+}
+
+/// Test-only: pin the capability so a policy test can assert both branches
+/// instead of only whichever one the machine running the suite happens to be.
+#[cfg(test)]
+pub fn set_meeting_capability_for_test(capability: AppleSpeechMeetingCapability) {
+    SPEECH_ANALYZER_MEETING_CAPABILITY.store(
+        match capability {
+            AppleSpeechMeetingCapability::Unknown => MEETING_CAPABILITY_UNKNOWN,
+            AppleSpeechMeetingCapability::Supported => MEETING_CAPABILITY_SUPPORTED,
+            AppleSpeechMeetingCapability::Unsupported => MEETING_CAPABILITY_UNSUPPORTED,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// Progress from an in-flight language-asset install.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleSpeechAssetProgress {
+    pub stage: String,
+    pub locale: String,
+    pub fraction: f64,
+    pub message: String,
+}
+
+/// The result of a language-asset install.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleSpeechAssetInstall {
+    pub locale: String,
+    pub installed: bool,
+    pub asset_status: String,
+    pub engine: AppleSpeechEngine,
+}
+
+/// A locale identifier the helper will accept as a command-line argument.
+///
+/// The value reaches here from the renderer, and it is passed to a process as
+/// an argument, so it is matched against the shape of a BCP-47/ICU identifier
+/// rather than merely escaped: anything with a dash-dash prefix, a path
+/// separator, or whitespace is refused outright instead of being handed to the
+/// helper's argument parser.
+pub fn is_valid_locale_argument(locale: &str) -> bool {
+    !locale.is_empty()
+        && locale.len() <= 32
+        && locale.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '_' || character == '-'
+        })
+        && locale
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+}
+
+/// The vocabulary terms to hand the Apple Speech helper for one request.
+///
+/// Both Apple engines take a bias list -- `SFSpeechRecognitionRequest`
+/// `contextualStrings` on the older one, `AnalysisContext.contextualStrings`
+/// on SpeechAnalyzer -- so the dictionary hint the whisper and cloud routes
+/// already receive reaches this route too. The caps mirror
+/// `dictation_parity`'s: the builder there already applies them, and applying
+/// them again here means a hint arriving from anywhere else cannot exceed what
+/// the helper is prepared to take. Terms are counted, not the framing, because
+/// there is no prompt frame on this path.
+pub fn contextual_strings_for_helper(hint: Option<&VocabularyHint>) -> Vec<String> {
+    let Some(hint) = hint else {
+        return Vec::new();
+    };
+    let mut accepted: Vec<String> = Vec::new();
+    let mut characters = 0usize;
+    for term in hint.terms() {
+        let term = term.split_whitespace().collect::<Vec<_>>().join(" ");
+        if term.is_empty() || term.chars().any(char::is_control) {
+            continue;
+        }
+        if accepted.len() >= VOCABULARY_HINT_MAX_TERMS {
+            break;
+        }
+        let length = term.chars().count();
+        if characters + length > VOCABULARY_HINT_MAX_CHARS {
+            break;
+        }
+        characters += length;
+        accepted.push(term);
+    }
+    accepted
+}
+
+/// The JSON body the helper reads from `--contextual-strings-file`.
+///
+/// Serialized rather than hand-built so the field names cannot drift from what
+/// the Swift side decodes.
+#[derive(Debug, Serialize)]
+struct ContextualStringsRequest<'a> {
+    protocol_version: u32,
+    contextual_strings: &'a [String],
+}
+
+/// A private temp file holding one request's vocabulary terms, deleted when it
+/// goes out of scope.
+///
+/// The terms are the user's own dictionary entries, so they never travel as
+/// process arguments -- an argument list is readable by every process on the
+/// machine. The file is created `0600` and only its path is passed.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct ContextualStringsFile {
+    path: PathBuf,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl ContextualStringsFile {
+    /// `None` when there are no terms: an empty list is the same as no file,
+    /// and writing one anyway would put user text on disk for nothing.
+    fn write(terms: &[String]) -> Result<Option<Self>> {
+        use std::io::Write;
+
+        if terms.is_empty() {
+            return Ok(None);
+        }
+        let path = std::env::temp_dir().join(format!(
+            "nautilus-speech-vocabulary-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let body = serde_json::to_vec(&ContextualStringsRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            contextual_strings: terms,
+        })
+        .map_err(|error| {
+            typed_error(
+                "recognition_failed",
+                format!("Could not encode the dictation vocabulary hint: {error}"),
+                false,
+            )
+        })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|error| {
+            typed_error(
+                "recognition_failed",
+                format!("Could not stage the dictation vocabulary hint: {error}"),
+                false,
+            )
+        })?;
+        file.write_all(&body).map_err(|error| {
+            typed_error(
+                "recognition_failed",
+                format!("Could not write the dictation vocabulary hint: {error}"),
+                false,
+            )
+        })?;
+        Ok(Some(Self { path }))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl Drop for ContextualStringsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// One timed span of a SpeechAnalyzer transcript.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct MacosSpeechSegment {
+    pub text: String,
+    #[serde(default)]
+    pub start_seconds: f64,
+    #[serde(default)]
+    pub end_seconds: f64,
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+/// A finished Apple Speech transcription. `segments` is empty on the
+/// SFSpeechRecognizer path, which has no usable segment ranges to report.
+#[derive(Debug, Clone, Default)]
+pub struct MacosSpeechTranscript {
+    pub text: String,
+    pub language: String,
+    pub confidence: f64,
+    pub engine: Option<String>,
+    pub segments: Vec<MacosSpeechSegment>,
+    /// Terms the helper reports it actually handed the recognizer. Read from
+    /// the helper's own reply rather than from what was sent, so a helper too
+    /// old to know the option reports zero and the audit log says the hint did
+    /// not reach the recognizer instead of assuming it did.
+    pub vocabulary_hint_terms_applied: usize,
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -113,16 +631,82 @@ struct HelperProbePayload {
     #[serde(default)]
     speech_analyzer_available: bool,
     #[serde(default)]
+    speech_analyzer_locale_supported: bool,
+    #[serde(default)]
+    speech_analyzer_assets_installed: bool,
+    #[serde(default)]
+    speech_analyzer_asset_status: String,
+    #[serde(default)]
+    speech_analyzer_locales: Vec<String>,
+    #[serde(default)]
+    speech_analyzer_installed_locales: Vec<String>,
+    // The helper also reports the `engine` it would resolve. Rust does not
+    // parse it: `selected_engine` recomputes the same decision from the facts
+    // above, which is the version that can be tested without a Mac, and one
+    // source of truth beats two that can drift.
+    #[serde(default)]
     operating_system_version: Option<String>,
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl HelperProbePayload {
+    /// Whether SpeechAnalyzer can run for the probed locale right now.
+    fn speech_analyzer_usable(&self) -> bool {
+        self.speech_analyzer_available
+            && self.speech_analyzer_locale_supported
+            && self.speech_analyzer_assets_installed
+    }
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[derive(Debug, Clone, Deserialize)]
+struct HelperAssetProgressPayload {
+    protocol_version: u32,
+    #[serde(rename = "type")]
+    kind: String,
+    stage: String,
+    locale: String,
+    fraction: f64,
+    message: String,
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+#[derive(Debug, Clone, Deserialize)]
+struct HelperAssetInstallPayload {
+    locale: String,
+    installed: bool,
+    asset_status: String,
+    engine: AppleSpeechEngine,
+}
+
+/// Parses one helper line as asset-install progress, or `None` for anything
+/// else (the closing `asset_install` payload, a typed error, a blank line).
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+fn parse_asset_progress_line(line: &str) -> Option<AppleSpeechAssetProgress> {
+    let payload = serde_json::from_str::<HelperAssetProgressPayload>(line).ok()?;
+    if payload.protocol_version != HELPER_PROTOCOL_VERSION || payload.kind != "progress" {
+        return None;
+    }
+    Some(AppleSpeechAssetProgress {
+        stage: payload.stage,
+        locale: payload.locale,
+        fraction: payload.fraction.clamp(0.0, 1.0),
+        message: payload.message,
+    })
+}
+
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 #[derive(Debug, Clone, Deserialize)]
 struct HelperTranscriptPayload {
     text: String,
     language: String,
     confidence: f64,
     is_final: bool,
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    contextual_strings_applied: usize,
+    #[serde(default)]
+    segments: Vec<MacosSpeechSegment>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +719,139 @@ pub struct LiveSpeechEvent {
     pub language: String,
     pub confidence: f64,
     pub is_final: bool,
+}
+
+/// One SpeechAnalyzer live event, exactly as the helper emits it on
+/// `--live --engine speech_analyzer`.
+///
+/// `volatile` spans are the model's current guess for audio it has not
+/// finalized and are replaced wholesale by the next event; `finalized` spans
+/// never change again.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct SpeechAnalyzerLiveEvent {
+    pub protocol_version: u32,
+    #[serde(rename = "type")]
+    pub payload_type: String,
+    pub kind: String,
+    pub text: String,
+    pub language: String,
+    #[serde(default)]
+    pub start_seconds: f64,
+    #[serde(default)]
+    pub end_seconds: f64,
+    #[serde(default)]
+    pub confidence: f64,
+}
+
+impl SpeechAnalyzerLiveEvent {
+    pub fn is_finalized(&self) -> bool {
+        self.kind == "finalized"
+    }
+}
+
+/// A streaming dictation partial: text that will not change again, plus the
+/// model's current guess for the tail.
+///
+/// This is the shape the streaming dictation path consumes. Nothing in the
+/// sidecar drives it yet -- the live streaming session is not wired to
+/// dictation -- so it exists here as the seam the helper side is tested
+/// against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamingPartial {
+    pub stable_prefix: String,
+    pub volatile_suffix: String,
+}
+
+impl StreamingPartial {
+    /// The whole preview, stable text first.
+    pub fn combined_text(&self) -> String {
+        match (
+            self.stable_prefix.is_empty(),
+            self.volatile_suffix.is_empty(),
+        ) {
+            (true, _) => self.volatile_suffix.clone(),
+            (_, true) => self.stable_prefix.clone(),
+            _ => format!("{} {}", self.stable_prefix, self.volatile_suffix),
+        }
+    }
+}
+
+/// Receives streaming partials. The consumer lives outside this module; this
+/// trait is the plug point so the helper side and its accumulator can land and
+/// be tested independently.
+pub trait StreamingPartialSink: Send {
+    fn accept_partial(&mut self, partial: StreamingPartial);
+}
+
+/// Folds the helper's volatile/finalized events into a growing stable prefix
+/// and a replaceable volatile tail.
+#[derive(Debug, Default)]
+pub struct SpeechAnalyzerPartialAccumulator {
+    stable_prefix: String,
+    volatile_suffix: String,
+}
+
+impl SpeechAnalyzerPartialAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Applies one event and returns the partial it produces.
+    ///
+    /// A finalized span is appended to the stable prefix and clears the
+    /// volatile tail, because SpeechAnalyzer finalizes the span the volatile
+    /// guess covered. A volatile span replaces the tail outright.
+    pub fn apply(&mut self, event: &SpeechAnalyzerLiveEvent) -> StreamingPartial {
+        if event.is_finalized() {
+            append_transcript_piece(&mut self.stable_prefix, &event.text);
+            self.volatile_suffix.clear();
+        } else {
+            self.volatile_suffix = event.text.clone();
+        }
+        self.snapshot()
+    }
+
+    pub fn snapshot(&self) -> StreamingPartial {
+        StreamingPartial {
+            stable_prefix: self.stable_prefix.trim().to_string(),
+            volatile_suffix: self.volatile_suffix.trim().to_string(),
+        }
+    }
+
+    /// The finalized transcript so far, with the volatile guess discarded.
+    pub fn finalized_text(&self) -> String {
+        self.stable_prefix.trim().to_string()
+    }
+}
+
+/// Joins one transcript span onto another, respecting the leading space
+/// SpeechAnalyzer already puts on continuation spans.
+fn append_transcript_piece(target: &mut String, piece: &str) {
+    if piece.trim().is_empty() {
+        return;
+    }
+    if target.is_empty() {
+        target.push_str(piece.trim_start());
+        return;
+    }
+    if !target.ends_with(' ') && !piece.starts_with(' ') {
+        target.push(' ');
+    }
+    target.push_str(piece);
+}
+
+/// Parses one helper line as a SpeechAnalyzer live event, or `None` when the
+/// line is something else (a typed error, the closing `final`, a blank line).
+pub fn parse_speech_analyzer_live_line(line: &str) -> Option<SpeechAnalyzerLiveEvent> {
+    let event = serde_json::from_str::<SpeechAnalyzerLiveEvent>(line).ok()?;
+    if event.protocol_version == HELPER_PROTOCOL_VERSION
+        && event.payload_type == "live"
+        && matches!(event.kind.as_str(), "volatile" | "finalized")
+    {
+        Some(event)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +930,15 @@ fn parse_helper_error_line(line: &str) -> Option<HelperErrorPayload> {
     }
 }
 
+/// The typed code inside one of this module's errors, when it carries one.
+///
+/// The errors serialize their payload as their message, so a caller that needs
+/// to tell "the reader cancelled" from "the install failed" can read the code
+/// rather than matching on prose.
+pub fn typed_error_code(error: &anyhow::Error) -> Option<String> {
+    parse_helper_error_line(&error.to_string()).map(|payload| payload.code)
+}
+
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 fn parse_single_payload<T>(bytes: &[u8], expected_kind: &str) -> Result<T>
 where
@@ -281,12 +1007,18 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
         SpeechAuthorizationStatus::NotDetermined => (
             AppleSpeechReadinessStatus::AuthorizationNotDetermined,
             "Speech Recognition permission has not been decided.".to_string(),
-            Some("Request Speech Recognition permission from the installed Plainsong app.".to_string()),
+            Some(
+                "Request Speech Recognition permission from the installed Plainsong app. It records your consent to on-device processing; both Apple engines run on this Mac with Apple's server fallback off."
+                    .to_string(),
+            ),
         ),
         SpeechAuthorizationStatus::Denied => (
             AppleSpeechReadinessStatus::AuthorizationDenied,
             "Speech Recognition permission is denied.".to_string(),
-            Some("Enable Plainsong in System Settings > Privacy & Security > Speech Recognition.".to_string()),
+            Some(
+                "Enable Plainsong in System Settings > Privacy & Security > Speech Recognition. It records your consent to on-device processing; both Apple engines run on this Mac with Apple's server fallback off."
+                    .to_string(),
+            ),
         ),
         SpeechAuthorizationStatus::Restricted => (
             AppleSpeechReadinessStatus::AuthorizationRestricted,
@@ -302,6 +1034,18 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
             AppleSpeechReadinessStatus::RuntimeUnavailable,
             "Speech Recognition authorization is unavailable.".to_string(),
             Some("Choose another dictation provider.".to_string()),
+        ),
+        // SpeechAnalyzer is checked first because it does not depend on any of
+        // the SFSpeechRecognizer facts below: a locale SFSpeechRecognizer
+        // cannot serve on-device is still transcribable when SpeechAnalyzer
+        // supports it and its assets are installed.
+        SpeechAuthorizationStatus::Authorized if payload.speech_analyzer_usable() => (
+            AppleSpeechReadinessStatus::Ready,
+            format!(
+                "Apple Speech is ready for on-device transcription in locale '{}' through SpeechAnalyzer, with nothing to download.",
+                payload.locale
+            ),
+            None,
         ),
         SpeechAuthorizationStatus::Authorized if !payload.locale_supported => (
             AppleSpeechReadinessStatus::UnsupportedLocale,
@@ -324,14 +1068,14 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
         SpeechAuthorizationStatus::Authorized => (
             AppleSpeechReadinessStatus::Ready,
             format!(
-                "Apple Speech is ready for on-device dictation in locale '{}'.",
+                "Apple Speech is ready for on-device dictation in locale '{}' through SFSpeechRecognizer.",
                 payload.locale
             ),
             None,
         ),
     };
 
-    AppleSpeechReadiness {
+    let mut readiness = AppleSpeechReadiness {
         status,
         ready: status == AppleSpeechReadinessStatus::Ready,
         platform_supported: true,
@@ -344,8 +1088,16 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
         message,
         setup_action,
         speech_analyzer_available: payload.speech_analyzer_available,
+        speech_analyzer_locale_supported: payload.speech_analyzer_locale_supported,
+        speech_analyzer_assets_installed: payload.speech_analyzer_assets_installed,
+        speech_analyzer_asset_status: payload.speech_analyzer_asset_status.clone(),
+        speech_analyzer_locales: payload.speech_analyzer_locales.clone(),
+        speech_analyzer_installed_locales: payload.speech_analyzer_installed_locales.clone(),
+        engine: AppleSpeechEngine::SfSpeechRecognizer,
         operating_system_version: payload.operating_system_version.clone(),
-    }
+    };
+    readiness.engine = selected_engine(&readiness);
+    readiness
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -380,6 +1132,12 @@ fn readiness_from_probe_error(error: &anyhow::Error) -> AppleSpeechReadiness {
             "Re-check Apple Speech readiness or choose another dictation provider.".to_string()
         }),
         speech_analyzer_available: false,
+        speech_analyzer_locale_supported: false,
+        speech_analyzer_assets_installed: false,
+        speech_analyzer_asset_status: String::new(),
+        speech_analyzer_locales: Vec::new(),
+        speech_analyzer_installed_locales: Vec::new(),
+        engine: AppleSpeechEngine::SfSpeechRecognizer,
         operating_system_version: None,
     }
 }
@@ -420,6 +1178,10 @@ fn readiness_with_policy(force_refresh: bool) -> AppleSpeechReadiness {
     let readiness = helper_probe(false)
         .map(|payload| readiness_from_probe(&payload))
         .unwrap_or_else(|error| readiness_from_probe_error(&error));
+
+    // The meeting-route policy reads this flag instead of spawning the helper
+    // on a route-resolution path; every probe refreshes it.
+    store_meeting_capability(supports_meetings(&readiness));
 
     let mut state = mutex
         .lock()
@@ -465,6 +1227,12 @@ pub fn readiness() -> AppleSpeechReadiness {
         message: "Apple Speech dictation requires macOS on Apple Silicon.".to_string(),
         setup_action: Some("Choose a dictation provider supported on this platform.".to_string()),
         speech_analyzer_available: false,
+        speech_analyzer_locale_supported: false,
+        speech_analyzer_assets_installed: false,
+        speech_analyzer_asset_status: String::new(),
+        speech_analyzer_locales: Vec::new(),
+        speech_analyzer_installed_locales: Vec::new(),
+        engine: AppleSpeechEngine::SfSpeechRecognizer,
         operating_system_version: None,
     }
 }
@@ -493,15 +1261,44 @@ pub fn probe_from_readiness(readiness: &AppleSpeechReadiness) -> EngineProbe {
     }
 }
 
+/// Transcribes one file through the Apple Speech helper.
+///
+/// `required_engine` is the engine the *caller's* decision depends on. Passing
+/// it skips the engine re-decision here and holds the helper to it: the
+/// meeting gate reads a cached capability flag and this function used to probe
+/// again, so an asset or reservation change in between could route a meeting
+/// to SFSpeechRecognizer, which returns no segments -- a saved transcript with
+/// zero timestamps and no error anywhere. `None` keeps the old behaviour for
+/// dictation, where either engine is a correct answer.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub fn transcribe_file(audio_path: &Path) -> Result<(String, String, f64)> {
-    ensure_speech_authorized(false)?;
+pub fn transcribe_file(
+    audio_path: &Path,
+    required_engine: Option<AppleSpeechEngine>,
+    contextual_strings: &[String],
+) -> Result<MacosSpeechTranscript> {
+    let probe = authorized_probe(false)?;
+    // Named explicitly rather than left to the helper's own `auto`, so the
+    // engine that runs is the one this side decided and reported.
+    let engine = match required_engine {
+        Some(engine) => engine,
+        None if probe.speech_analyzer_usable() => AppleSpeechEngine::SpeechAnalyzer,
+        None => AppleSpeechEngine::SfSpeechRecognizer,
+    };
     let helper = resolve_helper_binary_path()?;
     let mut arguments = vec![
         OsString::from("--transcribe-file"),
         audio_path.as_os_str().to_os_string(),
+        OsString::from("--engine"),
+        OsString::from(engine.id()),
     ];
     append_configured_locale(&mut arguments);
+    // Held for the whole call: dropping it deletes the file, and the helper
+    // reads it after this function has already returned from `write`.
+    let vocabulary_file = ContextualStringsFile::write(contextual_strings)?;
+    if let Some(file) = vocabulary_file.as_ref() {
+        arguments.push(OsString::from("--contextual-strings-file"));
+        arguments.push(file.path().as_os_str().to_os_string());
+    }
     let output =
         run_helper_with_timeout(&helper, &arguments, helper_timeout_for_audio(audio_path))?;
     if !output.status.success() {
@@ -520,12 +1317,30 @@ pub fn transcribe_file(audio_path: &Path) -> Result<(String, String, f64)> {
             true,
         ));
     }
+    if let Some(message) = engine_mismatch_refusal(
+        required_engine,
+        payload.engine.as_deref(),
+        payload.segments.len(),
+    ) {
+        return Err(message);
+    }
 
-    Ok((payload.text, payload.language, payload.confidence))
+    Ok(MacosSpeechTranscript {
+        text: payload.text,
+        language: payload.language,
+        confidence: payload.confidence,
+        engine: payload.engine,
+        segments: payload.segments,
+        vocabulary_hint_terms_applied: payload.contextual_strings_applied,
+    })
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-pub fn transcribe_file(_audio_path: &Path) -> Result<(String, String, f64)> {
+pub fn transcribe_file(
+    _audio_path: &Path,
+    _required_engine: Option<AppleSpeechEngine>,
+    _contextual_strings: &[String],
+) -> Result<MacosSpeechTranscript> {
     Err(typed_error(
         "helper_missing",
         "macOS Apple Speech native engine is unavailable in this build.",
@@ -533,12 +1348,23 @@ pub fn transcribe_file(_audio_path: &Path) -> Result<(String, String, f64)> {
     ))
 }
 
+/// Starts a live dictation session against one of the two engines.
+///
+/// The SFSpeechRecognizer stream reports one growing best guess as `partial`
+/// events and one closing `final`. The SpeechAnalyzer stream additionally
+/// reports `live` events -- volatile and finalized spans -- which are folded
+/// into `StreamingPartial`s on the third channel; both streams end with the
+/// same closing `final`, so a caller that only wants the finished text needs
+/// no new parsing.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub async fn start_live_dictation_session(
     sample_rate: u32,
+    engine: AppleSpeechEngine,
+    contextual_strings: &[String],
 ) -> Result<(
     LiveSpeechAudioSink,
     mpsc::UnboundedReceiver<LiveSpeechEvent>,
+    mpsc::UnboundedReceiver<StreamingPartial>,
     oneshot::Receiver<Result<LiveSpeechResult, String>>,
 )> {
     ensure_speech_authorized(false)?;
@@ -547,9 +1373,20 @@ pub async fn start_live_dictation_session(
     command
         .arg("--live")
         .arg("--sample-rate")
-        .arg(sample_rate.to_string());
+        .arg(sample_rate.to_string())
+        .arg("--engine")
+        .arg(engine.id());
     if let Some(locale) = configured_locale() {
         command.arg("--locale").arg(locale);
+    }
+    // A live session outlives this function, so the file has to as well: it is
+    // moved into the task that reaps the child and dropped when the session
+    // ends, which is the only point at which the helper can no longer read it.
+    let vocabulary_file = ContextualStringsFile::write(contextual_strings)?;
+    if let Some(file) = vocabulary_file.as_ref() {
+        command
+            .arg("--contextual-strings-file")
+            .arg(file.path().as_os_str());
     }
     let mut child = command
         .stdin(Stdio::piped())
@@ -587,6 +1424,7 @@ pub async fn start_live_dictation_session(
 
     let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Vec<f32>>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<LiveSpeechEvent>();
+    let (partial_tx, partial_rx) = mpsc::unbounded_channel::<StreamingPartial>();
     let (final_tx, final_rx) = oneshot::channel::<Result<LiveSpeechResult, String>>();
 
     tokio::spawn(async move {
@@ -605,6 +1443,9 @@ pub async fn start_live_dictation_session(
     });
 
     tokio::spawn(async move {
+        // Moved in so the vocabulary file outlives the helper that reads it and
+        // is deleted when the session ends, whichever way it ends.
+        let _vocabulary_file = vocabulary_file;
         let stderr_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut stderr_text = String::new();
@@ -616,14 +1457,50 @@ pub async fn start_live_dictation_session(
         let mut final_tx = Some(final_tx);
         let mut terminal_message: Option<String> = None;
         let mut final_sent = false;
+        let mut accumulator = SpeechAnalyzerPartialAccumulator::new();
 
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            // Unbounded before: a helper that stopped saying anything held the
+            // child process, both channels and this task until the app quit.
+            // Silence is normal in dictation, so the window is generous; what
+            // it catches is a wedged process, not a quiet speaker.
+            let line = match tokio::time::timeout(LIVE_HELPER_IDLE_TIMEOUT, lines.next_line()).await
+            {
+                Ok(Ok(Some(line))) => line,
+                Ok(_) => break,
+                Err(_) => {
+                    terminal_message = Some(
+                        typed_error_with_details(
+                            "timeout",
+                            "Apple live dictation stopped responding and was ended.",
+                            true,
+                            BTreeMap::from([
+                                ("operation".to_string(), "live_dictation".to_string()),
+                                (
+                                    "idle_seconds".to_string(),
+                                    LIVE_HELPER_IDLE_TIMEOUT.as_secs().to_string(),
+                                ),
+                            ]),
+                        )
+                        .to_string(),
+                    );
+                    let _ = child.kill().await;
+                    break;
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
             if let Some(error) = parse_helper_error_line(&line) {
                 terminal_message = Some(serialize_helper_error(&error));
                 break;
+            }
+            // SpeechAnalyzer volatile/finalized spans. A finalized span is not
+            // the end of the session -- SpeechAnalyzer finalizes many of them
+            // -- so these never close the final channel.
+            if let Some(event) = parse_speech_analyzer_live_line(&line) {
+                let _ = partial_tx.send(accumulator.apply(&event));
+                continue;
             }
 
             match serde_json::from_str::<LiveSpeechEvent>(&line) {
@@ -680,7 +1557,7 @@ pub async fn start_live_dictation_session(
             }
         }
 
-        let child_status = child.wait().await.ok();
+        let child_status = reap_helper(&mut child).await;
         let stderr_text = stderr_task.await.unwrap_or_default();
         if !final_sent {
             let status_note = child_status
@@ -713,15 +1590,23 @@ pub async fn start_live_dictation_session(
         }
     });
 
-    Ok((LiveSpeechAudioSink { sender: audio_tx }, event_rx, final_rx))
+    Ok((
+        LiveSpeechAudioSink { sender: audio_tx },
+        event_rx,
+        partial_rx,
+        final_rx,
+    ))
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 pub async fn start_live_dictation_session(
     _sample_rate: u32,
+    _engine: AppleSpeechEngine,
+    _contextual_strings: &[String],
 ) -> Result<(
     LiveSpeechAudioSink,
     mpsc::UnboundedReceiver<LiveSpeechEvent>,
+    mpsc::UnboundedReceiver<StreamingPartial>,
     oneshot::Receiver<Result<LiveSpeechResult, String>>,
 )> {
     Err(typed_error(
@@ -731,8 +1616,203 @@ pub async fn start_live_dictation_session(
     ))
 }
 
+/// Asks macOS to download and install the SpeechAnalyzer assets for one
+/// locale, reporting progress as it goes.
+///
+/// This is the only path that downloads anything. Transcription never does:
+/// it refuses with `assets_not_installed` and leaves the choice to the reader,
+/// because a language pack is the OS's download, on the reader's disk, at a
+/// size this app does not control.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub async fn install_language_assets<F>(
+    locale: Option<&str>,
+    mut on_progress: F,
+) -> Result<AppleSpeechAssetInstall>
+where
+    F: FnMut(AppleSpeechAssetProgress),
+{
+    // A cancel that arrived while nothing was installing must not cancel the
+    // install the reader just asked for.
+    take_install_cancellation();
+    let helper = resolve_helper_binary_path()?;
+    let mut command = TokioCommand::new(&helper);
+    command.arg("--install-assets");
+    let requested_locale = locale
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(configured_locale);
+    if let Some(locale) = requested_locale {
+        if !is_valid_locale_argument(&locale) {
+            return Err(typed_error_with_details(
+                "malformed_request",
+                "That is not a valid language identifier.",
+                false,
+                BTreeMap::from([("locale".to_string(), locale)]),
+            ));
+        }
+        command.arg("--locale").arg(locale);
+    }
+
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "Failed to start the macOS Speech helper at '{}' to install language assets",
+                helper.display()
+            )
+        })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        typed_error(
+            "helper_missing",
+            "macOS Speech helper stdout is unavailable.",
+            false,
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        typed_error(
+            "helper_missing",
+            "macOS Speech helper stderr is unavailable.",
+            false,
+        )
+    })?;
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut text = String::new();
+        let _ = reader.read_to_string(&mut text).await;
+        text
+    });
+
+    let mut lines = BufReader::new(stdout).lines();
+    let mut install: Option<AppleSpeechAssetInstall> = None;
+    let mut helper_error: Option<anyhow::Error> = None;
+    // Neither layer used to bound this: the Swift helper blocks on a semaphore
+    // with no deadline, and this loop awaited the next line forever. An
+    // install that macOS never finished held a child process, the progress
+    // event stream and the "Installing language…" button for the life of the
+    // app, with no way to stop it.
+    let started = Instant::now();
+    let mut last_progress = Instant::now();
+    let mut stop_reason: Option<anyhow::Error> = None;
+    loop {
+        if take_install_cancellation() {
+            stop_reason = Some(install_language_cancelled_error());
+            break;
+        }
+        let line = match tokio::time::timeout(INSTALL_CANCEL_POLL, lines.next_line()).await {
+            Ok(Ok(Some(line))) => line,
+            // The helper closed stdout, or the pipe broke: fall through to the
+            // exit handling below, which reports whatever it did or did not say.
+            Ok(_) => break,
+            Err(_) => {
+                if let Some(expiry) =
+                    install_wait_expiry(started.elapsed(), last_progress.elapsed())
+                {
+                    stop_reason = Some(typed_error_with_details(
+                        "timeout",
+                        expiry.message(),
+                        true,
+                        BTreeMap::from([
+                            ("operation".to_string(), "install_assets".to_string()),
+                            (
+                                "waited_seconds".to_string(),
+                                started.elapsed().as_secs().to_string(),
+                            ),
+                        ]),
+                    ));
+                    break;
+                }
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(error) = parse_helper_error_line(&line) {
+            helper_error = Some(anyhow::anyhow!(serialize_helper_error(&error)));
+            break;
+        }
+        if let Some(progress) = parse_asset_progress_line(&line) {
+            last_progress = Instant::now();
+            on_progress(progress);
+            continue;
+        }
+        if let Ok(payload) = serde_json::from_str::<HelperAssetInstallPayload>(&line) {
+            install = Some(AppleSpeechAssetInstall {
+                locale: payload.locale,
+                installed: payload.installed,
+                asset_status: payload.asset_status,
+                engine: payload.engine,
+            });
+            // The helper emits this line and exits, so waiting for stdout to
+            // close would risk the liveness window expiring on a finished
+            // install and reporting a timeout for work that succeeded.
+            break;
+        }
+    }
+
+    if stop_reason.is_some() {
+        let _ = child.kill().await;
+    }
+    let status = reap_helper(&mut child).await;
+    let stderr_text = stderr_task.await.unwrap_or_default();
+    invalidate_readiness_cache();
+
+    if let Some(error) = stop_reason {
+        return Err(error);
+    }
+    if let Some(error) = helper_error {
+        return Err(error);
+    }
+    install.ok_or_else(|| {
+        let mut details = BTreeMap::from([(
+            "exit_code".to_string(),
+            status
+                .and_then(|status| status.code())
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string()),
+        )]);
+        let stderr_text = stderr_text.trim();
+        if !stderr_text.is_empty() {
+            details.insert("stderr".to_string(), stderr_text.to_string());
+        }
+        typed_error_with_details(
+            "asset_install_failed",
+            "The macOS language install ended without a result.",
+            true,
+            details,
+        )
+    })
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+pub async fn install_language_assets<F>(
+    _locale: Option<&str>,
+    _on_progress: F,
+) -> Result<AppleSpeechAssetInstall>
+where
+    F: FnMut(AppleSpeechAssetProgress),
+{
+    Err(typed_error(
+        "helper_missing",
+        "Installing Apple Speech languages requires macOS on Apple Silicon.",
+        false,
+    ))
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
+    authorized_probe(prompt_if_needed).map(|_| ())
+}
+
+/// The authorization gate, returning the probe it already had to run so
+/// callers do not spawn the helper twice to learn which engine will serve
+/// them.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn authorized_probe(prompt_if_needed: bool) -> Result<HelperProbePayload> {
     if prompt_if_needed && !is_packaged_app_context() {
         return Err(typed_error(
             "authorization_not_determined",
@@ -782,6 +1862,13 @@ pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
         }
     }
 
+    // The three checks below are SFSpeechRecognizer's. A locale it cannot
+    // serve on-device is still transcribable when SpeechAnalyzer supports it
+    // and its assets are installed, so they are skipped in that case rather
+    // than refusing a route that works.
+    if payload.speech_analyzer_usable() {
+        return Ok(payload);
+    }
     if !payload.locale_supported {
         return Err(typed_error_with_details(
             "unsupported_locale",
@@ -806,7 +1893,7 @@ pub fn ensure_speech_authorized(prompt_if_needed: bool) -> Result<()> {
             BTreeMap::from([("locale".to_string(), payload.locale)]),
         ));
     }
-    Ok(())
+    Ok(payload)
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
@@ -828,6 +1915,38 @@ pub fn speech_authorization_status() -> SpeechAuthorizationStatus {
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 pub fn speech_authorization_status() -> SpeechAuthorizationStatus {
     SpeechAuthorizationStatus::Unavailable
+}
+
+/// Waits for a helper to exit, killing it if it will not.
+///
+/// `child.wait()` on its own is unbounded, so a helper that ignored the first
+/// kill (or finished its stdout and then hung) would keep this task alive
+/// forever after the reader had already been told the operation ended.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+async fn reap_helper(child: &mut tokio::process::Child) -> Option<std::process::ExitStatus> {
+    reap_helper_within(child, HELPER_EXIT_GRACE).await
+}
+
+/// `reap_helper` with the grace passed in, so a test can prove the kill
+/// without waiting the production window.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+async fn reap_helper_within(
+    child: &mut tokio::process::Child,
+    grace: Duration,
+) -> Option<std::process::ExitStatus> {
+    match tokio::time::timeout(grace, child.wait()).await {
+        Ok(status) => status.ok(),
+        Err(_) => {
+            let _ = child.kill().await;
+            match tokio::time::timeout(grace, child.wait()).await {
+                Ok(status) => status.ok(),
+                Err(_) => {
+                    tracing::warn!("macOS Speech helper did not exit after being killed");
+                    None
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1255,12 +2374,511 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        map_authorization_status_payload, parse_helper_error_line, parse_single_payload,
-        readiness_from_probe, serialize_helper_error, typed_error, AppleSpeechReadinessStatus,
-        HelperErrorPayload, HelperProbePayload, SpeechAuthorizationStatus, HELPER_PROTOCOL_VERSION,
+        cancel_language_install, contextual_strings_for_helper, engine_mismatch_refusal,
+        install_wait_expiry, map_authorization_status_payload, parse_helper_error_line,
+        parse_single_payload, parse_speech_analyzer_live_line, readiness_from_probe,
+        resolve_meeting_capability, selected_engine, serialize_helper_error, supports_meetings,
+        take_install_cancellation, typed_error, AppleSpeechEngine, AppleSpeechMeetingCapability,
+        AppleSpeechReadiness, AppleSpeechReadinessStatus, HelperErrorPayload, HelperProbePayload,
+        HelperTranscriptPayload, InstallWaitExpiry, SpeechAnalyzerLiveEvent,
+        SpeechAnalyzerPartialAccumulator, SpeechAuthorizationStatus, StreamingPartial,
+        StreamingPartialSink, HELPER_PROTOCOL_VERSION, INSTALL_PROGRESS_IDLE, INSTALL_TOTAL_BUDGET,
     };
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    use super::{resolve_helper_binary_path_for_executable, HELPER_TARGET_NAME};
+    use super::{
+        reap_helper_within, resolve_helper_binary_path_for_executable, BufReader, Instant, Stdio,
+        TokioCommand, HELPER_TARGET_NAME,
+    };
+    use std::time::Duration;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    use tokio::io::AsyncBufReadExt;
+
+    /// Every JSON literal below was captured verbatim from the compiled
+    /// helper on this Mac (macOS 27.0, build 26A5406e, SDK 26.2) rather than
+    /// hand-written, so the Rust contract is checked against what the helper
+    /// actually emits.
+    const HELPER_PROBE_CAPTURE: &[u8] = br#"{"authorization":"not_determined","authorization_code":0,"engine":"speech_analyzer","locale":"en_US","locale_supported":true,"on_device_available":true,"operating_system_version":"27.0.0","protocol_version":1,"recognizer_available":true,"speech_analyzer_asset_status":"installed_not_allocated","speech_analyzer_assets_installed":true,"speech_analyzer_available":true,"speech_analyzer_installed_locales":["en_AU","en_CA","en_GB","en_IE","en_IN","en_NZ","en_SG","en_US","en_ZA"],"speech_analyzer_locale_supported":true,"speech_analyzer_locales":["bn_IN","de_AT","de_CH","de_DE","en_AU","en_CA","en_GB","en_IE","en_IN","en_NZ","en_SG","en_US","en_ZA","es_CL","es_ES","es_MX","es_US","fr_BE","fr_CA","fr_CH","fr_FR","gu_IN","hi_IN","it_CH","it_IT","ja_JP","kn_IN","ko_KR","ks_IN","mai_IN","ml_IN","mr_IN","mul_IN","ne_IN","or_IN","pa_IN","pt_BR","pt_PT","ta_IN","te_IN","ur_IN","yue_CN","zh_CN","zh_HK","zh_TW"],"type":"probe"}"#;
+    const HELPER_TRANSCRIPT_CAPTURE: &[u8] = br#"{"confidence":0.9627857142857145,"engine":"speech_analyzer","is_final":true,"language":"en_US","protocol_version":1,"segments":[{"confidence":0.9627857142857145,"end_seconds":5.3226875,"start_seconds":0,"text":"This is a Nautilus local quality gate sample with enough spoken words for verification."}],"text":"This is a Nautilus local quality gate sample with enough spoken words for verification.","type":"transcript"}"#;
+
+    fn analyzer_readiness(
+        speech_analyzer_available: bool,
+        speech_analyzer_locale_supported: bool,
+        speech_analyzer_assets_installed: bool,
+        ready: bool,
+    ) -> AppleSpeechReadiness {
+        AppleSpeechReadiness {
+            status: if ready {
+                AppleSpeechReadinessStatus::Ready
+            } else {
+                AppleSpeechReadinessStatus::AuthorizationNotDetermined
+            },
+            ready,
+            platform_supported: true,
+            helper_present: true,
+            authorization: if ready {
+                "authorized"
+            } else {
+                "not_determined"
+            }
+            .to_string(),
+            locale: Some("en_US".to_string()),
+            locale_supported: true,
+            on_device_available: true,
+            recognizer_available: true,
+            message: String::new(),
+            setup_action: None,
+            speech_analyzer_available,
+            speech_analyzer_locale_supported,
+            speech_analyzer_assets_installed,
+            speech_analyzer_asset_status: String::new(),
+            speech_analyzer_locales: Vec::new(),
+            speech_analyzer_installed_locales: Vec::new(),
+            engine: AppleSpeechEngine::SfSpeechRecognizer,
+            operating_system_version: None,
+        }
+    }
+
+    #[test]
+    fn locale_arguments_are_validated_before_reaching_the_helper() {
+        for valid in ["en_US", "fr-FR", "zh_Hant_TW", "yue_CN", "en"] {
+            assert!(super::is_valid_locale_argument(valid), "{valid}");
+        }
+        // The value arrives from the renderer and becomes a process argument,
+        // so anything that could be read as another flag or a path is refused
+        // rather than escaped.
+        for invalid in [
+            "",
+            "--engine",
+            "-locale",
+            "en US",
+            "../etc/passwd",
+            "en_US;rm -rf /",
+            "en_US\n--engine",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(!super::is_valid_locale_argument(invalid), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn asset_install_progress_lines_parse_and_other_lines_do_not() {
+        // Captured verbatim from `--install-assets --locale en_US`.
+        let progress = super::parse_asset_progress_line(
+            r#"{"fraction":0,"locale":"en_US","message":"Checking which language assets macOS already has.","protocol_version":1,"stage":"checking","type":"progress"}"#,
+        )
+        .expect("captured progress line should parse");
+        assert_eq!(progress.stage, "checking");
+        assert_eq!(progress.locale, "en_US");
+        assert_eq!(progress.fraction, 0.0);
+
+        assert!(super::parse_asset_progress_line(
+            r#"{"asset_status":"installed","engine":"speech_analyzer","installed":true,"locale":"en_US","protocol_version":1,"type":"asset_install"}"#
+        )
+        .is_none());
+        assert!(super::parse_asset_progress_line("").is_none());
+    }
+
+    #[test]
+    fn probe_contract_carries_the_speech_analyzer_asset_and_locale_fields() {
+        let probe: HelperProbePayload = parse_single_payload(HELPER_PROBE_CAPTURE, "probe")
+            .expect("the real helper probe should match the Rust contract");
+        assert!(probe.speech_analyzer_available);
+        assert!(probe.speech_analyzer_locale_supported);
+        assert!(probe.speech_analyzer_assets_installed);
+        // macOS reports `.supported` for a locale whose model is on disk until
+        // the process allocates it, so the helper reports that case explicitly
+        // instead of calling it a missing download.
+        assert_eq!(
+            probe.speech_analyzer_asset_status,
+            "installed_not_allocated"
+        );
+        assert!(probe.speech_analyzer_locales.contains(&"ja_JP".to_string()));
+        assert!(probe
+            .speech_analyzer_installed_locales
+            .contains(&"en_US".to_string()));
+        assert!(probe.speech_analyzer_usable());
+
+        // That capture has Speech Recognition permission still undecided, so
+        // the route is not ready even though SpeechAnalyzer itself is usable.
+        let readiness = readiness_from_probe(&probe);
+        assert_eq!(
+            readiness.status,
+            AppleSpeechReadinessStatus::AuthorizationNotDetermined
+        );
+        assert_eq!(readiness.engine, AppleSpeechEngine::SpeechAnalyzer);
+        assert!(!supports_meetings(&readiness));
+        assert_eq!(
+            readiness.speech_analyzer_locales.len(),
+            probe.speech_analyzer_locales.len()
+        );
+    }
+
+    #[test]
+    fn an_authorized_speech_analyzer_probe_is_ready_and_meeting_capable() {
+        let authorized = String::from_utf8(HELPER_PROBE_CAPTURE.to_vec())
+            .expect("probe capture is UTF-8")
+            .replace(
+                "\"authorization\":\"not_determined\",\"authorization_code\":0",
+                "\"authorization\":\"authorized\",\"authorization_code\":3",
+            );
+        let probe: HelperProbePayload = parse_single_payload(authorized.as_bytes(), "probe")
+            .expect("authorized probe should parse");
+        let readiness = readiness_from_probe(&probe);
+        assert_eq!(readiness.status, AppleSpeechReadinessStatus::Ready);
+        assert!(readiness.message.contains("SpeechAnalyzer"));
+        assert!(readiness.message.contains("nothing to download"));
+        assert_eq!(readiness.engine, AppleSpeechEngine::SpeechAnalyzer);
+        assert!(supports_meetings(&readiness));
+    }
+
+    #[test]
+    fn engine_selection_needs_the_api_the_locale_and_the_installed_assets() {
+        for (available, locale_supported, assets_installed, expected) in [
+            (true, true, true, AppleSpeechEngine::SpeechAnalyzer),
+            (false, true, true, AppleSpeechEngine::SfSpeechRecognizer),
+            (true, false, true, AppleSpeechEngine::SfSpeechRecognizer),
+            (true, true, false, AppleSpeechEngine::SfSpeechRecognizer),
+            (false, false, false, AppleSpeechEngine::SfSpeechRecognizer),
+        ] {
+            let readiness = analyzer_readiness(available, locale_supported, assets_installed, true);
+            assert_eq!(selected_engine(&readiness), expected);
+        }
+    }
+
+    #[test]
+    fn meetings_need_a_ready_route_running_speech_analyzer() {
+        assert!(supports_meetings(&analyzer_readiness(
+            true, true, true, true
+        )));
+        // Not ready: permission still undecided.
+        assert!(!supports_meetings(&analyzer_readiness(
+            true, true, true, false
+        )));
+        // Ready, but on the SFSpeechRecognizer path, which returns no segment
+        // timestamps and so stays dictation-only.
+        assert!(!supports_meetings(&analyzer_readiness(
+            false, false, false, true
+        )));
+    }
+
+    /// "Nothing has probed yet" is not an answer, and treating it as "no" is
+    /// what dropped Apple Speech from the meeting candidates on a Mac that
+    /// could serve them, until some unrelated inventory refresh happened to
+    /// run first.
+    #[test]
+    fn an_unprobed_meeting_capability_looks_instead_of_answering_no() {
+        let mut probes = 0;
+        assert!(resolve_meeting_capability(
+            AppleSpeechMeetingCapability::Unknown,
+            || {
+                probes += 1;
+                true
+            }
+        ));
+        assert_eq!(probes, 1, "an unknown capability must probe exactly once");
+
+        // A probe that ran and found nothing is a real answer; do not re-probe.
+        assert!(!resolve_meeting_capability(
+            AppleSpeechMeetingCapability::Unsupported,
+            || panic!("a probed capability must not probe again")
+        ));
+        assert!(resolve_meeting_capability(
+            AppleSpeechMeetingCapability::Supported,
+            || panic!("a probed capability must not probe again")
+        ));
+    }
+
+    /// Two captures from the same three-term hint on the same synthesized
+    /// fixture, one per engine, taken on macOS 27.0 (26A5406e). They are kept
+    /// together because the pair is the finding: both engines report the same
+    /// three terms handed over, and only one of them changed its answer.
+    /// SFSpeechRecognizer heard "Play song" without the hint and "Plainsong"
+    /// with it; SpeechAnalyzer said "Plain song" either way.
+    const HELPER_HINTED_SF_CAPTURE: &[u8] = br#"{"confidence":0.8448888858159384,"contextual_strings_applied":3,"engine":"sf_speech_recognizer","is_final":true,"language":"en_US","protocol_version":1,"segments":[],"text":"Plainsong exports every new to Obsidian before the stand-up","type":"transcript"}"#;
+    const HELPER_HINTED_ANALYZER_CAPTURE: &[u8] = br#"{"confidence":0.8326,"contextual_strings_applied":3,"engine":"speech_analyzer","is_final":true,"language":"en_US","protocol_version":1,"segments":[{"confidence":0.8326,"end_seconds":3.5623125,"start_seconds":0,"text":"Plain song exports every new to obsidian before the stand-up."}],"text":"Plain song exports every new to obsidian before the stand-up.","type":"transcript"}"#;
+
+    fn vocabulary_hint(terms: &[&str]) -> Option<crate::asr::VocabularyHint> {
+        crate::asr::VocabularyHint::new(terms.iter().map(|term| term.to_string()).collect())
+    }
+
+    /// The hint the dictation route builds is already capped, but this route
+    /// caps again: the helper is a separate binary, and a list that outgrew the
+    /// cap should be trimmed on the way out rather than refused at the far end.
+    #[test]
+    fn vocabulary_terms_are_capped_the_way_the_whisper_prompt_is() {
+        assert!(contextual_strings_for_helper(None).is_empty());
+
+        let many: Vec<String> = (0..80).map(|index| format!("Term{index:02}")).collect();
+        let many_hint = crate::asr::VocabularyHint::new(many).expect("terms");
+        assert_eq!(
+            contextual_strings_for_helper(Some(&many_hint)).len(),
+            super::VOCABULARY_HINT_MAX_TERMS
+        );
+
+        // Twenty 50-character terms is 1000 characters, so the character cap
+        // stops at twelve of them, well before the term cap.
+        let long: Vec<String> = (0..20).map(|_| "x".repeat(50)).collect();
+        let long_hint = crate::asr::VocabularyHint::new(long).expect("terms");
+        let capped = contextual_strings_for_helper(Some(&long_hint));
+        assert_eq!(capped.len(), 12);
+        assert!(
+            capped
+                .iter()
+                .map(|term| term.chars().count())
+                .sum::<usize>()
+                <= super::VOCABULARY_HINT_MAX_CHARS
+        );
+
+        // Whitespace is collapsed and anything that is not a term is dropped
+        // rather than sent as an empty string the recognizer would ignore.
+        let messy =
+            vocabulary_hint(&["  ", "  Plain\tsong ", "Obsidian", "bad\u{7}term"]).expect("terms");
+        assert_eq!(
+            contextual_strings_for_helper(Some(&messy)),
+            vec!["Plain song".to_string(), "Obsidian".to_string()]
+        );
+    }
+
+    /// The count the app reports is the helper's own, so a helper too old to
+    /// know the option reports nothing rather than the app assuming the terms
+    /// arrived.
+    #[test]
+    fn the_applied_term_count_comes_from_the_helper_not_from_what_was_sent() {
+        let older: HelperTranscriptPayload =
+            parse_single_payload(HELPER_TRANSCRIPT_CAPTURE, "transcript")
+                .expect("a helper capture without the field still parses");
+        assert_eq!(older.contextual_strings_applied, 0);
+
+        let sf: HelperTranscriptPayload =
+            parse_single_payload(HELPER_HINTED_SF_CAPTURE, "transcript").expect("sf capture");
+        assert_eq!(sf.contextual_strings_applied, 3);
+        assert_eq!(sf.engine.as_deref(), Some("sf_speech_recognizer"));
+        assert!(sf.text.contains("Plainsong"), "{}", sf.text);
+
+        // The same three terms, the same fixture, the other engine: it took
+        // them and its answer did not change. "Applied" means handed to the
+        // recognizer, never that the recognizer acted on them, which is why
+        // the receipt records the effect separately.
+        let analyzer: HelperTranscriptPayload =
+            parse_single_payload(HELPER_HINTED_ANALYZER_CAPTURE, "transcript")
+                .expect("analyzer capture");
+        assert_eq!(analyzer.contextual_strings_applied, 3);
+        assert_eq!(analyzer.engine.as_deref(), Some("speech_analyzer"));
+        assert!(analyzer.text.contains("Plain song"), "{}", analyzer.text);
+    }
+
+    /// The Models screen asks for a permission macOS named in the era when
+    /// speech recognition meant sending audio to Apple. Neither engine does
+    /// that here -- SpeechAnalyzer transcribes with the permission still
+    /// undecided, and both run with server fallback off -- so the sentence
+    /// that asks for the grant has to say what the grant is for. Plainsong
+    /// keeps refusing until it is granted, in the app and in the helper: it is
+    /// the only record of consent to on-device processing this route has.
+    #[test]
+    fn asking_for_speech_recognition_says_it_is_consent_not_a_server_grant() {
+        let mut probe: HelperProbePayload = parse_single_payload(HELPER_PROBE_CAPTURE, "probe")
+            .expect("the real helper probe should match the Rust contract");
+
+        for (authorization, code) in [("not_determined", 0), ("denied", 1)] {
+            probe.authorization = authorization.to_string();
+            probe.authorization_code = code;
+            let readiness = readiness_from_probe(&probe);
+            assert!(!readiness.ready, "{authorization}");
+            let action = readiness
+                .setup_action
+                .as_deref()
+                .unwrap_or_else(|| panic!("{authorization} must offer a next action"));
+            assert!(
+                action.contains("consent to on-device processing"),
+                "{authorization}: {action}"
+            );
+            assert!(
+                action.contains("server fallback off"),
+                "{authorization}: {action}"
+            );
+        }
+    }
+
+    /// The meeting gate decides the engine from one probe and the route used
+    /// to decide again from another. Between the two, assets can be released
+    /// or a reservation lost, and SFSpeechRecognizer returns no segments: a
+    /// saved meeting with a full transcript, no timestamps, and no error.
+    #[test]
+    fn a_required_engine_refuses_anything_that_did_not_run_it() {
+        let refusal = |required, reported: Option<&str>, segments| {
+            engine_mismatch_refusal(required, reported, segments).map(|error| error.to_string())
+        };
+
+        // Dictation names no engine: either one is a correct answer.
+        assert!(refusal(None, Some("sf_speech_recognizer"), 0).is_none());
+        assert!(refusal(None, None, 0).is_none());
+
+        // The contract holds: SpeechAnalyzer ran and returned timed segments.
+        assert!(refusal(
+            Some(AppleSpeechEngine::SpeechAnalyzer),
+            Some("speech_analyzer"),
+            3
+        )
+        .is_none());
+        assert!(refusal(
+            Some(AppleSpeechEngine::SfSpeechRecognizer),
+            Some("sf_speech_recognizer"),
+            0
+        )
+        .is_none());
+
+        // A different engine ran than the one required.
+        let swapped = refusal(
+            Some(AppleSpeechEngine::SpeechAnalyzer),
+            Some("sf_speech_recognizer"),
+            0,
+        )
+        .expect("a swapped engine must be refused");
+        assert!(swapped.contains("engine_mismatch"), "{swapped}");
+        assert!(swapped.contains("SFSpeechRecognizer"), "{swapped}");
+        assert!(swapped.contains("SpeechAnalyzer"), "{swapped}");
+
+        // An older helper that reports no engine at all is not proof either.
+        assert!(refusal(Some(AppleSpeechEngine::SpeechAnalyzer), None, 4).is_some());
+
+        // The right engine, but nothing a meeting transcript can be built from.
+        let untimed = refusal(
+            Some(AppleSpeechEngine::SpeechAnalyzer),
+            Some("speech_analyzer"),
+            0,
+        )
+        .expect("a segment-less SpeechAnalyzer result must be refused");
+        assert!(untimed.contains("no timed segments"), "{untimed}");
+    }
+
+    #[test]
+    fn transcript_contract_carries_speech_analyzer_segments() {
+        let payload: HelperTranscriptPayload =
+            parse_single_payload(HELPER_TRANSCRIPT_CAPTURE, "transcript")
+                .expect("the real helper transcript should match the Rust contract");
+        assert!(payload.is_final);
+        assert_eq!(payload.engine.as_deref(), Some("speech_analyzer"));
+        assert_eq!(payload.segments.len(), 1);
+        let segment = &payload.segments[0];
+        assert_eq!(segment.start_seconds, 0.0);
+        assert!((segment.end_seconds - 5.3226875).abs() < 1e-9);
+        assert!(segment.confidence > 0.9);
+        assert_eq!(segment.text, payload.text);
+    }
+
+    #[test]
+    fn an_sf_speech_recognizer_transcript_still_parses_without_segments() {
+        let json = br#"{"confidence":0.5,"is_final":true,"language":"en_US","protocol_version":1,"text":"hello there","type":"transcript"}"#;
+        let payload: HelperTranscriptPayload = parse_single_payload(json, "transcript")
+            .expect("a transcript without the new fields must still parse");
+        assert!(payload.engine.is_none());
+        assert!(payload.segments.is_empty());
+    }
+
+    #[test]
+    fn speech_analyzer_live_events_fold_into_streaming_partials() {
+        let lines = [
+            r#"{"confidence":0,"end_seconds":4,"kind":"volatile","language":"en_US","protocol_version":1,"start_seconds":0,"text":"Plain song is a free and open source dictation app for the Mac.","type":"live"}"#,
+            r#"{"confidence":0.9405384615384614,"end_seconds":3.36,"kind":"finalized","language":"en_US","protocol_version":1,"start_seconds":0,"text":"Plain song is a free and open source dictation app for the Mac.","type":"live"}"#,
+            r#"{"confidence":0,"end_seconds":4,"kind":"volatile","language":"en_US","protocol_version":1,"start_seconds":3.36,"text":" It","type":"live"}"#,
+            r#"{"confidence":0.9533999999999998,"end_seconds":10.14,"kind":"finalized","language":"en_US","protocol_version":1,"start_seconds":3.36,"text":" It listens when you press a hot, turns your words into text on your own machine, and types them into whatever app you are using.","type":"live"}"#,
+        ];
+        let events: Vec<SpeechAnalyzerLiveEvent> = lines
+            .iter()
+            .map(|line| {
+                parse_speech_analyzer_live_line(line).expect("captured live line should parse")
+            })
+            .collect();
+
+        let mut accumulator = SpeechAnalyzerPartialAccumulator::new();
+        let partials: Vec<StreamingPartial> = events
+            .iter()
+            .map(|event| accumulator.apply(event))
+            .collect();
+
+        // A volatile span is the current guess and nothing is stable yet.
+        assert_eq!(partials[0].stable_prefix, "");
+        assert_eq!(
+            partials[0].volatile_suffix,
+            "Plain song is a free and open source dictation app for the Mac."
+        );
+        // Finalizing that span moves it into the stable prefix and clears the
+        // guess, so nothing is shown twice.
+        assert_eq!(
+            partials[1].stable_prefix,
+            "Plain song is a free and open source dictation app for the Mac."
+        );
+        assert_eq!(partials[1].volatile_suffix, "");
+        // The next volatile span is appended to the display but not to the
+        // stable text.
+        assert_eq!(
+            partials[2].stable_prefix,
+            "Plain song is a free and open source dictation app for the Mac."
+        );
+        assert_eq!(partials[2].volatile_suffix, "It");
+        assert_eq!(
+            partials[2].combined_text(),
+            "Plain song is a free and open source dictation app for the Mac. It"
+        );
+        // Two finalized spans join with exactly one space.
+        assert_eq!(
+            partials[3].stable_prefix,
+            "Plain song is a free and open source dictation app for the Mac. It listens when you press a hot, turns your words into text on your own machine, and types them into whatever app you are using."
+        );
+        assert_eq!(partials[3].volatile_suffix, "");
+        assert_eq!(accumulator.finalized_text(), partials[3].stable_prefix);
+    }
+
+    #[test]
+    fn the_live_parser_ignores_every_other_helper_line() {
+        // The closing `final` line keeps the SFSpeechRecognizer shape, so the
+        // existing consumer still terminates on it rather than on a finalized
+        // span.
+        assert!(parse_speech_analyzer_live_line(r#"{"confidence":0.9341819823709108,"event":"final","is_final":true,"language":"en_US","protocol_version":1,"text":"Plain song is a free and open source dictation app for the Mac. It listens when you press a hot, turns your words into text on your own machine, and types them into whatever app you are using. Nothing you say ever leaves your computer. You can dictate an email in your male client, a message in Slack, a commit message in your terminal, or a note in your editor, and plain song will adapt its formatting to where you are typing. It also captures meetings without a bot joining the call, giving you transcripts, summaries, and action items you can search later. The goal is simple. Voice input everywhere, with no account, no subscription, and no cloud in the middle. This recording exists to benchmark transcription latency against realistic continuous speech instead of a synthetic tone.","type":"final"}"#).is_none());
+        assert!(parse_speech_analyzer_live_line(
+            r#"{"protocol_version":1,"type":"error","code":"cancelled","message":"stop","retryable":false,"details":{}}"#
+        )
+        .is_none());
+        assert!(parse_speech_analyzer_live_line(
+            r#"{"protocol_version":2,"type":"live","kind":"volatile","text":"x","language":"en_US"}"#
+        )
+        .is_none());
+        assert!(parse_speech_analyzer_live_line(
+            r#"{"protocol_version":1,"type":"live","kind":"speculative","text":"x","language":"en_US"}"#
+        )
+        .is_none());
+        assert!(parse_speech_analyzer_live_line("").is_none());
+    }
+
+    /// The seam lane C1's streaming dictation plugs into.
+    #[test]
+    fn a_streaming_partial_sink_receives_every_partial() {
+        #[derive(Default)]
+        struct RecordingSink {
+            partials: Vec<StreamingPartial>,
+        }
+
+        impl StreamingPartialSink for RecordingSink {
+            fn accept_partial(&mut self, partial: StreamingPartial) {
+                self.partials.push(partial);
+            }
+        }
+
+        let mut accumulator = SpeechAnalyzerPartialAccumulator::new();
+        let mut sink = RecordingSink::default();
+        for line in [
+            r#"{"confidence":0,"end_seconds":4,"kind":"volatile","language":"en_US","protocol_version":1,"start_seconds":0,"text":"Hello","type":"live"}"#,
+            r#"{"confidence":0.9,"end_seconds":4,"kind":"finalized","language":"en_US","protocol_version":1,"start_seconds":0,"text":"Hello there.","type":"live"}"#,
+        ] {
+            let event = parse_speech_analyzer_live_line(line).expect("live line");
+            sink.accept_partial(accumulator.apply(&event));
+        }
+
+        assert_eq!(sink.partials.len(), 2);
+        assert_eq!(sink.partials[0].volatile_suffix, "Hello");
+        assert_eq!(sink.partials[1].stable_prefix, "Hello there.");
+        assert_eq!(sink.partials[1].volatile_suffix, "");
+    }
 
     #[test]
     fn helper_authorization_payload_maps_known_statuses() {
@@ -1274,6 +2892,11 @@ mod tests {
             on_device_available: true,
             recognizer_available: true,
             speech_analyzer_available: false,
+            speech_analyzer_locale_supported: false,
+            speech_analyzer_assets_installed: false,
+            speech_analyzer_asset_status: String::new(),
+            speech_analyzer_locales: Vec::new(),
+            speech_analyzer_installed_locales: Vec::new(),
             operating_system_version: None,
         };
         assert_eq!(
@@ -1319,6 +2942,11 @@ mod tests {
             on_device_available,
             recognizer_available,
             speech_analyzer_available: false,
+            speech_analyzer_locale_supported: false,
+            speech_analyzer_assets_installed: false,
+            speech_analyzer_asset_status: String::new(),
+            speech_analyzer_locales: Vec::new(),
+            speech_analyzer_installed_locales: Vec::new(),
             operating_system_version: None,
         };
 
@@ -1423,6 +3051,100 @@ mod tests {
             parse_single_payload(json, "probe").expect("probe should match Rust contract");
         assert!(!probe.speech_analyzer_available);
         assert!(probe.operating_system_version.is_none());
+    }
+
+    /// The install is macOS' download, so the budget is generous -- but it is
+    /// a budget. Before this the helper could sit forever holding a child
+    /// process, the progress stream and the "Installing language…" button.
+    #[test]
+    fn a_language_install_gives_up_on_a_total_budget_and_on_silence() {
+        // Downloading, slowly, but still talking: keep waiting.
+        assert_eq!(
+            install_wait_expiry(Duration::from_secs(15 * 60), Duration::from_secs(30)),
+            None
+        );
+        // Still inside the total budget, but macOS has said nothing for longer
+        // than a large download goes quiet.
+        assert_eq!(
+            install_wait_expiry(Duration::from_secs(5 * 60), INSTALL_PROGRESS_IDLE),
+            Some(InstallWaitExpiry::NoProgress)
+        );
+        // Reporting progress the whole time, but past the outer bound.
+        assert_eq!(
+            install_wait_expiry(INSTALL_TOTAL_BUDGET, Duration::from_secs(1)),
+            Some(InstallWaitExpiry::TotalBudget)
+        );
+        assert!(INSTALL_PROGRESS_IDLE < INSTALL_TOTAL_BUDGET);
+        for expiry in [
+            InstallWaitExpiry::NoProgress,
+            InstallWaitExpiry::TotalBudget,
+        ] {
+            // The reader is looking at a spinner; the message has to say what
+            // happened and what to do next.
+            assert!(expiry.message().contains("System Settings"));
+        }
+    }
+
+    /// A cancel that arrived while nothing was installing must not cancel the
+    /// install the reader asks for next.
+    #[test]
+    fn a_stale_cancel_does_not_stop_the_next_install() {
+        cancel_language_install();
+        assert!(take_install_cancellation());
+        assert!(!take_install_cancellation());
+    }
+
+    /// `child.wait()` is unbounded: a helper that ignored its stdin close, or
+    /// wedged after closing stdout, kept the task alive for the life of the
+    /// app. Proven against a stub child rather than the real helper, which
+    /// cannot be pointed somewhere else on purpose.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_helper_that_will_not_exit_is_killed_rather_than_waited_on() {
+        let mut child = TokioCommand::new("/bin/sleep")
+            .arg("600")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn a stub helper that never exits on its own");
+
+        let started = Instant::now();
+        let status = reap_helper_within(&mut child, Duration::from_millis(200)).await;
+
+        assert!(
+            status.is_some(),
+            "a helper that will not exit must be killed and reaped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the wait must be bounded, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The shape the install and live loops rely on: a helper that says
+    /// nothing has to fall out of the read rather than parking the task.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn a_silent_helper_times_out_instead_of_blocking_the_reader() {
+        let mut child = TokioCommand::new("/bin/sleep")
+            .arg("600")
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn a stub helper that emits nothing");
+        let stdout = child.stdout.take().expect("stub helper stdout");
+        let mut lines = BufReader::new(stdout).lines();
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), lines.next_line())
+                .await
+                .is_err(),
+            "a silent helper must expire the read rather than return"
+        );
+
+        let _ = child.kill().await;
+        assert!(reap_helper_within(&mut child, Duration::from_secs(5))
+            .await
+            .is_some());
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

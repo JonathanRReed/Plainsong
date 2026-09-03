@@ -10,6 +10,22 @@ import {
   getAsrProviderInventory,
   listDownloadedModels,
 } from "@/lib/backend/asr";
+import {
+  cancelAppleSpeechLanguageInstall,
+  installAppleSpeechLanguage,
+} from "@/lib/backend/settings";
+import {
+  deleteBundledCleanupModel,
+  deleteLivePreviewEngineModel,
+  downloadBundledCleanupModel,
+  downloadLivePreviewEngineModel,
+  getAppleLanguageModelAvailability,
+  getBundledCleanupModelStatus,
+  getLivePreviewEngineStatus,
+  type AppleLanguageModelAvailability,
+  type BundledCleanupModelStatus,
+  type LivePreviewEngineStatus,
+} from "@/lib/backend/ai";
 import { listen } from "@/lib/electron";
 import type { AsrProviderInventory } from "@/types";
 import type { Settings } from "@/types/settings";
@@ -35,9 +51,14 @@ import {
   withSpeechLaneRoute,
   type SpeechLane,
 } from "@/components/models/model-selection";
+import { LivePreviewEngineRow } from "@/components/models/live-preview-engine-row";
 import { MoreModelsDrawer } from "@/components/models/more-models-drawer";
 import { PresetPicker } from "@/components/models/preset-picker";
 import { SpeechLaneRow } from "@/components/models/speech-lane-row";
+import {
+  AppleLanguageModelRow,
+  BundledCleanupModelRow,
+} from "@/components/models/zero-setup-model-row";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
 
@@ -67,7 +88,7 @@ const AI_LANE_COPY: Record<AiLaneKey, { label: string; help: string }> = {
   },
   dictationAi: {
     label: "Who cleans up dictation",
-    help: "Runs on every capture behind a short timeout, so a smaller, faster model usually wins here. A dictation mode that carries its own AI provider overrides this while that mode is selected.",
+    help: "Runs on every capture behind a short timeout, so a smaller, faster model usually wins here. Built-in needs nothing installed; Ollama and the cloud providers can also run custom modes and dictation commands. A dictation mode that carries its own AI provider overrides this while that mode is selected.",
   },
 };
 
@@ -95,6 +116,23 @@ export function ModelsScreen({
     null,
   );
   const [busyRouteId, setBusyRouteId] = useState<string | null>(null);
+  const [cancellingLanguageInstall, setCancellingLanguageInstall] =
+    useState(false);
+  const [bundledStatus, setBundledStatus] =
+    useState<BundledCleanupModelStatus | null>(null);
+  const [bundledBusy, setBundledBusy] = useState(false);
+  const [bundledProgress, setBundledProgress] = useState<number | null>(null);
+  const [bundledError, setBundledError] = useState<string | null>(null);
+  const [livePreviewStatus, setLivePreviewStatus] =
+    useState<LivePreviewEngineStatus | null>(null);
+  const [livePreviewBusy, setLivePreviewBusy] = useState(false);
+  const [livePreviewProgress, setLivePreviewProgress] = useState<number | null>(
+    null,
+  );
+  const [livePreviewError, setLivePreviewError] = useState<string | null>(null);
+  const [appleAvailability, setAppleAvailability] =
+    useState<AppleLanguageModelAvailability | null>(null);
+  const [appleChecking, setAppleChecking] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const mountedRef = useRef(true);
@@ -127,13 +165,203 @@ export function ModelsScreen({
     }
   }, []);
 
+  // Both zero-setup providers answer a cheap, local question, so they are
+  // read on mount rather than only when their row is on screen: the picker
+  // has to be able to say "Not available" the moment someone selects one.
+  const refreshBundledStatus = useCallback(async () => {
+    try {
+      const status = await getBundledCleanupModelStatus();
+      if (mountedRef.current) {
+        setBundledStatus(status);
+      }
+    } catch (error) {
+      // No measured state is better than an invented one.
+      console.warn("Failed to read the built-in cleanup model state:", error);
+      if (mountedRef.current) {
+        setBundledStatus(null);
+      }
+    }
+  }, []);
+
+  const refreshAppleAvailability = useCallback(async (force = false) => {
+    setAppleChecking(true);
+    try {
+      const availability = await getAppleLanguageModelAvailability(force);
+      if (mountedRef.current) {
+        setAppleAvailability(availability);
+      }
+    } catch (error) {
+      console.warn("Failed to probe the Apple on-device model:", error);
+      if (mountedRef.current) {
+        setAppleAvailability(null);
+      }
+    } finally {
+      if (mountedRef.current) {
+        setAppleChecking(false);
+      }
+    }
+  }, []);
+
   useEffect(() => {
     mountedRef.current = true;
     void refresh();
+    void refreshBundledStatus();
+    void refreshAppleAvailability();
     return () => {
       mountedRef.current = false;
     };
-  }, [refresh]);
+  }, [refresh, refreshBundledStatus, refreshAppleAvailability]);
+
+  // The sidecar emits weighted 0..100 progress across all four pinned files
+  // while `download_bundled_cleanup_model` runs. Without this the button can
+  // only say "Downloading…" for the whole ~484 MB, which reads as a hang.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen("model-download-progress", (payload) => {
+      if (disposed) {
+        return;
+      }
+      const update = payload as { modelName?: string; percentage?: number };
+      if (update?.modelName !== "bundled_cleanup") {
+        return;
+      }
+      if (typeof update.percentage === "number") {
+        setBundledProgress(update.percentage);
+      }
+    })
+      .then((dispose) => {
+        if (disposed) {
+          dispose?.();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch((error) => {
+        console.warn("Failed to subscribe to model-download-progress:", error);
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const refreshLivePreviewStatus = useCallback(async () => {
+    try {
+      const status = await getLivePreviewEngineStatus();
+      if (mountedRef.current) {
+        setLivePreviewStatus(status);
+      }
+    } catch {
+      // A sidecar that cannot answer leaves the row hidden rather than
+      // claiming an engine state it does not know.
+      if (mountedRef.current) {
+        setLivePreviewStatus(null);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLivePreviewStatus();
+  }, [refreshLivePreviewStatus]);
+
+  const handleLivePreviewDownload = useCallback(async () => {
+    setLivePreviewBusy(true);
+    setLivePreviewProgress(null);
+    setLivePreviewError(null);
+    try {
+      const status = await downloadLivePreviewEngineModel();
+      if (mountedRef.current) {
+        setLivePreviewStatus(status);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setLivePreviewError(
+          error instanceof Error
+            ? error.message
+            : "The download did not finish.",
+        );
+      }
+      void refreshLivePreviewStatus();
+    } finally {
+      if (mountedRef.current) {
+        setLivePreviewBusy(false);
+        setLivePreviewProgress(null);
+      }
+    }
+  }, [refreshLivePreviewStatus]);
+
+  const handleLivePreviewDelete = useCallback(async () => {
+    setLivePreviewBusy(true);
+    setLivePreviewError(null);
+    try {
+      const status = await deleteLivePreviewEngineModel();
+      if (mountedRef.current) {
+        setLivePreviewStatus(status);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setLivePreviewError(
+          error instanceof Error ? error.message : "Could not delete it.",
+        );
+      }
+      void refreshLivePreviewStatus();
+    } finally {
+      if (mountedRef.current) {
+        setLivePreviewBusy(false);
+      }
+    }
+  }, [refreshLivePreviewStatus]);
+
+  const handleBundledDownload = useCallback(async () => {
+    setBundledBusy(true);
+    setBundledProgress(null);
+    setBundledError(null);
+    try {
+      const status = await downloadBundledCleanupModel();
+      if (mountedRef.current) {
+        setBundledStatus(status);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setBundledError(
+          error instanceof Error
+            ? error.message
+            : "The download did not finish.",
+        );
+      }
+      void refreshBundledStatus();
+    } finally {
+      if (mountedRef.current) {
+        setBundledBusy(false);
+        setBundledProgress(null);
+      }
+    }
+  }, [refreshBundledStatus]);
+
+  const handleBundledDelete = useCallback(async () => {
+    setBundledBusy(true);
+    setBundledError(null);
+    try {
+      const status = await deleteBundledCleanupModel();
+      if (mountedRef.current) {
+        setBundledStatus(status);
+      }
+    } catch (error) {
+      if (mountedRef.current) {
+        setBundledError(
+          error instanceof Error ? error.message : "Could not delete it.",
+        );
+      }
+      void refreshBundledStatus();
+    } finally {
+      if (mountedRef.current) {
+        setBundledBusy(false);
+      }
+    }
+  }, [refreshBundledStatus]);
 
   // The sidecar applies each provider's model map while it saves, so download
   // state only becomes true after the write lands. Re-reading on the broadcast
@@ -326,6 +554,29 @@ export function ModelsScreen({
     [inventory, onPatchSettings],
   );
 
+  /**
+   * Stops a running language install.
+   *
+   * The sidecar kills the helper, so the in-flight `installAppleSpeechLanguage`
+   * call returns with a cancelled note and the row's own `finally` clears the
+   * busy state -- there is nothing to unwind here.
+   */
+  const handleCancelLanguageInstall = useCallback(async () => {
+    setCancellingLanguageInstall(true);
+    try {
+      await cancelAppleSpeechLanguageInstall();
+    } catch (error) {
+      setActionError(
+        error instanceof Error
+          ? error.message
+          : "Could not stop the language install.",
+      );
+      if (mountedRef.current) {
+        setCancellingLanguageInstall(false);
+      }
+    }
+  }, []);
+
   const handleApplyPreset = useCallback(
     (preset: ModelPreset) => {
       setActionError(null);
@@ -342,6 +593,32 @@ export function ModelsScreen({
 
       if (action === "connect_api_key") {
         onOpenKeySettings();
+        return;
+      }
+      if (action === "install_language") {
+        // macOS owns the download and its size; this only asks for it and
+        // then re-reads what the machine now has.
+        setBusyRouteId(route.routeId);
+        setCancellingLanguageInstall(false);
+        setActionError(null);
+        try {
+          const result = await installAppleSpeechLanguage();
+          if (result.notes.length > 0) {
+            setActionError(result.notes.join(" "));
+          }
+          await Promise.all([refresh(), refreshProductReadiness()]);
+        } catch (error) {
+          setActionError(
+            error instanceof Error
+              ? error.message
+              : `Could not install the language for ${route.label}.`,
+          );
+        } finally {
+          if (mountedRef.current) {
+            setBusyRouteId(null);
+            setCancellingLanguageInstall(false);
+          }
+        }
         return;
       }
       if (action !== "download") {
@@ -449,8 +726,22 @@ export function ModelsScreen({
                 onSelect={(route) => handleSelectRoute("dictation", route)}
                 onAction={(route) => void handleRouteAction(route)}
                 actionBusy={busyRouteId === activeDictationRoute?.routeId}
+                onCancelLanguageInstall={() =>
+                  void handleCancelLanguageInstall()
+                }
+                cancelLanguageInstallBusy={cancellingLanguageInstall}
                 readinessOverride={dictationReadinessOverride}
                 explainPauseBehavior
+              />
+              {/* Under the dictation lane on purpose: it is not a route the
+                  lane can select, it is an add-on to that lane's popup. */}
+              <LivePreviewEngineRow
+                status={livePreviewStatus}
+                busy={livePreviewBusy}
+                progressPercent={livePreviewProgress}
+                error={livePreviewError}
+                onDownload={() => void handleLivePreviewDownload()}
+                onDelete={() => void handleLivePreviewDelete()}
               />
             </div>
           )}
@@ -467,6 +758,10 @@ export function ModelsScreen({
                 onSelect={(route) => handleSelectRoute("meeting", route)}
                 onAction={(route) => void handleRouteAction(route)}
                 actionBusy={busyRouteId === activeMeetingRoute?.routeId}
+                onCancelLanguageInstall={() =>
+                  void handleCancelLanguageInstall()
+                }
+                cancelLanguageInstallBusy={cancellingLanguageInstall}
                 readinessOverride={meetingReadinessOverride}
                 explainPauseBehavior={false}
               />
@@ -485,6 +780,25 @@ export function ModelsScreen({
                 modelsLoading={aiModelsLoading}
                 onProviderChange={onAiProviderChange}
                 onModelChange={onAiModelChange}
+                zeroSetupSlot={
+                  settings.privacy[lane].provider === "bundled_local" ? (
+                    <BundledCleanupModelRow
+                      status={bundledStatus}
+                      busy={bundledBusy}
+                      progressPercent={bundledProgress}
+                      error={bundledError}
+                      onDownload={() => void handleBundledDownload()}
+                      onDelete={() => void handleBundledDelete()}
+                    />
+                  ) : settings.privacy[lane].provider ===
+                    "apple_language_model" ? (
+                    <AppleLanguageModelRow
+                      availability={appleAvailability}
+                      checking={appleChecking}
+                      onRecheck={() => void refreshAppleAvailability(true)}
+                    />
+                  ) : null
+                }
               />
             </div>
           ))}

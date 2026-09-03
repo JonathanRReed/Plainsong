@@ -6,4 +6,5 @@ export {
 } from "../backend";
 export type {
   ExportTemplate,
+  RecordingExportFormat,
 } from "../backend";

@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -47,6 +48,116 @@ describe("macOS Apple Speech helper contract", () => {
     );
     expect(buildScript).not.toMatch(
       /if\s*!source\.exists\(\)[\s\S]{0,160}return;/,
+    );
+  });
+
+  /**
+   * `@available(macOS 26, *)` guards the runtime only. The symbols behind it
+   * still have to resolve while compiling, so an SDK older than macOS 26 fails
+   * the helper compile outright -- and `build.rs` calls
+   * `require_success("compile the required macOS Speech helper")`, so the whole
+   * app stops building on that machine.
+   */
+  it("compiles the SpeechAnalyzer section out when the SDK is too old", () => {
+    const helper = fs.readFileSync(
+      path.join(repoRoot, "rust-sidecar/native/macos_speech_helper.swift"),
+      "utf8",
+    );
+    const buildScript = fs.readFileSync(
+      path.join(repoRoot, "rust-sidecar/build.rs"),
+      "utf8",
+    );
+
+    expect(helper).toContain("#if !NO_SPEECH_ANALYZER");
+    // The fallback still has to answer the probe, and answer it honestly.
+    expect(helper).toMatch(
+      /#else[\s\S]{0,600}private func analyzerFactsForProbe\(locale: Locale\) -> AnalyzerFacts \{[\s\S]{0,200}return AnalyzerFacts\(\)/,
+    );
+    expect(buildScript).toContain('"--sdk", "macosx", "--show-sdk-version"');
+    expect(buildScript).toContain('swiftc_arguments.extend(["-D", "NO_SPEECH_ANALYZER"]);');
+    // Every `#if` has to close, or the compile-out variant silently keeps the
+    // symbols it was meant to drop.
+    const opened = helper.match(/^#if /gm)?.length ?? 0;
+    const closed = helper.match(/^#endif$/gm)?.length ?? 0;
+    expect(opened).toBeGreaterThan(0);
+    expect(closed).toBe(opened);
+  });
+
+  /**
+   * The only proof the older-SDK path actually builds: compile the helper with
+   * the guard forced off and check the binary reports what it can really do.
+   * Skipped off macOS, where there is no Swift toolchain to run.
+   */
+  it.skipIf(process.platform !== "darwin")(
+    "builds and probes honestly with the SpeechAnalyzer section removed",
+    () => {
+      const scratch = fs.mkdtempSync(
+        path.join(os.tmpdir(), "plainsong-speech-helper-test-"),
+      );
+      try {
+        const binary = path.join(scratch, "helper-no-speech-analyzer");
+        execFileSync(
+          "/usr/bin/xcrun",
+          [
+            "swiftc",
+            "-target",
+            "arm64-apple-macosx13.0",
+            "-D",
+            "NO_SPEECH_ANALYZER",
+            path.join(repoRoot, "rust-sidecar/native/macos_speech_helper.swift"),
+            "-framework",
+            "Speech",
+            "-framework",
+            "Foundation",
+            "-framework",
+            "AVFoundation",
+            "-o",
+            binary,
+          ],
+          { encoding: "utf8" },
+        );
+        const probe = JSON.parse(
+          execFileSync(binary, ["--probe"], { encoding: "utf8" }).trim(),
+        ) as { speech_analyzer_available: boolean; engine: string };
+
+        expect(probe.speech_analyzer_available).toBe(false);
+        expect(probe.engine).toBe("sf_speech_recognizer");
+      } finally {
+        fs.rmSync(scratch, { force: true, recursive: true });
+      }
+    },
+    180_000,
+  );
+
+  /**
+   * The helper is its own binary with its own Speech entitlement. The app's
+   * gate is not the only thing that has to hold: both SpeechAnalyzer branches
+   * exit the function without returning, so an authorization check that only
+   * lives inside `recognitionContext` never runs for them.
+   */
+  it("checks Speech authorization before either engine can transcribe", () => {
+    const helper = fs.readFileSync(
+      path.join(repoRoot, "rust-sidecar/native/macos_speech_helper.swift"),
+      "utf8",
+    );
+
+    expect(helper).toContain(
+      "private func requireSpeechAuthorization() -> SFSpeechRecognizerAuthorizationStatus",
+    );
+    for (const entryPoint of ["runFileRecognition", "runLiveRecognition"]) {
+      const start = helper.indexOf(`private func ${entryPoint}(`);
+      expect(start).toBeGreaterThan(-1);
+      const gate = helper.indexOf("requireSpeechAuthorization()", start);
+      const analyzerBranch = helper.indexOf("#if !NO_SPEECH_ANALYZER", start);
+      expect(gate).toBeGreaterThan(-1);
+      expect(analyzerBranch).toBeGreaterThan(-1);
+      expect(gate).toBeLessThan(analyzerBranch);
+    }
+    // The probe reports authorization; it must never demand it.
+    const probeStart = helper.indexOf("private func capabilityProbe(");
+    const probeEnd = helper.indexOf("\n}\n", probeStart);
+    expect(helper.slice(probeStart, probeEnd)).not.toContain(
+      "requireSpeechAuthorization()",
     );
   });
 

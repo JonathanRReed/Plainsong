@@ -11,6 +11,15 @@ export type AppleSpeechReadinessStatus =
   | "unknown_authorization"
   | "runtime_unavailable";
 
+/**
+ * Which Apple engine the route runs. `speech_analyzer` is macOS 26's
+ * SpeechAnalyzer: per-segment timestamps, volatile/finalized streaming, and
+ * nothing to download beyond the OS-managed language assets.
+ * `sf_speech_recognizer` is the older path, which returns no segment
+ * timestamps and so stays dictation-only.
+ */
+export type AppleSpeechEngine = "speech_analyzer" | "sf_speech_recognizer";
+
 export interface AppleSpeechReadiness {
   status: AppleSpeechReadinessStatus;
   ready: boolean;
@@ -23,10 +32,51 @@ export interface AppleSpeechReadiness {
   recognizerAvailable: boolean;
   message: string;
   setupAction?: string | null;
-  /** Whether the new SpeechAnalyzer API (macOS 26+) is available. */
+  /**
+   * Whether the helper can actually run SpeechAnalyzer here: the macOS 26+ API
+   * exists and the transcriber reports itself usable.
+   */
   speechAnalyzerAvailable: boolean;
+  /** Whether SpeechAnalyzer supports the probed locale at all. */
+  speechAnalyzerLocaleSupported: boolean;
+  /** Whether that locale's assets are already on disk. */
+  speechAnalyzerAssetsInstalled: boolean;
+  /**
+   * Raw asset state from macOS, plus the helper's `installed_not_allocated`
+   * case: macOS reports `installed` only once the locale is allocated to the
+   * process, and that allocation does not survive the helper exiting.
+   */
+  speechAnalyzerAssetStatus: string;
+  /** Every locale SpeechAnalyzer supports on this Mac. */
+  speechAnalyzerLocales: string[];
+  /** The subset of those whose assets macOS already has. */
+  speechAnalyzerInstalledLocales: string[];
+  /** The engine this route will run for the probed locale. */
+  engine: AppleSpeechEngine;
   /** The OS version string reported by the helper (e.g. "26.0.0"). */
   operatingSystemVersion?: string | null;
+}
+
+/** The result of asking macOS for one language's SpeechAnalyzer assets. */
+export interface AppleSpeechAssetInstall {
+  locale: string;
+  installed: boolean;
+  assetStatus: string;
+  engine: AppleSpeechEngine;
+}
+
+export interface AppleSpeechLanguageInstallResult {
+  install: AppleSpeechAssetInstall | null;
+  readiness: AppleSpeechReadiness;
+  notes: string[];
+}
+
+/** Progress from an in-flight language install, as the sidecar emits it. */
+export interface AppleSpeechLanguageInstallProgress {
+  stage: string;
+  locale: string;
+  fraction: number;
+  message: string;
 }
 
 export interface AsrProviderInfo {
@@ -127,7 +177,19 @@ export type AsrProviderType =
   | "openai_cloud"
   | "groq"
   | "cohere_transcribe"
-  | "qwen3_asr";
+  // The same Cohere Transcribe weights as `cohere_transcribe`, run locally on
+  // ONNX Runtime. Experimental, never a default: no language detection, and
+  // its segment times are estimated rather than measured.
+  | "cohere_local"
+  | "qwen3_asr"
+  | "deepgram"
+  | "gemini_transcribe"
+  // The transcribe.cpp spike route. The sidecar only reports it when it was
+  // built with `--features asr-transcribe-cpp` (off by default and absent from
+  // the release feature list), so no shipped build ever sends it -- but the
+  // renderer has to be able to render it honestly when a developer build does,
+  // instead of dropping an unknown provider out of the picker.
+  | "transcribe_cpp";
 
 // LLM Types
 export interface LlmAnalysisResult {

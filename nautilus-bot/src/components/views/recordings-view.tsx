@@ -11,20 +11,27 @@ import { Textarea } from "@/components/ui/textarea";
 import { useRecordings } from "@/hooks/use-recordings";
 import { useRecording } from "@/hooks/use-recording";
 import { useRecordingDetail } from "@/hooks/use-recording-detail";
+import { AudioPlayer, type AudioPlayerHandle } from "@/components/meetings/audio-player";
 import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
 import { useToast } from "@/components/toast";
 import { ConsentDialog } from "@/components/recording-overlay";
 import {
-  TranscriptViewer,
   TranscriptSearch,
+  type SpeakerVoiceState,
   type TranscriptMatch,
   type TranscriptProvenance,
 } from "@/components/transcript-viewer";
+import { PlayheadTranscriptViewer } from "@/components/meetings/playhead-transcript-viewer";
+import { usePlayheadStore } from "@/lib/playhead-store";
 import {
   isCloudProvider,
   isKnownAsrProvider,
   providerHostingPreference,
 } from "@/lib/asr-capabilities";
+import {
+  describeMeetingDiarizer,
+  describeMeetingDiarizerDetail,
+} from "@/lib/meeting-diarizer";
 import { cn } from "@/lib/utils";
 import { RecordingWaveform, WaveformVisualizer } from "@/components/waveform-visualizer";
 import { AiAnalysisPanel } from "@/components/ai-analysis-panel";
@@ -41,8 +48,10 @@ import {
   editTranscriptSpeakerTurn,
   getMeetingChatMessages,
   getRecording,
+  importAudioFile,
   openRecordingAudio,
   renameRecording,
+  updateRecordingAttendees,
   acknowledgeIncompleteTranscript,
   retranscribeRecording,
   retryMeetingAnalysis,
@@ -55,7 +64,15 @@ import {
   updateRecordingTemplate,
 } from "@/lib/backend/recordings";
 import { exportRecordingV2, openExportPath } from "@/lib/backend/exports";
-import { isDiarizationModelAvailable, renameSpeaker, runDiarization } from "@/lib/backend/asr";
+import {
+  isDiarizationModelAvailable,
+  rejectSpeakerVoice,
+  rememberSpeakerVoice,
+  renameSpeaker,
+  runDiarization,
+  suggestSpeakerVoices,
+} from "@/lib/backend/asr";
+import { resolveMeetingsSettings } from "@/lib/settings-sections";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import type {
   CompanyMemoryProfile,
@@ -129,7 +146,17 @@ import {
 } from "@/lib/meeting-analysis-status";
 import { StatusBanner } from "@/components/ui/status-banner";
 import { CalendarMeetingCue } from "@/components/meetings/calendar-meeting-cue";
-import type { CalendarCapturePrefill } from "@/lib/calendar-events";
+import { MeetingAttendees } from "@/components/meetings/meeting-attendees";
+import { attendeeNameSuggestions, type MeetingAttendee } from "@/lib/attendees";
+import { DetectedCallCue } from "@/components/meetings/detected-call-cue";
+import { storedVideoServiceLabel } from "@/lib/calendar-events";
+import { buildDetectedCallCapturePrefill } from "@/lib/detected-call";
+import {
+  meetingCapturePrefillFromCalendarEvent,
+  meetingCapturePrefillFromDetectedCall,
+  type MeetingCapturePrefill,
+} from "@/lib/meeting-capture-prefill";
+import { subscribeCallCaptureRequests } from "@/lib/call-capture-request";
 import {
   canRecheckMeetingAudio,
   describeCaptureDegradation,
@@ -137,6 +164,7 @@ import {
   readMeetingIntegrity,
 } from "@/lib/meeting-recovery";
 import { actionItemsToMarkdownList } from "@/lib/markdown";
+import { ActionItemList } from "@/components/views/meetings/action-item-list";
 import { DocumentField } from "@/components/views/meetings/document-field";
 import { AudioIssueBanner } from "@/components/views/meetings/audio-issue-banner";
 import { EditableTitle } from "@/components/views/meetings/editable-title";
@@ -158,10 +186,12 @@ import {
   FileAudio,
   FileOutput,
   FileText,
+  FolderOpen,
   MessageSquare,
   Loader2,
   Mic2,
   MoreHorizontal,
+  Pause,
   Plus,
   Play,
   RefreshCw,
@@ -174,6 +204,8 @@ import {
 } from "lucide-react";
 import type { AnalysisTemplate } from "@/types";
 import type { AsrProviderType, LlmCitation, SearchHit } from "@/types";
+import { MEETING_CAPTURE_MODE_IMPORTED } from "@/types";
+import { formatDate, formatDateTime } from "@/lib/format-locale";
 
 const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   {
@@ -404,6 +436,8 @@ const CLOUD_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   openai_cloud: "OpenAI",
   groq: "Groq",
   cohere_transcribe: "Cohere",
+  deepgram: "Deepgram Nova",
+  gemini_transcribe: "Gemini Transcribe",
 };
 
 /**
@@ -462,9 +496,13 @@ function buildMeetingShareMarkdown(args: {
   templateLabel: string;
   includeTranscript: boolean;
 }): string {
+  // The service line only appears when the meeting actually began from
+  // something that named one — a calendar event or a detected call.
+  const serviceLabel = storedVideoServiceLabel(args.recording.videoService);
   const sections = [
     `# ${args.recording.title}`,
-    `- Date: ${new Date(args.recording.createdAt).toLocaleString()}`,
+    `- Date: ${formatDateTime(args.recording.createdAt)}`,
+    ...(serviceLabel ? [`- Service: ${serviceLabel}`] : []),
     `- Capture mode: ${args.captureMode}`,
     `- Template: ${args.templateLabel}`,
     `- Consent: ${args.consentLabel}`,
@@ -489,6 +527,13 @@ function resolveRecordingCaptureMode(
   details: MeetingTranscriptDetails | null,
   fallbackSystemAudio = false
 ): string {
+  // An imported file has no microphone side and no system side, so this is
+  // checked before the transcript's source mode: "Single track" would be
+  // technically true and completely uninformative.
+  if (recording?.meetingCaptureMode === MEETING_CAPTURE_MODE_IMPORTED) {
+    return "Imported file";
+  }
+
   const sourceMode = formatSourceMode(details);
   if (sourceMode !== "Unknown") {
     return sourceMode;
@@ -1003,21 +1048,27 @@ export function RecordingsView() {
   const {
     startMeeting,
     stopMeeting,
+    pauseMeeting,
+    resumeMeeting,
     isRecording,
     recordingId,
     formattedDuration,
     meetingPhase = "idle",
     meetingMessage = null,
+    meetingPaused = false,
   } = useRecording();
   const { toast } = useToast();
   const [recordingStatusOverrides, setRecordingStatusOverrides] = useState<
     Record<string, Recording["status"]>
   >({});
   const [showConsent, setShowConsent] = useState(false);
-  // Set only by the calendar affordance, consumed by the start that follows it.
-  // A ref rather than state because nothing renders from it: it is read once,
-  // after the meeting exists, to give the recording the event's name.
-  const pendingCalendarPrefill = useRef<CalendarCapturePrefill | null>(null);
+  // Set only by the calendar or detected-call affordance, consumed by the
+  // start that follows it. A ref rather than state because nothing renders
+  // from it: it is read once the reader answers the consent sheet, to give the
+  // recording the event's (or the call's) name and service, and to tell the
+  // sidecar which detected call this capture is the answer to.
+  const pendingCalendarPrefill = useRef<MeetingCapturePrefill | null>(null);
+  const [isTogglingPause, setIsTogglingPause] = useState(false);
   const [showRecordingDetail, setShowRecordingDetail] = useState(false);
   // Opening a meeting and coming back are navigations between two pages that
   // never coexist. Each page's h1 takes focus on arrival; otherwise focus is
@@ -1041,9 +1092,14 @@ export function RecordingsView() {
   const [transcriptMatches, setTranscriptMatches] = useState<TranscriptMatch[]>([]);
   const [activeTranscriptMatchIndex, setActiveTranscriptMatchIndex] = useState(0);
   // Where the reader is in the transcript. Set by a segment click, by keyboard
-  // stepping, by a search hit, and by a citation's "jump to source" — it is a
-  // reading position, not audio playback, which this build cannot drive.
-  const [transcriptCueTime, setTranscriptCueTime] = useState<number | undefined>(undefined);
+  // stepping, by a search hit, by a citation's "jump to source", and — while
+  // the meeting's audio plays — by the playhead, a few times a second. Held
+  // outside React state on purpose: as view state, every one of those playback
+  // ticks re-rendered this whole view to move one highlight. Only the
+  // transcript subscribes.
+  const playhead = usePlayheadStore();
+  // The in-app player, so a transcript click or a citation can seek the audio.
+  const audioPlayerRef = useRef<AudioPlayerHandle | null>(null);
   // A deep link names both a query and the moment it was found at. The hits
   // only exist once the transcript has loaded, so the requested moment is
   // parked here and spent on the first report that actually has hits in it.
@@ -1078,6 +1134,13 @@ export function RecordingsView() {
   const [customMeetingTemplates, setCustomMeetingTemplates] = useState<
     CustomMeetingTemplate[]
   >([]);
+  // Voiceprints. Empty and off until the setting says otherwise, so the
+  // transcript looks exactly as it did before the feature existed.
+  const [rememberVoicesEnabled, setRememberVoicesEnabled] = useState(false);
+  const [speakerVoices, setSpeakerVoices] = useState<
+    Record<string, SpeakerVoiceState>
+  >({});
+  const [speakerNameOptions, setSpeakerNameOptions] = useState<string[]>([]);
   const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
   // null while creating a new template; the template being edited otherwise.
   const [templateEditorTarget, setTemplateEditorTarget] =
@@ -1216,6 +1279,10 @@ export function RecordingsView() {
   const [meetingStartFailure, setMeetingStartFailure] =
     useState<MeetingStartFailure | null>(null);
   const [isBulkReclassifying, setIsBulkReclassifying] = useState(false);
+  // "Import audio…": true from the click until the sidecar has decoded the
+  // file and saved it. Transcription runs after that and reports itself
+  // through the same processing states a stopped meeting uses.
+  const [isImportingAudio, setIsImportingAudio] = useState(false);
   const [isExportingMeeting, setIsExportingMeeting] = useState(false);
   const [isRefreshingTranscriptPanel, setIsRefreshingTranscriptPanel] =
     useState(false);
@@ -1281,6 +1348,7 @@ export function RecordingsView() {
         .then((settings) => {
           if (!disposed) {
             setCustomMeetingTemplates(settings.transcription.meetingCustomTemplates ?? []);
+            setRememberVoicesEnabled(resolveMeetingsSettings(settings).rememberVoices);
           }
         })
         .catch((error) => {
@@ -1691,6 +1759,116 @@ export function RecordingsView() {
       cancelled = true;
     };
   }, []);
+
+  /**
+   * Ask the sidecar what it recognizes in this meeting's speaker clusters.
+   *
+   * Returns `enabled: false` (and so an empty map) whenever "Remember voices"
+   * is off, which is how the chips disappear entirely rather than sitting
+   * there disabled. Never throws into the caller: a failed suggestion is a
+   * missing chip, not a broken transcript.
+   */
+  const refreshSpeakerVoices = useCallback(async (recordingId: string) => {
+    try {
+      const result = await suggestSpeakerVoices(recordingId);
+      const next: Record<string, SpeakerVoiceState> = {};
+      if (result.enabled) {
+        for (const cluster of result.clusters) {
+          next[cluster.speakerId] = {
+            matchState: cluster.matchState,
+            suggestion: cluster.suggestion
+              ? {
+                  profileId: cluster.suggestion.profileId,
+                  displayName: cluster.suggestion.displayName,
+                  percent: cluster.suggestion.percent,
+                }
+              : null,
+          };
+        }
+      }
+      setSpeakerVoices(next);
+      // Attendees first, then remembered voices — the sidecar has already
+      // ranked them, so this side does not re-decide the order.
+      setSpeakerNameOptions(result.enabled ? result.nameOptions : []);
+    } catch (error) {
+      console.warn("Failed to load remembered-voice suggestions:", error);
+      setSpeakerVoices({});
+      setSpeakerNameOptions([]);
+    }
+  }, []);
+
+  // Re-asked whenever the open meeting changes. Cheap: it compares stored
+  // centroids, it does not re-run the embedder over the audio.
+  useEffect(() => {
+    if (!selectedRecording) {
+      setSpeakerVoices({});
+      setSpeakerNameOptions([]);
+      return;
+    }
+    void refreshSpeakerVoices(selectedRecording.id);
+  }, [selectedRecording, refreshSpeakerVoices]);
+
+  // And whenever a remembered voice is forgotten. "Delete all" in Settings
+  // used to leave the open transcript offering names for voices that no
+  // longer existed until the reader navigated away and back.
+  useEffect(() => {
+    if (!selectedRecording) {
+      return;
+    }
+    const recordingId = selectedRecording.id;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      const stop = await listen("remembered-voices-changed", () => {
+        void refreshSpeakerVoices(recordingId);
+      });
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [selectedRecording, refreshSpeakerVoices]);
+
+  const handleConfirmSpeakerVoice = async (speakerId: string, profileId: string) => {
+    if (!selectedRecording) {
+      return;
+    }
+    try {
+      const { displayName } = await rememberSpeakerVoice({
+        recordingId: selectedRecording.id,
+        speakerId,
+        profileId,
+      });
+      setSpeakerNames((prev) => ({ ...prev, [speakerId]: displayName }));
+      await refreshSpeakerVoices(selectedRecording.id);
+      toast(`Speaker named ${displayName}.`, "success");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Couldn't confirm that voice.";
+      toast(message, "error");
+      throw error;
+    }
+  };
+
+  const handleRejectSpeakerVoice = async (speakerId: string, profileId: string) => {
+    if (!selectedRecording) {
+      return;
+    }
+    try {
+      await rejectSpeakerVoice(selectedRecording.id, speakerId, profileId);
+      await refreshSpeakerVoices(selectedRecording.id);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Couldn't dismiss that suggestion.";
+      toast(message, "error");
+      throw error;
+    }
+  };
 
   const handleRefreshTranscriptPanel = async () => {
     if (!selectedRecording) {
@@ -2284,7 +2462,7 @@ export function RecordingsView() {
     setSearchQuery(focus?.highlightQuery ?? "");
     setTranscriptMatches([]);
     setActiveTranscriptMatchIndex(0);
-    setTranscriptCueTime(focus?.segmentTime);
+    playhead.set(focus?.segmentTime);
     // Which hit the reader asked for: the one at the moment they clicked, not
     // whichever occurrence happens to come first in the meeting.
     pendingMatchFocusTimeRef.current =
@@ -2340,7 +2518,7 @@ export function RecordingsView() {
       });
   };
 
-  const openMeetingCapture = (calendarPrefill?: CalendarCapturePrefill) => {
+  const openMeetingCapture = (calendarPrefill?: MeetingCapturePrefill) => {
     if (!captureIsReady) {
       const cause = meetingCaptureReadiness.cause;
       toast(
@@ -2358,6 +2536,33 @@ export function RecordingsView() {
     pendingCalendarPrefill.current = calendarPrefill ?? null;
     setShowConsent(true);
   };
+
+  // `plainsong://meeting/start` (electron/main.ts) lands here: the same
+  // readiness gate and the same consent sheet as the New meeting button, and
+  // nothing records until the person clicks Start on that sheet. The ref keeps
+  // one subscription for the component's life while always calling the
+  // current closure.
+  const openMeetingCaptureRef = useRef(openMeetingCapture);
+  openMeetingCaptureRef.current = openMeetingCapture;
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("meeting-start-requested", () => {
+      if (!disposed) {
+        openMeetingCaptureRef.current();
+      }
+    }).then((dispose) => {
+      if (disposed) {
+        dispose?.();
+        return;
+      }
+      unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   const handleStartRecording = async (options: { mic: boolean; systemAudio: boolean; template?: string }) => {
     const requestedReadiness = options.systemAudio
@@ -2385,10 +2590,16 @@ export function RecordingsView() {
       const seededNotes = shouldSeedTemplateOutline
         ? buildMeetingTemplateOutline(options.template, customMeetingTemplates)
         : liveMeetingNotes;
+      // Read before the start, not after it: the call id and the service are
+      // decisions the capture is started WITH, unlike the title, which is
+      // applied to the recording once it exists.
+      const prefill = pendingCalendarPrefill.current;
       const startedId = await startMeeting({
         ...options,
         projectId: "default",
         meetingNotes: seededNotes.trim() || undefined,
+        detectedCallId: prefill?.detectedCallId ?? undefined,
+        videoService: prefill?.videoService ?? undefined,
       });
       if (startedId) {
         setLiveMeetingNotes(seededNotes);
@@ -2404,12 +2615,21 @@ export function RecordingsView() {
         // `auto_name_meeting_recording` only overwrites a PLACEHOLDER title,
         // so an event's name survives the analysis pass. A failure here loses
         // the name and nothing else, which is why it does not fail the start.
-        const prefill = pendingCalendarPrefill.current;
         if (prefill) {
           try {
             await renameRecording(startedId, prefill.title);
           } catch (error) {
             console.error("Failed to apply the calendar meeting title:", error);
+          }
+          // Same shape as the rename above: applied after the start, so a
+          // failure costs the attendee list and nothing else. The meeting is
+          // already recording by this point and must not be undone for it.
+          if (prefill.attendees.length > 0) {
+            try {
+              await updateRecordingAttendees(startedId, prefill.attendees);
+            } catch (error) {
+              console.error("Failed to store the calendar attendee list:", error);
+            }
           }
         }
         void refetch();
@@ -2466,6 +2686,101 @@ export function RecordingsView() {
     }
   };
 
+  /**
+   * Import an existing audio file as a meeting.
+   *
+   * There is no consent step: nobody is being recorded, the audio already
+   * exists, and asking the reader to confirm a notice they cannot send to a
+   * meeting that already happened would be theatre. The native picker itself
+   * is the user gesture Electron requires.
+   */
+  const handleImportAudioFile = async () => {
+    setIsImportingAudio(true);
+    try {
+      const imported = await importAudioFile();
+      if (!imported) {
+        // The picker was dismissed. Nothing happened, so say nothing.
+        return;
+      }
+      await refetch();
+      toast(
+        `Importing ${imported.sourceFileName}. Transcription is running now.`,
+        "success",
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : "Plainsong could not import that audio file.",
+        "error",
+      );
+    } finally {
+      setIsImportingAudio(false);
+    }
+  };
+
+  const handleTogglePause = useCallback(async () => {
+    if (!isRecording || isTogglingPause) return;
+    setIsTogglingPause(true);
+    try {
+      if (meetingPaused) {
+        await resumeMeeting();
+      } else {
+        await pauseMeeting();
+      }
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : meetingPaused
+            ? "Plainsong could not resume this meeting."
+            : "Plainsong could not pause this meeting.",
+        "error",
+      );
+    } finally {
+      setIsTogglingPause(false);
+    }
+  }, [isRecording, isTogglingPause, meetingPaused, pauseMeeting, resumeMeeting, toast]);
+
+  // ⌘⇧P / Ctrl+Shift+P pauses and resumes the live meeting from anywhere in
+  // this view, except while typing: the notes box is where the reader's
+  // hands are during a meeting, and a shortcut must not fire out of it.
+  useEffect(() => {
+    if (!isRecording) return;
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.altKey) return;
+      if (event.key.toLowerCase() !== "p") return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      void handleTogglePause();
+    };
+    window.addEventListener("keydown", handleKeydown);
+    return () => window.removeEventListener("keydown", handleKeydown);
+  }, [handleTogglePause, isRecording]);
+
+  // A clicked "Zoom call started" notification lands here: the consent
+  // dialog opens with the call's name filled in, and nothing else happens
+  // until the reader answers it.
+  useEffect(() => {
+    return subscribeCallCaptureRequests((request) => {
+      const prefill = buildDetectedCallCapturePrefill(request);
+      if (prefill) {
+        openMeetingCapture(meetingCapturePrefillFromDetectedCall(prefill));
+      }
+    });
+    // openMeetingCapture reads readiness at call time; re-subscribing on
+    // every render would re-deliver nothing but is wasteful.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleRecordingClick = (recording: Recording) => {
     openMeetingWorkspace(recording);
   };
@@ -2502,16 +2817,41 @@ export function RecordingsView() {
     });
   };
 
-  const handleRenameSpeaker = async (speakerId: string, newName: string) => {
+  const handleRenameSpeaker = async (
+    speakerId: string,
+    newName: string,
+    remember?: boolean
+  ) => {
     if (!selectedRecording) {
       const error = new Error("No recording is open for speaker renaming.");
       toast(error.message, "error");
       throw error;
     }
 
+    // Remembering needs a voice signature for this cluster, and only clusters
+    // that have one appear in `speakerVoices`. A meeting diarized before the
+    // feature was turned on has none, and the sidecar refuses -- which used to
+    // mean the rename failed outright rather than falling back to the plain
+    // one the reader actually asked for.
+    const canRemember = Boolean(remember && speakerVoices[speakerId]);
     try {
+      if (canRemember) {
+        // One call: it renames the speaker through the same path below and
+        // stores the voice, so the two can never disagree.
+        await rememberSpeakerVoice({
+          recordingId: selectedRecording.id,
+          speakerId,
+          name: newName,
+        });
+        setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
+        await refreshSpeakerVoices(selectedRecording.id);
+        return;
+      }
       await renameSpeaker(selectedRecording.id, speakerId, newName);
       setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
+      // A rename clears the voice link and the "auto" marker in the sidecar,
+      // so the header has to stop saying "auto" without a reload.
+      await refreshSpeakerVoices(selectedRecording.id);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Couldn't rename this speaker.";
@@ -3161,6 +3501,25 @@ export function RecordingsView() {
 
   // The title is edited where it is read, in the workspace header. It is the
   // same write the row's Rename dialog performs.
+  const handleAttendeesChange = async (next: MeetingAttendee[]) => {
+    if (!selectedRecording) {
+      return;
+    }
+    const recordingId = selectedRecording.id;
+    try {
+      // Render what the sidecar stored, not what was sent: it sanitizes the
+      // list (duplicates dropped, fields clipped) and the header must show
+      // the version that is actually on disk.
+      const stored = await updateRecordingAttendees(recordingId, next);
+      setSelectedRecording((current) =>
+        current?.id === recordingId ? { ...current, attendees: stored } : current,
+      );
+    } catch (error) {
+      console.error("Failed to update the attendee list:", error);
+      toast("Couldn't save that attendee change.", "error");
+    }
+  };
+
   const handleRenameMeetingTitle = async (nextTitle: string) => {
     if (!selectedRecording) {
       return;
@@ -3211,7 +3570,7 @@ export function RecordingsView() {
         (activeTranscriptMatchIndex + direction + transcriptMatches.length) %
         transcriptMatches.length;
       setActiveTranscriptMatchIndex(nextIndex);
-      setTranscriptCueTime(transcriptMatches[nextIndex].startTime);
+      playhead.set(transcriptMatches[nextIndex].startTime);
     },
     [activeTranscriptMatchIndex, transcriptMatches]
   );
@@ -3354,7 +3713,7 @@ export function RecordingsView() {
         // a formatted date, which is all this used to look at.
         const haystack = [
           meeting.title,
-          new Date(meeting.createdAt).toLocaleString(),
+          formatDateTime(meeting.createdAt),
           meeting.meetingNotes ?? "",
           meeting.summary ?? "",
           ...(meeting.actionItems ?? []),
@@ -3425,6 +3784,19 @@ export function RecordingsView() {
       resolveRecordingCaptureMode(activeMeeting, null, liveMeetingSystemAudio),
     [activeMeeting, liveMeetingSystemAudio]
   );
+  // Which diarizer produced the speaker badges, from what was recorded when
+  // they were written -- never inferred from the ASR provider, because a
+  // provider-diarization attempt that fell back to the local pipeline would
+  // then be credited to the provider.
+  const selectedMeetingDiarizer = useMemo(
+    () => describeMeetingDiarizer(selectedTranscriptDetails),
+    [selectedTranscriptDetails]
+  );
+  const selectedMeetingDiarizerDetail = useMemo(
+    () => describeMeetingDiarizerDetail(selectedTranscriptDetails),
+    [selectedTranscriptDetails]
+  );
+
   const selectedMeetingCaptureMode = useMemo(
     () =>
       resolveRecordingCaptureMode(
@@ -3529,7 +3901,10 @@ export function RecordingsView() {
     setTranscriptMatches([]);
     setActiveTranscriptMatchIndex(0);
     pendingMatchFocusTimeRef.current = null;
-    setTranscriptCueTime(typeof startTime === "number" ? startTime : undefined);
+    playhead.set(typeof startTime === "number" ? startTime : undefined);
+    if (typeof startTime === "number") {
+      audioPlayerRef.current?.seekTo(startTime);
+    }
   }, []);
   const selectedMeetingRelationshipMatches = useMemo(() => {
     if (!selectedRecording || !relationshipMemory) {
@@ -4062,8 +4437,8 @@ export function RecordingsView() {
                     }
                   }}
                 >
-                  <Play className="mr-2 h-4 w-4" />
-                  Play audio
+                  <ExternalLink className="mr-2 h-4 w-4" />
+                  Open audio file
                 </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
@@ -4178,13 +4553,23 @@ export function RecordingsView() {
             <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-muted-foreground">
               <span className="time-spec">
                 {selectedRecording
-                  ? new Date(selectedRecording.createdAt).toLocaleString()
+                  ? formatDateTime(selectedRecording.createdAt)
                   : "Date unknown"}
               </span>
               <span className="time-spec">
                 {formatDuration(selectedRecording?.duration ?? 0)}
               </span>
               <span>{selectedMeetingCaptureMode}</span>
+              {selectedMeetingDiarizer ? (
+                <span title={selectedMeetingDiarizerDetail ?? undefined}>
+                  {selectedMeetingDiarizer}
+                </span>
+              ) : null}
+              {/* The meeting can be renamed; the file it came from cannot, so
+                  the provenance is stated separately from the title. */}
+              {selectedRecording?.importedSourceName ? (
+                <span>From {selectedRecording.importedSourceName}</span>
+              ) : null}
               <span className="inline-flex items-center gap-1.5">
                 <span
                   className={cn(
@@ -4209,6 +4594,11 @@ export function RecordingsView() {
                 {selectedMeetingConsent.message}
               </p>
             ) : null}
+            <MeetingAttendees
+              attendees={selectedRecording?.attendees ?? []}
+              onChange={(next) => void handleAttendeesChange(next)}
+              disabled={!selectedRecording}
+            />
           </div>
 
           {/* What the capture actually got. Rendered before anything derived
@@ -4502,6 +4892,9 @@ export function RecordingsView() {
                                 label="Action items"
                                 value={meetingActionItemsText}
                                 renderValue={actionItemsToMarkdownList(selectedMeetingActionItems)}
+                                renderBody={
+                                  <ActionItemList items={selectedMeetingActionItems} />
+                                }
                                 onChange={(next) => {
                                   setMeetingActionItemsText(next);
                                   setUserEditedActionItemsText(next);
@@ -4610,9 +5003,7 @@ export function RecordingsView() {
                                       <p className="mt-1 font-mono text-xs text-muted-foreground">
                                         {selectedRecording.summaryProvenance.actualProvider} ·{" "}
                                         {selectedRecording.summaryProvenance.actualModel} · finished{" "}
-                                        {new Date(
-                                          selectedRecording.summaryProvenance.completedAt
-                                        ).toLocaleString()}
+                                        {formatDateTime(selectedRecording.summaryProvenance.completedAt)}
                                       </p>
                                     ) : null}
                                     {!summaryProvenance.grounded ||
@@ -4664,9 +5055,7 @@ export function RecordingsView() {
                                       <p className="mt-1 font-mono text-xs text-muted-foreground">
                                         {selectedRecording.actionItemsProvenance.actualProvider} ·{" "}
                                         {selectedRecording.actionItemsProvenance.actualModel} · finished{" "}
-                                        {new Date(
-                                          selectedRecording.actionItemsProvenance.completedAt
-                                        ).toLocaleString()}
+                                        {formatDateTime(selectedRecording.actionItemsProvenance.completedAt)}
                                       </p>
                                     ) : null}
                                     <div className="mt-1.5 space-y-3">
@@ -4916,7 +5305,7 @@ export function RecordingsView() {
                                 {enhancedMeetingNotesDraft ? (
                                   <p className="mt-2 text-sm text-muted-foreground">
                                     Generated{" "}
-                                    {new Date(enhancedMeetingNotesDraft.generatedAt).toLocaleString()}.
+                                    {formatDateTime(enhancedMeetingNotesDraft.generatedAt)}.
                                   </p>
                                 ) : null}
                               </div>
@@ -5079,7 +5468,7 @@ export function RecordingsView() {
                                         <p className="text-sm font-medium">{person.name}</p>
                                         <p className="time-spec mt-1 text-sm text-muted-foreground">
                                           {person.recordingCount} meetings · last seen{" "}
-                                          {new Date(person.lastSeenAt).toLocaleDateString()}
+                                          {formatDate(person.lastSeenAt)}
                                         </p>
                                         {person.recentMeetings[0] ? (
                                           <p className="mt-2 text-sm text-muted-foreground">
@@ -5093,7 +5482,7 @@ export function RecordingsView() {
                                         <p className="text-sm font-medium">{company.name}</p>
                                         <p className="time-spec mt-1 text-sm text-muted-foreground">
                                           {company.recordingCount} meetings · last seen{" "}
-                                          {new Date(company.lastSeenAt).toLocaleDateString()}
+                                          {formatDate(company.lastSeenAt)}
                                         </p>
                                         {company.recentMeetings[0] ? (
                                           <p className="mt-2 text-sm text-muted-foreground">
@@ -5534,7 +5923,7 @@ export function RecordingsView() {
                             <span className="text-muted-foreground">Recorded:</span>{" "}
                             <span className="time-spec font-medium">
                               {selectedRecording?.createdAt
-                                ? new Date(selectedRecording.createdAt).toLocaleString()
+                                ? formatDateTime(selectedRecording.createdAt)
                                 : "Unknown"}
                             </span>
                           </p>
@@ -5679,9 +6068,24 @@ export function RecordingsView() {
                     </span>
                   </div>
                   <p className="mb-3 max-w-prose text-sm text-muted-foreground">
-                    Click a line to mark your place; the text stays selectable. Double-click it, or
-                    use Edit, to correct it. Arrow keys move line by line.
+                    Click a line to mark your place; with audio loaded, playback jumps there too.
+                    The text stays selectable. Double-click it, or use Edit, to correct it. Arrow
+                    keys move line by line; Space plays or pauses; ← and → skip five seconds.
                   </p>
+                  {selectedRecording?.audioPath ? (
+                    <AudioPlayer
+                      key={selectedRecording.id}
+                      ref={audioPlayerRef}
+                      recordingId={selectedRecording.id}
+                      waveform={waveformData}
+                      durationHint={selectedRecording.duration}
+                      onTimeUpdate={playhead.set}
+                      onError={(message) =>
+                        setAudioPlaybackIssue({ recordingId: selectedRecording.id, message })
+                      }
+                      className="mb-4 shrink-0"
+                    />
+                  ) : null}
                   <TranscriptSearch
                     query={searchQuery}
                     onQueryChange={(query) => {
@@ -5697,16 +6101,30 @@ export function RecordingsView() {
                     className="mb-4 shrink-0"
                   />
                   <div className="min-h-0 flex-1 overflow-hidden rounded-md border">
-                    <TranscriptViewer
+                    <PlayheadTranscriptViewer
+                      playhead={playhead}
                       segments={transcriptSegments}
+                      pauseSpans={selectedRecording?.pauseSpans}
                       speakerNames={speakerNames}
+                      speakerNameSuggestions={attendeeNameSuggestions(
+                        selectedRecording?.attendees,
+                      )}
                       provenance={selectedTranscriptProvenance}
-                      currentTime={transcriptCueTime}
-                      onSegmentClick={(segment) => setTranscriptCueTime(segment.startTime)}
+                      onSegmentClick={(segment) => {
+                        playhead.set(segment.startTime);
+                        audioPlayerRef.current?.seekTo(segment.startTime);
+                      }}
+                      onTogglePlayback={() => audioPlayerRef.current?.togglePlayback()}
+                      onSeekBy={(delta) => audioPlayerRef.current?.seekBy(delta)}
                       highlightQuery={searchQuery}
                       activeMatchIndex={activeTranscriptMatchIndex}
                       onMatchesChange={handleTranscriptMatchesChange}
                       onRenameSpeaker={handleRenameSpeaker}
+                      speakerVoices={speakerVoices}
+                      rememberVoicesEnabled={rememberVoicesEnabled}
+                      onConfirmSpeakerVoice={handleConfirmSpeakerVoice}
+                      onRejectSpeakerVoice={handleRejectSpeakerVoice}
+                      speakerNameOptions={speakerNameOptions}
                       onEditSegment={async (segmentIds, newText) => {
                         if (!selectedRecording || segmentIds.length === 0) return;
                         try {
@@ -5871,15 +6289,43 @@ export function RecordingsView() {
           </p>
         </div>
         <div className="flex gap-2">
+          {/* Secondary to the one primary CTA on this surface. Disabled while a
+              meeting is live: an import and a capture want the same
+              post-processing lease, and the sidecar would refuse the second. */}
+          <Button
+            variant="outline"
+            onClick={() => void handleImportAudioFile()}
+            disabled={isRecording || isImportingAudio}
+            title="Transcribe an audio file you already have"
+          >
+            <FolderOpen className="h-4 w-4 mr-2" />
+            {isImportingAudio ? "Importing…" : "Import audio…"}
+          </Button>
           {isRecording ? (
-            <Button
-              variant="destructive"
-              disabled={isStopping}
-              onClick={() => void handleStopMeeting()}
-            >
-              <Square className="h-4 w-4 mr-2 fill-current" />
-              {isStopping ? "Stopping…" : "Stop meeting"}
-            </Button>
+            <>
+              <Button
+                variant="outline"
+                disabled={isStopping || isTogglingPause}
+                onClick={() => void handleTogglePause()}
+                aria-label={meetingPaused ? "Resume meeting" : "Pause meeting"}
+                title={`${meetingPaused ? "Resume" : "Pause"} (⌘⇧P)`}
+              >
+                {meetingPaused ? (
+                  <Play className="h-4 w-4 mr-2 fill-current" />
+                ) : (
+                  <Pause className="h-4 w-4 mr-2 fill-current" />
+                )}
+                {meetingPaused ? "Resume" : "Pause"}
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={isStopping}
+                onClick={() => void handleStopMeeting()}
+              >
+                <Square className="h-4 w-4 mr-2 fill-current" />
+                {isStopping ? "Stopping…" : "Stop meeting"}
+              </Button>
+            </>
           ) : (
             <Button
               variant="active"
@@ -5900,7 +6346,24 @@ export function RecordingsView() {
             exactly as well as one with it. */}
         <CalendarMeetingCue
           captureInProgress={isRecording}
-          onStartCapture={(prefill) => openMeetingCapture(prefill)}
+          onStartCapture={(prefill) =>
+            openMeetingCapture(meetingCapturePrefillFromCalendarEvent(prefill))
+          }
+          onOpenMeeting={(recordingId) => {
+            const cited = recordings.find((entry) => entry.id === recordingId);
+            if (cited) {
+              openMeetingWorkspace(cited);
+            }
+          }}
+        />
+        {/* Its sibling for a call that is happening right now, found by the
+            sidecar's detector. Same shape, same hand-off, same rule about
+            never starting anything itself. */}
+        <DetectedCallCue
+          captureInProgress={isRecording}
+          onStartCapture={(prefill) =>
+            openMeetingCapture(meetingCapturePrefillFromDetectedCall(prefill))
+          }
         />
       </div>
 
@@ -6324,12 +6787,21 @@ export function RecordingsView() {
                       {/* The gold neume is the live mark. A separate "Live
                           meeting" chip beside this line said it a second
                           time. */}
-                      <p className="inline-flex items-center gap-1.5 text-sm font-medium text-gold-text">
-                        <span className="neume neume-lit" aria-hidden="true" />
-                        Recording
-                      </p>
+                      {meetingPaused ? (
+                        <p className="inline-flex items-center gap-1.5 text-sm font-medium text-rust">
+                          <span className="neume neume-hollow" aria-hidden="true" />
+                          Paused
+                        </p>
+                      ) : (
+                        <p className="inline-flex items-center gap-1.5 text-sm font-medium text-gold-text">
+                          <span className="neume neume-lit" aria-hidden="true" />
+                          Recording
+                        </p>
+                      )}
                       <p className="text-sm text-muted-foreground">
-                        Take notes while Plainsong captures the audio.
+                        {meetingPaused
+                          ? "Nothing is being kept until you resume; the clock is stopped."
+                          : "Take notes while Plainsong captures the audio."}
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -6385,7 +6857,29 @@ export function RecordingsView() {
                       <Edit3 className="mr-2 h-4 w-4" />
                       Open this meeting
                     </Button>
-                    <div className="font-mono text-lg font-semibold">{formattedDuration}</div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={isStopping || isTogglingPause}
+                      onClick={() => void handleTogglePause()}
+                      aria-label={meetingPaused ? "Resume meeting" : "Pause meeting"}
+                      title={`${meetingPaused ? "Resume" : "Pause"} (⌘⇧P)`}
+                    >
+                      {meetingPaused ? (
+                        <Play className="mr-2 h-4 w-4 fill-current" />
+                      ) : (
+                        <Pause className="mr-2 h-4 w-4 fill-current" />
+                      )}
+                      {meetingPaused ? "Resume" : "Pause"}
+                    </Button>
+                    <div
+                      className={cn(
+                        "font-mono text-lg font-semibold",
+                        meetingPaused && "text-muted-foreground",
+                      )}
+                    >
+                      {formattedDuration}
+                    </div>
                   </div>
                 </div>
                 <RecordingWaveform
@@ -6525,7 +7019,7 @@ export function RecordingsView() {
                         <div className="min-w-0">
                           <h3 className="truncate font-medium">{recording.title}</h3>
                           <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 font-mono text-xs text-muted-foreground">
-                            <span className="time-spec">{new Date(recording.createdAt).toLocaleString()}</span>
+                            <span className="time-spec">{formatDateTime(recording.createdAt)}</span>
                             <span aria-hidden="true" className="text-muted-foreground/40">·</span>
                             {recording.status === "processing" ? (
                               <span className="inline-flex items-center gap-1">

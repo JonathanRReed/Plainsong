@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import Darwin
 import Foundation
 import Speech
@@ -6,6 +7,8 @@ import Speech
 private let protocolVersion = 1
 
 private enum HelperErrorCode: String {
+  case assetInstallFailed = "asset_install_failed"
+  case assetsNotInstalled = "assets_not_installed"
   case authorizationDenied = "authorization_denied"
   case authorizationNotDetermined = "authorization_not_determined"
   case authorizationRestricted = "authorization_restricted"
@@ -15,6 +18,26 @@ private enum HelperErrorCode: String {
   case recognitionFailed = "recognition_failed"
   case timeout = "timeout"
   case unsupportedLocale = "unsupported_locale"
+}
+
+/// The two recognition engines this helper can run.
+///
+/// `speech_analyzer` is `SpeechAnalyzer` + `SpeechTranscriber` (macOS 26+):
+/// purpose-built for long-form on-device transcription, returns per-segment
+/// timestamps, and downloads nothing beyond the OS-managed locale assets.
+/// `sf_speech_recognizer` is the `SFSpeechRecognizer` path this helper has
+/// always used, kept for macOS 13-15 and for locales whose SpeechAnalyzer
+/// assets are not installed.
+private enum HelperEngine: String {
+  case speechAnalyzer = "speech_analyzer"
+  case sfSpeechRecognizer = "sf_speech_recognizer"
+}
+
+/// How the caller asked the helper to choose between the two engines.
+private enum EngineRequest: String {
+  case auto
+  case speechAnalyzer = "speech_analyzer"
+  case sfSpeechRecognizer = "sf_speech_recognizer"
 }
 
 private struct ErrorPayload: Encodable {
@@ -36,7 +59,20 @@ private struct ProbePayload: Encodable {
   let onDeviceAvailable: Bool
   let recognizerAvailable: Bool
   let speechAnalyzerAvailable: Bool
+  let speechAnalyzerLocaleSupported: Bool
+  let speechAnalyzerAssetsInstalled: Bool
+  let speechAnalyzerAssetStatus: String
+  let speechAnalyzerLocales: [String]
+  let speechAnalyzerInstalledLocales: [String]
+  let engine: String
   let operatingSystemVersion: String
+}
+
+private struct SegmentPayload: Encodable {
+  let text: String
+  let startSeconds: Double
+  let endSeconds: Double
+  let confidence: Double
 }
 
 private struct TranscriptPayload: Encodable {
@@ -46,6 +82,49 @@ private struct TranscriptPayload: Encodable {
   let language: String
   let confidence: Double
   let isFinal: Bool
+  let engine: String
+  /// How many vocabulary terms this request actually handed the recognizer.
+  /// Zero when the caller sent none, and zero on any path that cannot take
+  /// them, so the count is a report of what happened rather than an echo of
+  /// what was asked for.
+  let contextualStringsApplied: Int
+  /// Per-segment timestamps. Always empty on the `SFSpeechRecognizer` path,
+  /// which reports one formatted string and no usable segment ranges; filled
+  /// in on the SpeechAnalyzer path, where the meeting transcript contract
+  /// needs `start_seconds`/`end_seconds` to offset and merge chunks.
+  let segments: [SegmentPayload]
+}
+
+/// One SpeechAnalyzer live event. `volatile` results are the model's current
+/// best guess for audio it has not finalized yet and are replaced wholesale by
+/// later events; `finalized` results never change again.
+private struct AnalyzerLivePayload: Encodable {
+  let protocolVersion: Int
+  let type: String
+  let kind: String
+  let text: String
+  let language: String
+  let startSeconds: Double
+  let endSeconds: Double
+  let confidence: Double
+}
+
+private struct AssetProgressPayload: Encodable {
+  let protocolVersion: Int
+  let type: String
+  let stage: String
+  let locale: String
+  let fraction: Double
+  let message: String
+}
+
+private struct AssetInstallPayload: Encodable {
+  let protocolVersion: Int
+  let type: String
+  let locale: String
+  let installed: Bool
+  let assetStatus: String
+  let engine: String
 }
 
 private struct LiveTranscriptPayload: Encodable {
@@ -56,6 +135,9 @@ private struct LiveTranscriptPayload: Encodable {
   let language: String
   let confidence: Double
   let isFinal: Bool
+  /// Same meaning as on `TranscriptPayload`: terms actually handed to the
+  /// recognizer for this session, not terms received.
+  let contextualStringsApplied: Int
 }
 
 private let encoder: JSONEncoder = {
@@ -126,6 +208,867 @@ private func requestedLocale(_ identifier: String?) -> Locale {
   return Locale(identifier: trimmed.isEmpty ? Locale.current.identifier : trimmed)
 }
 
+// MARK: - Vocabulary hints (contextual strings)
+//
+// Both Apple engines take a list of spellings to bias recognition toward:
+// `SFSpeechRecognitionRequest.contextualStrings` on the older engine and
+// `AnalysisContext.contextualStrings[.general]` on SpeechAnalyzer. The terms
+// come from the user's personal dictionary, so they are user text and never
+// travel as command-line arguments -- the caller writes them to a private
+// JSON file and passes only its path.
+
+/// Caps on the list handed to the recognizer, mirroring the Rust-side
+/// `VOCABULARY_HINT_MAX_TERMS` / `VOCABULARY_HINT_MAX_CHARS` in
+/// `dictation_parity.rs`. Applied here as well as there: the helper is a
+/// separate binary, and neither side should assume the other trimmed.
+private let contextualStringsMaxTerms = 60
+private let contextualStringsMaxCharacters = 600
+
+/// The additive request body for `--contextual-strings-file`. `protocol_version`
+/// stays 1: a helper that predates this option ignores a file it is never told
+/// about, and a caller that predates it simply passes no file.
+private struct ContextualStringsRequest: Decodable {
+  let protocolVersion: Int?
+  let contextualStrings: [String]
+}
+
+/// Trims, drops anything that is not a usable term, and applies the caps in
+/// order so the result is deterministic for a given input.
+private func cappedContextualStrings(_ raw: [String]) -> [String] {
+  var accepted: [String] = []
+  var characters = 0
+  for candidate in raw {
+    let term = candidate.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    if term.isEmpty { continue }
+    if term.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+      continue
+    }
+    if accepted.count >= contextualStringsMaxTerms { break }
+    if characters + term.count > contextualStringsMaxCharacters { break }
+    characters += term.count
+    accepted.append(term)
+  }
+  return accepted
+}
+
+/// Reads the caller's vocabulary terms from a file. Any problem is a
+/// `malformed_request`: silently transcribing without the terms would report a
+/// hint that never reached the recognizer.
+private func loadContextualStrings(path: String?) -> [String] {
+  guard let path else { return [] }
+  let url = URL(fileURLWithPath: path)
+  let data: Data
+  do {
+    data = try Data(contentsOf: url)
+  } catch {
+    fail(
+      .malformedRequest,
+      "Could not read the contextual strings file.",
+      details: ["path": path, "error": error.localizedDescription]
+    )
+  }
+  let decoder = JSONDecoder()
+  decoder.keyDecodingStrategy = .convertFromSnakeCase
+  let request: ContextualStringsRequest
+  do {
+    request = try decoder.decode(ContextualStringsRequest.self, from: data)
+  } catch {
+    fail(
+      .malformedRequest,
+      "The contextual strings file is not a valid helper request.",
+      details: ["path": path, "error": error.localizedDescription]
+    )
+  }
+  if let version = request.protocolVersion, version != protocolVersion {
+    fail(
+      .malformedRequest,
+      "The contextual strings file declares an unsupported protocol version.",
+      details: ["protocol_version": String(version)]
+    )
+  }
+  return cappedContextualStrings(request.contextualStrings)
+}
+
+// MARK: - SpeechAnalyzer (macOS 26+)
+//
+// Everything in this section is guarded by `if #available(macOS 26, *)`. The
+// helper still compiles and runs with a macOS 13.0 deployment target: on
+// macOS 13-15 the guards are false, no SpeechAnalyzer symbol is ever touched,
+// and the SFSpeechRecognizer paths below behave exactly as they always have.
+
+/// A typed failure carried across an `async` boundary. `Error` is not
+/// `Sendable`, so async work returns this instead and the synchronous caller
+/// turns it into the same helper error protocol every other failure uses.
+private struct AnalyzerFailure: Error, Sendable {
+  let code: HelperErrorCode
+  let message: String
+  var retryable: Bool = false
+  var details: [String: String] = [:]
+}
+
+/// What the helper knows about SpeechAnalyzer for one requested locale.
+private struct AnalyzerFacts: Sendable {
+  var apiAvailable = false
+  var transcriberAvailable = false
+  var localeSupported = false
+  var assetsInstalled = false
+  var assetStatus = "unavailable"
+  var supportedLocales: [String] = []
+  var installedLocales: [String] = []
+  var resolvedLocale: Locale?
+}
+
+private struct AnalyzerSegment: Sendable {
+  let text: String
+  let startSeconds: Double
+  let endSeconds: Double
+  let confidence: Double
+}
+
+private struct AnalyzerTranscript: Sendable {
+  let text: String
+  let language: String
+  let confidence: Double
+  let segments: [AnalyzerSegment]
+}
+
+private final class ValueBox<T>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: T?
+
+  func set(_ newValue: T) {
+    lock.lock()
+    defer { lock.unlock() }
+    value = newValue
+  }
+
+  func take() -> T? {
+    lock.lock()
+    defer { lock.unlock() }
+    return value
+  }
+}
+
+/// Runs an async operation to completion from the helper's synchronous
+/// top-level code.
+///
+/// The helper is a short-lived CLI with no run loop and no `@MainActor` work,
+/// so blocking the calling thread on a semaphore while Swift concurrency runs
+/// the operation on its own cooperative threads cannot deadlock, and it keeps
+/// the existing synchronous SFSpeechRecognizer paths untouched rather than
+/// converting the whole file to top-level `await`.
+private func runBlocking<T: Sendable>(_ operation: @escaping @Sendable () async -> T) -> T {
+  let box = ValueBox<T>()
+  let semaphore = DispatchSemaphore(value: 0)
+  Task.detached(priority: .userInitiated) {
+    box.set(await operation())
+    semaphore.signal()
+  }
+  semaphore.wait()
+  guard let value = box.take() else {
+    fail(.recognitionFailed, "The macOS Speech helper lost an asynchronous result.")
+  }
+  return value
+}
+
+// `@available(macOS 26, *)` is a *runtime* guard: the symbols behind it still
+// have to resolve at compile time, so an SDK older than macOS 26 cannot build
+// this section at all -- it fails with "cannot find 'SpeechAnalyzer' in scope"
+// long before any deployment-target check runs. `build.rs` probes
+// `xcrun --sdk macosx --show-sdk-version` and passes `-D NO_SPEECH_ANALYZER`
+// when the SDK predates 26, which compiles the SFSpeechRecognizer-only helper.
+// That variant reports `speech_analyzer_available: false` and refuses every
+// SpeechAnalyzer request with the same typed error macOS 13-15 returns at
+// runtime under the modern SDK, so the app behaves identically either way.
+#if !NO_SPEECH_ANALYZER
+
+@available(macOS 26, *)
+private func analyzerTranscriber(
+  locale: Locale,
+  volatileResults: Bool
+) -> SpeechTranscriber {
+  // `.transcription` plus timestamps: no etiquette replacements or alternative
+  // transcriptions (nothing downstream reads them), audio time ranges because
+  // the meeting transcript contract needs per-segment start/end, and
+  // transcription confidence because the JSON contract carries a confidence.
+  SpeechTranscriber(
+    locale: locale,
+    transcriptionOptions: [],
+    reportingOptions: volatileResults ? [.volatileResults] : [],
+    attributeOptions: [.audioTimeRange, .transcriptionConfidence]
+  )
+}
+
+/// The `AnalysisContext` carrying this request's vocabulary terms, or `nil`
+/// when there are none -- an empty context is the same as no context, and
+/// building one anyway would make "sent" indistinguishable from "not sent".
+@available(macOS 26, *)
+private func analyzerContext(contextualStrings: [String]) -> AnalysisContext? {
+  guard !contextualStrings.isEmpty else { return nil }
+  let context = AnalysisContext()
+  context.contextualStrings[.general] = contextualStrings
+  return context
+}
+
+@available(macOS 26, *)
+private func collectAnalyzerFacts(locale: Locale) async -> AnalyzerFacts {
+  var facts = AnalyzerFacts()
+  facts.apiAvailable = true
+  facts.transcriberAvailable = SpeechTranscriber.isAvailable
+  facts.supportedLocales = await SpeechTranscriber.supportedLocales
+    .map { normalizedLocaleIdentifier($0.identifier) }
+    .sorted()
+  facts.installedLocales = await SpeechTranscriber.installedLocales
+    .map { normalizedLocaleIdentifier($0.identifier) }
+    .sorted()
+
+  guard facts.transcriberAvailable,
+    let resolved = await SpeechTranscriber.supportedLocale(equivalentTo: locale)
+  else {
+    facts.assetStatus = facts.transcriberAvailable ? "unsupported" : "unavailable"
+    return facts
+  }
+
+  facts.localeSupported = true
+  facts.resolvedLocale = resolved
+  // `AssetInventory.status(forModules:)` only reports `.installed` once the
+  // locale is *allocated* to this process, so a locale whose model is already
+  // on disk reads back as `.supported` until `AssetInventory.reserve` runs.
+  // Measured on macOS 27.0 (26A5406e): en_US was in
+  // `SpeechTranscriber.installedLocales` and reported `.supported`; after
+  // `reserve(locale:)` the same call reported `.installed` and the install
+  // request was nil (nothing to download). The probe must not call that a
+  // missing download, so "on disk" is the union of the two signals and the
+  // raw inventory state is reported alongside it.
+  let onDisk = facts.installedLocales.contains(normalizedLocaleIdentifier(resolved.identifier))
+  let status = await AssetInventory.status(
+    forModules: [analyzerTranscriber(locale: resolved, volatileResults: false)]
+  )
+  switch status {
+  case .unsupported:
+    facts.assetStatus = "unsupported"
+  case .supported:
+    facts.assetStatus = onDisk ? "installed_not_allocated" : "supported"
+  case .downloading:
+    facts.assetStatus = "downloading"
+  case .installed:
+    facts.assetStatus = "installed"
+  @unknown default:
+    facts.assetStatus = "unknown"
+  }
+  facts.assetsInstalled = status == .installed || onDisk
+  return facts
+}
+
+/// Blocking wrapper used by the capability probe, which stays synchronous.
+private func analyzerFactsForProbe(locale: Locale) -> AnalyzerFacts {
+  guard #available(macOS 26, *) else { return AnalyzerFacts() }
+  return runBlocking { await collectAnalyzerFacts(locale: locale) }
+}
+
+#else
+
+/// SDK-too-old variant of the probe's analyzer facts.
+///
+/// Every field stays at its "nothing is available" default, which is what a
+/// macOS 13-15 machine reports under the modern SDK too. `capabilityProbe`
+/// therefore emits `speech_analyzer_available: false` and `resolveEngine` can
+/// never choose the analyzer for `auto`.
+private func analyzerFactsForProbe(locale: Locale) -> AnalyzerFacts {
+  _ = locale
+  return AnalyzerFacts()
+}
+
+#endif
+
+private func resolveEngine(request: EngineRequest, facts: AnalyzerFacts) -> HelperEngine {
+  switch request {
+  case .sfSpeechRecognizer:
+    return .sfSpeechRecognizer
+  case .speechAnalyzer:
+    return .speechAnalyzer
+  case .auto:
+    // `auto` only picks SpeechAnalyzer when it can actually run right now: the
+    // API exists, the locale is supported, and its assets are already on disk.
+    // Anything else falls back to SFSpeechRecognizer rather than blocking on a
+    // download the caller did not ask for.
+    return facts.apiAvailable && facts.transcriberAvailable && facts.localeSupported
+      && facts.assetsInstalled ? .speechAnalyzer : .sfSpeechRecognizer
+  }
+}
+
+#if !NO_SPEECH_ANALYZER
+
+@available(macOS 26, *)
+private func analyzerSegment(from result: SpeechTranscriber.Result) -> AnalyzerSegment {
+  let attributed = result.text
+  var confidenceTotal = 0.0
+  var confidenceCount = 0.0
+  for run in attributed.runs {
+    if let value = run.transcriptionConfidence {
+      confidenceTotal += value
+      confidenceCount += 1
+    }
+  }
+  let range = result.range
+  return AnalyzerSegment(
+    text: String(attributed.characters),
+    startSeconds: range.start.isNumeric ? range.start.seconds : 0.0,
+    endSeconds: range.end.isNumeric ? range.end.seconds : 0.0,
+    confidence: confidenceCount > 0 ? confidenceTotal / confidenceCount : 0.0
+  )
+}
+
+#endif
+
+private func joinedAnalyzerText(_ segments: [AnalyzerSegment]) -> String {
+  var text = ""
+  for segment in segments {
+    let piece = segment.text
+    if piece.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+    if text.isEmpty {
+      text = piece
+    } else if text.hasSuffix(" ") || piece.hasPrefix(" ") {
+      text += piece
+    } else {
+      text += " " + piece
+    }
+  }
+  return text.trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+private func averageAnalyzerConfidence(_ segments: [AnalyzerSegment]) -> Double {
+  let scored = segments.filter { $0.confidence > 0 }
+  guard !scored.isEmpty else { return 0.0 }
+  return scored.reduce(0.0) { $0 + $1.confidence } / Double(scored.count)
+}
+
+private func analyzerErrorDetails(_ error: Error) -> [String: String] {
+  let nsError = error as NSError
+  return [
+    "domain": nsError.domain,
+    "code": String(nsError.code),
+    "description": nsError.localizedDescription,
+  ]
+}
+
+#if !NO_SPEECH_ANALYZER
+
+/// Makes sure the locale is allocated to this process before analysis.
+///
+/// SpeechAnalyzer fails with `assetLocaleNotAllocated` for a locale the app has
+/// not reserved, even when its assets are installed. Reservation is per app and
+/// capped, so a failure is reported as a typed error instead of quietly
+/// releasing a locale somebody else's session reserved.
+@available(macOS 26, *)
+private func ensureLocaleReserved(_ locale: Locale) async -> AnalyzerFailure? {
+  let normalized = normalizedLocaleIdentifier(locale.identifier)
+  let reserved = await AssetInventory.reservedLocales
+  if reserved.contains(where: { normalizedLocaleIdentifier($0.identifier) == normalized }) {
+    return nil
+  }
+  do {
+    _ = try await AssetInventory.reserve(locale: locale)
+    return nil
+  } catch {
+    var details = analyzerErrorDetails(error)
+    details["locale"] = normalized
+    details["maximum_reserved_locales"] = String(AssetInventory.maximumReservedLocales)
+    return AnalyzerFailure(
+      code: .onDeviceUnavailable,
+      message:
+        "macOS would not allocate the SpeechAnalyzer locale to Plainsong. Free a reserved language and try again.",
+      retryable: false,
+      details: details
+    )
+  }
+}
+
+/// The shared preflight for both SpeechAnalyzer modes: the locale must be
+/// supported and its assets must already be installed. Never falls back to a
+/// server and never starts a download on its own.
+@available(macOS 26, *)
+private func analyzerReadyLocale(_ locale: Locale) async -> Result<Locale, AnalyzerFailure> {
+  let facts = await collectAnalyzerFacts(locale: locale)
+  guard facts.transcriberAvailable else {
+    return .failure(
+      AnalyzerFailure(
+        code: .onDeviceUnavailable,
+        message: "SpeechAnalyzer transcription is unavailable on this Mac."
+      )
+    )
+  }
+  guard facts.localeSupported, let resolved = facts.resolvedLocale else {
+    return .failure(
+      AnalyzerFailure(
+        code: .unsupportedLocale,
+        message: "SpeechAnalyzer does not support the requested locale.",
+        details: ["locale": normalizedLocaleIdentifier(locale.identifier)]
+      )
+    )
+  }
+  guard facts.assetsInstalled else {
+    return .failure(
+      AnalyzerFailure(
+        code: .assetsNotInstalled,
+        message:
+          "The SpeechAnalyzer language assets for this locale are not installed. Install the language, then try again.",
+        details: [
+          "locale": normalizedLocaleIdentifier(resolved.identifier),
+          "asset_status": facts.assetStatus,
+        ]
+      )
+    )
+  }
+  if let failure = await ensureLocaleReserved(resolved) {
+    return .failure(failure)
+  }
+  return .success(resolved)
+}
+
+@available(macOS 26, *)
+private func analyzerTranscribeFile(
+  url: URL,
+  locale: Locale,
+  contextualStrings: [String]
+) async -> Result<AnalyzerTranscript, AnalyzerFailure> {
+  let resolvedLocale: Locale
+  switch await analyzerReadyLocale(locale) {
+  case .failure(let failure):
+    return .failure(failure)
+  case .success(let value):
+    resolvedLocale = value
+  }
+
+  let audioFile: AVAudioFile
+  do {
+    audioFile = try AVAudioFile(forReading: url)
+  } catch {
+    var details = analyzerErrorDetails(error)
+    details["path"] = url.path
+    return .failure(
+      AnalyzerFailure(
+        code: .malformedRequest,
+        message: "Could not open the requested audio file for SpeechAnalyzer.",
+        details: details
+      )
+    )
+  }
+
+  let transcriber = analyzerTranscriber(locale: resolvedLocale, volatileResults: false)
+  let analyzer = SpeechAnalyzer(modules: [transcriber])
+  // `SpeechAnalyzer(modules:)` takes no context, so the batch path sets it
+  // before any audio is analyzed. A refusal here is reported rather than
+  // swallowed: transcribing without the terms while the caller was told they
+  // were applied is the one outcome this whole path exists to prevent.
+  if let context = analyzerContext(contextualStrings: contextualStrings) {
+    do {
+      try await analyzer.setContext(context)
+    } catch {
+      return .failure(
+        AnalyzerFailure(
+          code: .recognitionFailed,
+          message:
+            "SpeechAnalyzer refused the vocabulary terms for this request: \(error.localizedDescription)",
+          retryable: true,
+          details: analyzerErrorDetails(error)
+        )
+      )
+    }
+  }
+  let collector = Task { () throws -> [AnalyzerSegment] in
+    var collected: [AnalyzerSegment] = []
+    for try await result in transcriber.results {
+      collected.append(analyzerSegment(from: result))
+    }
+    return collected
+  }
+
+  do {
+    _ = try await analyzer.analyzeSequence(from: audioFile)
+    try await analyzer.finalizeAndFinishThroughEndOfInput()
+  } catch {
+    collector.cancel()
+    return .failure(
+      AnalyzerFailure(
+        code: .recognitionFailed,
+        message: "SpeechAnalyzer transcription failed: \(error.localizedDescription)",
+        retryable: true,
+        details: analyzerErrorDetails(error)
+      )
+    )
+  }
+
+  let segments: [AnalyzerSegment]
+  do {
+    segments = try await collector.value
+  } catch {
+    return .failure(
+      AnalyzerFailure(
+        code: .recognitionFailed,
+        message: "SpeechAnalyzer results ended in an error: \(error.localizedDescription)",
+        retryable: true,
+        details: analyzerErrorDetails(error)
+      )
+    )
+  }
+
+  let text = joinedAnalyzerText(segments)
+  guard !text.isEmpty else {
+    return .failure(
+      AnalyzerFailure(
+        code: .recognitionFailed,
+        message: "SpeechAnalyzer did not recognize speech in the audio file."
+      )
+    )
+  }
+  return .success(
+    AnalyzerTranscript(
+      text: text,
+      language: normalizedLocaleIdentifier(resolvedLocale.identifier),
+      confidence: averageAnalyzerConfidence(segments),
+      segments: segments
+    )
+  )
+}
+
+@available(macOS 26, *)
+private func convertedAnalyzerBuffer(
+  _ buffer: AVAudioPCMBuffer,
+  converter: AVAudioConverter,
+  format: AVAudioFormat
+) -> AVAudioPCMBuffer? {
+  let ratio = format.sampleRate / buffer.format.sampleRate
+  let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
+  guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+    return nil
+  }
+  var consumed = false
+  var conversionError: NSError?
+  converter.convert(to: output, error: &conversionError) { _, status in
+    if consumed {
+      status.pointee = .noDataNow
+      return nil
+    }
+    consumed = true
+    status.pointee = .haveData
+    return buffer
+  }
+  if conversionError != nil { return nil }
+  return output.frameLength > 0 ? output : nil
+}
+
+/// Streams SpeechAnalyzer volatile/finalized events for Float32 PCM arriving on
+/// stdin, emitting one JSON line per event as it happens.
+@available(macOS 26, *)
+private func analyzerLiveSession(
+  sampleRate: Double,
+  locale: Locale,
+  contextualStrings: [String]
+) async -> Result<AnalyzerTranscript, AnalyzerFailure> {
+  let resolvedLocale: Locale
+  switch await analyzerReadyLocale(locale) {
+  case .failure(let failure):
+    return .failure(failure)
+  case .success(let value):
+    resolvedLocale = value
+  }
+  let language = normalizedLocaleIdentifier(resolvedLocale.identifier)
+
+  guard
+    let inputFormat = AVAudioFormat(
+      commonFormat: .pcmFormatFloat32,
+      sampleRate: sampleRate,
+      channels: 1,
+      interleaved: false
+    )
+  else {
+    return .failure(
+      AnalyzerFailure(
+        code: .malformedRequest,
+        message: "The live audio sample rate is not supported.",
+        details: ["sample_rate": String(sampleRate)]
+      )
+    )
+  }
+
+  let transcriber = analyzerTranscriber(locale: resolvedLocale, volatileResults: true)
+  let analyzerFormat = await SpeechAnalyzer.bestAvailableAudioFormat(
+    compatibleWith: [transcriber],
+    considering: inputFormat
+  )
+  var converter: AVAudioConverter?
+  if let analyzerFormat, analyzerFormat != inputFormat {
+    guard let made = AVAudioConverter(from: inputFormat, to: analyzerFormat) else {
+      return .failure(
+        AnalyzerFailure(
+          code: .malformedRequest,
+          message: "Could not convert the live audio stream into a SpeechAnalyzer format.",
+          details: [
+            "input_format": inputFormat.description,
+            "analyzer_format": analyzerFormat.description,
+          ]
+        )
+      )
+    }
+    converter = made
+  }
+  let targetFormat = analyzerFormat ?? inputFormat
+
+  let (inputStream, inputContinuation) = AsyncStream<AnalyzerInput>.makeStream()
+  let collector = Task { () throws -> [AnalyzerSegment] in
+    var finalized: [AnalyzerSegment] = []
+    for try await result in transcriber.results {
+      let segment = analyzerSegment(from: result)
+      let isFinal = result.isFinal
+      if isFinal {
+        finalized.append(segment)
+      }
+      try? emit(
+        AnalyzerLivePayload(
+          protocolVersion: protocolVersion,
+          type: "live",
+          kind: isFinal ? "finalized" : "volatile",
+          text: segment.text,
+          language: language,
+          startSeconds: segment.startSeconds,
+          endSeconds: segment.endSeconds,
+          confidence: segment.confidence
+        )
+      )
+    }
+    return finalized
+  }
+
+  // The streaming initializer takes the context directly, so the terms are in
+  // place before the first buffer rather than after it.
+  let analyzer = SpeechAnalyzer(
+    inputSequence: inputStream,
+    modules: [transcriber],
+    analysisContext: analyzerContext(contextualStrings: contextualStrings) ?? AnalysisContext()
+  )
+
+  // stdin reads block, so they run on a dedicated thread instead of one of
+  // Swift concurrency's cooperative threads.
+  let readerQueue = DispatchQueue(label: "com.plainsong.speech-helper.live-stdin")
+  let readerFailure = ValueBox<AnalyzerFailure>()
+  readerQueue.async {
+    let stdin = FileHandle.standardInput
+    let bytesPerSample = MemoryLayout<Float>.size
+    var pending = Data()
+
+    while true {
+      let data = stdin.availableData
+      if data.isEmpty { break }
+      pending.append(data)
+
+      let completeByteCount = pending.count - (pending.count % bytesPerSample)
+      guard completeByteCount > 0 else { continue }
+      let chunk = pending.prefix(completeByteCount)
+      pending.removeFirst(completeByteCount)
+      let frameCount = completeByteCount / bytesPerSample
+      guard
+        let buffer = AVAudioPCMBuffer(
+          pcmFormat: inputFormat,
+          frameCapacity: AVAudioFrameCount(frameCount)
+        ),
+        let channelData = buffer.floatChannelData?.pointee
+      else {
+        readerFailure.set(
+          AnalyzerFailure(
+            code: .recognitionFailed,
+            message: "Failed to allocate a live SpeechAnalyzer audio buffer."
+          )
+        )
+        break
+      }
+      buffer.frameLength = AVAudioFrameCount(frameCount)
+      chunk.withUnsafeBytes { bytes in
+        if let baseAddress = bytes.baseAddress {
+          memcpy(channelData, baseAddress, completeByteCount)
+        }
+      }
+
+      let outgoing: AVAudioPCMBuffer?
+      if let converter {
+        outgoing = convertedAnalyzerBuffer(buffer, converter: converter, format: targetFormat)
+      } else {
+        outgoing = buffer
+      }
+      if let outgoing {
+        inputContinuation.yield(AnalyzerInput(buffer: outgoing))
+      }
+    }
+
+    if !pending.isEmpty {
+      readerFailure.set(
+        AnalyzerFailure(
+          code: .malformedRequest,
+          message: "The live audio stream ended with an incomplete Float32 sample.",
+          details: ["remaining_bytes": String(pending.count)]
+        )
+      )
+    }
+    inputContinuation.finish()
+  }
+
+  do {
+    try await analyzer.finalizeAndFinishThroughEndOfInput()
+  } catch {
+    collector.cancel()
+    return .failure(
+      AnalyzerFailure(
+        code: .recognitionFailed,
+        message: "SpeechAnalyzer live dictation failed: \(error.localizedDescription)",
+        retryable: true,
+        details: analyzerErrorDetails(error)
+      )
+    )
+  }
+
+  let segments: [AnalyzerSegment]
+  do {
+    segments = try await collector.value
+  } catch {
+    return .failure(
+      AnalyzerFailure(
+        code: .recognitionFailed,
+        message: "SpeechAnalyzer live results ended in an error: \(error.localizedDescription)",
+        retryable: true,
+        details: analyzerErrorDetails(error)
+      )
+    )
+  }
+
+  if let failure = readerFailure.take() {
+    return .failure(failure)
+  }
+
+  let text = joinedAnalyzerText(segments)
+  guard !text.isEmpty else {
+    return .failure(
+      AnalyzerFailure(
+        code: .recognitionFailed,
+        message: "SpeechAnalyzer did not recognize speech in the live audio stream."
+      )
+    )
+  }
+  return .success(
+    AnalyzerTranscript(
+      text: text,
+      language: language,
+      confidence: averageAnalyzerConfidence(segments),
+      segments: segments
+    )
+  )
+}
+
+/// Downloads and installs the OS-managed SpeechAnalyzer assets for one locale,
+/// reporting progress as newline JSON so the Models screen can show it.
+@available(macOS 26, *)
+private func analyzerInstallAssets(locale: Locale) async -> Result<AnalyzerFacts, AnalyzerFailure> {
+  guard SpeechTranscriber.isAvailable else {
+    return .failure(
+      AnalyzerFailure(
+        code: .onDeviceUnavailable,
+        message: "SpeechAnalyzer transcription is unavailable on this Mac."
+      )
+    )
+  }
+  guard let resolved = await SpeechTranscriber.supportedLocale(equivalentTo: locale) else {
+    return .failure(
+      AnalyzerFailure(
+        code: .unsupportedLocale,
+        message: "SpeechAnalyzer does not support the requested locale.",
+        details: ["locale": normalizedLocaleIdentifier(locale.identifier)]
+      )
+    )
+  }
+  let language = normalizedLocaleIdentifier(resolved.identifier)
+  let transcriber = analyzerTranscriber(locale: resolved, volatileResults: false)
+
+  try? emit(
+    AssetProgressPayload(
+      protocolVersion: protocolVersion,
+      type: "progress",
+      stage: "checking",
+      locale: language,
+      fraction: 0.0,
+      message: "Checking which language assets macOS already has."
+    )
+  )
+
+  let request: AssetInstallationRequest?
+  do {
+    request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber])
+  } catch {
+    var details = analyzerErrorDetails(error)
+    details["locale"] = language
+    return .failure(
+      AnalyzerFailure(
+        code: .assetInstallFailed,
+        message: "macOS could not prepare the language download: \(error.localizedDescription)",
+        retryable: true,
+        details: details
+      )
+    )
+  }
+
+  if let request {
+    let progress = request.progress
+    let reporter = Task {
+      while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        if Task.isCancelled { break }
+        try? emit(
+          AssetProgressPayload(
+            protocolVersion: protocolVersion,
+            type: "progress",
+            stage: "downloading",
+            locale: language,
+            fraction: progress.fractionCompleted,
+            message: "Downloading the macOS language assets."
+          )
+        )
+      }
+    }
+    do {
+      try await request.downloadAndInstall()
+      reporter.cancel()
+    } catch {
+      reporter.cancel()
+      var details = analyzerErrorDetails(error)
+      details["locale"] = language
+      return .failure(
+        AnalyzerFailure(
+          code: .assetInstallFailed,
+          message: "The macOS language download failed: \(error.localizedDescription)",
+          retryable: true,
+          details: details
+        )
+      )
+    }
+  }
+
+  if let failure = await ensureLocaleReserved(resolved) {
+    return .failure(failure)
+  }
+
+  try? emit(
+    AssetProgressPayload(
+      protocolVersion: protocolVersion,
+      type: "progress",
+      stage: "verifying",
+      locale: language,
+      fraction: 1.0,
+      message: "Verifying the installed language assets."
+    )
+  )
+  return .success(await collectAnalyzerFacts(locale: resolved))
+}
+
+#endif
+
 private func capabilityProbe(
   authorizationStatus: SFSpeechRecognizerAuthorizationStatus,
   localeIdentifier: String?
@@ -144,10 +1087,12 @@ private func capabilityProbe(
   // edge cases that a raw major-version comparison can miss.
   let osVersion = ProcessInfo.processInfo.operatingSystemVersion
   let osVersionString = "\(osVersion.majorVersion).\(osVersion.minorVersion).\(osVersion.patchVersion)"
-  var speechAnalyzerAvailable = false
-  if #available(macOS 26, *) {
-    speechAnalyzerAvailable = true
-  }
+  let analyzerFacts = analyzerFactsForProbe(locale: locale)
+  // "Available" means the helper could actually run SpeechAnalyzer here: the
+  // macOS 26 API exists *and* SpeechTranscriber reports itself usable. Whether
+  // it will run for this locale is `speech_analyzer_assets_installed` and the
+  // resolved `engine` below.
+  let analyzerAvailable = analyzerFacts.apiAvailable && analyzerFacts.transcriberAvailable
 
   return ProbePayload(
     protocolVersion: protocolVersion,
@@ -158,7 +1103,13 @@ private func capabilityProbe(
     localeSupported: localeSupported && recognizer != nil,
     onDeviceAvailable: recognizer?.supportsOnDeviceRecognition ?? false,
     recognizerAvailable: recognizer?.isAvailable ?? false,
-    speechAnalyzerAvailable: speechAnalyzerAvailable,
+    speechAnalyzerAvailable: analyzerAvailable,
+    speechAnalyzerLocaleSupported: analyzerFacts.localeSupported,
+    speechAnalyzerAssetsInstalled: analyzerFacts.assetsInstalled,
+    speechAnalyzerAssetStatus: analyzerFacts.assetStatus,
+    speechAnalyzerLocales: analyzerFacts.supportedLocales,
+    speechAnalyzerInstalledLocales: analyzerFacts.installedLocales,
+    engine: resolveEngine(request: .auto, facts: analyzerFacts).rawValue,
     operatingSystemVersion: osVersionString
   )
 }
@@ -206,7 +1157,19 @@ private struct RecognitionContext {
   let language: String
 }
 
-private func recognitionContext(localeIdentifier: String?) -> RecognitionContext {
+/// The authorization gate every transcription path has to pass.
+///
+/// Extracted from `recognitionContext` so the SpeechAnalyzer branches enforce
+/// it too. They used to reach the analyzer before `recognitionContext` ran, so
+/// the helper on disk would transcribe with Speech authorization still
+/// `not_determined` -- the app's own gate was the only thing stopping it, and
+/// the helper is a separate binary anyone can run. Never prompts: the prompt
+/// belongs to `--request-authorization`, from the packaged app.
+///
+/// Returns the status it read so a caller that also needs the probe does not
+/// ask macOS twice.
+@discardableResult
+private func requireSpeechAuthorization() -> SFSpeechRecognizerAuthorizationStatus {
   let status = SFSpeechRecognizer.authorizationStatus()
   switch status {
   case .authorized:
@@ -236,6 +1199,11 @@ private func recognitionContext(localeIdentifier: String?) -> RecognitionContext
       details: ["authorization_code": String(status.rawValue)]
     )
   }
+  return status
+}
+
+private func recognitionContext(localeIdentifier: String?) -> RecognitionContext {
+  let status = requireSpeechAuthorization()
 
   let probe = capabilityProbe(
     authorizationStatus: status,
@@ -312,7 +1280,13 @@ private func recognitionErrorDetails(_ error: Error) -> [String: String] {
 }
 
 private final class RecognitionState: @unchecked Sendable {
+  private let contextualStringsApplied: Int
   private let lock = NSLock()
+
+  init(contextualStringsApplied: Int) {
+    self.contextualStringsApplied = contextualStringsApplied
+  }
+
   private var text = ""
   private var confidence = 0.0
   private var error: Error?
@@ -352,7 +1326,8 @@ private final class RecognitionState: @unchecked Sendable {
         text: candidate,
         language: language,
         confidence: confidence,
-        isFinal: result.isFinal
+        isFinal: result.isFinal,
+        contextualStringsApplied: contextualStringsApplied
       )
       lastEmittedText = candidate
     }
@@ -387,7 +1362,9 @@ private func audioDurationSeconds(_ url: URL) -> Double {
 
 private func runFileRecognition(
   inputPath: String,
-  localeIdentifier: String?
+  localeIdentifier: String?,
+  engineRequest: EngineRequest,
+  contextualStringsPath: String?
 ) {
   let inputURL = URL(fileURLWithPath: inputPath)
   var isDirectory: ObjCBool = false
@@ -401,15 +1378,59 @@ private func runFileRecognition(
     )
   }
 
+  // Before the engine is chosen, not after: the SpeechAnalyzer branch below
+  // never returns, so an authorization check placed after it (as
+  // `recognitionContext` is) would only ever cover SFSpeechRecognizer.
+  requireSpeechAuthorization()
+
+  // Read before the engine is chosen so a malformed vocabulary file is
+  // refused the same way on both engines.
+  let contextualStrings = loadContextualStrings(path: contextualStringsPath)
+
+  #if !NO_SPEECH_ANALYZER
+    if #available(macOS 26, *) {
+      let locale = requestedLocale(localeIdentifier)
+      let engine = resolveEngine(
+        request: engineRequest,
+        facts: runBlocking { await collectAnalyzerFacts(locale: locale) }
+      )
+      if engine == .speechAnalyzer {
+        runAnalyzerFileRecognition(
+          url: inputURL,
+          locale: locale,
+          contextualStrings: contextualStrings
+        )
+      }
+    } else if engineRequest == .speechAnalyzer {
+      fail(
+        .onDeviceUnavailable,
+        "SpeechAnalyzer requires macOS 26 or later.",
+        details: ["engine": EngineRequest.speechAnalyzer.rawValue]
+      )
+    }
+  #else
+    // Built against an SDK older than macOS 26: the analyzer symbols are not
+    // in this binary at all. `auto` falls through to SFSpeechRecognizer below,
+    // and an explicit request gets the same typed refusal an old OS gets.
+    if engineRequest == .speechAnalyzer {
+      fail(
+        .onDeviceUnavailable,
+        "SpeechAnalyzer requires macOS 26 or later.",
+        details: ["engine": EngineRequest.speechAnalyzer.rawValue]
+      )
+    }
+  #endif
+
   let context = recognitionContext(localeIdentifier: localeIdentifier)
   let request = SFSpeechURLRecognitionRequest(url: inputURL)
   request.shouldReportPartialResults = true
   request.taskHint = .dictation
   request.requiresOnDeviceRecognition = true
   request.addsPunctuation = true
+  request.contextualStrings = contextualStrings
 
   let semaphore = DispatchSemaphore(value: 0)
-  let state = RecognitionState()
+  let state = RecognitionState(contextualStringsApplied: contextualStrings.count)
   let task = context.recognizer.recognitionTask(with: request) { result, error in
     let update = state.consume(result: result, error: error, language: context.language)
     if update.shouldSignal {
@@ -471,7 +1492,10 @@ private func runFileRecognition(
         text: completedText,
         language: context.language,
         confidence: snapshot.confidence,
-        isFinal: true
+        isFinal: true,
+        engine: HelperEngine.sfSpeechRecognizer.rawValue,
+        contextualStringsApplied: contextualStrings.count,
+        segments: []
       )
     )
   } catch {
@@ -483,16 +1507,137 @@ private func runFileRecognition(
   }
 }
 
+#if !NO_SPEECH_ANALYZER
+
+/// Runs the SpeechAnalyzer batch path and exits; only returns to the caller
+/// when the caller is expected to keep going (it never is).
+@available(macOS 26, *)
+private func runAnalyzerFileRecognition(
+  url: URL,
+  locale: Locale,
+  contextualStrings: [String]
+) -> Never {
+  switch runBlocking({
+    await analyzerTranscribeFile(
+      url: url,
+      locale: locale,
+      contextualStrings: contextualStrings
+    )
+  }) {
+  case .failure(let failure):
+    fail(failure.code, failure.message, retryable: failure.retryable, details: failure.details)
+  case .success(let transcript):
+    do {
+      try emit(
+        TranscriptPayload(
+          protocolVersion: protocolVersion,
+          type: "transcript",
+          text: transcript.text,
+          language: transcript.language,
+          confidence: transcript.confidence,
+          isFinal: true,
+          engine: HelperEngine.speechAnalyzer.rawValue,
+          contextualStringsApplied: contextualStrings.count,
+          segments: transcript.segments.map { segment in
+            SegmentPayload(
+              text: segment.text,
+              startSeconds: segment.startSeconds,
+              endSeconds: segment.endSeconds,
+              confidence: segment.confidence
+            )
+          }
+        )
+      )
+    } catch {
+      fail(
+        .recognitionFailed,
+        "Failed to encode the SpeechAnalyzer transcript.",
+        details: recognitionErrorDetails(error)
+      )
+    }
+    exit(0)
+  }
+}
+
+/// Runs the SpeechAnalyzer asset install and exits.
+@available(macOS 26, *)
+private func runAnalyzerAssetInstall(locale: Locale) -> Never {
+  switch runBlocking({ await analyzerInstallAssets(locale: locale) }) {
+  case .failure(let failure):
+    fail(failure.code, failure.message, retryable: failure.retryable, details: failure.details)
+  case .success(let facts):
+    do {
+      try emit(
+        AssetInstallPayload(
+          protocolVersion: protocolVersion,
+          type: "asset_install",
+          locale: facts.resolvedLocale.map { normalizedLocaleIdentifier($0.identifier) }
+            ?? normalizedLocaleIdentifier(locale.identifier),
+          installed: facts.assetsInstalled,
+          assetStatus: facts.assetStatus,
+          engine: resolveEngine(request: .auto, facts: facts).rawValue
+        )
+      )
+    } catch {
+      fail(
+        .recognitionFailed,
+        "Failed to encode the SpeechAnalyzer asset install result.",
+        details: recognitionErrorDetails(error)
+      )
+    }
+    exit(0)
+  }
+}
+
+#endif
+
 private func runLiveRecognition(
   sampleRate: Double,
-  localeIdentifier: String?
+  localeIdentifier: String?,
+  engineRequest: EngineRequest,
+  contextualStringsPath: String?
 ) {
+  // Unlike `--transcribe-file`, live mode does not default to `auto`: the
+  // SpeechAnalyzer stream emits a different event shape (volatile/finalized
+  // spans instead of one growing best guess), so callers opt into it
+  // explicitly and the existing consumer keeps the protocol it was written
+  // against.
+  // Same reason as `runFileRecognition`: the analyzer branch never returns, so
+  // the check has to happen before it rather than inside `recognitionContext`.
+  requireSpeechAuthorization()
+
+  let contextualStrings = loadContextualStrings(path: contextualStringsPath)
+
+  if engineRequest == .speechAnalyzer {
+    #if !NO_SPEECH_ANALYZER
+      guard #available(macOS 26, *) else {
+        fail(
+          .onDeviceUnavailable,
+          "SpeechAnalyzer requires macOS 26 or later.",
+          details: ["engine": EngineRequest.speechAnalyzer.rawValue]
+        )
+      }
+      runAnalyzerLiveRecognition(
+        sampleRate: sampleRate,
+        locale: requestedLocale(localeIdentifier),
+        contextualStrings: contextualStrings
+      )
+    #else
+      fail(
+        .onDeviceUnavailable,
+        "SpeechAnalyzer requires macOS 26 or later.",
+        details: ["engine": EngineRequest.speechAnalyzer.rawValue]
+      )
+    #endif
+  }
+
   let context = recognitionContext(localeIdentifier: localeIdentifier)
   let request = SFSpeechAudioBufferRecognitionRequest()
   request.shouldReportPartialResults = true
   request.taskHint = .dictation
   request.requiresOnDeviceRecognition = true
   request.addsPunctuation = true
+  request.contextualStrings = contextualStrings
 
   guard
     let format = AVAudioFormat(
@@ -510,7 +1655,7 @@ private func runLiveRecognition(
   }
 
   let semaphore = DispatchSemaphore(value: 0)
-  let state = RecognitionState()
+  let state = RecognitionState(contextualStringsApplied: contextualStrings.count)
   let task = context.recognizer.recognitionTask(with: request) { result, error in
     let update = state.consume(result: result, error: error, language: context.language)
     if let payload = update.payload {
@@ -614,11 +1759,70 @@ private func runLiveRecognition(
   }
 }
 
+#if !NO_SPEECH_ANALYZER
+
+/// Runs the SpeechAnalyzer live path and exits. Volatile and finalized events
+/// were already streamed as they arrived; this emits the closing `final` line
+/// in the same shape the SFSpeechRecognizer live path uses, so a consumer that
+/// only wants the finished text needs no new parsing.
+@available(macOS 26, *)
+private func runAnalyzerLiveRecognition(
+  sampleRate: Double,
+  locale: Locale,
+  contextualStrings: [String]
+) -> Never {
+  switch runBlocking({
+    await analyzerLiveSession(
+      sampleRate: sampleRate,
+      locale: locale,
+      contextualStrings: contextualStrings
+    )
+  }) {
+  case .failure(let failure):
+    fail(failure.code, failure.message, retryable: failure.retryable, details: failure.details)
+  case .success(let transcript):
+    do {
+      try emit(
+        LiveTranscriptPayload(
+          protocolVersion: protocolVersion,
+          type: "final",
+          event: "final",
+          text: transcript.text,
+          language: transcript.language,
+          confidence: transcript.confidence,
+          isFinal: true,
+          contextualStringsApplied: contextualStrings.count
+        )
+      )
+    } catch {
+      fail(
+        .recognitionFailed,
+        "Failed to encode the SpeechAnalyzer live transcript.",
+        details: recognitionErrorDetails(error)
+      )
+    }
+    exit(0)
+  }
+}
+
+#endif
+
 private enum HelperCommand {
   case probe(locale: String?)
   case requestAuthorization(locale: String?)
-  case transcribeFile(path: String, locale: String?)
-  case live(sampleRate: Double, locale: String?)
+  case installAssets(locale: String?)
+  case transcribeFile(
+    path: String,
+    locale: String?,
+    engine: EngineRequest,
+    contextualStringsPath: String?
+  )
+  case live(
+    sampleRate: Double,
+    locale: String?,
+    engine: EngineRequest,
+    contextualStringsPath: String?
+  )
 }
 
 private struct ArgumentParser {
@@ -645,6 +1849,8 @@ private struct ArgumentParser {
       return .probe(locale: parseLocaleOnly())
     case "--request-authorization":
       return .requestAuthorization(locale: parseLocaleOnly())
+    case "--install-assets":
+      return .installAssets(locale: parseLocaleOnly())
     case "--transcribe-file":
       guard index < arguments.count else {
         fail(
@@ -655,7 +1861,13 @@ private struct ArgumentParser {
       }
       let path = arguments[index]
       index += 1
-      return .transcribeFile(path: path, locale: parseLocaleOnly())
+      let options = parseLocaleAndEngine(defaultEngine: .auto)
+      return .transcribeFile(
+        path: path,
+        locale: options.locale,
+        engine: options.engine,
+        contextualStringsPath: options.contextualStringsPath
+      )
     case "--live":
       return parseLive()
     default:
@@ -666,8 +1878,70 @@ private struct ArgumentParser {
           details: ["usage": usage]
         )
       }
-      return .transcribeFile(path: first, locale: parseLocaleOnly())
+      let options = parseLocaleAndEngine(defaultEngine: .auto)
+      return .transcribeFile(
+        path: first,
+        locale: options.locale,
+        engine: options.engine,
+        contextualStringsPath: options.contextualStringsPath
+      )
     }
+  }
+
+  private mutating func parseLocaleAndEngine(
+    defaultEngine: EngineRequest
+  ) -> (locale: String?, engine: EngineRequest, contextualStringsPath: String?) {
+    var locale: String?
+    var engine: EngineRequest?
+    var contextualStringsPath: String?
+    while index < arguments.count {
+      let option = arguments[index]
+      index += 1
+      switch option {
+      // The vocabulary terms themselves never appear here: they are user text
+      // from the personal dictionary, and a process argument list is readable
+      // by anyone on the machine. Only the path to a private file travels.
+      case "--contextual-strings-file":
+        guard contextualStringsPath == nil, index < arguments.count else {
+          fail(
+            .malformedRequest,
+            "--contextual-strings-file requires one file path.",
+            details: ["usage": usage]
+          )
+        }
+        contextualStringsPath = arguments[index]
+        index += 1
+      case "--locale":
+        guard locale == nil, index < arguments.count else {
+          fail(
+            .malformedRequest,
+            "--locale requires one locale identifier.",
+            details: ["usage": usage]
+          )
+        }
+        locale = arguments[index]
+        index += 1
+      case "--engine":
+        guard engine == nil, index < arguments.count,
+          let parsed = EngineRequest(rawValue: arguments[index])
+        else {
+          fail(
+            .malformedRequest,
+            "--engine requires one of: auto, speech_analyzer, sf_speech_recognizer.",
+            details: ["usage": usage]
+          )
+        }
+        engine = parsed
+        index += 1
+      default:
+        fail(
+          .malformedRequest,
+          "Unexpected or incomplete helper option: \(option)",
+          details: ["usage": usage]
+        )
+      }
+    }
+    return (locale, engine ?? defaultEngine, contextualStringsPath)
   }
 
   private mutating func parseLocaleOnly() -> String? {
@@ -694,10 +1968,39 @@ private struct ArgumentParser {
   private mutating func parseLive() -> HelperCommand {
     var sampleRate: Double?
     var locale: String?
+    var engine: EngineRequest?
+    var contextualStringsPath: String?
     while index < arguments.count {
       let option = arguments[index]
       index += 1
       switch option {
+      case "--contextual-strings-file":
+        guard contextualStringsPath == nil, index < arguments.count else {
+          fail(
+            .malformedRequest,
+            "--contextual-strings-file requires one file path.",
+            details: ["usage": usage]
+          )
+        }
+        contextualStringsPath = arguments[index]
+        index += 1
+      case "--engine":
+        // `auto` is rejected here rather than quietly resolved: live mode does
+        // not auto-select, because the two engines emit different event
+        // shapes, and a caller that asked for `auto` and silently got the
+        // older protocol would have no way to notice.
+        guard engine == nil, index < arguments.count,
+          let parsed = EngineRequest(rawValue: arguments[index]),
+          parsed != .auto
+        else {
+          fail(
+            .malformedRequest,
+            "--live --engine requires speech_analyzer or sf_speech_recognizer; live mode does not auto-select.",
+            details: ["usage": usage]
+          )
+        }
+        engine = parsed
+        index += 1
       case "--sample-rate":
         guard sampleRate == nil,
           index < arguments.count,
@@ -739,11 +2042,18 @@ private struct ArgumentParser {
         details: ["usage": usage]
       )
     }
-    return .live(sampleRate: sampleRate, locale: locale)
+    // Live keeps the SFSpeechRecognizer protocol unless SpeechAnalyzer is
+    // named outright; see `runLiveRecognition`.
+    return .live(
+      sampleRate: sampleRate,
+      locale: locale,
+      engine: engine ?? .sfSpeechRecognizer,
+      contextualStringsPath: contextualStringsPath
+    )
   }
 
   private var usage: String {
-    "macos_speech_helper --probe [--locale <id>] | --request-authorization [--locale <id>] | --transcribe-file <path> [--locale <id>] | --live --sample-rate <hz> [--locale <id>]"
+    "macos_speech_helper --probe [--locale <id>] | --request-authorization [--locale <id>] | --install-assets [--locale <id>] | --transcribe-file <path> [--locale <id>] [--engine auto|speech_analyzer|sf_speech_recognizer] [--contextual-strings-file <path>] | --live --sample-rate <hz> [--locale <id>] [--engine speech_analyzer|sf_speech_recognizer] [--contextual-strings-file <path>]"
   }
 }
 
@@ -769,8 +2079,36 @@ case .requestAuthorization(let locale):
       details: recognitionErrorDetails(error)
     )
   }
-case .transcribeFile(let path, let locale):
-  runFileRecognition(inputPath: path, localeIdentifier: locale)
-case .live(let sampleRate, let locale):
-  runLiveRecognition(sampleRate: sampleRate, localeIdentifier: locale)
+case .installAssets(let locale):
+  #if !NO_SPEECH_ANALYZER
+    guard #available(macOS 26, *) else {
+      fail(
+        .onDeviceUnavailable,
+        "Installing Apple Speech language assets requires macOS 26 or later.",
+        details: ["operation": "install_assets"]
+      )
+    }
+    runAnalyzerAssetInstall(locale: requestedLocale(locale))
+  #else
+    _ = locale
+    fail(
+      .onDeviceUnavailable,
+      "Installing Apple Speech language assets requires macOS 26 or later.",
+      details: ["operation": "install_assets"]
+    )
+  #endif
+case .transcribeFile(let path, let locale, let engine, let contextualStringsPath):
+  runFileRecognition(
+    inputPath: path,
+    localeIdentifier: locale,
+    engineRequest: engine,
+    contextualStringsPath: contextualStringsPath
+  )
+case .live(let sampleRate, let locale, let engine, let contextualStringsPath):
+  runLiveRecognition(
+    sampleRate: sampleRate,
+    localeIdentifier: locale,
+    engineRequest: engine,
+    contextualStringsPath: contextualStringsPath
+  )
 }

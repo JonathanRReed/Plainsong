@@ -30,7 +30,21 @@ const calendarHelperEntitlements = path.resolve(
   "build-resources",
   "entitlements.mac.calendar-helper.plist",
 );
+// Apple Foundation Models helper. It reads text on stdin and runs the
+// on-device system model; it touches no TCC-guarded resource and needs no
+// network client, so it carries an empty entitlement set rather than
+// inheriting the app's.
+const languageModelHelperName = "plainsong-native-language-model-helper";
+const languageModelHelperEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.language-model-helper.plist",
+);
 const sidecarName = "plainsong-sidecar";
+// The command-line tool / MCP server. Same empty entitlement set as the
+// sidecar: it reads the database and talks on stdio, nothing more.
+const cliName = "plainsong-cli";
 const sidecarEntitlements = path.resolve(
   import.meta.dirname,
   "..",
@@ -54,7 +68,7 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile, signCont
   // 2.x passes a context object as the second argument. Forward it so an
   // inherited callback that reads it sees the same thing osx-sign would.
   const inherited = inheritedOptionsForFile?.(filePath, signContext) ?? {};
-  if (path.basename(filePath) === sidecarName) {
+  if (path.basename(filePath) === sidecarName || path.basename(filePath) === cliName) {
     return {
       ...inherited,
       entitlements: sidecarEntitlements,
@@ -70,6 +84,12 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile, signCont
     return {
       ...inherited,
       entitlements: calendarHelperEntitlements,
+    };
+  }
+  if (path.basename(filePath) === languageModelHelperName) {
+    return {
+      ...inherited,
+      entitlements: languageModelHelperEntitlements,
     };
   }
   if (genericHelperPattern.test(path.basename(filePath))) {

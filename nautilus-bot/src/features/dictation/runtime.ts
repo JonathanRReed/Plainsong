@@ -42,6 +42,16 @@ export interface DictationStateChangedEvent {
   message?: string | null;
   preview?: string | null;
   partialText?: string | null;
+  /**
+   * The live preview split into the half the recognizer has committed to and
+   * the half it may still rewrite. Only the streaming engine produces the
+   * split; the re-decode engine sends `partialText` alone, and the popup then
+   * renders the whole thing as volatile, which is what it is.
+   */
+  partialStableText?: string | null;
+  partialVolatileText?: string | null;
+  /** Which engine drew this preview: "streaming" or "redecode". */
+  partialEngine?: "streaming" | "redecode" | null;
   sessionId?: number | null;
   stopReason?: string | null;
   outcome?: string | null;
@@ -99,6 +109,14 @@ export interface DictationTimingRecord {
 
 interface DictationTextReadyEvent {
   text: string;
+  /**
+   * Terminal delivery outcome, mirrored from the sidecar: `pasted`,
+   * `paste_dispatched`, `copied`, `replaced`, `copied_replacement`,
+   * `previewed`, `undone`, `error`, `empty`, or `secure_field` (delivery
+   * refused because the focused control is a password or secure input —
+   * see `describeDictationDeliveryRefusal`).
+   */
+  outcome?: string | null;
   pasted?: boolean;
   copied?: boolean;
   pasteError?: string | null;
@@ -168,12 +186,42 @@ function normalizeStateEvent(payload: DictationStateChangedEvent): DictationStat
   };
 }
 
-function mergeStateEvent(
+/**
+ * Fields that describe one session's result and must not outlive it. The
+ * idle event that follows a done/error phase does not repeat them, so a plain
+ * spread merge kept the finished session's message and outcome — a
+ * secure-field refusal, say — on screen after the overlay had already reset.
+ * Provider/route metadata is deliberately not in this list: it is sticky by
+ * design and describes the configuration, not the session.
+ */
+const VOLATILE_SESSION_FIELDS = [
+  "message",
+  "preview",
+  "partialText",
+  "partialStableText",
+  "partialVolatileText",
+  "partialEngine",
+  "outcome",
+  "stopReason",
+  "fallbackReason",
+] as const;
+
+/**
+ * Folds the next `dictation-state-changed` event into the last one. Exported
+ * for its tests; the hook below is its only production caller.
+ */
+export function reduceDictationStateEvent(
   previous: DictationStateChangedEvent | null,
   next: DictationStateChangedEvent,
 ): DictationStateChangedEvent {
+  const carried: Partial<DictationStateChangedEvent> = { ...(previous ?? {}) };
+  if (next.phase === "idle") {
+    for (const field of VOLATILE_SESSION_FIELDS) {
+      delete carried[field];
+    }
+  }
   return normalizeStateEvent({
-    ...(previous ?? {}),
+    ...carried,
     ...next,
   });
 }
@@ -191,7 +239,7 @@ export function useDictationRuntime() {
       try {
         const initialState = await invoke<DictationStateChangedEvent>("get_dictation_overlay_state");
         if (!disposed) {
-          setStateEvent((previous) => mergeStateEvent(previous, initialState));
+          setStateEvent((previous) => reduceDictationStateEvent(previous, initialState));
         }
       } catch {
         // Ignore initial hydration failures.
@@ -202,7 +250,7 @@ export function useDictationRuntime() {
         (event) => {
           if (!disposed) {
             setStateEvent((previous) =>
-              mergeStateEvent(previous, event.payload),
+              reduceDictationStateEvent(previous, event.payload),
             );
           }
         },

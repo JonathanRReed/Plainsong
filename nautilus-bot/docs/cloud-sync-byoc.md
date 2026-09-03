@@ -30,7 +30,8 @@ Current product note:
 4. Repeat the export when the transcript or notes change. The export-root
    setting is a path boundary, not an automatic export service.
 
-> **Encryption note**: Markdown, JSON, and text exports are readable files.
+> **Encryption note**: every export — Markdown, Word, JSON, text, and
+> subtitles — is a readable file.
 > Vault encryption protects Plainsong's managed database and recording store;
 > it does not encrypt files you explicitly export. Protect the destination with
 > the cloud provider's encryption and access controls.

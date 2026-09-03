@@ -221,6 +221,7 @@ mod tests {
                     "additionalProperties": false
                 })),
                 requested_context_tokens: None,
+                dictation_style: None,
             },
         };
 

@@ -27,6 +27,17 @@
  * the sidecar, or index.html ever constructs one, so it was reachable surface
  * with no caller.
  *
+ * The same rule is why `console.deepgram.com` and `aistudio.google.com` are
+ * NOT here, even though both appear in the Deepgram and Gemini setup copy
+ * ("Requires DEEPGRAM_API_KEY from https://console.deepgram.com"). That copy is
+ * a provider `description` and a runtime-diagnostics message, and both are
+ * rendered as plain text -- the renderer's only `href` to an external host is
+ * `provider.modelInfo.sourceUrl` (asr-provider-manager.tsx) and its only
+ * `window.open` is RELEASES_URL (UpdateStatusWidget.tsx). Nothing constructs a
+ * navigation to either host, so adding them would widen the single egress
+ * channel a compromised renderer has, for no caller. If a key-setup link is
+ * ever made clickable, add the host in the same change as the link.
+ *
  * Matching is exact host equality, never a suffix test: `evil-github.com` and
  * `github.com.evil.example` must not pass, and no provider needs a subdomain
  * wildcard.
@@ -38,6 +49,10 @@ export const ALLOWED_EXTERNAL_HOSTS: readonly string[] = [
   "console.groq.com",
   "developers.openai.com",
   "elevenlabs.io",
+  // Deepgram Nova → rust-sidecar/src/asr/deepgram.rs
+  "developers.deepgram.com",
+  // Gemini Transcribe → rust-sidecar/src/asr/gemini_transcribe.rs
+  "ai.google.dev",
   // macOS Apple Speech / Windows SDK dictation provider docs
   "developer.apple.com",
   "learn.microsoft.com",

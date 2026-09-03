@@ -168,7 +168,6 @@ const backendMocks = vi.hoisted(() => ({
   },
   shortcuts: {
     toggleDictation: "Ctrl+Shift+Space",
-    toggleDictationAlternates: [],
     openWindow: "Ctrl+Shift+N",
   },
   updates: {
@@ -227,6 +226,9 @@ const backendMocks = vi.hoisted(() => ({
     },
   ],
   getSettings: vi.fn(),
+  searchDictationHistory: vi.fn(async (): Promise<any[]> => []),
+  reprocessDictation: vi.fn(async (): Promise<any> => null),
+  getTranscript: vi.fn(async (): Promise<any> => null),
 }));
 
 backendMocks.getSettings.mockImplementation(async () => {
@@ -274,7 +276,7 @@ vi.mock("@/lib/backend/settings", () => ({
 }));
 
 vi.mock("@/lib/backend/recordings", () => ({
-  getTranscript: vi.fn(),
+  getTranscript: backendMocks.getTranscript,
   deleteRecording: backendMocks.deleteRecording,
 }));
 
@@ -300,6 +302,8 @@ vi.mock("@/lib/backend/dictation", () => ({
   })),
   captureSelectedTextForPlayback: vi.fn(async () => "Read this selected sentence"),
   reprocessDictationText: vi.fn(),
+  searchDictationHistory: backendMocks.searchDictationHistory,
+  reprocessDictation: backendMocks.reprocessDictation,
   listDictationDictionaryEntries: vi.fn(async () => []),
   createDictationDictionaryEntry: vi.fn(),
   updateDictationDictionaryEntry: vi.fn(),
@@ -673,17 +677,21 @@ describe("DictationView modes", () => {
     ).toBeInTheDocument();
   });
 
-  it("describes keep warm as the speed choice it is, not a memory choice", async () => {
+  it("says which model keep warm frees and which it does not", async () => {
     render(<DictationView />);
 
     await openConfigTab("Capture");
 
-    // Off only skips the prewarm. The first transcription still loads the
-    // model into the process-global cache and nothing in the app evicts it,
-    // so "Off" costs latency once and saves no memory at all.
-    expect(
-      await screen.findByText(/stays in memory until you quit/i),
-    ).toBeInTheDocument();
+    // For the *speech* model this is still purely a latency choice: the first
+    // transcription loads it into the process-global cache and nothing evicts
+    // it. The built-in cleanup model is the one that now honors "off", so the
+    // copy has to separate them rather than make one claim about "the model".
+    const copy = await screen.findByText(/stays in memory until you quit/i);
+    expect(copy).toBeInTheDocument();
+    expect(copy.textContent).toMatch(/speech model stays in memory/i);
+    expect(copy.textContent).toMatch(
+      /built-in cleanup model is released a minute after your last dictation/i,
+    );
     expect(screen.queryByText(/frees the memory/i)).toBeNull();
   });
 
@@ -899,6 +907,54 @@ describe("DictationView modes", () => {
     await waitFor(() => {
       expect(backendMocks.refetchDictationHistory).toHaveBeenCalled();
     });
+  });
+
+  it("tells a cloud dictation route that dictionary terms travel with the audio", async () => {
+    // The dictionary now reaches the recognizer. For a cloud route that
+    // means the terms leave the machine, and for ElevenLabs it costs extra;
+    // both belong where the route is chosen, not only in developer docs.
+    backendMocks.transcriptionOverrides.defaultProvider = "elevenlabs_scribe";
+    backendMocks.transcriptionOverrides.dictationProvider = "elevenlabs_scribe";
+
+    render(<DictationView />);
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Profiles" }));
+
+    expect(
+      await screen.findByText(
+        /dictionary terms and snippet triggers are sent with the audio.*ElevenLabs bills 20% more/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not call a secure-field refusal 'ready to review'", async () => {
+    // The sidecar refused to write into a password field. Nothing was
+    // inserted or copied, so the status line must say that instead of the
+    // generic ready message, and the paste status carries the reason.
+    render(<DictationView />);
+
+    await screen.findByRole("tab", { name: "Profiles" });
+    const handler = backendMocks.eventListeners.get("dictation-text-ready");
+    expect(handler).toBeTruthy();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          text: "hunter two",
+          outcome: "secure_field",
+          pasted: false,
+          copied: false,
+          pasteError:
+            "The field in front is a password or secure input, so Plainsong did not insert or copy the words. They are kept in your dictation history.",
+          actualProvider: "distil_whisper",
+        },
+      });
+    });
+
+    expect(
+      await screen.findAllByText(/password or secure input/),
+    ).not.toHaveLength(0);
+    expect(screen.queryByText("Result is ready to review.")).not.toBeInTheDocument();
   });
 
   it("opens a saved dictation from a keyboard-accessible history control", async () => {
@@ -1914,6 +1970,43 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationCategoryFormattingEnabled).toBe(false);
   });
 
+  it("shows a numbers-as-digits switch per profile and says why Voice ships off", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Destinations");
+    const section = await screen.findByTestId("numbers-as-digits-section");
+    expect(
+      within(section).getByText("Numbers as digits"),
+    ).toBeInTheDocument();
+    expect(
+      within(section).getByText(
+        "Off by default: raw voice mode keeps your words as spoken.",
+      ),
+    ).toBeInTheDocument();
+
+    const voiceSwitch = within(section).getByRole("switch", {
+      name: "General: numbers as digits",
+    });
+    expect(voiceSwitch).toHaveAttribute("aria-checked", "false");
+    const writingSwitch = within(section).getByRole("switch", {
+      name: "Writing: numbers as digits",
+    });
+    expect(writingSwitch).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(voiceSwitch);
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<
+      [any]
+    >;
+    const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.dictationNumbersAsDigits).toMatchObject({
+      voice: true,
+    });
+  });
+
   it("adds and removes a per-app category override", async () => {
     render(<DictationView />);
 
@@ -2278,5 +2371,227 @@ describe("DictationView modes", () => {
         categoryScope: "worklog",
       });
     });
+  });
+});
+
+describe("DictationView history search and Process again", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.localStorage.clear();
+    backendMocks.eventListeners.clear();
+    backendMocks.asrProviders = backendMocks.buildAsrProviders();
+    backendMocks.recordings = [createSavedDictation()];
+    for (const key of Object.keys(backendMocks.transcriptionOverrides)) {
+      delete backendMocks.transcriptionOverrides[key];
+    }
+    backendMocks.getTranscript.mockResolvedValue({
+      id: "transcript-1",
+      recordingId: "dictation-1",
+      segments: [],
+      fullText: "Ship the quarterly budget summary to finance.",
+      language: "en",
+      confidence: 0.93,
+      model: "parakeet",
+      modelId: "parakeet-tdt-0.6b-v3",
+      requestedProvider: "parakeet",
+      actualProvider: "parakeet",
+      createdAt: "2026-08-01T12:00:12.000Z",
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: clipboardWriteText },
+    });
+  });
+
+  it("searches saved dictations, marks the matched words, and opens a hit", async () => {
+    backendMocks.searchDictationHistory.mockResolvedValue([
+      {
+        recordingId: "dictation-1",
+        recordingTitle: "Project update",
+        createdAt: "2026-08-01T12:00:00.000Z",
+        snippet: "Ship the quarterly [[budget]] summary to finance.",
+        matchedField: "raw",
+        score: -1.2,
+      },
+    ]);
+
+    render(<DictationView />);
+    const field = await screen.findByLabelText("Search saved dictations");
+    fireEvent.change(field, { target: { value: "budget" } });
+
+    await waitFor(() => {
+      expect(backendMocks.searchDictationHistory).toHaveBeenCalledWith("budget", {
+        limit: 25,
+      });
+    });
+
+    const hit = await screen.findByRole("button", {
+      name: "Open saved dictation: Project update",
+    });
+    // The marked run is a real <mark>, not a bracketed literal the reader has
+    // to decode, and the row says which side of the entry matched.
+    const marked = within(hit).getByText("budget");
+    expect(marked.tagName).toBe("MARK");
+    expect(hit).not.toHaveTextContent("[[");
+    expect(hit).toHaveTextContent("Matched what Plainsong heard");
+
+    fireEvent.click(hit);
+    expect(
+      await screen.findByRole("dialog", { name: "Project update" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says so plainly when nothing matches, and never fires a request per keystroke", async () => {
+    backendMocks.searchDictationHistory.mockResolvedValue([]);
+
+    render(<DictationView />);
+    const field = await screen.findByLabelText("Search saved dictations");
+    fireEvent.change(field, { target: { value: "b" } });
+    fireEvent.change(field, { target: { value: "bu" } });
+    fireEvent.change(field, { target: { value: "budgetary" } });
+
+    expect(await screen.findByText(/No saved dictation matches/)).toBeInTheDocument();
+    // Debounced: the two abandoned prefixes never reached the sidecar.
+    expect(backendMocks.searchDictationHistory).toHaveBeenCalledTimes(1);
+    expect(backendMocks.searchDictationHistory).toHaveBeenCalledWith("budgetary", {
+      limit: 25,
+    });
+  });
+
+  it("runs a saved dictation's kept audio again and shows what it saved", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    (backend.getDictationHistoryDetails as any).mockResolvedValue({
+      modePreset: "voice",
+      modeLabel: "Voice",
+      baseModePreset: "voice",
+      baseModeLabel: "Voice",
+      customModeId: null,
+      customModeName: null,
+      contextSource: null,
+      contextAppName: null,
+      appTarget: "Slack",
+      activationMatcher: null,
+      commandApplied: null,
+      dictionaryAppliedCount: 0,
+      snippetAppliedCount: 0,
+      formattingApplied: false,
+      recentInsertReused: false,
+      pipelineStageKeys: [],
+      promptSource: null,
+      promptPreview: null,
+      requestedProvider: "parakeet",
+      actualProvider: "parakeet",
+      modelId: "parakeet-tdt-0.6b-v3",
+      routePreference: "local",
+      resolvedHosting: "local",
+      startupLatencyMs: 320,
+      transcriptionLatencyMs: 900,
+      insertLatencyMs: 40,
+      endToEndMs: 1300,
+      audioAvailable: true,
+    });
+    backendMocks.reprocessDictation.mockResolvedValue({
+      recording: createSavedDictation({ id: "dictation-2", title: "Redo" }),
+      transcript: null,
+      finalText: "- Ship the quarterly budget summary",
+      rawText: "ship the quarterly budget summary",
+      modePreset: "notes",
+      customModeId: null,
+      customModeName: null,
+      provider: "parakeet",
+      modelId: "parakeet-tdt-0.6b-v3",
+      usedAi: false,
+      reprocessedFromId: "dictation-1",
+      reprocessedFromCreatedAt: "2026-08-01T12:00:00.000Z",
+      transcriptionLatencyMs: 780,
+    });
+
+    render(<DictationView />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open saved dictation: Project update",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Project update" });
+
+    fireEvent.change(
+      await within(dialog).findByLabelText("Style for the new entry"),
+      { target: { value: "notes" } },
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Process again" }),
+    );
+
+    await waitFor(() => {
+      expect(backendMocks.reprocessDictation).toHaveBeenCalledWith({
+        historyId: "dictation-1",
+        modeId: "notes",
+      });
+    });
+
+    expect(
+      await within(dialog).findByText("- Ship the quarterly budget summary"),
+    ).toBeInTheDocument();
+    // The new entry is a saved dictation, not something pasted anywhere.
+    expect(within(dialog).getByText("Saved as a new dictation")).toBeInTheDocument();
+    // And the list is reloaded so the new entry is actually visible.
+    expect(backendMocks.refetchDictationHistory).toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Copy result" }));
+    await waitFor(() => {
+      expect(clipboardWriteText).toHaveBeenCalledWith(
+        "- Ship the quarterly budget summary",
+      );
+    });
+  });
+
+  it("names the setting instead of offering a button when no audio was kept", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    (backend.getDictationHistoryDetails as any).mockResolvedValue({
+      modePreset: "voice",
+      modeLabel: "Voice",
+      baseModePreset: "voice",
+      baseModeLabel: "Voice",
+      customModeId: null,
+      customModeName: null,
+      contextSource: null,
+      contextAppName: null,
+      appTarget: null,
+      activationMatcher: null,
+      commandApplied: null,
+      dictionaryAppliedCount: 0,
+      snippetAppliedCount: 0,
+      formattingApplied: false,
+      recentInsertReused: false,
+      pipelineStageKeys: [],
+      promptSource: null,
+      promptPreview: null,
+      requestedProvider: "parakeet",
+      actualProvider: "parakeet",
+      modelId: "parakeet-tdt-0.6b-v3",
+      routePreference: "local",
+      resolvedHosting: "local",
+      startupLatencyMs: null,
+      transcriptionLatencyMs: null,
+      insertLatencyMs: null,
+      endToEndMs: null,
+      audioAvailable: null,
+    });
+
+    render(<DictationView />);
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Open saved dictation: Project update",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Project update" });
+
+    expect(
+      await within(dialog).findByText(/Keep dictation audio for Process again/),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "Process again" }),
+    ).not.toBeInTheDocument();
+    expect(backendMocks.reprocessDictation).not.toHaveBeenCalled();
   });
 });

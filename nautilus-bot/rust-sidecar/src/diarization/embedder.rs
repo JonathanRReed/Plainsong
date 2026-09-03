@@ -25,6 +25,29 @@ use std::path::PathBuf;
 
 // Re-export Array1 for use in mod.rs
 
+// ── The segmentation everything downstream was measured at ───────────────
+//
+// Two callers must not drift: `diarize_real` produces the embeddings the
+// product compares, and the voiceprint calibration harness measures the same
+// object to pick the thresholds in `voiceprints.rs`. They were literals in
+// both places, which is exactly the kind of duplication that goes quietly
+// wrong — and it is not a harmless number. CAM++ separates speakers cleanly
+// at 2-second windows and not at all at 8-second ones, so changing these
+// invalidates every threshold in `voiceprints.rs` until they are re-measured.
+// Receipt: `artifacts/qa/voiceprint-recalibration-2026-09-03.md`.
+
+/// Length of one embedding window, in seconds.
+pub const SEGMENT_SECONDS: f64 = 2.0;
+/// How much each window overlaps the previous one, in seconds — a 1-second
+/// hop at the 2-second window above.
+pub const SEGMENT_OVERLAP_SECONDS: f64 = 1.0;
+/// The shortest window worth embedding. The tail of a recording is clipped to
+/// what is left, and below this there is not enough voice to describe.
+pub const MIN_SEGMENT_SECONDS: f64 = 1.0;
+
+/// Sample rate every diarization window is resampled to before features.
+pub const EMBEDDING_SAMPLE_RATE: usize = 16000;
+
 /// Speaker embedding extractor using ONNX
 #[cfg(feature = "diarization")]
 pub struct SpeakerEmbeddingExtractor {
@@ -35,35 +58,24 @@ pub struct SpeakerEmbeddingExtractor {
 
 #[cfg(feature = "diarization")]
 impl SpeakerEmbeddingExtractor {
-    /// Create a new embedding extractor with default model
-    pub fn new() -> Result<Self> {
-        Self::with_model("ecapa_tdnn_speaker")
-    }
-
     /// Create an embedding extractor with a specific model
+    ///
+    /// The id is normalised through [`super::embedding_model_artifact_id`], so
+    /// the file this opens and the pin its integrity is checked against are
+    /// always the same model. They were not: an id outside the known four
+    /// loaded ECAPA's file but verified it against an unknown id's pin, which
+    /// no lookup could satisfy, so the extractor refused a model it had in
+    /// fact found.
     pub fn with_model(model_id: &str) -> Result<Self> {
-        let models_dir = crate::paths::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Plainsong")
-            .join("models")
-            .join("diarization");
-
-        let filename = match model_id {
-            "ecapa_tdnn_speaker" => "ecapa_tdnn_speaker.onnx",
-            "resnet34_speaker" => "resnet34_speaker.onnx",
-            "campplus_speaker" => "campplus_speaker.onnx",
-            "eres2netv2_speaker" => "eres2netv2_speaker.onnx",
-            _ => "ecapa_tdnn_speaker.onnx", // Default fallback
-        };
-
-        let model_path = models_dir.join(filename);
+        let artifact_id = super::embedding_model_artifact_id(model_id);
+        let model_path = super::diarization_models_dir().join(format!("{artifact_id}.onnx"));
 
         tracing::info!("Diarization model path: {:?}", model_path);
         tracing::info!("Model exists: {}", model_path.exists());
 
         Ok(Self {
             model_path,
-            model_id: model_id.to_string(),
+            model_id: artifact_id.to_string(),
             sample_rate: 16000,
         })
     }
@@ -98,6 +110,7 @@ impl SpeakerEmbeddingExtractor {
         }
         let audio_path = audio_path.to_path_buf();
         let model_path = self.model_path.clone();
+        let model_id = self.model_id.clone();
         let segments = segments.to_vec();
         let sample_rate = self.sample_rate;
 
@@ -105,7 +118,7 @@ impl SpeakerEmbeddingExtractor {
             // WAV loading, channel conversion, and resampling are CPU/blocking work.
             let samples = crate::audio::utils::load_audio_file(&audio_path)
                 .context("Failed to load audio for diarization")?;
-            let mut session = load_embedding_session(&model_path)?;
+            let mut session = load_embedding_session(&model_path, &model_id)?;
             let mut embeddings = Vec::new();
 
             for (start_sec, end_sec) in segments {
@@ -121,7 +134,7 @@ impl SpeakerEmbeddingExtractor {
                     continue;
                 }
 
-                match run_embedding_inference(&mut session, segment_samples) {
+                match run_embedding_inference(&mut session, segment_samples, &model_id) {
                     Ok(embedding) => {
                         // Log embedding stats for debugging
                         let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -151,7 +164,7 @@ impl SpeakerEmbeddingExtractor {
 }
 
 #[cfg(feature = "diarization")]
-fn load_embedding_session(model_path: &Path) -> Result<Session> {
+pub(super) fn load_embedding_session(model_path: &Path, artifact_id: &str) -> Result<Session> {
     if !model_path.exists() {
         return Err(anyhow!(
             "Diarization model file not found: {}",
@@ -161,10 +174,20 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
 
     tracing::debug!("Loading diarization model from: {}", model_path.display());
 
-    let session = crate::ort_utils::build_session_with(model_path, |builder| {
+    // Per-model graph optimization level. CAM++ is built without it because the
+    // ONNX Runtime 1.28 that `ort` 2.0.0-rc.13 links rewrites its 52 no-op
+    // `Pad` + `AveragePool(ceil_mode=1)` pairs into pools with
+    // `count_include_pad=1` and then counts the ceil-mode padding, which
+    // corrupts the embedding at every input length whose pooled length is not a
+    // multiple of 100 -- including the 198-frame window this app feeds.
+    // Measured in artifacts/qa/campplus-divergence-2026-09-02.md.
+    let level = super::embedding_window::graph_optimization_level_for(artifact_id);
+    let session = crate::ort_utils::build_session_with(model_path, move |builder| {
         builder
             .with_intra_threads(1)
-            .map_err(|error| anyhow!("Failed to configure ONNX intra-op threads: {}", error))
+            .map_err(|error| anyhow!("Failed to configure ONNX intra-op threads: {}", error))?
+            .with_optimization_level(level)
+            .map_err(|error| anyhow!("Failed to set ONNX graph optimization level: {}", error))
     })?;
 
     // Log model input/output info
@@ -194,7 +217,11 @@ fn load_embedding_session(model_path: &Path) -> Result<Session> {
 }
 
 #[cfg(feature = "diarization")]
-fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Array1<f32>> {
+pub(super) fn run_embedding_inference(
+    session: &mut Session,
+    samples: &[f32],
+    artifact_id: &str,
+) -> Result<Array1<f32>> {
     let input = session
         .inputs()
         .first()
@@ -213,22 +240,100 @@ fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Arr
         // Compute FBank features
         let fbank_features = compute_fbank_features(samples, 16000, 80)?;
 
-        // Shape: [1, num_frames, 80]
         let num_frames = fbank_features.len() / 80;
-        let input_shape = vec![1, num_frames, 80];
+        if num_frames == 0 {
+            return Err(anyhow!("FBank front end produced no frames"));
+        }
+
+        // The thresholds in `voiceprints.rs` were measured on tensors this
+        // shape, produced by the windows above. A window outside the verified
+        // range is a different object under the same name, and comparing it
+        // with a stored centroid would be arithmetic with no calibration
+        // behind it. A warning and a debug assertion rather than an error:
+        // this is a bug in a caller, and a meeting should not fail for it.
+        let verified = verified_fbank_frame_range();
+        if !verified.contains(&num_frames) {
+            tracing::warn!(
+                "Diarization window produced {} FBank frames, outside the verified {}-{} \
+                 (from {}-{}s windows). Voiceprint thresholds were not calibrated here.",
+                num_frames,
+                verified.start(),
+                verified.end(),
+                MIN_SEGMENT_SECONDS,
+                SEGMENT_SECONDS,
+            );
+        }
+        debug_assert!(
+            verified.contains(&num_frames),
+            "diarization window produced {num_frames} FBank frames, outside the verified \
+             {}-{}",
+            verified.start(),
+            verified.end(),
+        );
 
         tracing::debug!("Feeding FBank features: {} frames", num_frames);
 
-        let input_array = ndarray::Array::from_shape_vec(IxDyn(&input_shape), fbank_features)
-            .context("Failed to shape FBank input tensor")?;
+        // Never feed a model more frames in one shot than were verified for it.
+        // CAM++ is wrong under this ONNX Runtime at lengths whose pooled length
+        // is not a multiple of 100, and the error grows with the size of the
+        // partial pooling window, so a long input is split into near-equal
+        // windows and the per-window embeddings averaged -- the same thing the
+        // clusterer does across segments. Today nothing reaches this branch
+        // (`generate_segments(duration, 2.0, 1.0)` caps a window at 198
+        // frames); it exists so a future change to the segmentation cannot
+        // silently walk past what was measured.
+        let window = super::embedding_window::verified_frame_window(artifact_id)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let plan = super::embedding_window::split_into_windows(num_frames, window);
+        if plan.len() > 1 {
+            tracing::warn!(
+                "Diarization model '{}' was handed {} frames but is only verified to {}; \
+                 splitting into {} windows and averaging.",
+                artifact_id,
+                num_frames,
+                window,
+                plan.len()
+            );
+        }
 
-        let input_tensor = Tensor::from_array(input_array)
-            .context("Failed to create ONNX input tensor for FBank")?;
-        let outputs = session
-            .run(ort::inputs![input_tensor])
-            .context("ONNX diarization model inference failed")?;
+        let mut pooled: Option<Array1<f32>> = None;
+        for (start, len) in &plan {
+            let slice = fbank_features[start * 80..(start + len) * 80].to_vec();
+            let input_array = ndarray::Array::from_shape_vec(IxDyn(&[1, *len, 80]), slice)
+                .context("Failed to shape FBank input tensor")?;
+            let input_tensor = Tensor::from_array(input_array)
+                .context("Failed to create ONNX input tensor for FBank")?;
+            let outputs = session
+                .run(ort::inputs![input_tensor])
+                .context("ONNX diarization model inference failed")?;
+            let embedding = extract_embedding_from_outputs(&outputs)?;
+            pooled = Some(match pooled {
+                None => embedding,
+                Some(mut acc) => {
+                    if acc.len() != embedding.len() {
+                        return Err(anyhow!(
+                            "Diarization model returned embeddings of different lengths \
+                             ({} then {}) across split windows",
+                            acc.len(),
+                            embedding.len()
+                        ));
+                    }
+                    acc += &embedding;
+                    acc
+                }
+            });
+        }
 
-        extract_embedding_from_outputs(&outputs)
+        let summed = pooled.ok_or_else(|| anyhow!("Diarization produced no embedding windows"))?;
+        // Each window's embedding is already L2-normalized by
+        // `finalize_embedding`; re-normalize the sum so the mean of the windows
+        // is a unit vector again.
+        let norm = summed.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm <= 1e-6 {
+            return Err(anyhow!("Diarization embedding norm is too close to zero"));
+        }
+        Ok(summed.mapv(|value| value / norm))
     } else {
         // Fallback for raw waveform models
         let input_shape = infer_input_shape(input.dtype(), samples.len())?;
@@ -262,14 +367,14 @@ fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Arr
 
 /// Compute log Mel filterbank features from audio samples
 #[cfg(feature = "diarization")]
-fn compute_fbank_features(
+pub(super) fn compute_fbank_features(
     samples: &[f32],
     sample_rate: u32,
     num_mel_bins: usize,
 ) -> Result<Vec<f32>> {
     // Parameters for FBank extraction
-    let frame_size = 400; // 25ms at 16kHz
-    let frame_shift = 160; // 10ms at 16kHz
+    let frame_size = FBANK_FRAME_SIZE;
+    let frame_shift = FBANK_FRAME_SHIFT;
     let fft_size = 512;
 
     // Apply pre-emphasis
@@ -474,33 +579,6 @@ fn finalize_embedding(array: ArrayViewD<'_, f32>) -> Result<Array1<f32>> {
 
     let normalized: Vec<f32> = embedding.into_iter().map(|v| v / norm).collect();
     Ok(Array1::from(normalized))
-}
-
-#[cfg(not(feature = "diarization"))]
-pub struct SpeakerEmbeddingExtractor;
-
-#[cfg(not(feature = "diarization"))]
-#[allow(dead_code)]
-impl SpeakerEmbeddingExtractor {
-    pub fn new() -> Result<Self> {
-        Ok(Self)
-    }
-
-    pub fn with_model(_model_id: &str) -> Result<Self> {
-        Ok(Self)
-    }
-
-    pub fn is_model_available(&self) -> bool {
-        false
-    }
-
-    pub async fn extract_embeddings(
-        &self,
-        _audio_path: &Path,
-        _segments: &[(f64, f64)],
-    ) -> Result<Vec<(f64, f64, Array1<f32>)>> {
-        Ok(Vec::new())
-    }
 }
 
 /// Cluster embeddings to identify unique speakers
@@ -723,6 +801,38 @@ fn cosine_distance(a: &Array1<f32>, b: &Array1<f32>) -> f32 {
     (1.0 - similarity).max(0.0)
 }
 
+/// FBank analysis window, in samples: 25 ms at 16 kHz.
+#[cfg(feature = "diarization")]
+const FBANK_FRAME_SIZE: usize = 400;
+/// FBank hop, in samples: 10 ms at 16 kHz.
+#[cfg(feature = "diarization")]
+const FBANK_FRAME_SHIFT: usize = 160;
+
+/// How many FBank frames `compute_fbank_features` produces for `seconds` of
+/// audio at [`EMBEDDING_SAMPLE_RATE`].
+///
+/// Split out from the loop so the verified range below is derived from the
+/// segmentation constants rather than written down twice.
+#[cfg(feature = "diarization")]
+pub fn fbank_frames_for_seconds(seconds: f64) -> usize {
+    let samples = (seconds * EMBEDDING_SAMPLE_RATE as f64).round() as usize;
+    if samples < FBANK_FRAME_SIZE {
+        1
+    } else {
+        (samples - FBANK_FRAME_SIZE) / FBANK_FRAME_SHIFT + 1
+    }
+}
+
+/// The FBank frame counts the shipped segmentation can produce, inclusive.
+///
+/// Generic on purpose: every embedder in this build is fed the same windows,
+/// so the range is a property of the segmentation rather than of one model. A
+/// model-specific bound belongs beside the model.
+#[cfg(feature = "diarization")]
+pub fn verified_fbank_frame_range() -> std::ops::RangeInclusive<usize> {
+    fbank_frames_for_seconds(MIN_SEGMENT_SECONDS)..=fbank_frames_for_seconds(SEGMENT_SECONDS)
+}
+
 /// Generate overlapping segments for embedding extraction
 pub fn generate_segments(duration: f64, segment_duration: f64, overlap: f64) -> Vec<(f64, f64)> {
     let mut segments = Vec::new();
@@ -731,8 +841,7 @@ pub fn generate_segments(duration: f64, segment_duration: f64, overlap: f64) -> 
 
     while start < duration {
         let end = (start + segment_duration).min(duration);
-        if end - start >= 1.0 {
-            // Minimum 1 second
+        if end - start >= MIN_SEGMENT_SECONDS {
             segments.push((start, end));
         }
         start += step;
@@ -743,4 +852,47 @@ pub fn generate_segments(duration: f64, segment_duration: f64, overlap: f64) -> 
     }
 
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two numbers the voiceprint thresholds were measured at. A change
+    /// here invalidates
+    /// `artifacts/qa/voiceprint-recalibration-2026-09-03.md`, so it should
+    /// fail a test rather than pass quietly.
+    #[test]
+    fn the_shipped_segmentation_is_two_second_windows_on_a_one_second_hop() {
+        assert_eq!(SEGMENT_SECONDS, 2.0);
+        assert_eq!(SEGMENT_OVERLAP_SECONDS, 1.0);
+        assert_eq!(MIN_SEGMENT_SECONDS, 1.0);
+        assert_eq!(EMBEDDING_SAMPLE_RATE, 16000);
+    }
+
+    #[test]
+    fn generate_segments_hops_by_the_shipped_step_and_drops_a_short_tail() {
+        let segments = generate_segments(5.5, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
+        assert_eq!(
+            segments,
+            vec![(0.0, 2.0), (1.0, 3.0), (2.0, 4.0), (3.0, 5.0), (4.0, 5.5)]
+        );
+        // 0.5 s of audio is below `MIN_SEGMENT_SECONDS`, so nothing is emitted.
+        assert!(generate_segments(0.5, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS).is_empty());
+    }
+
+    #[test]
+    fn the_verified_frame_range_matches_the_shipped_windows() {
+        // 1.0 s -> (16000 - 400) / 160 + 1 = 98 frames.
+        // 2.0 s -> (32000 - 400) / 160 + 1 = 198 frames.
+        assert_eq!(fbank_frames_for_seconds(MIN_SEGMENT_SECONDS), 98);
+        assert_eq!(fbank_frames_for_seconds(SEGMENT_SECONDS), 198);
+        let verified = verified_fbank_frame_range();
+        assert_eq!(verified, 98..=198);
+        assert!(verified.contains(&fbank_frames_for_seconds(1.5)));
+        assert!(
+            !verified.contains(&fbank_frames_for_seconds(8.0)),
+            "an 8-second window is outside what was calibrated"
+        );
+    }
 }

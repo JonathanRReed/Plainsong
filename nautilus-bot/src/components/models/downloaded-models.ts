@@ -36,12 +36,14 @@ const PROVIDER_BY_LIST_VALUE: Record<string, AsrProviderType> = {
   distil_whisper: "distil_whisper",
   moonshine: "moonshine",
   qwen3_asr: "qwen3_asr",
+  cohere_local: "cohere_local",
 };
 
 const SINGLE_MODEL_ROUTE: Partial<Record<AsrProviderType, string>> = {
   whisper_candle: "whisper-large-v3-turbo",
   distil_whisper: "distil-large-v3.5",
   qwen3_asr: "qwen3-asr-0.6b",
+  cohere_local: "cohere-transcribe-03-2026-q4",
 };
 
 function normalizePath(path: string): string {

@@ -1,8 +1,10 @@
+import { describeCloudDictationVocabularyNote } from "@/lib/dictation-ui-message";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { formatModelSize, getAsrModelCapability } from "@/lib/asr-capabilities";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
+import { describeAppleSpeechEngine } from "@/lib/asr-route-catalog";
 import {
   mergeSelectionStateUpdate,
   selectionStateFromSettings,
@@ -17,6 +19,8 @@ import {
   saveSettings,
   getPermissionDiagnostics,
   openPermissionSettings,
+  cancelAppleSpeechLanguageInstall,
+  installAppleSpeechLanguage,
   openInstalledPlainsongApp,
   requestAppleSpeechPermission,
   repairCursorInsertPermissions,
@@ -44,6 +48,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import type {
+  AppleSpeechLanguageInstallProgress,
   AsrBenchmarkEntry,
   PlatformOptimizationSettings,
   AsrProviderInfo,
@@ -114,6 +119,14 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   );
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
   const [permissionActionBusy, setPermissionActionBusy] = useState(false);
+  const [languageInstallBusy, setLanguageInstallBusy] = useState(false);
+  const [languageInstallCancelling, setLanguageInstallCancelling] =
+    useState(false);
+  const [languageInstallProgress, setLanguageInstallProgress] =
+    useState<AppleSpeechLanguageInstallProgress | null>(null);
+  const [languageInstallError, setLanguageInstallError] = useState<
+    string | null
+  >(null);
   const [permissionDiagnostics, setPermissionDiagnostics] =
     useState<PermissionDiagnostics | null>(null);
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -732,6 +745,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "openai_cloud":
       case "elevenlabs_scribe":
       case "cohere_transcribe":
+      case "deepgram":
+      case "gemini_transcribe":
         return <CloudLightning className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
@@ -819,11 +834,17 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "distil_whisper":
         return "Use the Download button to fetch the Distil-Whisper Large v3.5 model (no Python needed)";
       case "macos_apple_speech":
-        return "Grant Plainsong Speech Recognition access in macOS System Settings > Privacy & Security > Speech Recognition";
+        // The old line was a bare instruction, and macOS named this
+        // permission in the era when speech recognition meant sending audio
+        // to Apple. On this route nothing is sent anywhere, so the sentence
+        // has to say what the grant is actually for before it asks for it.
+        return "Grant Speech Recognition in System Settings > Privacy & Security > Speech Recognition. It is consent to on-device processing, not permission to use a server.";
       case "moonshine":
         return "Use the Download button to fetch the selected Moonshine bundle. Tiny is the smallest edge model; Base is the default stable option.";
       case "qwen3_asr":
-        return "Use the Download button to fetch the Qwen3-ASR 0.6B model (~1.9 GiB, 7 files). The autoregressive decoder with KV cache threading is implemented but not yet validated with real audio — transcription is gated off until end-to-end testing.";
+        return "Use the Download button to fetch the Qwen3-ASR 0.6B model (~1.9 GiB, 7 files). Experimental: English is verified in Plainsong; 30 languages including Chinese, Japanese and Korean are listed upstream; it runs slower than real time on the CPU.";
+      case "cohere_local":
+        return "Use the Download button to fetch Cohere Transcribe 03-2026 as int4 ONNX (~2.0 GiB, 8 files). Experimental: it runs on the CPU with no Metal path, it cannot detect a language so you have to pick one of its 14, and its segment times are estimated rather than measured.";
       case "windows_sdk_dictation":
         return "Use a Windows x86_64 build with Windows speech recognition components available, or pick another ASR provider";
       case "elevenlabs_scribe":
@@ -832,6 +853,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return "Add an OpenAI API key in Settings → API Keys";
       case "cohere_transcribe":
         return "Add a Cohere API key in Settings → API Keys";
+      case "deepgram":
+        return "Add a Deepgram API key in Settings → API Keys";
+      case "gemini_transcribe":
+        return "Add a Google Gemini API key in Settings → API Keys";
       default:
         return "Use the Download button to fetch the model (no Python needed)";
     }
@@ -963,6 +988,85 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     selectionProviderByType("macos_apple_speech")?.platformReadiness ??
     providerByType("macos_apple_speech")?.platformReadiness ??
     null;
+
+  // The language install is the only download this route ever starts, so the
+  // action is offered only when macOS actually has something to fetch:
+  // SpeechAnalyzer is usable, it covers this language, and the assets are not
+  // already on disk.
+  const appleSpeechLanguageInstallable = Boolean(
+    appleSpeechReadiness?.speechAnalyzerAvailable &&
+      appleSpeechReadiness?.speechAnalyzerLocaleSupported &&
+      !appleSpeechReadiness?.speechAnalyzerAssetsInstalled,
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void (async () => {
+      const next = await listen<AppleSpeechLanguageInstallProgress>(
+        "apple-speech-language-install-progress",
+        (event) => {
+          if (!disposed) {
+            setLanguageInstallProgress({ ...event.payload });
+          }
+        },
+      );
+      if (disposed) {
+        next();
+        return;
+      }
+      unlisten = next;
+    })();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  /**
+   * Stops the running install.
+   *
+   * macOS owns the download and it can run for minutes; without this the only
+   * way out of "Installing language…" was to quit. The install call itself
+   * returns with a `cancelled` error, so the button state is cleared by the
+   * same `finally` as every other ending.
+   */
+  const cancelAppleSpeechLanguageAssets = async () => {
+    setLanguageInstallCancelling(true);
+    try {
+      await cancelAppleSpeechLanguageInstall();
+    } catch (error) {
+      setLanguageInstallError(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  };
+
+  const installAppleSpeechLanguageAssets = async () => {
+    setLanguageInstallBusy(true);
+    setLanguageInstallCancelling(false);
+    setLanguageInstallError(null);
+    setLanguageInstallProgress(null);
+    try {
+      const result = await installAppleSpeechLanguage(
+        appleSpeechReadiness?.locale ?? undefined,
+      );
+      if (result.notes.length > 0) {
+        setLanguageInstallError(result.notes.join(" "));
+      }
+      await refreshAppleNativeReadiness();
+    } catch (error) {
+      setLanguageInstallError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setLanguageInstallBusy(false);
+      setLanguageInstallCancelling(false);
+      setLanguageInstallProgress(null);
+    }
+  };
   const selectedRouteUsesAppleNative = useSharedAsrSelection
     ? defaultProvider === "macos_apple_speech"
     : dictationProvider === "macos_apple_speech" ||
@@ -1029,7 +1133,13 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       ready: permissionDiagnostics?.speechRecognitionReady ?? false,
       action: "Open Speech Settings",
       onClick: () => void openPermissionSettings("speech"),
-      detail: "Required for Apple Speech transcription.",
+      // macOS named this permission in the era when speech recognition meant
+      // sending audio to Apple. It does not mean that here: Plainsong runs
+      // both Apple engines with server recognition off, so granting it lets
+      // macOS transcribe on this Mac and nothing else. Saying only "required
+      // for transcription" left the reader to assume the older meaning.
+      detail:
+        "macOS asks for this before it will transcribe. It records your consent to on-device processing; it is not permission to use a server, and Plainsong keeps Apple's server fallback off.",
     },
     {
       key: "accessibility",
@@ -1147,15 +1257,53 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   {appleSpeechReadiness.setupAction}
                 </p>
               ) : null}
-              {appleSpeechReadiness.speechAnalyzerAvailable ? (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  SpeechAnalyzer API detected
-                  {appleSpeechReadiness.operatingSystemVersion
-                    ? ` (macOS ${appleSpeechReadiness.operatingSystemVersion})`
-                    : ""}
-                  . The newer streaming-capable Speech framework route is
-                  available on this device.
-                </p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {describeAppleSpeechEngine(appleSpeechReadiness)}
+              </p>
+              {appleSpeechLanguageInstallable ? (
+                <div className="mt-2 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={languageInstallBusy}
+                      onClick={() => void installAppleSpeechLanguageAssets()}
+                    >
+                      {languageInstallBusy
+                        ? "Installing language…"
+                        : "Install language"}
+                    </Button>
+                    {languageInstallBusy ? (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={languageInstallCancelling}
+                        onClick={() =>
+                          void cancelAppleSpeechLanguageAssets()
+                        }
+                      >
+                        {languageInstallCancelling ? "Stopping…" : "Cancel"}
+                      </Button>
+                    ) : null}
+                    {languageInstallProgress ? (
+                      <span className="text-sm text-muted-foreground">
+                        {languageInstallProgress.message}
+                        {languageInstallProgress.stage === "downloading"
+                          ? ` ${Math.round(
+                              languageInstallProgress.fraction * 100,
+                            )}%`
+                          : ""}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    macOS downloads and stores the language; Plainsong does not
+                    control its size and keeps no copy.
+                  </p>
+                </div>
+              ) : null}
+              {languageInstallError ? (
+                <p className="mt-1 text-sm text-rust">{languageInstallError}</p>
               ) : null}
             </div>
           ) : null}
@@ -1239,7 +1387,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   {permissionBadgeLabel(row.key, row.ready)}
                 </Badge>
               </div>
-              <p className="text-xs text-muted-foreground">{row.detail}</p>
+              {/* A sentence, so it sits on the text-sm body floor (STYLE.md */}
+              {/* section 2 and section 7); these details grew from labels into */}
+              {/* explanations and text-xs no longer fit them. */}
+              <p className="text-sm text-muted-foreground">{row.detail}</p>
               {!row.ready &&
               !(
                 row.key === "keyboardEvents" && appleNativeAccessibilityTrusted
@@ -1436,6 +1587,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 <CardDescription className="mt-1">
                   {provider.description}
                 </CardDescription>
+                {describeCloudDictationVocabularyNote(provider.providerType) ? (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {describeCloudDictationVocabularyNote(provider.providerType)}
+                  </p>
+                ) : null}
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -2263,7 +2419,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   <p className="font-medium mb-1">Whisper (Enabled)</p>
                   <p className="text-muted-foreground">
                     Production local transcription provider. Supports model
-                    selection including turbo variants.
+                    selection including turbo variants. The multilingual
+                    small, medium, large-v3 and large-v3-turbo models can also
+                    run meetings (100 languages, on the GPU, slower than
+                    Parakeet); tiny, base and every .en model stay dictation-only.
                   </p>
                 </div>
                 <div className="p-3 bg-muted/50 rounded-lg">

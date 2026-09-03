@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
+import { useSavedPromptChat } from "@/components/prompts/use-saved-prompt-chat";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -39,6 +40,7 @@ import {
   TriangleAlert,
   Users,
 } from "lucide-react";
+import { formatDate, formatDateTime, formatTime } from "@/lib/format-locale";
 
 /** m:ss for a transcript offset, so a hit reads like a place in the meeting. */
 function formatHitTimestamp(seconds: number): string {
@@ -137,7 +139,7 @@ export function DashboardView() {
             ? "Mic-only meetings are ready. Dictation needs one more pass"
             : "Finish setup to unlock the full solo workflow";
   const timelineGroups = useMemo(() => recordings.reduce<Record<string, typeof recordings>>((acc, recording) => {
-    const key = new Date(recording.createdAt).toLocaleDateString();
+    const key = formatDate(recording.createdAt);
     if (!acc[key]) {
       acc[key] = [];
     }
@@ -164,7 +166,16 @@ export function DashboardView() {
     ].join("\n");
   };
 
+  const savedPromptChat = useSavedPromptChat({
+    scope: "memory",
+    inputValue: memoryQuery,
+    onPickPrompt: setMemoryQuery,
+    label: "Saved prompts for your meetings",
+  });
+
   const runMemoryQuery = async (queryOverride?: string) => {
+    // While the "/" picker is open the box holds a filter, not a question.
+    if (queryOverride === undefined && savedPromptChat.pickerOpen) return;
     const query = (queryOverride ?? memoryQuery).trim();
     if (!query) return;
     
@@ -258,6 +269,7 @@ export function DashboardView() {
 
   return (
     <div className="h-full flex flex-col">
+      {savedPromptChat.manager}
       <PageHeader
         eyebrow="WORKSPACE"
         title="Home"
@@ -419,20 +431,30 @@ export function DashboardView() {
               </p>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="flex gap-2">
-                <Input
-                  value={memoryQuery}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setMemoryQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") void runMemoryQuery(); }}
-                  placeholder="Ask about your meetings..."
-                />
-                <Button
-                  aria-label="Send"
-                  onClick={() => void runMemoryQuery()}
-                  disabled={memoryLoading || !memoryQuery.trim()}
-                >
-                  {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                </Button>
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <Input
+                    value={memoryQuery}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setMemoryQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      savedPromptChat.onInputKeyDown(e);
+                      if (e.defaultPrevented) return;
+                      if (e.key === "Enter") void runMemoryQuery();
+                    }}
+                    placeholder="Ask about your meetings..."
+                  />
+                  <Button
+                    aria-label="Send"
+                    onClick={() => void runMemoryQuery()}
+                    disabled={memoryLoading || !memoryQuery.trim() || savedPromptChat.pickerOpen}
+                  >
+                    {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  </Button>
+                </div>
+                {savedPromptChat.picker}
+                <p className="text-sm text-muted-foreground">
+                  Type &ldquo;/&rdquo; for a saved prompt.
+                </p>
               </div>
               {memoryError && (
                 <div className="rounded-md border border-rust/30 bg-rust/10 p-3 text-sm text-rust">
@@ -450,6 +472,17 @@ export function DashboardView() {
                       )}
                     >
                       <p className="text-sm">{message.content}</p>
+                      {message.role === "user" && message.content.trim() ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="mt-1 h-auto px-2 py-1 text-sm text-muted-foreground"
+                          onClick={() => savedPromptChat.saveTextAsPrompt(message.content)}
+                        >
+                          Save as prompt
+                        </Button>
+                      ) : null}
                       {message.citations && message.citations.length > 0 && (
                         <div className="mt-2 space-y-1">
                           {message.citations.map((citation, idx) => (
@@ -511,7 +544,7 @@ export function DashboardView() {
                             <p className="font-medium truncate">{person.name}</p>
                             <p className="text-sm text-muted-foreground">
                               {person.recordingCount} meetings · last seen{" "}
-                              {new Date(person.lastSeenAt).toLocaleDateString()}
+                              {formatDate(person.lastSeenAt)}
                             </p>
                           </div>
                           <Button
@@ -549,7 +582,7 @@ export function DashboardView() {
                             <p className="font-medium truncate">{company.name}</p>
                             <p className="text-sm text-muted-foreground">
                               {company.recordingCount} meetings · last seen{" "}
-                              {new Date(company.lastSeenAt).toLocaleDateString()}
+                              {formatDate(company.lastSeenAt)}
                             </p>
                           </div>
                           <Button
@@ -753,7 +786,7 @@ export function DashboardView() {
                       <div className="min-w-0 flex-1">
                         <p className="font-medium truncate">{recording.title}</p>
                         <p className="text-xs text-muted-foreground">
-                          {new Date(recording.createdAt).toLocaleString()}
+                          {formatDateTime(recording.createdAt)}
                         </p>
                       </div>
                       <Badge variant="secondary" className="time-spec shrink-0">
@@ -794,7 +827,7 @@ export function DashboardView() {
                             {project.description || "No description"}
                           </p>
                           <p className="mt-2 text-xs text-muted-foreground">
-                            Created {new Date(project.createdAt).toLocaleDateString()}
+                            Created {formatDate(project.createdAt)}
                           </p>
                         </CardContent>
                       </Card>
@@ -821,7 +854,7 @@ export function DashboardView() {
                           <div key={recording.id} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
                             <span className="truncate font-medium">{recording.title}</span>
                             <span className="time-spec shrink-0 text-xs text-muted-foreground">
-                              {new Date(recording.createdAt).toLocaleTimeString()}
+                              {formatTime(recording.createdAt)}
                             </span>
                           </div>
                         ))}

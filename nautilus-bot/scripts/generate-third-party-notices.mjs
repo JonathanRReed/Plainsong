@@ -3,6 +3,12 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.mjs";
+import {
+  MODEL_WEIGHTS,
+  renderModelWeightsSection,
+} from "./model-weights-manifest.mjs";
 
 const appRoot = path.resolve(import.meta.dirname, "..");
 const repositoryRoot = path.resolve(appRoot, "..");
@@ -68,6 +74,60 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+/**
+ * Compare the committed notices file and the packaged copy against the
+ * notices regenerated from the current dependency graph. Comparing the
+ * packaged file only to the source file would let `release:mac` package a
+ * stale THIRD-PARTY-NOTICES.txt and still pass the license gate, so both are
+ * held to the regenerated text. Returns one failure line per stale or
+ * missing file, each saying which file is stale and how to fix it; an empty
+ * array means both match.
+ *
+ * @param {{ current: string, source: string | null, packaged: string | null, sourcePath: string, packagedPath: string }} input
+ * @returns {string[]}
+ */
+export function compareNoticesToCurrent({
+  current,
+  source,
+  packaged,
+  sourcePath,
+  packagedPath,
+}) {
+  const failures = [];
+  const currentHash = sha256(current);
+  const regenerate =
+    "run `bun run licenses:generate` from nautilus-bot/, commit THIRD-PARTY-NOTICES.txt, then rebuild the app";
+  const sourceIsCurrent = source === current;
+
+  if (source === null) {
+    failures.push(`source third-party notices are missing: ${sourcePath}; ${regenerate}`);
+  } else if (!sourceIsCurrent) {
+    failures.push(
+      `source third-party notices are stale: ${sourcePath} (sha256 ${sha256(source)}) does not match the notices regenerated from the current cargo metadata and npm production dependencies (sha256 ${currentHash}); ${regenerate}`,
+    );
+  }
+
+  if (packaged === null) {
+    failures.push(`packaged third-party notices are missing: ${packagedPath}`);
+  } else if (packaged.length === 0) {
+    failures.push(`packaged third-party notices are empty: ${packagedPath}`);
+  } else if (packaged !== current) {
+    failures.push(
+      `packaged third-party notices are stale: ${packagedPath} (sha256 ${sha256(packaged)}) does not match the regenerated notices (sha256 ${currentHash}); ${
+        sourceIsCurrent
+          ? "the source file is current, so rebuild the app so it packages the current THIRD-PARTY-NOTICES.txt"
+          : regenerate
+      }`,
+    );
+  }
+
+  return failures;
+}
+
+function readOptionalText(filePath) {
+  return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : null;
+}
+
 function verifyPackagedApp(appArgument) {
   const appPath = path.resolve(appRoot, appArgument);
   const resourcesPath = path.join(appPath, "Contents", "Resources");
@@ -78,11 +138,6 @@ function verifyPackagedApp(appArgument) {
       sourcePath: projectLicensePath,
     },
     {
-      name: "third-party notices",
-      packagedPath: path.join(resourcesPath, "THIRD-PARTY-NOTICES.txt"),
-      sourcePath: outputPath,
-    },
-    {
       name: "Chromium attributions",
       packagedPath: path.join(resourcesPath, "LICENSES.chromium.html"),
       sourcePath: chromiumNoticesPath,
@@ -90,6 +145,26 @@ function verifyPackagedApp(appArgument) {
   ];
 
   const failures = [];
+
+  // Third-party notices: regenerate from the live dependency graph (same
+  // macOS feature set as the shipped sidecar) and hold both the committed
+  // file and the packaged copy to it.
+  const packagedNoticesPath = path.join(resourcesPath, "THIRD-PARTY-NOTICES.txt");
+  const { notices: currentNotices } = buildNotices();
+  const noticesFailures = compareNoticesToCurrent({
+    current: currentNotices,
+    source: readOptionalText(outputPath),
+    packaged: readOptionalText(packagedNoticesPath),
+    sourcePath: outputPath,
+    packagedPath: packagedNoticesPath,
+  });
+  if (noticesFailures.length === 0) {
+    console.log(
+      `PASS third-party notices: ${packagedNoticesPath} (source and packaged copies match the regenerated notices, sha256 ${sha256(currentNotices)})`,
+    );
+  }
+  failures.push(...noticesFailures);
+
   for (const check of checks) {
     if (!fs.existsSync(check.sourcePath)) {
       failures.push(`source ${check.name} is missing: ${check.sourcePath}`);
@@ -131,6 +206,10 @@ function cargoMetadata() {
       "--locked",
       "--manifest-path",
       cargoManifestPath,
+      // Resolve the same feature set scripts/build-rust-sidecar.mjs ships on
+      // this host, so crates pulled in only by the macOS acceleration
+      // features (Metal, CoreML) get their notices too.
+      ...sidecarCargoFeatureArgs(),
     ],
     {
       cwd: appRoot,
@@ -431,6 +510,7 @@ function renderNotices({ rootPackage, rust, npm, cpalLicense, electron }) {
     `Application package: ${rootPackage.name}@${rootPackage.version}`,
     `Rust dependency packages: ${rust.packages.length}`,
     `npm production dependency packages: ${npm.packages.length}`,
+    `Downloadable model artifacts: ${MODEL_WEIGHTS.length}`,
     "",
     "The dependency indexes retain declared license identifiers and repository URLs",
     "even when no license file is available in the installed package or Cargo cache.",
@@ -445,6 +525,11 @@ function renderNotices({ rootPackage, rust, npm, cpalLicense, electron }) {
     "----- BEGIN rust-sidecar/vendor/cpal-0.18.1/LICENSE -----",
     withFinalNewline(cpalLicense),
     "----- END rust-sidecar/vendor/cpal-0.18.1/LICENSE -----",
+    "",
+    "================================================================================",
+    "MODEL WEIGHTS",
+    "================================================================================",
+    renderModelWeightsSection(),
     "",
     "================================================================================",
     "RUST DEPENDENCY INDEX",
@@ -492,7 +577,12 @@ function renderNotices({ rootPackage, rust, npm, cpalLicense, electron }) {
   ].join("\n");
 }
 
-function generate() {
+/**
+ * Render the notices from the current dependency graph without touching the
+ * filesystem output. Shared by `generate()` (which writes it) and
+ * `verifyPackagedApp()` (which compares against it).
+ */
+function buildNotices() {
   const rootPackage = JSON.parse(
     readRequiredText(path.join(appRoot, "package.json"), "package.json"),
   );
@@ -516,25 +606,52 @@ function generate() {
     throw new Error("generated notices do not contain the vendored CPAL license verbatim");
   }
 
+  // Every downloadable model must appear by name. The weights are the one
+  // class of third-party material with no dependency graph to derive them
+  // from, so a model added to the Rust source without an entry in
+  // scripts/model-weights-manifest.mjs would otherwise ship unmentioned.
+  for (const entry of MODEL_WEIGHTS) {
+    if (!notices.includes(entry.name) || !notices.includes(entry.revision)) {
+      throw new Error(
+        `generated notices do not name the model artifact ${entry.name} at ${entry.revision}`,
+      );
+    }
+  }
+
+  return { notices, rust, npm };
+}
+
+function generate() {
+  const { notices, rust, npm } = buildNotices();
   fs.writeFileSync(outputPath, notices, "utf8");
   console.log(
-    `Wrote ${outputPath} (${fs.statSync(outputPath).size} bytes, ${rust.packages.length} Rust packages, ${npm.packages.length} npm production packages).`,
+    `Wrote ${outputPath} (${fs.statSync(outputPath).size} bytes, ${rust.packages.length} Rust packages, ${npm.packages.length} npm production packages, ${MODEL_WEIGHTS.length} model artifacts).`,
   );
 }
 
-try {
-  ensureElectronDistribution();
-  if (verifyAppIndex >= 0) {
-    const appArgument = args[verifyAppIndex + 1];
-    if (!appArgument || appArgument.startsWith("--")) {
-      throw new Error("--verify-app requires a path to a packaged .app bundle");
+function main() {
+  try {
+    ensureElectronDistribution();
+    if (verifyAppIndex >= 0) {
+      const appArgument = args[verifyAppIndex + 1];
+      if (!appArgument || appArgument.startsWith("--")) {
+        throw new Error("--verify-app requires a path to a packaged .app bundle");
+      }
+      verifyPackagedApp(appArgument);
+    } else if (args.length > 0) {
+      throw new Error(`unknown arguments: ${args.join(" ")}`);
+    } else {
+      generate();
     }
-    verifyPackagedApp(appArgument);
-  } else if (args.length > 0) {
-    throw new Error(`unknown arguments: ${args.join(" ")}`);
-  } else {
-    generate();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
   }
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+}
+
+// Only run when executed directly; tests import `compareNoticesToCurrent`.
+const entrypointUrl = process.argv[1]
+  ? pathToFileURL(path.resolve(process.argv[1])).href
+  : null;
+if (entrypointUrl === import.meta.url) {
+  main();
 }

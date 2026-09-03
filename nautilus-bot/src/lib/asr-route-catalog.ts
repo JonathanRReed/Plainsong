@@ -1,18 +1,22 @@
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import {
+  appleSpeechServesMeetings,
   describeAsrModel,
   getAsrModelCapability,
   isDownloadableProvider,
   isMeetingEligibleModel,
   isSharedMeetingCompatible,
+  isWhisperMeetingModel,
   providerHostingPreference,
 } from "@/lib/asr-capabilities";
 import type { AsrModelCapability } from "@/lib/asr-capabilities";
 import type {
+  AppleSpeechReadiness,
   AsrProviderInfo,
   AsrProviderInventory,
   AsrProviderType,
 } from "@/types";
+import { compareStrings } from "@/lib/format-locale";
 
 export type AsrRouteLane = "shared" | "dictation" | "meeting";
 type MeetingRoutePolicy = "prefer_local" | "best_available";
@@ -25,6 +29,10 @@ type AsrRouteReadiness =
   | "unavailable";
 type AsrRouteAction =
   | "download"
+  // Asks macOS for one SpeechAnalyzer language. Distinct from "download",
+  // which fetches a model this repo pins and hashes: this one is Apple's
+  // asset, on Apple's terms, and Plainsong never stores a copy.
+  | "install_language"
   | "connect_api_key"
   | "request_permission"
   | "open_system_setup"
@@ -67,6 +75,9 @@ export interface AsrRouteCatalogEntry {
 // words it hasn't seen before (including "Plainsong" itself). Platform-native
 // engines and Moonshine's lowest-friction local route still rank first where
 // available; base.en remains offered as the smaller download further down.
+// Qwen3-ASR sits with the other experimental local route: it is offered (it
+// is the only local route to Chinese, Japanese and Korean) but never
+// recommended, and `isExperimentalRoute` sorts it into the last bucket.
 const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "moonshine",
   "macos_apple_speech",
@@ -75,31 +86,58 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "whisper",
   "distil_whisper",
   "whisper_candle",
+  "qwen3_asr",
+  "transcribe_cpp",
   "openai_cloud",
   "elevenlabs_scribe",
   "groq",
+  "deepgram",
+  "gemini_transcribe",
   "cohere_transcribe",
 ];
 
+// Parakeet stays first in every policy. whisper.cpp (only its multilingual
+// small+ models reach this lane -- see `isWhisperMeetingModel`) sits after it
+// and before Distil: it is the local route for the ~100 languages Parakeet v3
+// lacks, at the cost of being slower than Parakeet on long audio.
 const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
   MeetingRoutePolicy,
   AsrProviderType[]
 > = {
   prefer_local: [
     "parakeet",
+    "whisper",
     "distil_whisper",
+    // Apple Speech reaches this lane only on a Mac running SpeechAnalyzer with
+    // the language installed (see `routeLaneCompatibility`). It ranks after
+    // the three routes above -- they are what the meeting lane has been
+    // measured on -- but ahead of every cloud route, because it needs no
+    // account and never leaves the machine.
+    "macos_apple_speech",
+    // Deepgram and Gemini lead the cloud group here for the same reason they
+    // lead it under `best_available`: they are the only routes that return
+    // speaker labels with the transcript.
+    "deepgram",
+    "gemini_transcribe",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
     "cohere_transcribe",
   ],
+  // Deepgram and Gemini lead the cloud order for meetings because they are the
+  // only two routes that return speaker labels with the transcript; every
+  // other cloud route still pays for a local diarization pass afterwards.
   best_available: [
+    "deepgram",
+    "gemini_transcribe",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
     "cohere_transcribe",
     "parakeet",
+    "whisper",
     "distil_whisper",
+    "macos_apple_speech",
   ],
 };
 
@@ -128,23 +166,47 @@ function routeHosting(providerType: AsrProviderType): AsrRouteHosting {
   return providerHostingPreference(providerType) === "cloud" ? "cloud" : "local";
 }
 
+/**
+ * Which engine the Apple Speech route runs, and why, in one sentence.
+ *
+ * Says what will happen rather than what exists: "SpeechAnalyzer API
+ * available" told a reader nothing about whether their next dictation would
+ * use it.
+ */
+export function describeAppleSpeechEngine(
+  readiness: AppleSpeechReadiness,
+): string {
+  const version = readiness.operatingSystemVersion
+    ? ` (macOS ${readiness.operatingSystemVersion})`
+    : "";
+  const locale = readiness.locale ?? "this language";
+
+  if (!readiness.speechAnalyzerAvailable) {
+    return `Runs SFSpeechRecognizer${version}. SpeechAnalyzer needs macOS 26 or later.`;
+  }
+  if (readiness.engine === "speech_analyzer") {
+    return `Runs SpeechAnalyzer${version} with the ${locale} language installed. Nothing to download.`;
+  }
+  if (!readiness.speechAnalyzerLocaleSupported) {
+    return `Runs SFSpeechRecognizer${version}. SpeechAnalyzer is available but does not cover ${locale}.`;
+  }
+  return `Runs SFSpeechRecognizer${version}. Install the ${locale} language to switch to SpeechAnalyzer.`;
+}
+
 /// Builds the human-readable readiness detail string for a route.
 ///
-/// For Apple Speech, this appends a note about the SpeechAnalyzer API
-/// (macOS 26+) when it is available, so the route catalog surfaces the
-/// newer streaming-capable framework to the UI.
+/// For Apple Speech this names the engine that will actually run and the
+/// language-asset state behind that choice, because which of the two engines
+/// runs decides whether the route has timestamps and whether meetings can use
+/// it at all.
 function buildReadinessDetail(provider: RouteSelectableProvider): string | null {
   const base = provider.platformReadiness?.message ?? null;
   if (
     provider.providerType === "macos_apple_speech" &&
-    provider.platformReadiness?.speechAnalyzerAvailable
+    provider.platformReadiness
   ) {
-    const analyzerNote = `SpeechAnalyzer API available${
-      provider.platformReadiness.operatingSystemVersion
-        ? ` (macOS ${provider.platformReadiness.operatingSystemVersion})`
-        : ""
-    }`;
-    return base ? `${base}. ${analyzerNote}` : analyzerNote;
+    const engineNote = describeAppleSpeechEngine(provider.platformReadiness);
+    return base ? `${base}. ${engineNote}` : engineNote;
   }
   return base;
 }
@@ -253,6 +315,17 @@ function routeAction(
       default:
         break;
     }
+
+    // Offered even on a ready route: the route works on SFSpeechRecognizer,
+    // and installing the language is what upgrades it to SpeechAnalyzer and
+    // opens the meeting lane.
+    if (
+      provider.platformReadiness?.speechAnalyzerAvailable &&
+      provider.platformReadiness.speechAnalyzerLocaleSupported &&
+      !provider.platformReadiness.speechAnalyzerAssetsInstalled
+    ) {
+      return { action: "install_language", actionLabel: "Install language" };
+    }
   }
 
   if (readiness === "needs_download") {
@@ -278,13 +351,14 @@ function routeAction(
 }
 
 function routeCapabilityBadge(
-  providerType: AsrProviderType,
+  provider: RouteSelectableProvider,
   modelId: string,
 ): "Best for dictation" | "Best for meetings" | "Shared" {
-  if (isSharedMeetingCompatible(providerType, modelId)) {
+  const lanes = routeLaneCompatibility(provider, modelId);
+  if (lanes.shared) {
     return "Shared";
   }
-  if (isMeetingEligibleModel(providerType, modelId)) {
+  if (lanes.meeting) {
     return "Best for meetings";
   }
   return "Best for dictation";
@@ -295,6 +369,9 @@ function isExperimentalRoute(providerType: AsrProviderType, modelId: string) {
   return (
     providerType === "whisper_candle" ||
     providerType === "qwen3_asr" ||
+    // The transcribe.cpp spike: a second inference runtime behind an off-by-
+    // default Cargo feature. Offered when a build has it, never recommended.
+    providerType === "transcribe_cpp" ||
     normalized.includes("experimental") ||
     normalized === "parakeet-tdt-ctc-110m"
   );
@@ -352,8 +429,20 @@ function routeSummary(
   if (providerType === "cohere_transcribe") {
     return "Cloud route for meeting-grade transcription with a simple BYOK setup.";
   }
+  if (providerType === "deepgram") {
+    // The per-minute rate belongs in the picker, not only in the model label
+    // the sidecar sends: this is the line a user reads while choosing.
+    return modelId === "nova-3-medical"
+      ? "Deepgram's clinical-vocabulary build, English only, with the same speaker labels and word timestamps as Nova-3. Billed to your Deepgram key at $0.0043/min."
+      : "Fastest cloud route here, and the cheapest with speaker labels: meetings keep Deepgram's own speakers instead of running a second pass on this Mac. Billed to your Deepgram key at $0.0043/min in English, $0.0052/min on any other language setting including auto.";
+  }
+  if (providerType === "gemini_transcribe") {
+    return "Lowest published word error rate of the cloud routes, with speaker labels and word timestamps. Its API refuses your dictionary on the same request, so meetings get speakers and dictation gets the dictionary. Billed to your Google key at $0.005/min.";
+  }
   if (providerType === "macos_apple_speech") {
-    return "On-device Apple Speech for direct dictation only; server fallback is disabled and meetings use a separate provider.";
+    return capabilityBadge === "Best for dictation"
+      ? "On-device Apple Speech for direct dictation only; server fallback is disabled and meetings use a separate provider."
+      : "On-device Apple Speech through SpeechAnalyzer: nothing to download, per-segment timestamps for meetings, and server fallback disabled.";
   }
   if (providerType === "windows_sdk_dictation") {
     return "Built into Windows and convenient for direct dictation, but not a meeting route.";
@@ -362,7 +451,17 @@ function routeSummary(
     return "Whisper Large v3 Turbo run via Candle instead of whisper.cpp — a fallback engine, not a different model from the whisper.cpp large-v3-turbo route.";
   }
   if (providerType === "whisper") {
-    return "Flexible Whisper family for local power users who want finer model control.";
+    // The meeting-grade ggml models carry the same tradeoff sentence in every
+    // picker: what they add over Parakeet, where they run, and what it costs.
+    return isWhisperMeetingModel(modelId)
+      ? "100 languages, runs on the GPU, slower than Parakeet. Local route for meetings in languages Parakeet v3 and Distil-Whisper cannot hear."
+      : "Flexible Whisper family for local power users who want finer model control.";
+  }
+  if (providerType === "transcribe_cpp") {
+    return "Experimental second engine for the Parakeet weights, run on Metal through transcribe.cpp instead of the CPU ONNX runtime; a separate download from the Parakeet route.";
+  }
+  if (providerType === "qwen3_asr") {
+    return "Experimental local route with the widest language list here, including Chinese, Japanese and Korean; slower than real time on the CPU.";
   }
   return capabilityBadge === "Shared"
     ? "One route that stays viable for both dictation and meetings."
@@ -372,13 +471,20 @@ function routeSummary(
 }
 
 function routeLaneCompatibility(
-  providerType: AsrProviderType,
+  provider: RouteSelectableProvider,
   modelId: string,
 ): Record<AsrRouteLane, boolean> {
+  // Apple Speech is the one route whose meeting eligibility depends on the
+  // machine rather than the model id: only its SpeechAnalyzer engine returns
+  // the per-segment timestamps a meeting transcript is assembled from.
+  if (provider.providerType === "macos_apple_speech") {
+    const meeting = appleSpeechServesMeetings(provider.platformReadiness);
+    return { dictation: true, meeting, shared: meeting };
+  }
   return {
     dictation: true,
-    meeting: isMeetingEligibleModel(providerType, modelId),
-    shared: isSharedMeetingCompatible(providerType, modelId),
+    meeting: isMeetingEligibleModel(provider.providerType, modelId),
+    shared: isSharedMeetingCompatible(provider.providerType, modelId),
   };
 }
 
@@ -440,7 +546,7 @@ function sortRoutesForLane(
       return providerDelta;
     }
 
-    return left.label.localeCompare(right.label);
+    return compareStrings(left.label, right.label);
   });
 }
 
@@ -456,12 +562,23 @@ export function getLaneRoutes(
   );
 }
 
+/**
+ * The route the app recommends for a lane, or null when only experimental
+ * routes are compatible. Sorting already pushes experimental routes to the
+ * back, but a Qwen-only (or Candle-only) inventory would still surface one
+ * as "recommended" -- and the first-run wizard saves this as the meeting
+ * route -- so experimental routes are excluded outright rather than ranked.
+ */
 export function getRecommendedLaneRoute(
   routes: AsrRouteCatalogEntry[],
   lane: AsrRouteLane,
   meetingRoutePolicy: MeetingRoutePolicy,
 ) {
-  return getLaneRoutes(routes, lane, meetingRoutePolicy)[0] ?? null;
+  return (
+    getLaneRoutes(routes, lane, meetingRoutePolicy).find(
+      (route) => !route.experimental,
+    ) ?? null
+  );
 }
 
 export function buildAsrRouteCatalog(
@@ -472,7 +589,7 @@ export function buildAsrRouteCatalog(
     provider.modelOptions.map((option) => {
       const hosting = routeHosting(provider.providerType);
       const readiness = routeReadiness(provider, hosting);
-      const capabilityBadge = routeCapabilityBadge(provider.providerType, option.id);
+      const capabilityBadge = routeCapabilityBadge(provider, option.id);
       const actionState = routeAction(provider, readiness, hosting);
 
       return {
@@ -486,7 +603,7 @@ export function buildAsrRouteCatalog(
         ),
         providerLabel: provider.name,
         providerDescription: provider.description,
-        laneCompatibility: routeLaneCompatibility(provider.providerType, option.id),
+        laneCompatibility: routeLaneCompatibility(provider, option.id),
         hosting,
         readiness,
         readinessDetail: buildReadinessDetail(provider),

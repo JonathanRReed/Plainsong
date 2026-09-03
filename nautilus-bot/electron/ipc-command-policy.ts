@@ -22,8 +22,14 @@ const ANALYSIS_COMMANDS = new Set<string>([
 const FAST_COMMANDS = new Set<string>([
   "acknowledge_incomplete_transcript",
   "cancel_analysis_run",
+  // Sets one flag on an in-flight language install; the reader who pressed
+  // Cancel is watching the button.
+  "cancel_apple_speech_language_install",
   "check_for_updates",
   "check_system_audio_availability",
+  // Flips one flag on the call detector; the cue that sent it is waiting to
+  // disappear.
+  "dismiss_detected_call",
   "get_asr_provider_model",
   "get_available_space",
   "get_backup_config",
@@ -36,6 +42,8 @@ const FAST_COMMANDS = new Set<string>([
   "get_dictation_overlay_state",
   "get_dictation_shortcut_capability_status",
   "get_loopback_device_name",
+  // Reads the detector's in-memory state; the Meetings header polls it.
+  "get_meeting_call_status",
   "get_system_audio_capability",
   "get_permission_diagnostics",
   "get_recording_overlay_state",
@@ -48,9 +56,13 @@ const FAST_COMMANDS = new Set<string>([
   "is_diarization_model_available",
   "list_audio_input_devices",
   "list_diarization_models",
+  // Flip an atomic on the live capture session and record the span. Pause is
+  // pressed mid-sentence; a slow answer here reads as a stuck button.
+  "pause_recording",
   // Sits directly in front of a user-initiated capture start: a slow registry
   // write must fail fast rather than delay the meeting behind it.
   "register_capture_admission",
+  "resume_recording",
 ]);
 
 const EXTENDED_COMMANDS = new Set<string>([
@@ -68,12 +80,21 @@ const EXTENDED_COMMANDS = new Set<string>([
   "export_recording",
   "export_recording_v2",
   "export_with_template",
+  // Decodes a picked audio file with macOS' converter before it returns; a
+  // multi-hour source needs more than the default minute.
+  "import_audio_file",
   "import_dictation_dictionary_csv",
+  // Asks macOS to download a whole speech language pack. The size is Apple's,
+  // not this app's, so it gets the same headroom as a model download.
+  "install_apple_speech_language",
   "install_update",
   "migrate_to_encrypted_storage",
   "refresh_asr_runtime_probes",
   "reindex_embeddings",
   "repair_local_model_cache",
+  // Re-runs ASR (and possibly an LLM pass) over a saved dictation's kept
+  // audio; a ten-minute dictation on a cold model needs the extended budget.
+  "reprocess_dictation",
   "restore_backup_default",
   "run_diarization",
   "summarize_recording",
@@ -93,6 +114,10 @@ const LONG_COMMANDS = new Set<string>([
   "repair_cursor_insert_permissions",
   "reprocess_dictation_text",
   "request_apple_speech_permission",
+  // Decrypts a whole meeting's audio into the runtime directory before the
+  // first byte can play; a long, vault-protected meeting on a busy machine
+  // takes real time.
+  "prepare_recording_playback",
   // Blocks on a macOS permission dialog the reader has to read and answer, so
   // it gets the long timeout every other TCC prompt here gets.
   "request_calendar_access",
@@ -150,6 +175,11 @@ export function getCommandWorkKey(command: string, args?: unknown): string | nul
   }
   if (command === "benchmark_asr_providers" || command === "benchmark_asr_providers_bytes") {
     return "benchmark:active";
+  }
+  if (command === "reprocess_dictation") {
+    // One re-run per saved dictation at a time; a second click on the same
+    // entry is refused instead of queued behind the first.
+    return `reprocess_dictation:${stringArgument(args, ["historyId"]) ?? command}`;
   }
   if (ANALYSIS_COMMANDS.has(command)) {
     const target = stringArgument(args, ["runId", "recordingId"]) ?? command;

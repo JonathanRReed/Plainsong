@@ -212,6 +212,19 @@ describe("scripts/verify-packaged-native-helpers.mjs", () => {
     expect(gate).toContain('["calendar helper", paths.calendarHelper]');
   });
 
+  it("requires an empty entitlement set for the packaged plainsong CLI", () => {
+    // The `plainsong` CLI is a separate signature for the same reason the
+    // shortcut helper is: it must not inherit the app's microphone, Apple
+    // Events or library-validation entitlements. It is invokable by anything
+    // on the machine and only ever reads the database read-only, so an
+    // entitlement leaking into its signature would be handing out the app's
+    // own privileges.
+    expect(gate).toContain('requireEmptyEntitlements(paths.cli, "plainsong CLI")');
+    expect(gate).toContain('requireEmptyEntitlements(paths.shortcutHelper, "shortcut helper")');
+    expect(gate).toContain("must have an empty entitlement set");
+    expect(gate).toContain('["plainsong CLI", paths.cli]');
+  });
+
   it("checks the helper's entitlement set in both directions", () => {
     expect(gate).toContain("requireCalendarHelperEntitlements(paths.calendarHelper)");
     expect(gate).toContain("CALENDAR_HELPER_REQUIRED_ENTITLEMENT");
@@ -259,6 +272,69 @@ describe("scripts/verify-macos-release-trust.mjs", () => {
     // The split is the whole point; a release that took the entitlement back
     // into the app's signature would otherwise pass everything else.
     expect(gate).toContain("appHasNoCalendarEntitlement");
+  });
+});
+
+describe("the calendar helper's privacy contract", () => {
+  const helper = read("scripts/native-macos-calendar-helper.swift");
+
+  /**
+   * The shape of `EventPayload` IS the privacy promise.
+   *
+   * `docs/beta/PRIVACY-AND-CLOUD.md` tells the reader that a location and a
+   * note never leave the helper — only http/https links inside them do — and
+   * that an attendee list is the only prose it emits besides the title. That
+   * promise is kept by the struct: a field that does not exist cannot be
+   * encoded, however the emitting code is later rearranged. Nothing else in
+   * the suite can run this file, so this reads it.
+   */
+  it("emits no location, notes or raw URL field on an event", () => {
+    const payload = helper.match(
+      /private struct EventPayload: Encodable \{([\s\S]*?)\n\}/,
+    )?.[1];
+    expect(payload, "EventPayload must be findable").toBeTruthy();
+
+    const fields = [...(payload ?? "").matchAll(/^\s*let (\w+):/gm)].map(
+      ([, name]) => name,
+    );
+    expect(fields).toEqual([
+      "id",
+      "title",
+      "startsAt",
+      "endsAt",
+      "isAllDay",
+      "calendarId",
+      "calendarName",
+      "conferenceUrls",
+      "attendees",
+    ]);
+    for (const forbidden of ["location", "notes", "url", "structuredLocation"]) {
+      expect(
+        fields.some((field) => field.toLowerCase() === forbidden.toLowerCase()),
+        `EventPayload must not carry ${forbidden}`,
+      ).toBe(false);
+    }
+  });
+
+  it("says which protocol it speaks in one place, and speaks it everywhere", () => {
+    // The encode-failure line used to hard-code protocol_version 1 while the
+    // constant said 2. It is emitted exactly when nothing else can be, so the
+    // one message a caller gets from a broken helper announced a protocol the
+    // helper does not speak.
+    expect(helper).toMatch(/private let protocolVersion = 2\b/);
+    const hardCoded = [...helper.matchAll(/"protocol_version":\s*(\d+)/g)];
+    expect(
+      hardCoded,
+      `protocol_version must come from the constant, found: ${hardCoded
+        .map(([match]) => match)
+        .join(", ")}`,
+    ).toEqual([]);
+    expect(helper).toContain('"protocol_version":\\#(protocolVersion)');
+  });
+
+  it("caps the attendee list at the same 40 the app does", () => {
+    expect(helper).toMatch(/private let maximumAttendeesPerEvent = 40\b/);
+    expect(helper).toMatch(/private let maximumAttendeeFieldLength = 256\b/);
   });
 });
 

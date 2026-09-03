@@ -116,13 +116,26 @@ jobs:
       - name: Rust format
         run: cargo fmt --manifest-path rust-sidecar/Cargo.toml --check
 
-      # Build/lint/test the default feature set (asr-all + whisper-gpu + sqlcipher),
-      # i.e. the configuration shipped to users. macOS runners provide Metal acceleration.
+      # Build/lint/test the configuration shipped to users: the default feature
+      # set (asr-all + whisper-gpu + sqlcipher) plus, on macOS, the acceleration
+      # features from scripts/sidecar-cargo-features.mjs (currently
+      # candle-metal). The wrapper adds them on Darwin exactly as
+      # scripts/build-rust-sidecar.mjs does for the release binary.
       - name: Rust clippy
-        run: cargo clippy --locked --manifest-path rust-sidecar/Cargo.toml --all-targets -- -D warnings
+        run: node scripts/cargo-sidecar.mjs clippy --locked --all-targets -- -D warnings
 
       - name: Rust tests
-        run: cargo test --locked --manifest-path rust-sidecar/Cargo.toml --lib --bins
+        run: node scripts/cargo-sidecar.mjs test --locked --lib --bins
+
+      # The steps above only ever build the shipped configuration, which turns
+      # every optional dependency on -- so a module that reaches for one
+      # without gating it compiles there and nowhere else. `src/diarization/`
+      # used `ndarray` unconditionally while `ndarray` is only pulled in by
+      # `asr-parakeet`, `asr-canary` and `diarization`. A compile check per
+      # narrower combination is what keeps the feature flags honest; it runs no
+      # binary and cannot change what the shipped build does.
+      - name: Rust feature combinations
+        run: node scripts/gate-rust-features.mjs
 
   verify-package:
     name: Package and verify (macOS)

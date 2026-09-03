@@ -36,6 +36,57 @@ directories:
   output: release
   buildResources: build-resources
 
+# Chromium carries its own UI strings for 55 languages, and on macOS that is 220
+# `.lproj` directories once the grammatical-gender variants are counted — 47 MB
+# inside Electron Framework.framework, 12% of the installed application.
+#
+# Plainsong has no localization layer: there is no i18n runtime in
+# `package.json`, no string catalogue in `src/`, and every word of the product
+# is written in English in the source. What those `.pak` files translate is
+# Chromium's own furniture — the text-field context menu, the file picker, the
+# spell-check submenu — so shipping them means a Polish "Wklej" in a menu
+# attached to a window whose every label is English. Removing them costs
+# nothing a user can see.
+#
+# electron-builder deletes the unwanted directories in
+# `removeUnusedLanguagesIfNeeded` while it prepares the bundle, i.e. before the
+# app is signed, so the signature and the notarization ticket cover exactly what
+# ships. `en-US` is listed beside `en` because the matcher keeps a locale file
+# when a wanted language is a prefixed form of it; the pair resolves to the one
+# `en.lproj`, and naming both makes the intent survive an Electron upgrade that
+# renames the file.
+#
+# `icudtl.dat` stays whole, so every locale's date, time, number and collation
+# data is still on disk. What the deletion DOES change is which locale ICU
+# defaults to: Chromium seeds it from the resource bundle it managed to load, so
+# with only `en.lproj` present the default inside the packaged app is `en-US`
+# whatever the Mac is set to. Measured 2026-09-02 with this repo's own Electron
+# 43.4.0, both `.lproj` sweeps applied, system language set through
+# NSUserDefaults: a German Mac went from `4.3.2026, 09:30:00` to
+# `3/4/2026, 9:30:00 AM`, French and Japanese likewise.
+#
+# So the renderer never relies on that default. `electron/app-locale.ts` reads
+# `app.getPreferredSystemLanguages()` — macOS' own AppleLanguages, which the
+# deletion cannot touch — passes it to every renderer through
+# `webPreferences.additionalArguments`, and `src/lib/format-locale.ts` supplies
+# it to every `Intl` call. Dates, times and sort order follow the user's own
+# language again; `src/__tests__/renderer-locale-bridge.test.ts` fails the build
+# if any file under `src/` formats without it.
+electronLanguages:
+  - en
+  - en-US
+
+# `plainsong://` deep links (record, stop, mode, meeting/start, meeting/stop,
+# open). This writes CFBundleURLTypes so macOS hands the URL to the running
+# app via `open-url`; the app ignores every link unless Settings > General >
+# Local tools is on, and parses only the six commands above
+# (electron/deep-link-policy.ts). The scheme is the renderer's own privileged
+# scheme on purpose: see the rationale at the top of that file.
+protocols:
+  - name: Plainsong
+    schemes:
+      - plainsong
+
 # Fail packaging before signing if a required native helper is absent, has the
 # wrong deployment target, or no longer matches its Rust protocol.
 afterPack: scripts/verify-packaged-native-helpers.mjs
@@ -45,6 +96,37 @@ files:
   - dist-electron/**
   - "!dist-electron/preload.js.map"
   - node_modules/**
+  # Everything the renderer imports — React, React DOM, Radix, Base UI, cmdk,
+  # 19 MB of Lucide icons — is compiled into dist/ by Vite before packaging.
+  # electron-builder then copied the *source* of all of it into app.asar as
+  # well, because it packs the whole production dependency tree: 39 of the
+  # asar's 43 MB was a second copy of code that no packaged code path can
+  # reach. `dist/index.html` is loaded over the renderer's own scheme and
+  # requires nothing from node_modules; the main process (electron/main.ts and
+  # its neighbours) imports exactly one real package, electron-updater.
+  #
+  # So the rule is inverted: exclude every top-level entry under node_modules
+  # that is not electron-updater or one of its transitive dependencies. Written
+  # this way a new renderer dependency is excluded the day it is added, instead
+  # of the day someone remembers to come back here. The cost is that a new
+  # *main-process* dependency must be added to this list or the packaged app
+  # will not start — which is why
+  # src/__tests__/macos-packaging-config.test.ts recomputes the closure from
+  # node_modules and the imports in electron/, and fails when this line and the
+  # code disagree in either direction. `bun run gate:cold-start` on the packed
+  # app is the second net: it launches the real bundle and waits for the
+  # renderer.
+  #
+  # Nested node_modules under a kept package are unaffected (the pattern only
+  # matches the first path segment), so electron-updater keeps any hoist-broken
+  # copies of its own dependencies.
+  #
+  # That one-segment rule is also how a SCOPED package would have to be listed:
+  # minimatch matches this extglob against a single path segment, so
+  # `@scope/name` is kept by naming `@scope` — the whole scope — and never by
+  # `@scope/name`, which can never match anything. The test compares the two
+  # sides on that same first segment for the same reason.
+  - "!node_modules/!(argparse|builder-util-runtime|debug|electron-updater|fs-extra|graceful-fs|js-yaml|jsonfile|lazy-val|lodash.escaperegexp|lodash.isequal|ms|sax|semver|tiny-typed-emitter|universalify)/**"
 
 extraResources:
   # Keep the project's MIT license and generated dependency attributions beside
@@ -60,6 +142,11 @@ extraResources:
     filter:
       - plainsong-sidecar
       - plainsong-sidecar.exe
+      # The `plainsong` command-line tool and read-only MCP server. Same
+      # directory as the sidecar so it is signed under the same rule in
+      # scripts/sign-macos.mjs and checked by verify-packaged-native-helpers.
+      - plainsong-cli
+      - plainsong-cli.exe
 
 mac:
   # The limited beta is arm64 only: the Rust sidecar is compiled for the host arch by
@@ -87,6 +174,7 @@ mac:
     - Contents/Resources/sidecar/nautilus-macos-speech-helper-aarch64-apple-darwin
     - Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper
     - Contents/Resources/calendar-helper/plainsong-native-calendar-helper
+    - Contents/Resources/language-model-helper/plainsong-native-language-model-helper
   icon: build-resources/icon.icns
   # Required TCC usage strings — without these macOS terminates the app the
   # moment it accesses the microphone / speech recognition.
@@ -121,6 +209,14 @@ mac:
       to: calendar-helper
       filter:
         - plainsong-native-calendar-helper
+    # Apple Foundation Models helper (built by `language-model-helper:build`).
+    # Its own resource directory for the same reason as the calendar helper:
+    # the packaged-helper gate names one path per entitlement policy, and this
+    # one's policy is "no entitlements at all".
+    - from: dist-native/
+      to: language-model-helper
+      filter:
+        - plainsong-native-language-model-helper
     - from: rust-sidecar/binaries/
       to: sidecar
       filter:
@@ -140,6 +236,42 @@ nsis:
   artifactName: ${productName}-Setup-${version}.${ext}
 
 dmg:
+  # lzfse rather than electron-builder's default zlib. Measured with hdiutil on
+  # this build's own 297 MB Plainsong.app, one source folder, four formats:
+  #
+  #   UDZO (the default, zlib-level=9)  132,494,542 bytes
+  #   ULFO (lzfse-level=9)              129,218,471 bytes   -2.5%
+  #   UDBZ (bzip2-level=9)              121,123,816 bytes   -8.6%
+  #   ULMO (lzma-level=9)                97,964,404 bytes  -26.1%
+  #
+  # ULMO is by far the smallest and is NOT usable: electron-builder 26.15.3's
+  # own configuration schema accepts only UDBZ, UDCO, UDRO, UDRW, UDZO and
+  # ULFO, and rejects the config outright before packaging starts. (Found by
+  # running the pack, not by reading the docs.) Revisit if a later
+  # electron-builder adds it — the format itself works, mounts on macOS 10.15+,
+  # and would take the download to 93 MB. `compresses the DMG with a format
+  # electron-builder will accept` reads that list straight out of
+  # `node_modules/app-builder-lib/scheme.json`, so an upgrade that adds ULMO
+  # surfaces here rather than in a build log.
+  #
+  # Of the three that are allowed, ULFO is the only one that is better than the
+  # default on both axes: lzfse decodes faster than zlib as well as packing
+  # smaller, so the disk image is smaller to download AND quicker to mount and
+  # drag out of. UDBZ saves 8 MB more but bzip2 decompresses several times
+  # slower than zlib, which would be paid in the one visible moment of the
+  # install — the copy to /Applications — to save about four seconds of
+  # download on a 20 Mbit line. That is a trade, not a win, so it was not taken.
+  #
+  # lzfse has been mountable since macOS 10.11 and this bundle's floor is 13.0.
+  # The measured ULFO image was attached read-only and its Plainsong.app read
+  # back whole before it was detached.
+  #
+  # `bun run electron:pack` was re-run after this line was added, so the
+  # configuration is known to validate. What has NOT been exercised is
+  # electron-builder's dmg target end-to-end: that path signs and notarizes and
+  # this machine has no credentials. The first `release:mac` after this change
+  # must confirm a DMG was produced and mounts before anything is distributed.
+  format: ULFO
   # The DMG is the primary download. electron-builder notarizes the .app before
   # creating this artifact, so sign the disk image here; the release workflow
   # then submits the signed DMG separately and staples its own notary ticket.

@@ -3,8 +3,10 @@ import {
   buildAsrRouteCatalog,
   getLaneRoutes,
   getRecommendedLaneRoute,
+  laneProviderOrder,
 } from "@/lib/asr-route-catalog";
 import type {
+  AppleSpeechEngine,
   AppleSpeechReadinessStatus,
   AsrProviderInfo,
 } from "@/types";
@@ -101,8 +103,17 @@ const providers: AsrProviderInfo[] = [
   },
 ];
 
-function appleProvider(status: AppleSpeechReadinessStatus): AsrProviderInfo {
+/**
+ * @param engine which Apple engine this Mac would run. `speech_analyzer` is
+ *   macOS 26+ with the language installed, which is the only configuration
+ *   that reaches the meeting lane.
+ */
+function appleProvider(
+  status: AppleSpeechReadinessStatus,
+  engine: AppleSpeechEngine = "sf_speech_recognizer",
+): AsrProviderInfo {
   const ready = status === "ready";
+  const analyzer = engine === "speech_analyzer";
   return {
     providerType: "macos_apple_speech",
     name: "Apple Speech (On-Device)",
@@ -145,13 +156,250 @@ function appleProvider(status: AppleSpeechReadinessStatus): AsrProviderInfo {
       recognizerAvailable: status !== "recognizer_unavailable",
       message: `Apple Speech status: ${status}`,
       setupAction: ready ? null : "Fix Apple Speech setup.",
-      speechAnalyzerAvailable: false,
-      operatingSystemVersion: null,
+      speechAnalyzerAvailable: analyzer,
+      speechAnalyzerLocaleSupported: analyzer,
+      speechAnalyzerAssetsInstalled: analyzer,
+      speechAnalyzerAssetStatus: analyzer ? "installed" : "unavailable",
+      speechAnalyzerLocales: analyzer ? ["en_US", "fr_FR"] : [],
+      speechAnalyzerInstalledLocales: analyzer ? ["en_US"] : [],
+      engine,
+      operatingSystemVersion: analyzer ? "27.0.0" : null,
     },
   };
 }
 
+const qwen3Provider: AsrProviderInfo = {
+  providerType: "qwen3_asr",
+  name: "Qwen3-ASR (Local)",
+  description: "Experimental multilingual local route",
+  isAvailable: true,
+  inferenceEnabled: true,
+  modelInfo: {
+    name: "Qwen3-ASR 0.6B",
+    version: "0.6b-int4",
+    sizeMb: 1927,
+    parameters: "0.6B",
+    languages: ["en", "zh", "ja", "ko"],
+    license: "Apache-2.0",
+    sourceUrl: "https://example.com/qwen3",
+  },
+  selectedModelId: "qwen3-asr-0.6b",
+  modelOptions: [{ id: "qwen3-asr-0.6b", label: "Qwen3-ASR 0.6B int4" }],
+  downloadStatus: "Downloaded",
+  runtimeStatus: "ready",
+  runtimeDetails: {},
+};
+
+// The transcribe.cpp spike route, as the sidecar reports it when it was built
+// with `--features asr-transcribe-cpp`. No shipped build sends this; the
+// renderer still has to place it honestly when a developer build does.
+const transcribeCppProvider: AsrProviderInfo = {
+  providerType: "transcribe_cpp",
+  name: "transcribe.cpp (experimental)",
+  description: "Parakeet TDT 0.6B v3 GGUF on Metal via transcribe.cpp",
+  isAvailable: true,
+  inferenceEnabled: true,
+  modelInfo: {
+    name: "Parakeet TDT 0.6B v3 (GGUF Q8_0)",
+    version: "q8_0",
+    sizeMb: 705,
+    parameters: "600M",
+    languages: ["en", "de", "fr"],
+    license: "CC-BY-4.0",
+    sourceUrl: "https://example.com/transcribe-cpp",
+  },
+  selectedModelId: "parakeet-tdt-0.6b-v3-q8_0",
+  modelOptions: [
+    { id: "parakeet-tdt-0.6b-v3-q8_0", label: "Parakeet TDT 0.6B v3 GGUF Q8_0" },
+  ],
+  downloadStatus: "Downloaded",
+  runtimeStatus: "ready",
+  runtimeDetails: {},
+};
+
+// The two diarizing cloud routes, as the sidecar reports them.
+const deepgramProvider: AsrProviderInfo = {
+  providerType: "deepgram",
+  name: "Deepgram Nova",
+  description: "Cloud speech-to-text via Deepgram's Nova-3 batch API",
+  isAvailable: true,
+  inferenceEnabled: true,
+  modelInfo: {
+    name: "Deepgram Nova-3",
+    version: "nova-3",
+    sizeMb: 0,
+    parameters: "cloud",
+    languages: ["en", "multilingual"],
+    license: "Commercial API",
+    sourceUrl: "https://developers.deepgram.com/docs/pre-recorded-audio",
+  },
+  selectedModelId: "nova-3",
+  modelOptions: [
+    { id: "nova-3", label: "Nova-3" },
+    { id: "nova-3-medical", label: "Nova-3 Medical" },
+  ],
+  downloadStatus: "Downloaded",
+  runtimeStatus: "ready",
+  runtimeDetails: {},
+};
+
+const geminiProvider: AsrProviderInfo = {
+  providerType: "gemini_transcribe",
+  name: "Google Gemini Transcribe",
+  description: "Cloud speech-to-text via Gemini 3.5 Transcribe",
+  isAvailable: true,
+  inferenceEnabled: true,
+  modelInfo: {
+    name: "Gemini 3.5 Transcribe",
+    version: "gemini-3.5-transcribe",
+    sizeMb: 0,
+    parameters: "cloud",
+    languages: ["en", "multilingual"],
+    license: "Commercial API",
+    sourceUrl: "https://ai.google.dev/gemini-api/docs/transcribe",
+  },
+  selectedModelId: "gemini-3.5-transcribe",
+  modelOptions: [
+    { id: "gemini-3.5-transcribe", label: "Gemini 3.5 Transcribe" },
+  ],
+  downloadStatus: "Downloaded",
+  runtimeStatus: "ready",
+  runtimeDetails: {},
+};
+
 describe("asr-route-catalog", () => {
+  it("puts what a cloud route costs per minute in the picker", () => {
+    // The rate used to live only in the model label the sidecar sends, which
+    // is not the line a user reads while choosing a route. A route that bills
+    // per minute has to say so where the choice is made.
+    const routes = buildAsrRouteCatalog(
+      [...providers, deepgramProvider, geminiProvider],
+      "best_available",
+    );
+
+    const deepgram = routes.filter(
+      (route) => route.providerType === "deepgram",
+    );
+    const nova = deepgram.find((route) => route.modelId === "nova-3");
+    expect(nova?.summary).toContain("$0.0043/min");
+    // The multilingual tier is a different price, and auto lands on it.
+    expect(nova?.summary).toContain("$0.0052/min");
+    expect(nova?.summary).toContain("auto");
+
+    const medical = deepgram.find(
+      (route) => route.modelId === "nova-3-medical",
+    );
+    expect(medical?.summary).toContain("$0.0043/min");
+    // English-only, so it never reaches the multilingual rate.
+    expect(medical?.summary).not.toContain("$0.0052/min");
+    expect(medical?.summary).toContain("English only");
+
+    const gemini = routes.find(
+      (route) => route.providerType === "gemini_transcribe",
+    );
+    expect(gemini?.summary).toContain("$0.005/min");
+  });
+
+
+  it("offers the transcribe.cpp spike as an experimental route that never outranks the shipped Parakeet one", () => {
+    const routes = buildAsrRouteCatalog(
+      [...providers, transcribeCppProvider],
+      "prefer_local",
+    );
+    const spike = routes.find((route) => route.providerType === "transcribe_cpp");
+
+    expect(spike).toBeDefined();
+    expect(spike?.experimental).toBe(true);
+    expect(spike?.readiness).toBe("ready");
+    expect(spike?.hosting).toBe("local");
+    expect(spike?.downloadable).toBe(true);
+    // Same weights as the shipped Parakeet meeting route, so the same lanes.
+    expect(spike?.laneCompatibility).toEqual({
+      dictation: true,
+      meeting: true,
+      shared: true,
+    });
+    expect(spike?.summary).toContain("transcribe.cpp");
+    // Honest about the cost: it is a second download of a model you may
+    // already have.
+    expect(spike?.capabilitySummary).toContain("second");
+
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      const laneRoutes = getLaneRoutes(routes, lane, "prefer_local");
+      expect(
+        laneRoutes.some((route) => route.providerType === "transcribe_cpp"),
+      ).toBe(true);
+      expect(
+        getRecommendedLaneRoute(routes, lane, "prefer_local")?.providerType,
+      ).not.toBe("transcribe_cpp");
+      const parakeetIndex = laneRoutes.findIndex(
+        (route) => route.providerType === "parakeet",
+      );
+      const spikeIndex = laneRoutes.findIndex(
+        (route) => route.providerType === "transcribe_cpp",
+      );
+      expect(parakeetIndex).toBeLessThan(spikeIndex);
+    }
+  });
+
+  it("recommends nothing rather than the transcribe.cpp spike when it is the only ready route", () => {
+    const routes = buildAsrRouteCatalog([transcribeCppProvider], "prefer_local");
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      expect(
+        getLaneRoutes(routes, lane, "prefer_local").map(
+          (route) => route.providerType,
+        ),
+      ).toEqual(["transcribe_cpp"]);
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")).toBeNull();
+      expect(getRecommendedLaneRoute(routes, lane, "best_available")).toBeNull();
+    }
+  });
+
+  it("offers a ready Qwen3-ASR route for both lanes as experimental and never recommends it over Parakeet", () => {
+    const routes = buildAsrRouteCatalog([...providers, qwen3Provider], "prefer_local");
+    const qwen3 = routes.find((route) => route.providerType === "qwen3_asr");
+
+    expect(qwen3).toBeDefined();
+    expect(qwen3?.experimental).toBe(true);
+    expect(qwen3?.readiness).toBe("ready");
+    expect(qwen3?.selectable).toBe(true);
+    expect(qwen3?.laneCompatibility).toEqual({ dictation: true, meeting: true, shared: true });
+    expect(qwen3?.summary).toContain("Chinese, Japanese and Korean");
+
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      const laneRoutes = getLaneRoutes(routes, lane, "prefer_local");
+      expect(laneRoutes.some((route) => route.providerType === "qwen3_asr")).toBe(true);
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")?.providerType).not.toBe(
+        "qwen3_asr",
+      );
+      const parakeetIndex = laneRoutes.findIndex((route) => route.providerType === "parakeet");
+      const qwen3Index = laneRoutes.findIndex((route) => route.providerType === "qwen3_asr");
+      expect(parakeetIndex).toBeLessThan(qwen3Index);
+    }
+  });
+
+  it("recommends nothing rather than an experimental route when only Qwen3-ASR is ready", () => {
+    const routes = buildAsrRouteCatalog([qwen3Provider], "prefer_local");
+
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      // The route is still offered ...
+      expect(getLaneRoutes(routes, lane, "prefer_local").map((route) => route.providerType)).toEqual([
+        "qwen3_asr",
+      ]);
+      // ... but never recommended: the first-run wizard saves the
+      // recommended meeting route, and an experimental route must not
+      // become a default by being the only one installed.
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")).toBeNull();
+      expect(getRecommendedLaneRoute(routes, lane, "best_available")).toBeNull();
+    }
+
+    // With a non-experimental route alongside it, that route wins.
+    const withParakeet = buildAsrRouteCatalog([qwen3Provider, providers[2]], "prefer_local");
+    expect(getRecommendedLaneRoute(withParakeet, "meeting", "prefer_local")?.providerType).toBe(
+      "parakeet",
+    );
+  });
+
   it("keeps dictation-only routes out of meeting selectors and promotes the current Parakeet release", () => {
     const routes = buildAsrRouteCatalog(providers, "prefer_local");
     const meetingRoutes = getLaneRoutes(routes, "meeting", "prefer_local");
@@ -268,6 +516,46 @@ describe("asr-route-catalog", () => {
     expect(recommended?.modelId).toBe("parakeet-tdt-0.6b-v3");
   });
 
+  it("ranks a multilingual whisper.cpp model after Parakeet and before Distil for meetings, and keeps base.en out", () => {
+    const whisper = {
+      ...providers[0],
+      providerType: "whisper" as const,
+      name: "Whisper.cpp",
+      description: "Local Whisper family",
+      selectedModelId: "large-v3-turbo",
+      modelOptions: [
+        { id: "base.en", label: "base.en (balanced, English)" },
+        { id: "large-v3-turbo", label: "large-v3-turbo (fast + accurate)" },
+      ],
+    };
+    for (const policy of ["prefer_local", "best_available"] as const) {
+      const routes = buildAsrRouteCatalog(
+        [whisper, providers[1], providers[2]],
+        policy,
+      );
+      const meetingRoutes = getLaneRoutes(routes, "meeting", policy);
+      const order = meetingRoutes.map((route) => route.routeId);
+
+      expect(order).not.toContain("whisper:base.en");
+      expect(order.indexOf("parakeet:parakeet-tdt-0.6b-v3")).toBeLessThan(
+        order.indexOf("whisper:large-v3-turbo"),
+      );
+      expect(order.indexOf("whisper:large-v3-turbo")).toBeLessThan(
+        order.indexOf("distil_whisper:distil-large-v3.5"),
+      );
+      expect(getRecommendedLaneRoute(routes, "meeting", policy)?.providerType).toBe(
+        "parakeet",
+      );
+    }
+
+    const turbo = buildAsrRouteCatalog([whisper], "prefer_local").find(
+      (route) => route.routeId === "whisper:large-v3-turbo",
+    );
+    expect(turbo?.summary).toContain("100 languages, runs on the GPU, slower than Parakeet");
+    expect(turbo?.laneCompatibility.meeting).toBe(true);
+    expect(turbo?.experimental).toBe(false);
+  });
+
   it("recommends Parakeet before Distil Whisper for local meetings", () => {
     const routes = buildAsrRouteCatalog(
       [providers[1], providers[2]],
@@ -352,19 +640,87 @@ describe("asr-route-catalog", () => {
     expect(route.hosting).toBe("platform");
   });
 
-  it("surfaces SpeechAnalyzer availability in the readiness detail for macOS 26+", () => {
-    const provider = appleProvider("ready");
-    provider.platformReadiness!.speechAnalyzerAvailable = true;
-    provider.platformReadiness!.operatingSystemVersion = "26.0.0";
-    const route = buildAsrRouteCatalog([provider], "prefer_local")[0];
+  it("names the engine that will run, not just that SpeechAnalyzer exists", () => {
+    const route = buildAsrRouteCatalog(
+      [appleProvider("ready", "speech_analyzer")],
+      "prefer_local",
+    )[0];
 
-    expect(route.readinessDetail).toContain("SpeechAnalyzer API available");
-    expect(route.readinessDetail).toContain("macOS 26.0.0");
+    expect(route.readinessDetail).toContain("Runs SpeechAnalyzer");
+    expect(route.readinessDetail).toContain("macOS 27.0.0");
+    expect(route.readinessDetail).toContain("Nothing to download");
   });
 
-  it("omits SpeechAnalyzer detail when the API is not available", () => {
+  it("says which language is missing when SpeechAnalyzer is there but its assets are not", () => {
+    const provider = appleProvider("ready", "speech_analyzer");
+    provider.platformReadiness!.speechAnalyzerAssetsInstalled = false;
+    provider.platformReadiness!.speechAnalyzerAssetStatus = "supported";
+    provider.platformReadiness!.engine = "sf_speech_recognizer";
+    const route = buildAsrRouteCatalog([provider], "prefer_local")[0];
+
+    expect(route.readinessDetail).toContain("Runs SFSpeechRecognizer");
+    expect(route.readinessDetail).toContain("Install the en_US language");
+    expect(route.laneCompatibility.meeting).toBe(false);
+  });
+
+  it("says SpeechAnalyzer needs a newer macOS when the API is absent", () => {
     const route = buildAsrRouteCatalog([appleProvider("ready")], "prefer_local")[0];
 
-    expect(route.readinessDetail).not.toContain("SpeechAnalyzer");
+    expect(route.readinessDetail).toContain("Runs SFSpeechRecognizer");
+    expect(route.readinessDetail).toContain("needs macOS 26 or later");
+  });
+
+  it("keeps Apple Speech out of the meeting lane on the SFSpeechRecognizer path", () => {
+    const route = buildAsrRouteCatalog([appleProvider("ready")], "prefer_local")[0];
+
+    expect(route.laneCompatibility.dictation).toBe(true);
+    expect(route.laneCompatibility.meeting).toBe(false);
+    expect(route.laneCompatibility.shared).toBe(false);
+    expect(route.capabilityBadge).toBe("Best for dictation");
+    expect(route.summary).toContain("dictation only");
+    expect(
+      getLaneRoutes([route], "meeting", "prefer_local").map((entry) => entry.routeId),
+    ).toEqual([]);
+  });
+
+  it("lets Apple Speech into the meeting lane once SpeechAnalyzer is the engine", () => {
+    const routes = buildAsrRouteCatalog(
+      [appleProvider("ready", "speech_analyzer")],
+      "prefer_local",
+    );
+    const route = routes[0];
+
+    expect(route.laneCompatibility.meeting).toBe(true);
+    expect(route.laneCompatibility.shared).toBe(true);
+    expect(route.capabilityBadge).toBe("Shared");
+    expect(route.summary).toContain("per-segment timestamps");
+    expect(
+      getLaneRoutes(routes, "meeting", "prefer_local").map((entry) => entry.routeId),
+    ).toEqual([route.routeId]);
+  });
+
+  it("ranks Apple Speech behind the measured local meeting routes but ahead of cloud", () => {
+    const routes = buildAsrRouteCatalog(
+      [...providers, appleProvider("ready", "speech_analyzer")],
+      "prefer_local",
+    );
+    const meetingProviders = getLaneRoutes(routes, "meeting", "prefer_local").map(
+      (entry) => entry.providerType,
+    );
+
+    expect(meetingProviders).toContain("macos_apple_speech");
+    expect(meetingProviders.indexOf("macos_apple_speech")).toBeGreaterThan(
+      meetingProviders.indexOf("parakeet"),
+    );
+
+    // The cloud routes in this fixture are not meeting-eligible models, so the
+    // ordering against them is asserted on the lane order itself.
+    const order = laneProviderOrder("meeting", "prefer_local");
+    expect(order.indexOf("macos_apple_speech")).toBeGreaterThan(
+      order.indexOf("distil_whisper"),
+    );
+    expect(order.indexOf("macos_apple_speech")).toBeLessThan(
+      order.indexOf("openai_cloud"),
+    );
   });
 });

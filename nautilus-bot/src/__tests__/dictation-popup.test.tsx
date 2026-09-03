@@ -157,6 +157,49 @@ describe("DictationPopup", () => {
     expect(screen.queryByText(/Listening/i)).not.toBeInTheDocument();
   });
 
+  it("shows and then clears the 'Recording from a link' notice", async () => {
+    // `plainsong://record` is reachable from any web page, so a dictation that
+    // a link started has to be visibly attributable rather than silent.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-source-notice")).toBeDefined();
+    });
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-source-notice")?.({
+        payload: { source: "deep_link", message: "Recording from a link", durationMs: 1000 },
+      });
+    });
+    expect(
+      await screen.findByTestId("dictation-source-notice"),
+    ).toHaveTextContent("Recording from a link");
+
+    // It is a one-second notice, not a permanent badge.
+    await act(async () => {
+      vi.advanceTimersByTime(1100);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("dictation-source-notice")).not.toBeInTheDocument();
+    });
+  });
+
+  it("ignores an empty source notice instead of flashing a blank badge", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-source-notice")).toBeDefined();
+    });
+    await act(async () => {
+      popupMocks.listeners.get("dictation-source-notice")?.({ payload: { message: "   " } });
+    });
+    expect(screen.queryByTestId("dictation-source-notice")).not.toBeInTheDocument();
+  });
+
   it("renders resolved runtime mode metadata from dictation state events", async () => {
     await act(async () => {
       render(<DictationPopup />);
@@ -771,6 +814,58 @@ describe("DictationPopup", () => {
     expect(screen.queryByText("Backtrack applied")).not.toBeInTheDocument();
   });
 
+  it("explains a secure-field refusal and keeps the copy action available", async () => {
+    // The sidecar refused to write into a password field: nothing inserted,
+    // nothing copied, words kept in history. The popup must say exactly that
+    // rather than "Transcription ready" or "Inserted into", and still offer
+    // Copy result for the user who wants the words on the clipboard anyway.
+    let container!: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<DictationPopup />));
+    });
+
+    const stateHandler = popupMocks.listeners.get("dictation-state-changed");
+    const textReadyHandler = popupMocks.listeners.get("dictation-text-ready");
+
+    await act(async () => {
+      textReadyHandler?.({
+        payload: {
+          text: "hunter two",
+          outcome: "secure_field",
+          pasted: false,
+          copied: false,
+          pasteError:
+            "The field in front is a password or secure input, so Plainsong did not insert or copy the words. They are kept in your dictation history.",
+          appTarget: "Safari",
+        },
+      });
+      stateHandler?.({
+        payload: {
+          phase: "done",
+          sessionId: 11,
+          outcome: "secure_field",
+          appTarget: "Safari",
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText("Not inserted — secure field"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/password or secure input.*did not insert or copy/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Kept in history")).toBeInTheDocument();
+    expect(screen.getByText("Copy result")).toBeInTheDocument();
+    expect(screen.queryByText("Transcription ready")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Inserted into/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Clipboard ready")).not.toBeInTheDocument();
+    expect(container.querySelector(".lucide-circle-check-big")).toBeNull();
+    expect(
+      container.querySelector(".lucide-triangle-alert"),
+    ).toBeInTheDocument();
+  });
+
   it("turns done state into a real review surface with command metadata and quick actions", async () => {
     await act(async () => {
       render(<DictationPopup />);
@@ -879,5 +974,233 @@ describe("DictationPopup", () => {
     expect(
       screen.queryByRole("button", { name: "Copy result" }),
     ).not.toBeInTheDocument();
+  });
+
+  // STYLE.md \u00a75: mode/template/capture selectors are rubric controls, so
+  // they are rust and neutral. This notice used to be gilded (bg-gold/12,
+  // neume-lit, text-gold-text) while nothing was being recorded, competing
+  // with the one moment on this HUD that earns gold.
+  it("announces the next profile in rust and neutral, never gold", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-mode-cycled")).toBeDefined();
+    });
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-mode-cycled")?.({
+        payload: {
+          modePreset: "notes",
+          selectedCustomModeId: null,
+          label: "Notes",
+        },
+      });
+    });
+
+    const notice = (await screen.findByText("Next profile")).closest(
+      "[role=\"status\"]",
+    ) as HTMLElement;
+    expect(notice).toBeTruthy();
+    expect(notice.className).not.toMatch(/gold/);
+    expect(notice.innerHTML).not.toMatch(/gold/);
+    expect(notice.innerHTML).not.toMatch(/neume-lit/);
+    expect(notice.querySelector(".neume-rust")).toBeTruthy();
+    expect(screen.getByText("Notes").className).toMatch(/text-foreground/);
+  });
+  it("renders a streaming preview's settled words apart from the tail it may still change", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 11,
+          partialText: "ship the release",
+          partialStableText: "ship the",
+          partialVolatileText: " release",
+          partialEngine: "streaming",
+        },
+      });
+    });
+
+    const settled = await screen.findByText("ship the");
+    const volatileTail = screen.getByText("release");
+    // The committed half reads as text; the half the recognizer may still
+    // rewrite is muted. No new colours -- the muted foreground the rest of
+    // the popup already uses.
+    expect(settled.className).not.toMatch(/text-muted-foreground/);
+    expect(volatileTail.className).toMatch(/text-muted-foreground/);
+    expect(volatileTail.className).not.toMatch(/gold|rust/);
+  });
+
+  it("renders a re-decode preview as one run, because none of it is settled", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-state-changed")?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 12,
+          partialText: "ship the release",
+        },
+      });
+    });
+
+    const preview = await screen.findByText("ship the release");
+    expect(preview.querySelector("span")).toBeNull();
+  });
+
+  it("never reads a live partial aloud, only the finished result", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    // A live preview is on screen and the session then *fails*, so there is
+    // no finished result. The read-aloud button is not offered here, but the
+    // handler must refuse on its own too: a partial is half-heard text, and
+    // speaking it back would present a guess as the transcription.
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 21,
+          partialText: "ship the release",
+          partialStableText: "ship the",
+          partialVolatileText: " release",
+          partialEngine: "streaming",
+        },
+      });
+    });
+    expect(await screen.findByText("ship the")).toBeInTheDocument();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "error",
+          sessionId: 21,
+          message: "The dictation engine stopped.",
+        },
+      });
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /^Read aloud/i }),
+    ).not.toBeInTheDocument();
+    expect(popupMocks.speechSynthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it("reads back the finished text even when a preview is still on screen", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+    const textReadyHandler = popupMocks.listeners.get("dictation-text-ready");
+
+    // The preview and the result deliberately disagree: the preview is the
+    // recognizer's half-heard guess, the result is the batch decode. Read
+    // aloud must speak the second one, whatever the first still says.
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 22,
+          partialText: "ship the realease",
+          partialStableText: "ship the",
+          partialVolatileText: " realease",
+          partialEngine: "streaming",
+        },
+      });
+    });
+
+    await act(async () => {
+      textReadyHandler?.({
+        payload: {
+          text: "Ship the release.",
+          pasted: true,
+          appTarget: "Slack",
+        },
+      });
+      handler?.({
+        payload: { phase: "done", sessionId: 22, outcome: "pasted" },
+      });
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^Read aloud/i }),
+    );
+
+    await waitFor(() => {
+      expect(popupMocks.speechSynthesis.speak).toHaveBeenCalled();
+    });
+    const spoken = popupMocks.speechSynthesis.speak.mock.calls.map(
+      (call: unknown[]) => (call[0] as { text: string }).text,
+    );
+    expect(spoken).toEqual(["Ship the release."]);
+    expect(spoken.join(" ")).not.toContain("realease");
+  });
+
+  it("drops the streaming preview split when the session goes idle", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 13,
+          partialText: "ship the release",
+          partialStableText: "ship the",
+          partialVolatileText: " release",
+          partialEngine: "streaming",
+        },
+      });
+    });
+    expect(await screen.findByText("ship the")).toBeInTheDocument();
+
+    await act(async () => {
+      handler?.({ payload: { phase: "idle", sessionId: 13 } });
+    });
+
+    expect(screen.queryByText("ship the")).not.toBeInTheDocument();
+    expect(screen.queryByText("release")).not.toBeInTheDocument();
   });
 });

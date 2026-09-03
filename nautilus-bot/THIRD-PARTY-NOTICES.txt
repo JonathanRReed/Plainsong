@@ -4,9 +4,10 @@ This file is generated. Do not edit it by hand.
 Regenerate from nautilus-bot/ with:
   node scripts/generate-third-party-notices.mjs
 
-Application package: plainsong@0.9.0-beta.2
-Rust dependency packages: 505
+Application package: plainsong@0.9.0-beta.3
+Rust dependency packages: 532
 npm production dependency packages: 79
+Downloadable model artifacts: 20
 
 The dependency indexes retain declared license identifiers and repository URLs
 even when no license file is available in the installed package or Cargo cache.
@@ -224,6 +225,186 @@ reproduced verbatim. The vendored CPAL source contains no NOTICE file.
 ----- END rust-sidecar/vendor/cpal-0.18.1/LICENSE -----
 
 ================================================================================
+MODEL WEIGHTS
+================================================================================
+None of these ship inside the application. Each is downloaded on request
+from the repository and revision named below, verified against a SHA-256
+pinned in the source, and stored in the user's own models directory. The
+terms are the upstream project's, not Plainsong's, and are reproduced here
+because several differ from the license of the code that runs them.
+
+Model artifacts: 20
+Artifacts whose upstream declares no license: 2 (ERes2NetV2 speaker embedding (int8), pyannote community-1 bundle (speakrs export))
+
+S1-mini by Superwhisper (GGUF)
+  Used for: Built-in dictation cleanup (the zero-setup route).
+  License: Apache-2.0, with an additional naming term
+  Repository: https://huggingface.co/superwhisper/s1-mini-GGUF
+  Revision: 34add00a48a2e5d24e5a4ee5405a99620a3a240c
+  Files: s1-mini-q4_k_m.gguf
+  Pinned in: rust-sidecar/src/llm/bundled_local.rs (artifacts)
+  Note: The license requires the model keep the name "S1-mini" by "Superwhisper", with that exact capitalization, wherever it is used. Its LICENSE and NOTICE files are downloaded alongside the weights and kept beside them on disk.
+
+S1-mini by Superwhisper (tokenizer and license texts)
+  Used for: Tokenizer for the built-in cleanup model, and its own terms.
+  License: Apache-2.0, with an additional naming term
+  Repository: https://huggingface.co/superwhisper/s1-mini
+  Revision: 88f6b15896c73bbb13a3b596e0afe8ea0d5150b4
+  Files: tokenizer.json, LICENSE, NOTICE
+  Pinned in: rust-sidecar/src/llm/bundled_local.rs (artifacts)
+
+Whisper (whisper.cpp GGML builds)
+  Used for: Speech recognition: tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3 and large-v3-turbo.
+  License: MIT
+  Repository: https://huggingface.co/ggerganov/whisper.cpp
+  Revision: 5359861c739e955e79d9a303bcbc70fb988958b1
+  Files: ggml-<model>.bin, one per build listed above
+  Pinned in: rust-sidecar/src/asr/whisper.rs (WHISPER_MODELS)
+
+Whisper large-v3-turbo (Candle safetensors)
+  Used for: Speech recognition through the in-process Candle runtime.
+  License: MIT
+  Repository: https://huggingface.co/openai/whisper-large-v3-turbo
+  Revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9
+  Files: model.safetensors, config.json, tokenizer.json, preprocessor_config.json
+  Pinned in: rust-sidecar/src/asr/whisper_candle.rs (WHISPER_CANDLE_HF_*, WHISPER_CANDLE_REQUIRED_FILES)
+
+Distil-Whisper distil-large-v3.5
+  Used for: Faster English-only speech recognition.
+  License: Apache-2.0
+  Repository: https://huggingface.co/distil-whisper/distil-large-v3.5
+  Revision: 728a7691f3ff1d3d971528d3203a6e9559165d41
+  Files: model.safetensors, config.json, tokenizer.json, preprocessor_config.json
+  Pinned in: rust-sidecar/src/asr/distil_whisper.rs (DISTIL_HF_*, DISTIL_REQUIRED_FILES)
+
+Parakeet TDT 0.6b v3 (sherpa-onnx int8 export)
+  Used for: Speech recognition on the fast local route.
+  License: CC-BY-4.0
+  Repository: https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
+  Revision: 2bda32ec70b097a55adaa07d9a7173915b43cc78
+  Files: encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt
+  Pinned in: rust-sidecar/src/asr/parakeet.rs (PARAKEET_V3_*)
+  Note: Attribution is a condition of use, not a courtesy: this notice, shipped with the app, is how it is met. Derived from NVIDIA's nvidia/parakeet-tdt-0.6b-v3.
+
+Parakeet TDT CTC 110m (legacy export)
+  Used for: Speech recognition for installs that still carry the earlier Parakeet download.
+  License: CC-BY-4.0
+  Repository: https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000
+  Revision: 3af92f152d32c836acabf38f4c993bc96b80eb2d
+  Files: model.onnx, tokens.txt
+  Pinned in: rust-sidecar/src/asr/parakeet.rs (legacy artifact URLs)
+
+Parakeet TDT 0.6B v3 (GGUF Q8_0)
+  Used for: Speech recognition through the optional transcribe.cpp Metal runtime, which is off by default and compiled out of the release build.
+  License: CC-BY-4.0
+  Repository: https://huggingface.co/handy-computer/parakeet-tdt-0.6b-v3-gguf
+  Revision: 85ac09ea12fc4b1112fa76810059364bc6adc9de
+  Files: parakeet-tdt-0.6b-v3-Q8_0.gguf
+  Pinned in: rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)
+  Note: Attribution is a condition of use, not a courtesy: this notice, shipped with the app, is how it is met. A GGUF conversion of NVIDIA's nvidia/parakeet-tdt-0.6b-v3; the GGUF repository's own card metadata declares cc-by-4.0, matching the source weights, verified 2026-09-02.
+
+Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0)
+  Used for: Proving the transcribe.cpp streaming runtime path from `benchmark-latency`. It is never offered as a transcription route.
+  License: OpenMDW-1.1 (NVIDIA Open Model License terms)
+  Repository: https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf
+  Revision: 6d44e540bc31b0de1dbe174a3cea87f53a7f22fb
+  Files: nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf
+  Pinned in: rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)
+  Note: NVIDIA ships this model under OpenMDW-1.1 rather than the CC-BY-4.0 of the Parakeet weights beside it. It is downloadable only behind the optional transcribe.cpp runtime and is not selectable as a route, so nothing redistributes it.
+
+Moonshine (ONNX)
+  Used for: Low-latency English speech recognition, tiny and base.
+  License: MIT
+  Repository: https://huggingface.co/UsefulSensors/moonshine
+  Revision: 48b4e427b587bcf67797a5be706d6ddc4a298149
+  Files: onnx/merged/tiny/float/encoder_model.onnx, onnx/merged/tiny/float/decoder_model_merged.onnx, onnx/merged/base/float/encoder_model.onnx, onnx/merged/base/float/decoder_model_merged.onnx
+  Pinned in: rust-sidecar/src/asr/moonshine.rs (MOONSHINE_ONNX_HF_*)
+
+Moonshine tiny (tokenizer)
+  Used for: Tokenizer for the Moonshine tiny model.
+  License: MIT
+  Repository: https://huggingface.co/UsefulSensors/moonshine-tiny
+  Revision: 390624ed33d594443aa4aa221f5b9f283b545b5a
+  Files: tokenizer.json
+  Pinned in: rust-sidecar/src/asr/moonshine.rs (MOONSHINE_TINY_HF_*)
+
+Moonshine base (tokenizer)
+  Used for: Tokenizer for the Moonshine base model.
+  License: MIT
+  Repository: https://huggingface.co/UsefulSensors/moonshine-base
+  Revision: 7a73d8d55ac0ba2ef3ae761593f6784b51f96dcf
+  Files: tokenizer.json
+  Pinned in: rust-sidecar/src/asr/moonshine.rs (MOONSHINE_BASE_HF_*)
+
+Qwen3-ASR 0.6B (ONNX int4 export)
+  Used for: Speech recognition on the multilingual local route.
+  License: Apache-2.0
+  Repository: https://huggingface.co/andrewleech/qwen3-asr-0.6b-onnx
+  Revision: main (each of the seven files is pinned by SHA-256 instead of by commit)
+  Files: encoder.int4.onnx, decoder_init.int4.onnx, decoder_step.int4.onnx, decoder_weights.int4.data, embed_tokens.bin, config.json, tokenizer.json
+  Pinned in: rust-sidecar/src/asr/qwen3_asr.rs (QWEN3_ASR_HF_*)
+  Note: This is the one model whose revision is a branch. Every file is verified against a pinned SHA-256 on download, so a republished branch is rejected rather than loaded; the digests live beside the URLs in the file below.
+
+Cohere Transcribe 03-2026 (ONNX int4 export)
+  Used for: Speech recognition on the experimental offline high-accuracy route.
+  License: Apache-2.0
+  Repository: https://huggingface.co/onnx-community/cohere-transcribe-03-2026-ONNX
+  Revision: 31b1c6211c9000d76b077ddd23b74c9090badeba
+  Files: onnx/encoder_model_q4.onnx, onnx/encoder_model_q4.onnx_data, onnx/decoder_model_merged_q4.onnx, onnx/decoder_model_merged_q4.onnx_data, tokenizer.json, config.json, generation_config.json, preprocessor_config.json
+  Pinned in: rust-sidecar/src/asr/cohere_local.rs (COHERE_LOCAL_HF_*)
+  Note: The export repository declares Apache-2.0 in its own right, not only by inheritance from CohereLabs/cohere-transcribe-03-2026, which it also declares Apache-2.0. Every file is additionally pinned by SHA-256 on download.
+
+Silero VAD
+  Used for: Voice-activity detection: deciding when speech starts and stops.
+  License: MIT
+  Repository: https://github.com/snakers4/silero-vad
+  Revision: 76e3dc408eb2a5c655c34e230d2d5459b4439daa
+  Files: src/silero_vad/data/silero_vad.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (SILERO_VAD_ONNX_URL)
+
+WeSpeaker ECAPA-TDNN 512 (VoxCeleb, LM)
+  Used for: Speaker embeddings for meeting diarization.
+  License: Apache-2.0
+  Repository: https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM
+  Revision: a2f3dcb1c8702caccc7a55ceb57f5e8d1842112b
+  Files: voxceleb_ECAPA512_LM.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
+
+WeSpeaker ResNet34 (VoxCeleb, LM)
+  Used for: Speaker embeddings for meeting diarization.
+  License: Apache-2.0
+  Repository: https://huggingface.co/Wespeaker/wespeaker-resnet34-LM
+  Revision: f0c48c298fd835726c27956a5d617bad7115627e
+  Files: voxceleb_resnet34_LM.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
+
+WeSpeaker CAM++ (VoxCeleb, LM)
+  Used for: Speaker embeddings for meeting diarization.
+  License: Apache-2.0
+  Repository: https://huggingface.co/Wespeaker/wespeaker-voxceleb-campplus-LM
+  Revision: c5e01c6fcffcce160861e7e79782828320192b5c
+  Files: voxceleb_CAM++_LM.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
+
+ERes2NetV2 speaker embedding (int8)
+  Used for: Speaker embeddings for meeting diarization.
+  License: not declared by the repository this file is fetched from
+  Repository: https://huggingface.co/phoenix124/kept-models
+  Revision: 42de48f3d8cb1c33ad29f4dbe2db0801a0759ddf
+  Files: diarize-embedding-eres2netv2-int8.onnx
+  Pinned in: rust-sidecar/src/download/mod.rs (diarization_model_info)
+  Note: The mirror this artifact is pinned to declares no license, so none is asserted here. Until that is resolved upstream or the model is replaced, this entry records the gap rather than an assumption.
+
+pyannote community-1 bundle (speakrs export)
+  Used for: Speaker diarization through the experimental speakrs backend. Compiled only with the off-by-default `diarization-speakrs` Cargo feature, which no shipped build enables, so no released Plainsong offers or downloads this.
+  License: not declared by the mirror; upstream pyannote community-1 is CC-BY-4.0 (gated)
+  Repository: https://huggingface.co/avencera/speakrs-models
+  Revision: a785ebdbe6313868088c36c93d9efa71c470bd34
+  Files: segmentation-3.0.onnx, wespeaker-voxceleb-resnet34.onnx, wespeaker-voxceleb-resnet34.onnx.data, wespeaker-voxceleb-resnet34.min_num_samples.txt, plda_lda.npy, plda_tr.npy, plda_mu.npy, plda_psi.npy, plda_mean1.npy, plda_mean2.npy
+  Pinned in: rust-sidecar/src/download/mod.rs (SPEAKRS_BUNDLE)
+  Note: The mirror's model card declares no license of its own and says users are responsible for the upstream terms. Upstream is pyannote/speaker-diarization-community-1 (CC-BY-4.0, gated on Hugging Face); its segmentation component pyannote/segmentation-3.0 is MIT and its embedder pyannote/wespeaker-voxceleb-resnet34-LM is CC-BY-4.0. Nothing is asserted about the mirrored copies until that is resolved or the artifacts are fetched from the gated upstream directly. See artifacts/qa/diarization-speakrs-spike-2026-09-02.md.
+
+================================================================================
 RUST DEPENDENCY INDEX
 ================================================================================
 adler2 2.0.1
@@ -299,17 +480,17 @@ atomic-waker 1.1.2
 audioadapter 5.0.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/HEnquist/audioadapter-rs
-  License material: RUST-LICENSE-241, RUST-LICENSE-281, RUST-LICENSE-266
+  License material: RUST-LICENSE-241, RUST-LICENSE-282, RUST-LICENSE-266
 
 audioadapter-buffers 5.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/HEnquist/audioadapter-buffers-rs
-  License material: RUST-LICENSE-241, RUST-LICENSE-281, RUST-LICENSE-266
+  License material: RUST-LICENSE-241, RUST-LICENSE-282, RUST-LICENSE-266
 
 audioadapter-sample 5.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/HEnquist/audioadapter-sample-rs
-  License material: RUST-LICENSE-241, RUST-LICENSE-281, RUST-LICENSE-266
+  License material: RUST-LICENSE-241, RUST-LICENSE-282, RUST-LICENSE-266
 
 autocfg 1.5.0
   License: Apache-2.0 OR MIT
@@ -349,12 +530,17 @@ bindgen 0.72.1
 bit-set 0.8.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/contain-rs/bit-set
-  License material: RUST-LICENSE-160, RUST-LICENSE-290
+  License material: RUST-LICENSE-160, RUST-LICENSE-291
 
 bit-vec 0.8.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/contain-rs/bit-vec
-  License material: RUST-LICENSE-160, RUST-LICENSE-290
+  License material: RUST-LICENSE-160, RUST-LICENSE-291
+
+bitflags 1.3.2
+  License: MIT/Apache-2.0
+  Repository: https://github.com/bitflags/bitflags
+  License material: RUST-LICENSE-204, RUST-LICENSE-128
 
 bitflags 2.10.0
   License: MIT OR Apache-2.0
@@ -365,6 +551,11 @@ blake2 0.10.6
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustCrypto/hashes
   License material: RUST-LICENSE-209, RUST-LICENSE-195
+
+block 0.1.6
+  License: MIT
+  Repository: http://github.com/SSheldon/rust-block
+  License material: no local license file found; use the SPDX/license declaration and repository above
 
 block-buffer 0.10.4
   License: MIT OR Apache-2.0
@@ -389,12 +580,12 @@ bumpalo 3.19.1
 bytemuck 1.25.0
   License: Zlib OR Apache-2.0 OR MIT
   Repository: https://github.com/Lokathor/bytemuck
-  License material: RUST-LICENSE-271, RUST-LICENSE-197, RUST-LICENSE-164
+  License material: RUST-LICENSE-272, RUST-LICENSE-197, RUST-LICENSE-164
 
 bytemuck_derive 1.10.2
   License: Zlib OR Apache-2.0 OR MIT
   Repository: https://github.com/Lokathor/bytemuck
-  License material: RUST-LICENSE-271, RUST-LICENSE-197, RUST-LICENSE-164
+  License material: RUST-LICENSE-272, RUST-LICENSE-197, RUST-LICENSE-164
 
 byteorder 1.5.0
   License: Unlicense OR MIT
@@ -411,6 +602,11 @@ candle-core 0.10.2
   Repository: https://github.com/huggingface/candle
   License material: RUST-LICENSE-241
 
+candle-metal-kernels 0.10.2
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/huggingface/candle
+  License material: no local license file found; use the SPDX/license declaration and repository above
+
 candle-nn 0.10.2
   License: MIT OR Apache-2.0
   Repository: https://github.com/huggingface/candle
@@ -421,10 +617,15 @@ candle-transformers 0.10.2
   Repository: https://github.com/huggingface/candle
   License material: no local license file found; use the SPDX/license declaration and repository above
 
+candle-ug 0.10.2
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/huggingface/candle
+  License material: no local license file found; use the SPDX/license declaration and repository above
+
 castaway 0.2.4
   License: MIT
   Repository: https://github.com/sagebind/castaway
-  License material: RUST-LICENSE-294
+  License material: RUST-LICENSE-295
 
 cc 1.2.55
   License: MIT OR Apache-2.0
@@ -519,7 +720,12 @@ core-foundation-sys 0.8.7
 core-graphics 0.25.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/servo/core-foundation-rs
-  License material: RUST-LICENSE-279, RUST-LICENSE-204, RUST-LICENSE-124
+  License material: RUST-LICENSE-280, RUST-LICENSE-204, RUST-LICENSE-124
+
+core-graphics-types 0.1.3
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/servo/core-foundation-rs
+  License material: RUST-LICENSE-204, RUST-LICENSE-124
 
 core-graphics-types 0.2.0
   License: MIT OR Apache-2.0
@@ -861,7 +1067,17 @@ futures-util 0.3.34
   Repository: https://github.com/rust-lang/futures-rs
   License material: RUST-LICENSE-057, RUST-LICENSE-131
 
+gemm 0.18.2
+  License: MIT
+  Repository: https://github.com/sarah-ek/gemm/
+  License material: RUST-LICENSE-257
+
 gemm 0.19.0
+  License: MIT
+  Repository: https://github.com/sarah-ek/gemm/
+  License material: RUST-LICENSE-257
+
+gemm-c32 0.18.2
   License: MIT
   Repository: https://github.com/sarah-ek/gemm/
   License material: RUST-LICENSE-257
@@ -871,7 +1087,17 @@ gemm-c32 0.19.0
   Repository: https://github.com/sarah-ek/gemm/
   License material: RUST-LICENSE-257
 
+gemm-c64 0.18.2
+  License: MIT
+  Repository: https://github.com/sarah-ek/gemm/
+  License material: RUST-LICENSE-257
+
 gemm-c64 0.19.0
+  License: MIT
+  Repository: https://github.com/sarah-ek/gemm/
+  License material: RUST-LICENSE-257
+
+gemm-common 0.18.2
   License: MIT
   Repository: https://github.com/sarah-ek/gemm/
   License material: RUST-LICENSE-257
@@ -881,12 +1107,27 @@ gemm-common 0.19.0
   Repository: https://github.com/sarah-ek/gemm/
   License material: RUST-LICENSE-257
 
+gemm-f16 0.18.2
+  License: MIT
+  Repository: https://github.com/sarah-ek/gemm/
+  License material: RUST-LICENSE-257
+
 gemm-f16 0.19.0
   License: MIT
   Repository: https://github.com/sarah-ek/gemm/
   License material: RUST-LICENSE-257
 
+gemm-f32 0.18.2
+  License: MIT
+  Repository: https://github.com/sarah-ek/gemm/
+  License material: RUST-LICENSE-257
+
 gemm-f32 0.19.0
+  License: MIT
+  Repository: https://github.com/sarah-ek/gemm/
+  License material: RUST-LICENSE-257
+
+gemm-f64 0.18.2
   License: MIT
   Repository: https://github.com/sarah-ek/gemm/
   License material: RUST-LICENSE-257
@@ -926,7 +1167,7 @@ glob 0.3.3
   Repository: https://github.com/rust-lang/glob
   License material: RUST-LICENSE-204, RUST-LICENSE-128
 
-h2 0.4.13
+h2 0.4.16
   License: MIT
   Repository: https://github.com/hyperium/h2
   License material: RUST-LICENSE-218
@@ -939,22 +1180,22 @@ half 2.7.1
 hashbrown 0.14.5
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/hashbrown
-  License material: RUST-LICENSE-204, RUST-LICENSE-298
+  License material: RUST-LICENSE-204, RUST-LICENSE-299
 
 hashbrown 0.15.5
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/hashbrown
-  License material: RUST-LICENSE-204, RUST-LICENSE-298
+  License material: RUST-LICENSE-204, RUST-LICENSE-299
 
 hashbrown 0.16.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-lang/hashbrown
-  License material: RUST-LICENSE-204, RUST-LICENSE-298
+  License material: RUST-LICENSE-204, RUST-LICENSE-299
 
 hashlink 0.9.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/kyren/hashlink
-  License material: RUST-LICENSE-235, RUST-LICENSE-274
+  License material: RUST-LICENSE-235, RUST-LICENSE-275
 
 heck 0.5.0
   License: MIT OR Apache-2.0
@@ -969,7 +1210,12 @@ hermit-abi 0.5.2
 hex 0.4.3
   License: MIT OR Apache-2.0
   Repository: https://github.com/KokaKiwi/rust-hex
-  License material: RUST-LICENSE-240, RUST-LICENSE-292
+  License material: RUST-LICENSE-240, RUST-LICENSE-293
+
+hmac 0.13.0
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/RustCrypto/MACs
+  License material: RUST-LICENSE-209, RUST-LICENSE-199
 
 hmac-sha256 1.1.13
   License: ISC
@@ -1039,37 +1285,37 @@ iana-time-zone-haiku 0.1.2
 icu_collections 2.1.1
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 icu_locale_core 2.1.1
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 icu_normalizer 2.1.1
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 icu_normalizer_data 2.1.1
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 icu_properties 2.1.2
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 icu_properties_data 2.1.2
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 icu_provider 2.1.1
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 id-arena 2.3.0
   License: MIT/Apache-2.0
@@ -1094,7 +1340,7 @@ idna_adapter 1.2.1
 indexmap 2.13.0
   License: Apache-2.0 OR MIT
   Repository: https://github.com/indexmap-rs/indexmap
-  License material: RUST-LICENSE-204, RUST-LICENSE-280
+  License material: RUST-LICENSE-204, RUST-LICENSE-281
 
 indicatif 0.18.6
   License: MIT
@@ -1134,7 +1380,7 @@ itoa 1.0.17
 jni 0.21.1
   License: MIT/Apache-2.0
   Repository: https://github.com/jni-rs/jni-rs
-  License material: RUST-LICENSE-204, RUST-LICENSE-297
+  License material: RUST-LICENSE-204, RUST-LICENSE-298
 
 jni 0.22.4
   License: MIT OR Apache-2.0
@@ -1209,7 +1455,7 @@ libredox 0.1.12
 libsqlite3-sys 0.28.0
   License: MIT
   Repository: https://github.com/rusqlite/rusqlite
-  License material: RUST-LICENSE-291
+  License material: RUST-LICENSE-292
 
 linux-raw-sys 0.11.0
   License: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
@@ -1219,7 +1465,7 @@ linux-raw-sys 0.11.0
 litemap 0.8.1
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 lock_api 0.4.14
   License: MIT OR Apache-2.0
@@ -1256,6 +1502,11 @@ macro_rules_attribute-proc_macro 0.2.2
   Repository: https://github.com/danielhenrymantilla/macro_rules_attribute-rs
   License material: RUST-LICENSE-078, RUST-LICENSE-121, RUST-LICENSE-035
 
+malloc_buf 0.0.6
+  License: MIT
+  Repository: https://github.com/SSheldon/malloc_buf
+  License material: no local license file found; use the SPDX/license declaration and repository above
+
 matchers 0.2.0
   License: MIT
   Repository: https://github.com/hawkw/matchers
@@ -1275,6 +1526,11 @@ memmap2 0.9.11
   License: MIT OR Apache-2.0
   Repository: https://github.com/RazrFalcon/memmap2-rs
   License material: RUST-LICENSE-012, RUST-LICENSE-023
+
+metal 0.29.0
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/gfx-rs/metal-rs
+  License material: RUST-LICENSE-204, RUST-LICENSE-013
 
 mime 0.3.17
   License: MIT OR Apache-2.0
@@ -1314,7 +1570,7 @@ monostate-impl 0.1.18
 native-tls 0.2.14
   License: MIT OR Apache-2.0
   Repository: https://github.com/sfackler/rust-native-tls
-  License material: RUST-LICENSE-240, RUST-LICENSE-286
+  License material: RUST-LICENSE-240, RUST-LICENSE-287
 
 ndarray 0.17.2
   License: MIT OR Apache-2.0
@@ -1346,6 +1602,11 @@ nu-ansi-term 0.50.3
   Repository: https://github.com/nushell/nu-ansi-term
   License material: RUST-LICENSE-059
 
+num 0.4.3
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/rust-num/num
+  License material: RUST-LICENSE-204, RUST-LICENSE-128
+
 num_cpus 1.17.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/seanmonstar/num_cpus
@@ -1360,6 +1621,11 @@ num_enum_derive 0.7.5
   License: BSD-3-Clause OR MIT OR Apache-2.0
   Repository: https://github.com/illicitonion/num_enum
   License material: RUST-LICENSE-126, RUST-LICENSE-021, RUST-LICENSE-051
+
+num-bigint 0.4.8
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/rust-num/num-bigint
+  License material: RUST-LICENSE-204, RUST-LICENSE-128
 
 num-complex 0.4.6
   License: MIT OR Apache-2.0
@@ -1376,10 +1642,25 @@ num-integer 0.1.46
   Repository: https://github.com/rust-num/num-integer
   License material: RUST-LICENSE-204, RUST-LICENSE-128
 
+num-iter 0.1.46
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/rust-num/num-iter
+  License material: RUST-LICENSE-204, RUST-LICENSE-128
+
+num-rational 0.4.2
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/rust-num/num-rational
+  License material: RUST-LICENSE-204, RUST-LICENSE-128
+
 num-traits 0.2.19
   License: MIT OR Apache-2.0
   Repository: https://github.com/rust-num/num-traits
   License material: RUST-LICENSE-204, RUST-LICENSE-128
+
+objc 0.2.7
+  License: MIT
+  Repository: http://github.com/SSheldon/rust-objc
+  License material: RUST-LICENSE-271
 
 objc2 0.6.4
   License: MIT
@@ -1481,6 +1762,11 @@ objc2-media-toolbox 0.3.2
   Repository: https://github.com/madsmtm/objc2
   License material: no local license file found; use the SPDX/license declaration and repository above
 
+objc2-metal 0.3.2
+  License: Zlib OR Apache-2.0 OR MIT
+  Repository: https://github.com/madsmtm/objc2
+  License material: no local license file found; use the SPDX/license declaration and repository above
+
 objc2-quartz-core 0.3.2
   License: Zlib OR Apache-2.0 OR MIT
   Repository: https://github.com/madsmtm/objc2
@@ -1499,7 +1785,7 @@ once_cell 1.21.3
 onig 6.5.1
   License: MIT
   Repository: https://github.com/iwillspeak/rust-onig
-  License material: RUST-LICENSE-275
+  License material: RUST-LICENSE-276
 
 onig_sys 69.9.1
   License: MIT
@@ -1509,12 +1795,12 @@ onig_sys 69.9.1
 openssl 0.10.75
   License: Apache-2.0
   Repository: https://github.com/rust-openssl/rust-openssl
-  License material: RUST-LICENSE-288, RUST-LICENSE-240
+  License material: RUST-LICENSE-289, RUST-LICENSE-240
 
 openssl-macros 0.1.1
   License: MIT/Apache-2.0
   Repository: https://crates.io/crates/openssl-macros/0.1.1
-  License material: RUST-LICENSE-240, RUST-LICENSE-277
+  License material: RUST-LICENSE-240, RUST-LICENSE-278
 
 openssl-probe 0.1.6
   License: MIT/Apache-2.0
@@ -1609,7 +1895,7 @@ portable-atomic-util 0.2.5
 potential_utf 0.1.4
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 ppv-lite86 0.2.21
   License: MIT OR Apache-2.0
@@ -1635,6 +1921,11 @@ proc-macro2 1.0.106
   License: MIT OR Apache-2.0
   Repository: https://github.com/dtolnay/proc-macro2
   License material: RUST-LICENSE-126, RUST-LICENSE-051
+
+pulp 0.21.5
+  License: MIT
+  Repository: https://github.com/sarah-ek/pulp/
+  License material: RUST-LICENSE-257
 
 pulp 0.22.2
   License: MIT
@@ -1749,12 +2040,12 @@ reborrow 0.5.5
 redox_syscall 0.5.8
   License: MIT
   Repository: https://gitlab.redox-os.org/redox-os/syscall
-  License material: RUST-LICENSE-283
+  License material: RUST-LICENSE-284
 
 redox_users 0.5.2
   License: MIT
   Repository: https://gitlab.redox-os.org/redox-os/users
-  License material: RUST-LICENSE-272
+  License material: RUST-LICENSE-273
 
 regex 1.13.1
   License: MIT OR Apache-2.0
@@ -1779,7 +2070,7 @@ reqwest 0.13.4
 ring 0.17.14
   License: Apache-2.0 AND ISC
   Repository: https://github.com/briansmith/ring
-  License material: RUST-LICENSE-222, RUST-LICENSE-003, RUST-LICENSE-284
+  License material: RUST-LICENSE-222, RUST-LICENSE-003, RUST-LICENSE-285
 
 ringbuf 0.5.1
   License: MIT OR Apache-2.0
@@ -1794,7 +2085,7 @@ rubato 5.0.0
 rusqlite 0.31.0
   License: MIT
   Repository: https://github.com/rusqlite/rusqlite
-  License material: RUST-LICENSE-291
+  License material: RUST-LICENSE-292
 
 rustc_version 0.4.1
   License: MIT OR Apache-2.0
@@ -1856,6 +2147,11 @@ ryu 1.0.22
   Repository: https://github.com/dtolnay/ryu
   License material: RUST-LICENSE-126, RUST-LICENSE-244
 
+safetensors 0.4.5
+  License: Apache-2.0
+  Repository: https://github.com/huggingface/safetensors
+  License material: RUST-LICENSE-241
+
 safetensors 0.7.0
   License: Apache-2.0
   Repository: https://github.com/huggingface/safetensors
@@ -1874,7 +2170,7 @@ schannel 0.1.28
 scopeguard 1.2.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/bluss/scopeguard
-  License material: RUST-LICENSE-204, RUST-LICENSE-295
+  License material: RUST-LICENSE-204, RUST-LICENSE-296
 
 security-framework 2.11.1
   License: MIT OR Apache-2.0
@@ -1934,7 +2230,7 @@ sha2 0.11.0
 sharded-slab 0.1.7
   License: MIT
   Repository: https://github.com/hawkw/sharded-slab
-  License material: RUST-LICENSE-278
+  License material: RUST-LICENSE-279
 
 shlex 1.3.0
   License: MIT OR Apache-2.0
@@ -1994,7 +2290,7 @@ stable_deref_trait 1.2.1
 static_assertions 1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/nvzqz/static-assertions-rs
-  License material: RUST-LICENSE-251, RUST-LICENSE-276
+  License material: RUST-LICENSE-251, RUST-LICENSE-277
 
 strength_reduce 0.2.4
   License: MIT OR Apache-2.0
@@ -2079,12 +2375,12 @@ thread_local 1.1.9
 tinystr 0.8.2
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 tinyvec 1.11.0
   License: Zlib OR Apache-2.0 OR MIT
   Repository: https://github.com/Lokathor/tinyvec
-  License material: RUST-LICENSE-251, RUST-LICENSE-296, RUST-LICENSE-164
+  License material: RUST-LICENSE-251, RUST-LICENSE-297, RUST-LICENSE-164
 
 tinyvec_macros 0.1.1
   License: MIT OR Apache-2.0 OR Zlib
@@ -2201,6 +2497,16 @@ typenum 1.19.0
   Repository: https://github.com/paholg/typenum
   License material: RUST-LICENSE-262, RUST-LICENSE-108, RUST-LICENSE-208
 
+ug 0.5.0
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/LaurentMazare/ug
+  License material: no local license file found; use the SPDX/license declaration and repository above
+
+ug-metal 0.5.0
+  License: MIT OR Apache-2.0
+  Repository: https://github.com/LaurentMazare/ug
+  License material: no local license file found; use the SPDX/license declaration and repository above
+
 unicase 2.9.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/seanmonstar/unicase
@@ -2214,7 +2520,7 @@ unicode_categories 0.1.1
 unicode-ident 1.0.22
   License: (MIT OR Apache-2.0) AND Unicode-3.0
   Repository: https://github.com/dtolnay/unicode-ident
-  License material: RUST-LICENSE-126, RUST-LICENSE-051, RUST-LICENSE-293
+  License material: RUST-LICENSE-126, RUST-LICENSE-051, RUST-LICENSE-294
 
 unicode-normalization-alignments 0.1.12
   License: MIT/Apache-2.0
@@ -2244,7 +2550,7 @@ unit-prefix 0.5.2
 universal-hash 0.6.1
   License: MIT OR Apache-2.0
   Repository: https://github.com/RustCrypto/traits
-  License material: RUST-LICENSE-209, RUST-LICENSE-282
+  License material: RUST-LICENSE-209, RUST-LICENSE-283
 
 untrusted 0.9.0
   License: ISC
@@ -2384,7 +2690,7 @@ web-sys 0.3.102
 web-time 1.1.0
   License: MIT OR Apache-2.0
   Repository: https://github.com/daxpedda/web-time
-  License material: RUST-LICENSE-111, RUST-LICENSE-289
+  License material: RUST-LICENSE-111, RUST-LICENSE-290
 
 webpki-root-certs 1.0.6
   License: CDLA-Permissive-2.0
@@ -2394,7 +2700,7 @@ webpki-root-certs 1.0.6
 whisper-rs 0.16.0
   License: Unlicense
   Repository: https://codeberg.org/tazz4843/whisper-rs
-  License material: RUST-LICENSE-285
+  License material: RUST-LICENSE-286
 
 whisper-rs-sys 0.15.0
   License: Unlicense
@@ -2674,17 +2980,27 @@ wit-parser 0.244.0
 writeable 0.6.2
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
+
+yoke 0.7.5
+  License: Unicode-3.0
+  Repository: https://github.com/unicode-org/icu4x
+  License material: RUST-LICENSE-288
 
 yoke 0.8.1
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
+
+yoke-derive 0.7.5
+  License: Unicode-3.0
+  Repository: https://github.com/unicode-org/icu4x
+  License material: RUST-LICENSE-288
 
 yoke-derive 0.8.1
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 zerocopy 0.8.38
   License: BSD-2-Clause OR Apache-2.0 OR MIT
@@ -2699,12 +3015,12 @@ zerocopy-derive 0.8.38
 zerofrom 0.1.6
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 zerofrom-derive 0.1.6
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 zeroize 1.9.0
   License: Apache-2.0 OR MIT
@@ -2714,17 +3030,17 @@ zeroize 1.9.0
 zerotrie 0.2.3
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 zerovec 0.11.5
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 zerovec-derive 0.11.2
   License: Unicode-3.0
   Repository: https://github.com/unicode-org/icu4x
-  License material: RUST-LICENSE-287
+  License material: RUST-LICENSE-288
 
 zip 7.2.0
   License: MIT
@@ -2739,7 +3055,7 @@ zip 8.6.0
 zlib-rs 0.6.3
   License: Zlib
   Repository: https://github.com/trifectatechfoundation/zlib-rs
-  License material: RUST-LICENSE-273
+  License material: RUST-LICENSE-274
 
 zmij 1.0.19
   License: MIT
@@ -3892,7 +4208,7 @@ limitations under the License.
 --------------------------------------------------------------------------------
 RUST-LICENSE-013
 File name(s): LICENSE-MIT
-Applies to: lazy_static@1.5.0, rayon-core@1.13.0, rayon@1.11.0
+Applies to: lazy_static@1.5.0, metal@0.29.0, rayon-core@1.13.0, rayon@1.11.0
 SHA-256: 0621878e61f0d0fda054bcbe02df75192c28bde1ecc8289cbd86aeba2dd72720
 --------------------------------------------------------------------------------
 Copyright (c) 2010 The Rust Project Developers
@@ -10460,7 +10776,7 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 RUST-LICENSE-124
 File name(s): LICENSE-MIT
-Applies to: core-foundation-sys@0.8.7, core-foundation@0.10.1, core-foundation@0.9.4, core-graphics-types@0.2.0, core-graphics@0.25.0
+Applies to: core-foundation-sys@0.8.7, core-foundation@0.10.1, core-foundation@0.9.4, core-graphics-types@0.1.3, core-graphics-types@0.2.0, core-graphics@0.25.0
 SHA-256: 62065228e42caebca7e7d7db1204cbb867033de5982ca4009928915e4095f3a3
 --------------------------------------------------------------------------------
 Copyright (c) 2012-2013 Mozilla Foundation
@@ -10760,7 +11076,7 @@ DEALINGS IN THE SOFTWARE.
 --------------------------------------------------------------------------------
 RUST-LICENSE-128
 File name(s): LICENSE-MIT
-Applies to: bitflags@2.10.0, glob@0.3.3, log@0.4.29, num-complex@0.4.6, num-derive@0.4.2, num-integer@0.1.46, num-traits@0.2.19, regex-automata@0.4.16, regex-syntax@0.8.11, regex@1.13.1, serde_plain@1.0.2
+Applies to: bitflags@1.3.2, bitflags@2.10.0, glob@0.3.3, log@0.4.29, num-bigint@0.4.8, num-complex@0.4.6, num-derive@0.4.2, num-integer@0.1.46, num-iter@0.1.46, num-rational@0.4.2, num-traits@0.2.19, num@0.4.3, regex-automata@0.4.16, regex-syntax@0.8.11, regex@1.13.1, serde_plain@1.0.2
 SHA-256: 6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb
 --------------------------------------------------------------------------------
 Copyright (c) 2014 The Rust Project Developers
@@ -15789,7 +16105,7 @@ THE SOFTWARE.
 --------------------------------------------------------------------------------
 RUST-LICENSE-199
 File name(s): LICENSE-MIT
-Applies to: digest@0.10.7
+Applies to: digest@0.10.7, hmac@0.13.0
 SHA-256: 9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba
 --------------------------------------------------------------------------------
 Copyright (c) 2017 Artyom Pavlov
@@ -16216,7 +16532,7 @@ limitations under the License.
 --------------------------------------------------------------------------------
 RUST-LICENSE-204
 File name(s): LICENSE-APACHE
-Applies to: ahash@0.8.12, atomic-waker@1.1.2, autocfg@1.5.0, base64@0.13.1, base64@0.22.1, bitflags@2.10.0, bumpalo@3.19.1, cc@1.2.55, cexpr@0.6.0, cfg-if@1.0.4, cmake@0.1.57, core-foundation-sys@0.8.7, core-foundation@0.10.1, core-foundation@0.9.4, core-graphics-types@0.2.0, core-graphics@0.25.0, coreaudio-rs@0.14.2, crossbeam-channel@0.5.15, crossbeam-deque@0.8.6, crossbeam-epoch@0.9.20, crossbeam-queue@0.3.12, crossbeam-utils@0.8.21, displaydoc@0.2.5, either@1.15.0, equivalent@1.0.2, errno@0.3.14, fastrand@2.3.0, find-msvc-tools@0.1.9, flate2@1.1.9, fnv@1.0.7, form_urlencoded@1.2.2, glob@0.3.3, hashbrown@0.14.5, hashbrown@0.15.5, hashbrown@0.16.1, heck@0.5.0, hermit-abi@0.5.2, httparse@1.10.1, hyper-rustls@0.27.7, id-arena@2.3.0, idna@1.1.0, idna_adapter@1.2.1, indexmap@2.13.0, itertools@0.13.0, itertools@0.14.0, jni@0.21.1, jobserver@0.1.34, js-sys@0.3.102, lazy_static@1.5.0, leb128fmt@0.1.0, linux-raw-sys@0.11.0, lock_api@0.4.14, log@0.4.29, matrixmultiply@0.3.10, mime@0.3.17, ndarray@0.17.2, num-complex@0.4.6, num-derive@0.4.2, num-integer@0.1.46, num-traits@0.2.19, num_cpus@1.17.0, once_cell@1.21.3, openssl-probe@0.1.6, openssl-probe@0.2.1, parking_lot@0.12.5, parking_lot_core@0.9.12, percent-encoding@2.3.2, pkg-config@0.3.32, primal-check@0.3.4, rawpointer@0.2.1, rayon-cond@0.4.0, rayon-core@1.13.0, rayon@1.11.0, regex-automata@0.4.16, regex-syntax@0.8.11, regex@1.13.1, ringbuf@0.5.1, rustc_version@0.4.1, rustix@1.1.3, rustls-native-certs@0.8.3, rustls@0.23.36, scopeguard@1.2.0, security-framework-sys@2.15.0, security-framework@2.11.1, security-framework@3.5.1, serde_plain@1.0.2, signal-hook-registry@1.4.8, simd_cesu8@1.2.0, smallvec@1.15.1, socket2@0.6.3, stable_deref_trait@1.2.1, system-configuration-sys@0.6.0, system-configuration@0.7.0, tempfile@3.24.0, thread_local@1.1.9, unicase@2.9.0, unicode-normalization-alignments@0.1.12, unicode-segmentation@1.12.0, unicode-width@0.2.2, unicode-xid@0.2.6, url@2.5.8, uuid@1.24.0, version_check@0.9.5, wasi@0.11.1+wasi-snapshot-preview1, wasm-bindgen-futures@0.4.75, wasm-bindgen-macro-support@0.2.125, wasm-bindgen-macro@0.2.125, wasm-bindgen-shared@0.2.125, wasm-bindgen@0.2.125, web-sys@0.3.102, wit-bindgen-core@0.51.0, wit-bindgen-rust-macro@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen@0.51.0
+Applies to: ahash@0.8.12, atomic-waker@1.1.2, autocfg@1.5.0, base64@0.13.1, base64@0.22.1, bitflags@1.3.2, bitflags@2.10.0, bumpalo@3.19.1, cc@1.2.55, cexpr@0.6.0, cfg-if@1.0.4, cmake@0.1.57, core-foundation-sys@0.8.7, core-foundation@0.10.1, core-foundation@0.9.4, core-graphics-types@0.1.3, core-graphics-types@0.2.0, core-graphics@0.25.0, coreaudio-rs@0.14.2, crossbeam-channel@0.5.15, crossbeam-deque@0.8.6, crossbeam-epoch@0.9.20, crossbeam-queue@0.3.12, crossbeam-utils@0.8.21, displaydoc@0.2.5, either@1.15.0, equivalent@1.0.2, errno@0.3.14, fastrand@2.3.0, find-msvc-tools@0.1.9, flate2@1.1.9, fnv@1.0.7, form_urlencoded@1.2.2, glob@0.3.3, hashbrown@0.14.5, hashbrown@0.15.5, hashbrown@0.16.1, heck@0.5.0, hermit-abi@0.5.2, httparse@1.10.1, hyper-rustls@0.27.7, id-arena@2.3.0, idna@1.1.0, idna_adapter@1.2.1, indexmap@2.13.0, itertools@0.13.0, itertools@0.14.0, jni@0.21.1, jobserver@0.1.34, js-sys@0.3.102, lazy_static@1.5.0, leb128fmt@0.1.0, linux-raw-sys@0.11.0, lock_api@0.4.14, log@0.4.29, matrixmultiply@0.3.10, metal@0.29.0, mime@0.3.17, ndarray@0.17.2, num-bigint@0.4.8, num-complex@0.4.6, num-derive@0.4.2, num-integer@0.1.46, num-iter@0.1.46, num-rational@0.4.2, num-traits@0.2.19, num@0.4.3, num_cpus@1.17.0, once_cell@1.21.3, openssl-probe@0.1.6, openssl-probe@0.2.1, parking_lot@0.12.5, parking_lot_core@0.9.12, percent-encoding@2.3.2, pkg-config@0.3.32, primal-check@0.3.4, rawpointer@0.2.1, rayon-cond@0.4.0, rayon-core@1.13.0, rayon@1.11.0, regex-automata@0.4.16, regex-syntax@0.8.11, regex@1.13.1, ringbuf@0.5.1, rustc_version@0.4.1, rustix@1.1.3, rustls-native-certs@0.8.3, rustls@0.23.36, scopeguard@1.2.0, security-framework-sys@2.15.0, security-framework@2.11.1, security-framework@3.5.1, serde_plain@1.0.2, signal-hook-registry@1.4.8, simd_cesu8@1.2.0, smallvec@1.15.1, socket2@0.6.3, stable_deref_trait@1.2.1, system-configuration-sys@0.6.0, system-configuration@0.7.0, tempfile@3.24.0, thread_local@1.1.9, unicase@2.9.0, unicode-normalization-alignments@0.1.12, unicode-segmentation@1.12.0, unicode-width@0.2.2, unicode-xid@0.2.6, url@2.5.8, uuid@1.24.0, version_check@0.9.5, wasi@0.11.1+wasi-snapshot-preview1, wasm-bindgen-futures@0.4.75, wasm-bindgen-macro-support@0.2.125, wasm-bindgen-macro@0.2.125, wasm-bindgen-shared@0.2.125, wasm-bindgen@0.2.125, web-sys@0.3.102, wit-bindgen-core@0.51.0, wit-bindgen-rust-macro@0.51.0, wit-bindgen-rust@0.51.0, wit-bindgen@0.51.0
 SHA-256: a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2
 --------------------------------------------------------------------------------
                               Apache License
@@ -16694,7 +17010,7 @@ SOFTWARE.
 --------------------------------------------------------------------------------
 RUST-LICENSE-209
 File name(s): LICENSE-APACHE
-Applies to: aes-gcm@0.11.0, aes@0.9.2, argon2@0.5.3, base64ct@1.8.3, blake2@0.10.6, block-buffer@0.10.4, block-buffer@0.12.0, chacha20@0.10.0, cipher@0.5.2, const-oid@0.10.2, cpubits@0.1.1, cpufeatures@0.2.17, cpufeatures@0.3.0, crypto-common@0.1.7, crypto-common@0.2.2, ctr@0.10.1, der@0.7.10, digest@0.10.7, digest@0.11.2, ghash@0.6.0, hybrid-array@0.4.10, inout@0.2.2, password-hash@0.5.0, pem-rfc7468@0.7.0, polyval@0.7.3, sha2@0.11.0, universal-hash@0.6.1
+Applies to: aes-gcm@0.11.0, aes@0.9.2, argon2@0.5.3, base64ct@1.8.3, blake2@0.10.6, block-buffer@0.10.4, block-buffer@0.12.0, chacha20@0.10.0, cipher@0.5.2, const-oid@0.10.2, cpubits@0.1.1, cpufeatures@0.2.17, cpufeatures@0.3.0, crypto-common@0.1.7, crypto-common@0.2.2, ctr@0.10.1, der@0.7.10, digest@0.10.7, digest@0.11.2, ghash@0.6.0, hmac@0.13.0, hybrid-array@0.4.10, inout@0.2.2, password-hash@0.5.0, pem-rfc7468@0.7.0, polyval@0.7.3, sha2@0.11.0, universal-hash@0.6.1
 SHA-256: a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5
 --------------------------------------------------------------------------------
                               Apache License
@@ -18056,7 +18372,7 @@ limitations under the License.
 --------------------------------------------------------------------------------
 RUST-LICENSE-218
 File name(s): LICENSE
-Applies to: h2@0.4.13
+Applies to: h2@0.4.16
 SHA-256: b21623012e6c453d944b0342c515b631cfcbf30704c2621b291526b69c10724d
 --------------------------------------------------------------------------------
 Copyright (c) 2017 h2 authors
@@ -19587,7 +19903,7 @@ SHA-256: c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08
 --------------------------------------------------------------------------------
 RUST-LICENSE-241
 File name(s): LICENSE, LICENSE-APACHE
-Applies to: audioadapter-buffers@5.1.0, audioadapter-sample@5.1.0, audioadapter@5.0.0, candle-core@0.10.2, esaxx-rs@0.1.10, quinn-proto@0.11.15, quinn-udp@0.5.14, quinn@0.11.9, rustls-platform-verifier@0.6.2, safetensors@0.7.0, spm_precompiled@0.1.4, tokenizers@0.22.2, tokenizers@0.23.1, ureq@3.1.4
+Applies to: audioadapter-buffers@5.1.0, audioadapter-sample@5.1.0, audioadapter@5.0.0, candle-core@0.10.2, esaxx-rs@0.1.10, quinn-proto@0.11.15, quinn-udp@0.5.14, quinn@0.11.9, rustls-platform-verifier@0.6.2, safetensors@0.4.5, safetensors@0.7.0, spm_precompiled@0.1.4, tokenizers@0.22.2, tokenizers@0.23.1, ureq@3.1.4
 SHA-256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
 --------------------------------------------------------------------------------
                                  Apache License
@@ -20739,7 +21055,7 @@ DEALINGS IN THE SOFTWARE.
 --------------------------------------------------------------------------------
 RUST-LICENSE-257
 File name(s): LICENSE
-Applies to: gemm-c32@0.19.0, gemm-c64@0.19.0, gemm-common@0.19.0, gemm-f16@0.19.0, gemm-f32@0.19.0, gemm-f64@0.19.0, gemm@0.19.0, pulp@0.22.2
+Applies to: gemm-c32@0.18.2, gemm-c32@0.19.0, gemm-c64@0.18.2, gemm-c64@0.19.0, gemm-common@0.18.2, gemm-common@0.19.0, gemm-f16@0.18.2, gemm-f16@0.19.0, gemm-f32@0.18.2, gemm-f32@0.19.0, gemm-f64@0.18.2, gemm-f64@0.19.0, gemm@0.18.2, gemm@0.19.0, pulp@0.21.5, pulp@0.22.2
 SHA-256: d64f878c89bd5f1e5ada7e4aad57690b122727cf5229b7b87ea1980c188da1d9
 --------------------------------------------------------------------------------
 MIT License
@@ -21330,6 +21646,34 @@ insights.
 
 --------------------------------------------------------------------------------
 RUST-LICENSE-271
+File name(s): LICENSE.txt
+Applies to: objc@0.2.7
+SHA-256: e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5
+--------------------------------------------------------------------------------
+MIT License
+
+Copyright (c) Steven Sheldon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+RUST-LICENSE-272
 File name(s): LICENSE-APACHE
 Applies to: bytemuck@1.25.0, bytemuck_derive@1.10.2
 SHA-256: e3ba223bb1423f0aad8c3dfce0fe3148db48926d41e6fbc3afbbf5ff9e1c89cb
@@ -21397,7 +21741,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-272
+RUST-LICENSE-273
 File name(s): LICENSE
 Applies to: redox_users@0.5.2
 SHA-256: e6a8ae2d796083783efc94b1e66271aa2929dc4dfb231d34239aa9c7db8396db
@@ -21426,7 +21770,7 @@ SOFTWARE.
 
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-273
+RUST-LICENSE-274
 File name(s): LICENSE
 Applies to: zlib-rs@0.6.3
 SHA-256: e72111c52b7d96ebe25348dee19f0744f444d3c95ae6b1ecb6ccaecc5bce05ba
@@ -21452,7 +21796,7 @@ freely, subject to the following restrictions:
 3. This notice may not be removed or altered from any source distribution.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-274
+RUST-LICENSE-275
 File name(s): LICENSE-MIT
 Applies to: hashlink@0.9.1
 SHA-256: e915669a595b11a200873df8286561881b0e04932f6412a585db6297ba0bc97c
@@ -21485,7 +21829,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-275
+RUST-LICENSE-276
 File name(s): LICENSE.md
 Applies to: onig@6.5.1
 SHA-256: e9c1238c5beb73c6cc130160418968058b21d486a7a445f0ceff27d51fbfdc44
@@ -21521,7 +21865,7 @@ under the original license.
 > SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-276
+RUST-LICENSE-277
 File name(s): LICENSE-MIT
 Applies to: static_assertions@1.1.0
 SHA-256: ea084a2373ebc1f0902c09266e7bf25a05ab3814c1805bb017ffa7308f90c061
@@ -21549,7 +21893,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-277
+RUST-LICENSE-278
 File name(s): LICENSE-MIT
 Applies to: openssl-macros@0.1.1
 SHA-256: ea5ab440900ab271811d5c2dc02a9de6e03a6956ac5727e85c11d76df5883d30
@@ -21575,7 +21919,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-278
+RUST-LICENSE-279
 File name(s): LICENSE
 Applies to: sharded-slab@0.1.7
 SHA-256: eafbfa606bc005ed7fd2f623d65af17ffe4ef7c017221ac14405bf4140771ea9
@@ -21601,7 +21945,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-279
+RUST-LICENSE-280
 File name(s): COPYRIGHT
 Applies to: core-graphics@0.25.0
 SHA-256: ec82b96487e9e778ee610c7ab245162464782cfa1f555c2299333f8dbe5c036a
@@ -21613,7 +21957,7 @@ option. All files in the project carrying such notice may not be
 copied, modified, or distributed except according to those terms.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-280
+RUST-LICENSE-281
 File name(s): LICENSE-MIT
 Applies to: indexmap@2.13.0
 SHA-256: ecc269ef87fd38a1d98e30bfac9ba964a9dbd9315c3770fed98d4d7cb5882055
@@ -21645,7 +21989,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-281
+RUST-LICENSE-282
 File name(s): LICENSE-MIT
 Applies to: audioadapter-buffers@5.1.0, audioadapter-sample@5.1.0, audioadapter@5.0.0
 SHA-256: eea1d5a8dddb0f3f9a705b580296308cd34810daa1dd8c10bf93e5806fc1069c
@@ -21671,7 +22015,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-282
+RUST-LICENSE-283
 File name(s): LICENSE-MIT
 Applies to: universal-hash@0.6.1
 SHA-256: efa52eb70a774b62c50cf50f5e57e2625c29d375d09b91132f4f020e47b9944e
@@ -21703,7 +22047,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-283
+RUST-LICENSE-284
 File name(s): LICENSE
 Applies to: redox_syscall@0.5.8
 SHA-256: efcfee7981ff72431fffb06925cad00a23dce079ed4354f61030ad5abdb78829
@@ -21732,7 +22076,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-284
+RUST-LICENSE-285
 File name(s): LICENSE-other-bits
 Applies to: ring@0.17.14
 SHA-256: f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f
@@ -21752,7 +22096,7 @@ OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-285
+RUST-LICENSE-286
 File name(s): LICENSE
 Applies to: whisper-rs@0.16.0
 SHA-256: f0510d3b9d1223c45e8fdd2b49270ec8734fff491c7f7d1b948ee70162e1ceff
@@ -21783,7 +22127,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 For more information, please refer to <https://unlicense.org>
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-286
+RUST-LICENSE-287
 File name(s): LICENSE-MIT
 Applies to: native-tls@0.2.14
 SHA-256: f2ad7982ddbfa8c45eb965315718c55b70b9cc311b49afacb50d5fe84173ae2c
@@ -21809,9 +22153,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-287
+RUST-LICENSE-288
 File name(s): LICENSE
-Applies to: icu_collections@2.1.1, icu_locale_core@2.1.1, icu_normalizer@2.1.1, icu_normalizer_data@2.1.1, icu_properties@2.1.2, icu_properties_data@2.1.2, icu_provider@2.1.1, litemap@0.8.1, potential_utf@0.1.4, tinystr@0.8.2, writeable@0.6.2, yoke-derive@0.8.1, yoke@0.8.1, zerofrom-derive@0.1.6, zerofrom@0.1.6, zerotrie@0.2.3, zerovec-derive@0.11.2, zerovec@0.11.5
+Applies to: icu_collections@2.1.1, icu_locale_core@2.1.1, icu_normalizer@2.1.1, icu_normalizer_data@2.1.1, icu_properties@2.1.2, icu_properties_data@2.1.2, icu_provider@2.1.1, litemap@0.8.1, potential_utf@0.1.4, tinystr@0.8.2, writeable@0.6.2, yoke-derive@0.7.5, yoke-derive@0.8.1, yoke@0.7.5, yoke@0.8.1, zerofrom-derive@0.1.6, zerofrom@0.1.6, zerotrie@0.2.3, zerovec-derive@0.11.2, zerovec@0.11.5
 SHA-256: f367c1b8e1aa262435251e442901da4607b4650e0e63a026f5044473ecfb90f2
 --------------------------------------------------------------------------------
 UNICODE LICENSE V3
@@ -21862,7 +22206,7 @@ Portions of ICU4X may have been adapted from ICU4C and/or ICU4J.
 ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation and others.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-288
+RUST-LICENSE-289
 File name(s): LICENSE
 Applies to: openssl@0.10.75
 SHA-256: f3d4287b4a21c5176fea2f9bd4ae800696004e2fb8e05cbc818be513f188a941
@@ -21884,7 +22228,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-289
+RUST-LICENSE-290
 File name(s): LICENSE-MIT
 Applies to: web-time@1.1.0
 SHA-256: f428305bbf2e70fbd807af0f3c7ac1b7acfb95311640f451e9d2e48db6d7e96b
@@ -21912,7 +22256,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-290
+RUST-LICENSE-291
 File name(s): LICENSE-MIT
 Applies to: bit-set@0.8.0, bit-vec@0.8.0
 SHA-256: f51ac2c59a222f7476ce507ca879960e2b64ea64bb2786eefdbeb7b0b538d1b7
@@ -21944,7 +22288,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-291
+RUST-LICENSE-292
 File name(s): LICENSE
 Applies to: libsqlite3-sys@0.28.0, rusqlite@0.31.0
 SHA-256: f59ba65550f2a5adff98ec6478d783402c8e0a3eb515025c0b3438f3d30dc39e
@@ -21970,7 +22314,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-292
+RUST-LICENSE-293
 File name(s): LICENSE-MIT
 Applies to: hex@0.4.3
 SHA-256: f7bdb3426d045cd50efd4953026e3eb5a83d0199f458a075602611b9344da5b9
@@ -21997,7 +22341,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-293
+RUST-LICENSE-294
 File name(s): LICENSE-UNICODE
 Applies to: unicode-ident@1.0.22
 SHA-256: f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1
@@ -22043,7 +22387,7 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-294
+RUST-LICENSE-295
 File name(s): LICENSE
 Applies to: castaway@0.2.4
 SHA-256: f98e09091d5ae02b2f2ec1ead4f7f28c4c44d1cb98b078739ba67091637e170c
@@ -22071,7 +22415,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-295
+RUST-LICENSE-296
 File name(s): LICENSE-MIT
 Applies to: scopeguard@1.2.0
 SHA-256: fb77f0a9c53e473abe5103c8632ef9f0f2874d4fb3f17cb2d8c661aab9cee9d7
@@ -22103,7 +22447,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-296
+RUST-LICENSE-297
 File name(s): LICENSE-MIT.md
 Applies to: tinyvec@1.11.0
 SHA-256: fd80a26fbb3f644af1fa994134446702932968519797227e07a1368dea80f0bc
@@ -22115,7 +22459,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-297
+RUST-LICENSE-298
 File name(s): LICENSE-MIT
 Applies to: jni@0.21.1
 SHA-256: fea1d5bf3dd71605ce5d7d2ff695c1837e914c77195e523a86b5391716477960
@@ -22143,7 +22487,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-RUST-LICENSE-298
+RUST-LICENSE-299
 File name(s): LICENSE-MIT
 Applies to: hashbrown@0.14.5, hashbrown@0.15.5, hashbrown@0.16.1
 SHA-256: ff8f68cb076caf8cefe7a6430d4ac086ce6af2ca8ce2c4e5a2004d4552ef52a2

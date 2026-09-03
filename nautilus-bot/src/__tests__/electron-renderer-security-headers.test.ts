@@ -43,6 +43,9 @@ describe("renderer security headers", () => {
       "default-src 'self'",
       "script-src 'self'",
       "connect-src 'self'",
+      // The in-app player streams from its own origin, named explicitly; no
+      // other media source is admitted.
+      "media-src 'self' plainsong://playback data: blob:",
       "object-src 'none'",
       "base-uri 'self'",
       "frame-src 'none'",
@@ -104,14 +107,39 @@ describe("renderer security headers", () => {
     }
   });
 
-  it("wraps both the asset and the refusal path in main.ts", () => {
+  it("wraps the playback, asset, and refusal paths in main.ts", () => {
     const source = readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
     const start = source.indexOf("await protocol.handle(RENDERER_SCHEME");
     expect(start).toBeGreaterThan(-1);
-    const handler = source.slice(start, source.indexOf("if (devServerUrlIsUsable)", start));
+    // The handler runs up to the dev-server probe that follows it.
+    const handler = source.slice(
+      start,
+      source.indexOf("const timeout = new Promise<never>", start),
+    );
 
-    expect(handler.match(/withRendererSecurityHeaders\(/g)).toHaveLength(2);
+    // Dev-mode refusal, packaged asset, packaged refusal.
+    expect(handler.match(/withRendererSecurityHeaders\(/g)).toHaveLength(3);
+    // The token route is answered before any asset resolution runs.
+    expect(handler.indexOf("playbackTokenFromUrl(request.url)")).toBeGreaterThan(-1);
+    expect(handler.indexOf("playbackTokenFromUrl(request.url)")).toBeLessThan(
+      handler.indexOf("resolveRendererAssetPath("),
+    );
     // The bare pass-through of net.fetch is gone.
     expect(handler).not.toMatch(/return net\.fetch\(/);
+
+    const serveStart = source.indexOf("async function servePlayback(");
+    expect(serveStart).toBeGreaterThan(-1);
+    const serve = source.slice(serveStart, source.indexOf("\n}\n", serveStart));
+    // Unknown token, vanished file, and the streamed answer all carry the headers.
+    expect(serve.match(/withRendererSecurityHeaders\(/g)).toHaveLength(3);
+    expect(serve).toMatch(/buildPlaybackResponse\(/);
+  });
+
+  it("registers the app scheme as streamable so <audio> can play from it", () => {
+    const source = readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
+    const start = source.indexOf("protocol.registerSchemesAsPrivileged(");
+    expect(start).toBeGreaterThan(-1);
+    const block = source.slice(start, source.indexOf("]);", start));
+    expect(block).toMatch(/stream: true/);
   });
 });

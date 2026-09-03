@@ -1,0 +1,299 @@
+{
+  "audio": "artifacts/qa/diarization-speakrs/two-speaker-offgrid-300s.wav",
+  "source": "scripts/fixtures/real-speech-44s.wav",
+  "sampleRate": 16000,
+  "durationSeconds": 300,
+  "turnSeconds": 5.3,
+  "pitchRatio": 0.82,
+  "speakers": [
+    "A",
+    "B"
+  ],
+  "turns": [
+    {
+      "start": 0,
+      "end": 5.3,
+      "speaker": "A"
+    },
+    {
+      "start": 5.3,
+      "end": 10.6,
+      "speaker": "B"
+    },
+    {
+      "start": 10.6,
+      "end": 15.9,
+      "speaker": "A"
+    },
+    {
+      "start": 15.9,
+      "end": 21.2,
+      "speaker": "B"
+    },
+    {
+      "start": 21.2,
+      "end": 26.5,
+      "speaker": "A"
+    },
+    {
+      "start": 26.5,
+      "end": 31.8,
+      "speaker": "B"
+    },
+    {
+      "start": 31.8,
+      "end": 37.1,
+      "speaker": "A"
+    },
+    {
+      "start": 37.1,
+      "end": 42.4,
+      "speaker": "B"
+    },
+    {
+      "start": 42.4,
+      "end": 47.7,
+      "speaker": "A"
+    },
+    {
+      "start": 47.7,
+      "end": 53,
+      "speaker": "B"
+    },
+    {
+      "start": 53,
+      "end": 58.3,
+      "speaker": "A"
+    },
+    {
+      "start": 58.3,
+      "end": 63.6,
+      "speaker": "B"
+    },
+    {
+      "start": 63.6,
+      "end": 68.9,
+      "speaker": "A"
+    },
+    {
+      "start": 68.9,
+      "end": 74.2,
+      "speaker": "B"
+    },
+    {
+      "start": 74.2,
+      "end": 79.5,
+      "speaker": "A"
+    },
+    {
+      "start": 79.5,
+      "end": 84.8,
+      "speaker": "B"
+    },
+    {
+      "start": 84.8,
+      "end": 90.1,
+      "speaker": "A"
+    },
+    {
+      "start": 90.1,
+      "end": 95.4,
+      "speaker": "B"
+    },
+    {
+      "start": 95.4,
+      "end": 100.7,
+      "speaker": "A"
+    },
+    {
+      "start": 100.7,
+      "end": 106,
+      "speaker": "B"
+    },
+    {
+      "start": 106,
+      "end": 111.3,
+      "speaker": "A"
+    },
+    {
+      "start": 111.3,
+      "end": 116.6,
+      "speaker": "B"
+    },
+    {
+      "start": 116.6,
+      "end": 121.9,
+      "speaker": "A"
+    },
+    {
+      "start": 121.9,
+      "end": 127.2,
+      "speaker": "B"
+    },
+    {
+      "start": 127.2,
+      "end": 132.5,
+      "speaker": "A"
+    },
+    {
+      "start": 132.5,
+      "end": 137.8,
+      "speaker": "B"
+    },
+    {
+      "start": 137.8,
+      "end": 143.1,
+      "speaker": "A"
+    },
+    {
+      "start": 143.1,
+      "end": 148.4,
+      "speaker": "B"
+    },
+    {
+      "start": 148.4,
+      "end": 153.7,
+      "speaker": "A"
+    },
+    {
+      "start": 153.7,
+      "end": 159,
+      "speaker": "B"
+    },
+    {
+      "start": 159,
+      "end": 164.3,
+      "speaker": "A"
+    },
+    {
+      "start": 164.3,
+      "end": 169.6,
+      "speaker": "B"
+    },
+    {
+      "start": 169.6,
+      "end": 174.9,
+      "speaker": "A"
+    },
+    {
+      "start": 174.9,
+      "end": 180.2,
+      "speaker": "B"
+    },
+    {
+      "start": 180.2,
+      "end": 185.5,
+      "speaker": "A"
+    },
+    {
+      "start": 185.5,
+      "end": 190.8,
+      "speaker": "B"
+    },
+    {
+      "start": 190.8,
+      "end": 196.1,
+      "speaker": "A"
+    },
+    {
+      "start": 196.1,
+      "end": 201.4,
+      "speaker": "B"
+    },
+    {
+      "start": 201.4,
+      "end": 206.7,
+      "speaker": "A"
+    },
+    {
+      "start": 206.7,
+      "end": 212,
+      "speaker": "B"
+    },
+    {
+      "start": 212,
+      "end": 217.3,
+      "speaker": "A"
+    },
+    {
+      "start": 217.3,
+      "end": 222.6,
+      "speaker": "B"
+    },
+    {
+      "start": 222.6,
+      "end": 227.9,
+      "speaker": "A"
+    },
+    {
+      "start": 227.9,
+      "end": 233.2,
+      "speaker": "B"
+    },
+    {
+      "start": 233.2,
+      "end": 238.5,
+      "speaker": "A"
+    },
+    {
+      "start": 238.5,
+      "end": 243.8,
+      "speaker": "B"
+    },
+    {
+      "start": 243.8,
+      "end": 249.1,
+      "speaker": "A"
+    },
+    {
+      "start": 249.1,
+      "end": 254.4,
+      "speaker": "B"
+    },
+    {
+      "start": 254.4,
+      "end": 259.7,
+      "speaker": "A"
+    },
+    {
+      "start": 259.7,
+      "end": 265,
+      "speaker": "B"
+    },
+    {
+      "start": 265,
+      "end": 270.3,
+      "speaker": "A"
+    },
+    {
+      "start": 270.3,
+      "end": 275.6,
+      "speaker": "B"
+    },
+    {
+      "start": 275.6,
+      "end": 280.9,
+      "speaker": "A"
+    },
+    {
+      "start": 280.9,
+      "end": 286.2,
+      "speaker": "B"
+    },
+    {
+      "start": 286.2,
+      "end": 291.5,
+      "speaker": "A"
+    },
+    {
+      "start": 291.5,
+      "end": 296.8,
+      "speaker": "B"
+    },
+    {
+      "start": 296.8,
+      "end": 300,
+      "speaker": "A"
+    }
+  ]
+}

@@ -162,7 +162,7 @@ const PERMISSION_GATES: PermissionGate[] = [
     key: "speech",
     label: "Speech recognition",
     purpose:
-      "Optional -- only needed when you explicitly choose Apple Speech for on-device dictation. Plainsong never uses it as a fallback route.",
+      "Optional -- only needed when you explicitly choose Apple Speech for on-device dictation. macOS transcribes on this Mac; the permission records your consent to that, not permission to use a server. Plainsong never uses this route as a fallback.",
     section: "speech",
     settingsLabel: "Speech Recognition",
     optional: true,
@@ -931,7 +931,6 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         throw new Error(conflictMessage);
       }
       settings.shortcuts.toggleDictation = toggleDictation;
-      settings.shortcuts.toggleDictationAlternates = [];
       settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
       await saveSettings(settings);
       return true;
@@ -2496,6 +2495,21 @@ function AiNotesStep({
         route you choose. Capture and the transcript never depend on it.
       </p>
 
+      {/*
+        Dictation cleanup is a different lane with a different answer, and
+        saying so here stops the most common misreading of this step: that
+        picking "Transcripts only" also turns dictation cleanup off. The
+        built-in model ships as the default for that lane and needs nothing
+        from this screen -- but it is a normalizer, so it is not one of the
+        three answers below.
+      */}
+      <p className="text-sm text-muted-foreground">
+        Dictation cleanup is separate. It uses a small built-in model that runs
+        on this Mac with nothing to install — it tidies punctuation, fillers and
+        spoken numbers, but it cannot write meeting notes. Change either lane
+        later in Models.
+      </p>
+
       <div
         className="space-y-2"
         role="radiogroup"
@@ -2685,6 +2699,8 @@ function MeetingSetupStep({
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
         Meetings work best with a meeting-grade ASR route and, when available, both microphone and system audio capture.
+        Parakeet is the recommended local route; for a language it does not cover, whisper.cpp small, medium,
+        large-v3 or large-v3-turbo can run meetings too (100 languages, on the GPU, slower than Parakeet).
       </p>
 
       <div className="space-y-3">
@@ -2827,6 +2843,15 @@ function MeetingSetupStep({
 
       <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
         <p className="text-xs font-medium">Meeting storage defaults</p>
+        {/* One sentence, because it is the one thing here the reader did not
+            ask for: the app will notice a call and offer. It never records
+            without a click. */}
+        <p className="text-sm text-muted-foreground">
+          Plainsong also notices when a Zoom, Teams, Meet, Webex, Slack,
+          Discord or FaceTime call is in progress on this Mac and offers to
+          record it; it never starts on its own, and you can turn the offer off
+          in Settings › General.
+        </p>
         <div className="space-y-2">
           <label
             htmlFor="first-run-meeting-audio-storage"

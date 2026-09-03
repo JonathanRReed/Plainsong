@@ -33,6 +33,7 @@ import {
   isDownloadableProvider,
   isMeetingGradeProvider,
   providerActionLabel,
+  appleSpeechServesMeetings,
   providerCapabilityLabel,
   providerHostingLabel,
   providerRecommendation,
@@ -41,6 +42,7 @@ import { requestMainView } from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import type { AsrProviderInfo } from "@/types";
+import { compareStrings } from "@/lib/format-locale";
 
 /**
  * One flat label/value list per readiness card. Bordered detail tiles inside an
@@ -224,7 +226,7 @@ export function SetupView() {
       if (left.runtimeStatus !== "ready" && right.runtimeStatus === "ready") {
         return 1;
       }
-      return left.name.localeCompare(right.name);
+      return compareStrings(left.name, right.name);
     });
   }, [providers]);
 
@@ -682,7 +684,12 @@ export function SetupView() {
                             <p className="font-medium">{provider.name}</p>
                             {providerBadge(provider)}
                             <Badge variant="secondary">
-                              {providerCapabilityLabel(provider.providerType)}
+                              {providerCapabilityLabel(
+                                provider.providerType,
+                                appleSpeechServesMeetings(
+                                  provider.platformReadiness,
+                                ),
+                              )}
                             </Badge>
                             <Badge variant="outline">
                               {providerHostingLabel(provider.providerType)}

@@ -1,5 +1,6 @@
 import { invoke } from "@/lib/electron";
 import type {
+  PauseSpan,
   Recording,
   Project,
   Transcript,
@@ -14,8 +15,11 @@ import type {
   ActionItemsProvenance,
   SearchHit,
   MeetingTranscriptDetails,
+  AppleSpeechLanguageInstallResult,
 } from "@/types";
 import type { Settings } from "@/types/settings";
+import type { MeetingAttendee } from "@/lib/attendees";
+import type { DictationBindingIssue } from "../../electron/dictation-bindings";
 
 export interface DictationStartOptions {
   saveToInbox: boolean;
@@ -56,6 +60,19 @@ export interface DictationHistoryDetails {
   transcriptionLatencyMs: number | null;
   insertLatencyMs: number | null;
   endToEndMs: number | null;
+  /** BCP-47 primary tag the recognizer reported for the spoken audio. */
+  detectedLanguage?: string | null;
+  /** `whisper_native` | `ai_lane` when translate-to-English ran; null when off. */
+  translationRoute?: string | null;
+  /** Whether the delivered text is the translated one. */
+  translationApplied?: boolean | null;
+  /** What the recognizer heard, when the dictation was saved with it. */
+  rawTranscript?: string | null;
+  /** Whether the kept audio is still on disk; null when none was kept. */
+  audioAvailable?: boolean | null;
+  /** Set on a "Process again" entry: the dictation whose audio it re-ran. */
+  reprocessedFromId?: string | null;
+  reprocessedFromCreatedAt?: string | null;
 }
 
 export interface DictationInsights {
@@ -118,13 +135,17 @@ export interface RelationshipMemory {
   companies: CompanyMemoryProfile[];
 }
 
-export interface MeetingConsentAutomationStatus {
-  mode: "auto_ready" | "manual_required" | string;
+/**
+ * What Plainsong knows about the meeting the user is about to record and the
+ * notice they are expected to send themselves. Plainsong never posts the
+ * notice into a meeting chat; `message` names the detected meeting app (Zoom,
+ * Google Meet) only so the copy can say where the user should send it.
+ */
+export interface MeetingConsentNoticeStatus {
   surface?: "zoom" | "google_meet" | string | null;
   appName?: string | null;
   appBundleId?: string | null;
   browserUrl?: string | null;
-  canAutomate: boolean;
   message: string;
   noticeText: string;
 }
@@ -171,6 +192,72 @@ export async function getDictationHistoryDetails(
 
 export async function getDictationInsights(): Promise<DictationInsights> {
   return await invoke("get_dictation_insights");
+}
+
+/**
+ * One ranked hit from dictation history search. `snippet` wraps each matched
+ * term in `[[`/`]]`; `matchedField` says whether the delivered text
+ * (`final`) or what the recognizer heard (`raw`) matched.
+ */
+export interface DictationHistorySearchHit {
+  recordingId: string;
+  recordingTitle: string;
+  createdAt: string;
+  snippet: string;
+  matchedField: "final" | "raw" | string;
+  score: number;
+}
+
+export async function searchDictationHistory(
+  query: string,
+  options: { limit?: number; offset?: number } = {}
+): Promise<DictationHistorySearchHit[]> {
+  return await invoke("search_dictation_history", {
+    query,
+    limit: options.limit ?? 25,
+    offset: options.offset ?? 0,
+  });
+}
+
+/** What "Process again" was asked to do; only `historyId` is required. */
+export interface DictationReprocessRequest {
+  historyId: string;
+  /** A built-in preset id or a custom mode id. Omit for the active mode. */
+  modeId?: string | null;
+  /** Override the dictation lane's engine for this run only. */
+  provider?: string | null;
+  modelId?: string | null;
+}
+
+/**
+ * The new history entry "Process again" saved, plus what produced it. The
+ * sidecar inserts nothing and touches no clipboard; the entry is the result.
+ */
+export interface DictationReprocessOutcome {
+  recording: Recording;
+  transcript: Transcript;
+  finalText: string;
+  rawText: string;
+  modePreset: string;
+  customModeId: string | null;
+  customModeName: string | null;
+  provider: string;
+  modelId: string;
+  usedAi: boolean;
+  reprocessedFromId: string;
+  reprocessedFromCreatedAt: string;
+  transcriptionLatencyMs: number;
+}
+
+export async function reprocessDictation(
+  request: DictationReprocessRequest
+): Promise<DictationReprocessOutcome> {
+  return await invoke("reprocess_dictation", {
+    historyId: request.historyId,
+    modeId: request.modeId ?? null,
+    provider: request.provider ?? null,
+    modelId: request.modelId ?? null,
+  });
 }
 
 interface CursorInsertSmokeTestResult {
@@ -253,6 +340,14 @@ export async function startRecording(options: {
   preferredInputDeviceId?: string;
   template?: string;
   meetingNotes?: string;
+  /**
+   * The `callId` of the detected call whose offer the reader accepted. The
+   * sidecar binds this meeting's auto-stop to that call and to no other, so a
+   * meeting started any other way must leave it out.
+   */
+  detectedCallId?: number;
+  /** The conferencing service, stored with the recording as its tag. */
+  videoService?: string;
 }): Promise<string> {
   return await invoke("begin_meeting_capture", { options });
 }
@@ -281,16 +376,122 @@ export async function listAudioInputDevices(): Promise<AudioInputDeviceInventory
   return await invoke("list_audio_input_devices");
 }
 
-export async function getMeetingConsentAutomationStatus(): Promise<MeetingConsentAutomationStatus> {
-  return await invoke("get_meeting_consent_automation_status");
+export async function getMeetingConsentNoticeStatus(): Promise<MeetingConsentNoticeStatus> {
+  return await invoke("get_meeting_consent_notice_status");
 }
 
 export async function stopRecording(recordingId: string): Promise<void> {
   await invoke("end_meeting_capture", { recordingId });
 }
 
+/** Mirrors `RecordingPauseSnapshot` in rust-sidecar/src/audio.rs. */
+export interface RecordingPauseSnapshot {
+  paused: boolean;
+  closedPausedMs: number;
+  pauseStartedAtMs: number | null;
+  spans: PauseSpan[];
+}
+
+/**
+ * Pause the live meeting: the microphone (and system audio) stay open, but
+ * nothing captured until `resumeRecording` reaches the file, the preview, or
+ * the transcript. The sidecar answers with the pause ledger and also emits
+ * `meeting-recording-state-changed`, which is what every window renders from.
+ */
+export async function pauseRecording(recordingId: string): Promise<RecordingPauseSnapshot> {
+  return await invoke("pause_recording", { recordingId });
+}
+
+export async function resumeRecording(recordingId: string): Promise<RecordingPauseSnapshot> {
+  return await invoke("resume_recording", { recordingId });
+}
+
+/** Mirrors `ActiveCall` in rust-sidecar/src/meeting_detect.rs. */
+export interface DetectedCall {
+  callId: number;
+  app: string;
+  appLabel: string;
+  videoService: string | null;
+  bundleId: string;
+  /**
+   * Whether the call was found through a window rather than only through the
+   * microphone. The title itself never leaves the sidecar: for Google Meet it
+   * is the meeting's own name.
+   */
+  hasCallWindow: boolean;
+  confidence: "medium" | "high";
+  detectedAtMs: number;
+  detectedAt: string;
+  dismissed: boolean;
+}
+
+/** Mirrors `MeetingCallStatus` in rust-sidecar/src/meeting_detect.rs. */
+export interface MeetingCallStatus {
+  supported: boolean;
+  enabled: boolean;
+  accessibilityGranted: boolean;
+  activeCall: DetectedCall | null;
+}
+
+const EMPTY_MEETING_CALL_STATUS: MeetingCallStatus = {
+  supported: false,
+  enabled: false,
+  accessibilityGranted: false,
+  activeCall: null,
+};
+
+function normalizeMeetingCallStatus(value: unknown): MeetingCallStatus {
+  if (!value || typeof value !== "object") {
+    return EMPTY_MEETING_CALL_STATUS;
+  }
+  const status = value as Partial<MeetingCallStatus>;
+  const call = status.activeCall;
+  return {
+    supported: status.supported === true,
+    enabled: status.enabled === true,
+    accessibilityGranted: status.accessibilityGranted === true,
+    activeCall:
+      call && typeof call === "object" && typeof call.callId === "number"
+        ? (call as DetectedCall)
+        : null,
+  };
+}
+
+/** What the call detector currently sees. Cannot start anything. */
+export async function getMeetingCallStatus(): Promise<MeetingCallStatus> {
+  return normalizeMeetingCallStatus(await invoke("get_meeting_call_status"));
+}
+
+/**
+ * Wave away one detected call. Scoped to that call: the next call in the
+ * same app is offered again.
+ */
+export async function dismissDetectedCall(callId: number): Promise<MeetingCallStatus> {
+  return normalizeMeetingCallStatus(await invoke("dismiss_detected_call", { callId }));
+}
+
 export async function openRecordingAudio(recordingId: string): Promise<void> {
   await invoke("open_recording_audio", { recordingId });
+}
+
+/**
+ * What the main process hands back for in-app playback: a token and the URL
+ * the privileged `plainsong://playback` route answers for it. Never a path.
+ */
+interface PreparedPlayback {
+  token: string;
+  url: string;
+  recordingId: string;
+  protection: "plaintext" | "decrypted";
+  durationSeconds: number;
+}
+
+export async function prepareRecordingPlayback(recordingId: string): Promise<PreparedPlayback> {
+  return await invoke("prepare_recording_playback", { recordingId });
+}
+
+export async function releaseRecordingPlayback(token: string): Promise<void> {
+  await invoke("release_recording_playback", { token });
 }
 
 export async function openExportPath(targetPath: string): Promise<void> {
@@ -333,8 +534,45 @@ export async function retranscribeRecording(recordingId: string): Promise<void> 
   await invoke("retranscribe_recording", { recordingId });
 }
 
+/**
+ * What the sidecar saved for an imported audio file. `null` means the user
+ * dismissed the native file picker without choosing anything.
+ */
+export interface ImportedAudioFile {
+  recordingId: string;
+  title: string;
+  sourceFileName: string;
+  durationSeconds: number;
+}
+
+/**
+ * Open the native "choose an audio file" dialog and import what the user
+ * picks as a meeting.
+ *
+ * The renderer never names a path: Electron's main process shows the picker
+ * and hands the chosen path straight to the sidecar. Resolves as soon as the
+ * file has been decoded and saved; transcription then runs in the background
+ * and reports through the same `recording-status-changed` events a stopped
+ * meeting uses.
+ */
+export async function importAudioFile(): Promise<ImportedAudioFile | null> {
+  return (await invoke("select_audio_file_to_import")) as ImportedAudioFile | null;
+}
+
 export async function renameRecording(recordingId: string, newTitle: string): Promise<void> {
   await invoke("rename_recording", { recordingId, newTitle });
+}
+
+/**
+ * Replace a meeting's attendee list. Returns what the sidecar actually
+ * stored, which is the sanitized list -- duplicates dropped, fields clipped
+ * -- so the caller renders what is on disk rather than what it sent.
+ */
+export async function updateRecordingAttendees(
+  recordingId: string,
+  attendees: MeetingAttendee[],
+): Promise<MeetingAttendee[]> {
+  return await invoke("update_recording_attendees", { recordingId, attendees });
 }
 
 export async function updateRecordingNotes(
@@ -466,9 +704,22 @@ interface ExportResult {
   content: string | null;
 }
 
+/**
+ * File formats the sidecar can actually write. `docx` is a Word package built
+ * from the Markdown export, so a `preview: true` call for it returns that
+ * Markdown, not the bytes of the file.
+ */
+export type RecordingExportFormat =
+  | "markdown"
+  | "json"
+  | "text"
+  | "srt"
+  | "vtt"
+  | "docx";
+
 export async function exportRecordingV2(
   recordingId: string,
-  format: "markdown" | "pdf" | "json" | "text",
+  format: RecordingExportFormat,
   options?: {
     redactionLevel?: "none" | "basic" | "strict";
     target?: string;
@@ -488,7 +739,7 @@ export interface ExportTemplate {
   id: string;
   name: string;
   description: string;
-  format: "markdown" | "plain_text" | "html" | "json" | "csv" | "pdf";
+  format: "markdown" | "plain_text" | "html" | "json" | "csv" | "pdf" | "docx";
   template: string;
   includeSpeakers: boolean;
   includeTimestamps: boolean;
@@ -1030,12 +1281,46 @@ export async function requestAppleSpeechPermission(): Promise<PermissionDiagnost
   return await invoke("request_apple_speech_permission");
 }
 
+/**
+ * Asks macOS to install one language's SpeechAnalyzer assets.
+ *
+ * The only download this route ever starts, and only when the reader asks:
+ * transcription refuses a missing language instead of fetching it. Progress
+ * arrives on the `apple-speech-language-install-progress` event.
+ */
+export async function installAppleSpeechLanguage(
+  locale?: string,
+): Promise<AppleSpeechLanguageInstallResult> {
+  const trimmed = locale?.trim();
+  return await invoke(
+    "install_apple_speech_language",
+    trimmed ? { locale: trimmed } : {},
+  );
+}
+
+/**
+ * Asks an in-flight language install to stop.
+ *
+ * macOS owns the download and it can run for minutes, so the reader who
+ * started it needs a way out that is not "quit the app". Safe when nothing is
+ * installing: the next install clears the flag before it starts.
+ */
+export async function cancelAppleSpeechLanguageInstall(): Promise<void> {
+  await invoke("cancel_apple_speech_language_install");
+}
+
 export async function repairCursorInsertPermissions(): Promise<PermissionDiagnostics> {
   return await invoke("repair_cursor_insert_permissions");
 }
 
 export interface DictationShortcutCapabilityStatus {
   nativeShortcutAvailable: boolean;
+  /**
+   * Per-binding problems from Electron's last registration pass (see
+   * `validateDictationBindings` in electron/dictation-bindings.ts). Absent
+   * from older main processes.
+   */
+  bindingIssues?: DictationBindingIssue[];
 }
 
 /** Check whether the native hold-to-talk helper is available on this machine. */
@@ -1111,6 +1396,79 @@ export interface DiarizationModelOption {
   installed: boolean;
 }
 
+/** A remembered voice, as Settings lists it. Never carries the signature itself. */
+export interface RememberedVoice {
+  id: string;
+  displayName: string;
+  embeddingModelId: string;
+  sampleCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** What one speaker cluster's header should offer. */
+export interface SpeakerVoiceCluster {
+  speakerId: string;
+  appliedProfileId: string | null;
+  /** "auto" while Plainsong applied the name unasked, "confirmed" once agreed. */
+  matchState: "auto" | "confirmed" | null;
+  suggestion: {
+    profileId: string;
+    displayName: string;
+    percent: number;
+    confident: boolean;
+  } | null;
+}
+
+export interface SpeakerVoiceSuggestions {
+  /** False when "Remember voices" is off; the UI shows nothing rather than an error. */
+  enabled: boolean;
+  clusters: SpeakerVoiceCluster[];
+  /** Names offered in Confirm, attendees first where a meeting has them. */
+  nameOptions: string[];
+}
+
+export async function suggestSpeakerVoices(
+  recordingId: string,
+): Promise<SpeakerVoiceSuggestions> {
+  return await invoke("suggest_speaker_voices", { recordingId });
+}
+
+/**
+ * Remember one cluster's voice under a name, and put that name on the speaker.
+ *
+ * Pass `profileId` to confirm an existing suggestion (the stored voice decides
+ * the name), or `name` to remember a new one from the rename flow.
+ */
+export async function rememberSpeakerVoice(args: {
+  recordingId: string;
+  speakerId: string;
+  profileId?: string;
+  name?: string;
+}): Promise<{ profileId: string; displayName: string }> {
+  return await invoke("remember_speaker_voice", args);
+}
+
+export async function rejectSpeakerVoice(
+  recordingId: string,
+  speakerId: string,
+  profileId: string,
+): Promise<void> {
+  await invoke("reject_speaker_voice", { recordingId, speakerId, profileId });
+}
+
+export async function listRememberedVoices(): Promise<RememberedVoice[]> {
+  return await invoke("list_remembered_voices");
+}
+
+export async function forgetRememberedVoice(profileId: string): Promise<boolean> {
+  return await invoke("forget_remembered_voice", { profileId });
+}
+
+export async function forgetAllRememberedVoices(): Promise<number> {
+  return await invoke("forget_all_remembered_voices");
+}
+
 export async function listDiarizationModels(): Promise<DiarizationModelOption[]> {
   return await invoke("list_diarization_models");
 }
@@ -1130,6 +1488,129 @@ export async function isSileroVadModelDownloaded(): Promise<boolean> {
 
 export async function downloadSileroVadModel(): Promise<void> {
   await invoke("download_silero_vad_model");
+}
+
+/**
+ * Readiness of the bundled zero-setup dictation cleanup model.
+ *
+ * `ready` is "every pinned file carries a trusted integrity receipt", not
+ * "the files are on disk" -- the sidecar refuses to load weights it cannot
+ * vouch for, so anything weaker here would show a green row for a model that
+ * will not run.
+ */
+export interface BundledCleanupModelStatus {
+  provider: string;
+  modelId: string;
+  /** License-required name: "S1-mini" by "Superwhisper". */
+  displayName: string;
+  vendor: string;
+  /** Total bytes the download will fetch. */
+  downloadBytes: number;
+  /** Bytes currently on disk, whether or not they verify. */
+  bytesOnDisk: number;
+  ready: boolean;
+  /** Pinned files that are missing or failed verification. */
+  missingFiles: string[];
+  path: string;
+  /**
+   * Which backend a cleanup would actually run on: "metal", "cpu", or
+   * "unavailable" in a build without the local runtime. Probed without
+   * loading the weights.
+   */
+  backend: string;
+  /**
+   * Whether that backend can finish a long dictation inside the pre-insert
+   * budget. False on CPU, where a 200-word dictation measured 11-13 s against
+   * a 6 s budget — "downloaded" and "usable here" are different questions.
+   */
+  backendMeetsBudget: boolean;
+  /**
+   * Whether there is a backend at all. False only in a build compiled without
+   * the local runtime, where "this build cannot run it" is a different
+   * sentence from "this Mac is slow".
+   */
+  backendPresent: boolean;
+  /** Roughly what the model holds in memory while it is loaded. */
+  residentBytes: number;
+}
+
+export async function getBundledCleanupModelStatus(): Promise<BundledCleanupModelStatus> {
+  return await invoke("get_bundled_cleanup_model_status");
+}
+
+export async function downloadBundledCleanupModel(): Promise<BundledCleanupModelStatus> {
+  return await invoke("download_bundled_cleanup_model");
+}
+
+export async function deleteBundledCleanupModel(): Promise<BundledCleanupModelStatus> {
+  return await invoke("delete_bundled_cleanup_model");
+}
+
+/**
+ * The streaming engine that can draw the dictation live preview.
+ *
+ * These weights are deliberately not an ASR route: nothing can select them for
+ * dictation or meeting transcription, and the text they produce is never
+ * inserted. They only make the preview arrive while you are still speaking
+ * instead of a re-decode behind you.
+ *
+ * `supported` is false in a build with no streaming engine compiled in, which
+ * is a different sentence from "not downloaded" and gets a different UI.
+ */
+export interface LivePreviewEngineStatus {
+  /** Whether this build has a streaming engine at all. */
+  supported: boolean;
+  /** Whether its weights are on disk AND carry a trusted integrity receipt. */
+  ready: boolean;
+  modelId: string | null;
+  displayName: string | null;
+  /** Human-readable engine name, e.g. the runtime plus the model family. */
+  engineName: string | null;
+  license: string | null;
+  upstreamUrl: string | null;
+  downloadBytes: number;
+  bytesOnDisk: number;
+  /** The language codes the pinned weights declare. */
+  languages: string[];
+  /** Audio per streaming chunk, in milliseconds. */
+  chunkMs: number | null;
+  path: string | null;
+}
+
+export async function getLivePreviewEngineStatus(): Promise<LivePreviewEngineStatus> {
+  return await invoke("get_live_preview_engine_status");
+}
+
+export async function downloadLivePreviewEngineModel(): Promise<LivePreviewEngineStatus> {
+  return await invoke("download_live_preview_engine_model");
+}
+
+export async function deleteLivePreviewEngineModel(): Promise<LivePreviewEngineStatus> {
+  return await invoke("delete_live_preview_engine_model");
+}
+
+/**
+ * Whether Apple's on-device model can run here.
+ *
+ * Probed once at sidecar startup and cached, because the answer only changes
+ * when the user flips a System Settings switch or an OS model download
+ * finishes. Pass `refresh` after sending someone to System Settings.
+ */
+export interface AppleLanguageModelAvailability {
+  provider: string;
+  displayName: string;
+  available: boolean;
+  /** Machine-readable reason when unavailable. */
+  reason: string | null;
+  /** One sentence the user can act on when unavailable. */
+  detail: string | null;
+  operatingSystemVersion: string | null;
+}
+
+export async function getAppleLanguageModelAvailability(
+  refresh = false,
+): Promise<AppleLanguageModelAvailability> {
+  return await invoke("get_apple_language_model_availability", { refresh });
 }
 
 export async function getSpeakers(recordingId: string): Promise<Speaker[]> {
@@ -1226,6 +1707,50 @@ export interface ApprovedLocationSummary {
 
 export async function selectExportLocation(): Promise<ApprovedLocationSummary | null> {
   return await invoke("select_export_location");
+}
+
+/** One file the support bundle writes, and what it holds. */
+export interface SupportBundleSection {
+  file: string;
+  description: string;
+}
+
+/**
+ * What a support bundle would contain, before one exists.
+ *
+ * The Settings screen shows this so the reader decides with the file list and
+ * the redaction rules in front of them, rather than after a zip is already on
+ * their Desktop.
+ */
+export interface SupportBundlePreview {
+  schemaVersion: number;
+  sections: SupportBundleSection[];
+  redactionRules: string[];
+  excludedByDesign: string[];
+  auditEntryCount: number;
+  modelArtifactCount: number;
+  maxLogLines: number;
+  logLineCount: number;
+  suggestedFileName: string;
+}
+
+export interface SupportBundleResult {
+  fileName: string;
+  bytes: number;
+  fileCount: number;
+  generatedAt: string;
+}
+
+export async function previewSupportBundle(): Promise<SupportBundlePreview> {
+  return await invoke("preview_support_bundle");
+}
+
+/**
+ * Opens a native save dialog and writes the bundle where the reader chooses.
+ * Resolves to `null` when they cancel.
+ */
+export async function createSupportBundle(): Promise<SupportBundleResult | null> {
+  return await invoke("create_support_bundle");
 }
 
 type CloudProvider = "one_drive" | "google_drive" | "proton_drive" | "i_cloud";
@@ -1388,4 +1913,32 @@ export async function listGeminiModels(): Promise<string[]> {
 
 export async function listDeepSeekModels(): Promise<string[]> {
   return await invoke("list_deepseek_models");
+}
+
+// ── Local tools (CLI / MCP) ─────────────────────────────────────────────────
+
+/** Mirrors `CliToolStatus` in electron/cli-install.ts. */
+export interface CliToolStatus {
+  binaryPath: string;
+  binaryPresent: boolean;
+  linkPath: string;
+  installed: boolean;
+  stale: boolean;
+  occupied: boolean;
+  manualCommand: string;
+}
+
+/** Mirrors `CliInstallResult` in electron/cli-install.ts. */
+export type CliInstallResult =
+  | { status: "installed"; linkPath: string }
+  | { status: "manual"; reason: string; command: string }
+  | { status: "unavailable"; reason: string };
+
+export async function getCliToolStatus(): Promise<CliToolStatus> {
+  return await invoke("get_cli_tool_status");
+}
+
+/** Needs a recent click in the main window; the main process enforces it. */
+export async function installCliTool(): Promise<CliInstallResult> {
+  return await invoke("install_cli_tool");
 }

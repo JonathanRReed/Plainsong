@@ -22,6 +22,16 @@ interface SpeechLaneRowProps {
   onSelect: (route: AsrRouteCatalogEntry) => void;
   onAction: (route: AsrRouteCatalogEntry) => void;
   actionBusy: boolean;
+  /**
+   * Stops a running language install.
+   *
+   * Every other action on this row is quick; the language install is macOS'
+   * own download and can run for minutes, so the busy state needs a way out
+   * that is not quitting the app. Only rendered while that is the action
+   * running.
+   */
+  onCancelLanguageInstall?: () => void;
+  cancelLanguageInstallBusy?: boolean;
   readinessOverride?: LaneReadiness | null;
   /** Whether the pause-behaviour sentence earns its place in this lane. */
   explainPauseBehavior: boolean;
@@ -37,6 +47,8 @@ export function SpeechLaneRow({
   onSelect,
   onAction,
   actionBusy,
+  onCancelLanguageInstall,
+  cancelLanguageInstallBusy = false,
   readinessOverride = null,
   explainPauseBehavior,
 }: SpeechLaneRowProps) {
@@ -71,7 +83,23 @@ export function SpeechLaneRow({
                 disabled={actionBusy}
                 onClick={() => onAction(activeRoute)}
               >
-                {actionBusy ? "Working…" : headerReadiness.actionLabel}
+                {actionBusy
+                  ? headerReadiness.action === "install_language"
+                    ? "Installing language…"
+                    : "Working…"
+                  : headerReadiness.actionLabel}
+              </Button>
+            ) : null}
+            {actionBusy &&
+            headerReadiness.action === "install_language" &&
+            onCancelLanguageInstall ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={cancelLanguageInstallBusy}
+                onClick={onCancelLanguageInstall}
+              >
+                {cancelLanguageInstallBusy ? "Stopping…" : "Cancel"}
               </Button>
             ) : null}
           </div>

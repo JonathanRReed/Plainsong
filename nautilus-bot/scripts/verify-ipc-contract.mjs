@@ -100,6 +100,16 @@ const intentionallyUnreachableSidecarCommands = new Set([
   "approve_backup_location_privileged",
   "approve_cloud_backup_location_privileged",
   "approve_export_location_privileged",
+  // Answered for the Electron main process only: the Settings screen asks
+  // main.ts for `preview_support_bundle` / `create_support_bundle`, and main.ts
+  // is what opens the save dialog and hands the sidecar the chosen path plus
+  // the in-memory log tail. A renderer may not name either.
+  "describe_support_bundle",
+  "write_support_bundle_privileged",
+  // Takes a filesystem path, so only the Electron main process may call it —
+  // and only with a path the user just chose in a native open dialog.
+  "import_audio_file",
+  "record_automation_audit_event",
   "start_recording",
   "stop_recording",
 ]);

@@ -1,4 +1,9 @@
-import type { AsrProviderInfo, AsrProviderType } from "@/types";
+import type {
+  AppleSpeechReadiness,
+  AsrProviderInfo,
+  AsrProviderType,
+} from "@/types";
+import { compareStrings } from "@/lib/format-locale";
 
 export type DictationRoutePreference = "local" | "cloud";
 
@@ -27,7 +32,11 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   openai_cloud: true,
   groq: true,
   cohere_transcribe: true,
+  cohere_local: true,
   qwen3_asr: true,
+  deepgram: true,
+  gemini_transcribe: true,
+  transcribe_cpp: true,
 } satisfies Record<AsrProviderType, true>;
 
 export const ASR_PROVIDER_TYPES = Object.keys(
@@ -51,6 +60,8 @@ const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "distil_whisper",
   "moonshine",
   "qwen3_asr",
+  "cohere_local",
+  "transcribe_cpp",
 ]);
 
 const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
@@ -61,21 +72,85 @@ const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
   "elevenlabs_scribe",
   "cohere_transcribe",
   "qwen3_asr",
+  "deepgram",
+  "gemini_transcribe",
+  "transcribe_cpp",
 ]);
 
+/**
+ * Providers whose transcription response carries speaker labels, so a meeting
+ * transcribed by them does not need Plainsong's own diarizer run over the same
+ * audio afterwards. Mirrors which `AsrProvider` implementations populate
+ * `TranscriptionResult::speaker_turns` in the sidecar.
+ *
+ * None of the four cloud providers that shipped before September 2026
+ * (OpenAI, Groq, ElevenLabs, Cohere) returns speaker labels at all, which is
+ * why this set is not simply "the cloud providers".
+ */
+const PROVIDER_DIARIZATION_SET = new Set<AsrProviderType>([
+  "deepgram",
+  "gemini_transcribe",
+]);
+
+export function providerReturnsSpeakerLabels(providerType: AsrProviderType) {
+  return PROVIDER_DIARIZATION_SET.has(providerType);
+}
+
+// whisper.cpp is deliberately absent: its meeting support is per model (see
+// `WHISPER_MEETING_MODEL_IDS` below), so the provider is neither dictation-only
+// nor meeting-grade as a whole.
+//
+// Apple Speech is listed here as its default, which is what a Mac without
+// SpeechAnalyzer has. On macOS 26+ with the language installed it runs
+// SpeechAnalyzer, which does return per-segment timestamps, and
+// `appleSpeechServesMeetings` below is what tells the two apart. Nothing here
+// can decide it, because it depends on the machine.
 const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
   "macos_apple_speech",
   "windows_sdk_dictation",
   "moonshine",
-  "whisper",
   "whisper_candle",
 ]);
+
+/**
+ * Whether the Apple Speech route on *this* Mac can serve meetings.
+ *
+ * Only its SpeechAnalyzer engine returns the per-segment timestamps a meeting
+ * transcript is assembled from, and only when the route is otherwise ready.
+ * Mirrors `supports_meetings` in rust-sidecar/src/asr/platform/macos_speech.rs,
+ * which is the check the sidecar actually enforces.
+ */
+export function appleSpeechServesMeetings(
+  readiness: AppleSpeechReadiness | null | undefined,
+): boolean {
+  return Boolean(readiness?.ready) && readiness?.engine === "speech_analyzer";
+}
+
+/**
+ * The whisper.cpp ggml models the meeting lane accepts. Mirrors
+ * `WHISPER_MEETING_MODEL_IDS` in rust-sidecar/src/lib.rs: multilingual
+ * `small` and up, never tiny/base, never a `.en` build. They exist in the
+ * meeting lane for the ~100 languages Parakeet v3 and Distil-Whisper cannot
+ * hear, and whisper.cpp returns per-segment timestamps for them.
+ */
+const WHISPER_MEETING_MODEL_IDS = new Set([
+  "small",
+  "medium",
+  "large-v3",
+  "large-v3-turbo",
+]);
+
+export function isWhisperMeetingModel(modelId: string) {
+  return WHISPER_MEETING_MODEL_IDS.has(modelId.trim().toLowerCase());
+}
 
 const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
   "groq",
   "openai_cloud",
   "elevenlabs_scribe",
   "cohere_transcribe",
+  "deepgram",
+  "gemini_transcribe",
 ]);
 
 export function isDownloadableProvider(providerType: AsrProviderType) {
@@ -111,10 +186,14 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
 
   const normalizedModelId = modelId.trim().toLowerCase();
   if (!normalizedModelId) {
-    return true;
+    // whisper.cpp has no meeting-safe default: its provider default is
+    // base.en, which is dictation-only.
+    return providerType !== "whisper";
   }
 
   switch (providerType) {
+    case "whisper":
+      return isWhisperMeetingModel(normalizedModelId);
     case "distil_whisper":
       return normalizedModelId.startsWith("distil");
     case "parakeet":
@@ -125,6 +204,14 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     case "elevenlabs_scribe":
     case "cohere_transcribe":
       return true;
+    case "deepgram":
+      // Both Nova-3 builds return word timestamps and turn-level utterances.
+      return normalizedModelId.startsWith("nova-3");
+    case "gemini_transcribe":
+      // Only the batch model returns word timestamps; the -live model is
+      // websocket-only and cannot diarize (see the sidecar's
+      // sanitize_gemini_asr_model_id).
+      return normalizedModelId === "gemini-3.5-transcribe";
     case "openai_cloud":
       // Only whisper-1 requests verbose_json from the transcriptions
       // endpoint (openai_cloud.rs's uses_verbose_json()), which is what
@@ -134,10 +221,16 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
       // for a meeting -- so they stay dictation-only and the meeting lane
       // always resolves openai_cloud to whisper-1.
       return normalizedModelId === "whisper-1";
+    case "transcribe_cpp":
+      // Same Parakeet TDT 0.6B v3 weights as the shipped meeting route, so
+      // the long-form property is the same one; only the runtime differs.
+      // Experimental, so the catalog sorts it last and never recommends it.
+      return normalizedModelId.startsWith("parakeet-tdt-0.6b-v3");
     case "qwen3_asr":
-      // Qwen3-ASR is an encoder-decoder model capable of long-form transcription.
-      // Mark as experimental — the decoder loop is implemented but not yet
-      // validated with real audio, and transcription is gated off until tested.
+      // Qwen3-ASR is an encoder-decoder model that transcribes a whole
+      // recording in one pass (the meeting lane chunks it). Experimental:
+      // validated on English real audio in Plainsong on 2026-09-01, and the
+      // only local route to Chinese, Japanese and Korean.
       return normalizedModelId.startsWith("qwen3-asr");
     default:
       return false;
@@ -148,8 +241,18 @@ export function isSharedMeetingCompatible(providerType: AsrProviderType, modelId
   return isMeetingEligibleProvider(providerType) && isMeetingEligibleModel(providerType, modelId);
 }
 
-export function providerCapabilityLabel(providerType: AsrProviderType) {
+export function providerCapabilityLabel(
+  providerType: AsrProviderType,
+  appleSpeechMeetingCapable = false,
+) {
   if (isMeetingGradeProvider(providerType)) {
+    return "Meeting-grade";
+  }
+
+  if (
+    providerType === "macos_apple_speech" &&
+    appleSpeechMeetingCapable
+  ) {
     return "Meeting-grade";
   }
 
@@ -174,6 +277,13 @@ export function providerRecommendation(provider: AsrProviderInfo) {
       return "Ready for meeting-grade transcription.";
     }
     return "Best used for meetings once the runtime is ready.";
+  }
+
+  if (
+    provider.providerType === "macos_apple_speech" &&
+    appleSpeechServesMeetings(provider.platformReadiness)
+  ) {
+    return "Ready for dictation and meetings through Apple's SpeechAnalyzer, with nothing to download.";
   }
 
   if (isDictationOnlyProvider(provider.providerType)) {
@@ -472,7 +582,34 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "experimental — the autoregressive decoder loop with KV cache threading is implemented but not yet validated with real audio. The ~1.9 GiB download is gated from active transcription until tested.",
+      "experimental — English is the only language verified in Plainsong, and the int4 decoders run on the CPU at anywhere from a quarter of real time to slower than real time depending on load (11-59 s to transcribe 44 s of speech on an M4 Pro across quiet and shared-CPU runs), so a meeting can take longer to transcribe than it took to hold.",
+  },
+  {
+    providerType: "cohere_local",
+    modelId: "cohere-transcribe-03-2026-q4",
+    languages: {
+      englishOnly: false,
+      count: 14,
+      label: "14 languages, and you have to pick one",
+    },
+    // 2,127,674,554 bytes across the eight pinned files.
+    sizeMib: 2029,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "experimental \u2014 the same weights the Cohere cloud route uses, run offline on the CPU. Measured on a quiet M4 Pro against the shipped Parakeet default: 0.67 s against 0.13 s for a 5.3 s utterance, and 7.5 s against 1.0 s for 44 s of speech. It also cannot detect a language, so it transcribes as English until you choose one, and its segment times are estimated from sentence lengths rather than measured, which is why it is not offered for meetings.",
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: "parakeet-tdt-0.6b-v3-q8_0",
+    languages: PARAKEET_V3_LANGUAGES,
+    // 739,508,576 bytes for the single GGUF = 705.3 MiB. Mirrors
+    // `size_bytes` in rust-sidecar/src/asr/transcribe_cpp.rs.
+    sizeMib: 705,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff:
+      "experimental — the same Parakeet weights the recommended route already runs, re-quantized to GGUF and run through a second inference runtime, so it is a second copy of a model you may already have downloaded.",
   },
 ];
 
@@ -495,10 +632,34 @@ const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
     },
   ],
   [
+    "transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0",
+    {
+      // English only, on the two repo fixtures, in the spike receipt
+      // artifacts/qa/transcribe-cpp-spike-2026-09-02.md. The other 24
+      // languages are an upstream claim this build never exercised.
+      basis: "upstream_listed",
+      verifiedLanguages: ["English"],
+    },
+  ],
+  [
+    "cohere_local:cohere-transcribe-03-2026-q4",
+    {
+      // English only, on the two repo fixtures, in
+      // artifacts/qa/cohere-local-receipt-2026-09-02.md. The other 13
+      // languages are the upstream processor's list, which this build has
+      // never exercised.
+      basis: "upstream_listed",
+      verifiedLanguages: ["English"],
+    },
+  ],
+  [
     "qwen3_asr:qwen3-asr-0.6b",
     {
+      // English: real-audio eval on 2026-09-01 (qwen3_asr_real_audio_eval).
+      // Chinese, Japanese and Korean were only spot-checked with synthetic
+      // TTS clips, which is not a qualification.
       basis: "upstream_listed",
-      verifiedLanguages: [],
+      verifiedLanguages: ["English"],
     },
   ],
 ]);
@@ -606,6 +767,29 @@ const PARAKEET_V3_LANGUAGE_CODES: readonly string[] = [
   "sl", "es", "sv", "ru", "uk",
 ];
 
+/**
+ * The 30 languages the Qwen3-ASR model card lists (its 22 Chinese dialects
+ * all surface as `zh`/`yue`). Mirrors `QWEN3_ASR_LANGUAGES` in
+ * rust-sidecar/src/settings.rs, which is what a saved selection is validated
+ * against.
+ */
+const QWEN3_ASR_LANGUAGE_CODES: readonly string[] = [
+  "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it",
+  "ko", "ru", "th", "vi", "ja", "tr", "hi", "ms", "nl", "sv",
+  "da", "fi", "pl", "cs", "fil", "fa", "el", "hu", "mk", "ro",
+];
+
+/**
+ * The 14 languages `CohereAsrProcessor` accepts. Mirrors
+ * `COHERE_LOCAL_LANGUAGES` in rust-sidecar/src/asr/cohere_local.rs and
+ * `COHERE_LOCAL_LANGUAGES` in rust-sidecar/src/settings.rs. Unlike every other
+ * local route this one cannot detect a language, so the list is also the set
+ * the user must choose from.
+ */
+const COHERE_LOCAL_LANGUAGE_CODES: readonly string[] = [
+  "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
+];
+
 /** Language codes per route, where Plainsong can name the set. */
 const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper:tiny", WHISPER_LANGUAGE_CODES],
@@ -616,6 +800,9 @@ const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper:large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["whisper_candle:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["parakeet:parakeet-tdt-0.6b-v3", PARAKEET_V3_LANGUAGE_CODES],
+  ["transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0", PARAKEET_V3_LANGUAGE_CODES],
+  ["qwen3_asr:qwen3-asr-0.6b", QWEN3_ASR_LANGUAGE_CODES],
+  ["cohere_local:cohere-transcribe-03-2026-q4", COHERE_LOCAL_LANGUAGE_CODES],
 ]);
 
 /**
@@ -639,13 +826,39 @@ const CLOUD_LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["groq:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
 ]);
 
+/**
+ * Routes that are multilingual but whose language list Plainsong has never
+ * confirmed, with a label that says whose claim it is.
+ *
+ * These have no entry in `ASR_MODEL_CAPABILITIES` -- that table is about
+ * downloads (size, pause behaviour), and a hosted route has no download and no
+ * published decoder behaviour to describe. Without something here they fell
+ * through to the generic "the selected model's languages", which tells a user
+ * nothing about a route they are paying per minute for. The labels below state
+ * the upstream claim and mark it as upstream's, which is the same standard
+ * `languageEvidence.basis: "upstream_listed"` holds the downloadable models to.
+ *
+ * They are deliberately not enumerated: Plainsong has not exercised these
+ * language sets, and a fabricated list in the session-language picker would be
+ * a capability claim the app cannot back.
+ */
+const UNENUMERATED_LANGUAGE_LABELS_BY_ROUTE = new Map<string, string>([
+  // Deepgram documents `language=multi` code-switching for Nova-3 without
+  // publishing a fixed set. Nova-3 Medical is the English clinical build.
+  ["deepgram:nova-3", "multilingual code-switching, listed by Deepgram"],
+  ["deepgram:nova-3-medical", "English, listed by Deepgram"],
+  // Google reports 2.6% average word error rate across 85+ languages
+  // (Artificial Analysis, announced 2026-08-26) without publishing the set.
+  ["gemini_transcribe:gemini-3.5-transcribe", "85+ languages, listed by Google"],
+]);
+
 /** The English name of every code the lists above can produce. */
 export const ASR_LANGUAGE_NAMES: Readonly<Record<string, string>> = {
   af: "Afrikaans", am: "Amharic", ar: "Arabic", as: "Assamese", az: "Azerbaijani",
   ba: "Bashkir", be: "Belarusian", bg: "Bulgarian", bn: "Bengali", bo: "Tibetan",
   br: "Breton", bs: "Bosnian", ca: "Catalan", cs: "Czech", cy: "Welsh",
   da: "Danish", de: "German", el: "Greek", en: "English", es: "Spanish",
-  et: "Estonian", eu: "Basque", fa: "Persian", fi: "Finnish", fo: "Faroese",
+  et: "Estonian", eu: "Basque", fa: "Persian", fi: "Finnish", fil: "Filipino", fo: "Faroese",
   fr: "French", gl: "Galician", gu: "Gujarati", ha: "Hausa", haw: "Hawaiian",
   he: "Hebrew", hi: "Hindi", hr: "Croatian", ht: "Haitian Creole", hu: "Hungarian",
   hy: "Armenian", id: "Indonesian", is: "Icelandic", it: "Italian", ja: "Japanese",
@@ -712,6 +925,10 @@ export function resolveAsrLanguageBoundary(
   if (capability) {
     return { kind: "unenumerated", label: capability.languages.label };
   }
+  const upstreamLabel = UNENUMERATED_LANGUAGE_LABELS_BY_ROUTE.get(route);
+  if (upstreamLabel) {
+    return { kind: "unenumerated", label: upstreamLabel };
+  }
   return { kind: "unenumerated", label: "the selected model's languages" };
 }
 
@@ -728,7 +945,7 @@ export function asrLanguageOptions(
   }
   return [...boundary.codes]
     .map((code) => ({ value: code, label: asrLanguageName(code) }))
-    .sort((left, right) => left.label.localeCompare(right.label));
+    .sort((left, right) => compareStrings(left.label, right.label));
 }
 
 /**

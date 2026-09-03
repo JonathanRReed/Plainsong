@@ -42,6 +42,9 @@ pub enum ExportFormat {
     Json,
     Csv,
     Pdf,
+    /// Rendered as Markdown, then written as a Word package by
+    /// `super::docx`. Templates keep one body; only the file changes.
+    Docx,
 }
 
 impl std::fmt::Display for ExportFormat {
@@ -53,7 +56,15 @@ impl std::fmt::Display for ExportFormat {
             ExportFormat::Json => write!(f, "json"),
             ExportFormat::Csv => write!(f, "csv"),
             ExportFormat::Pdf => write!(f, "pdf"),
+            ExportFormat::Docx => write!(f, "docx"),
         }
+    }
+}
+
+impl ExportFormat {
+    /// True when the rendered template text is not what lands in the file.
+    pub fn is_binary(&self) -> bool {
+        matches!(self, ExportFormat::Docx)
     }
 }
 
@@ -191,6 +202,21 @@ impl TemplateManager {
             description: "Web-ready HTML transcript".to_string(),
             format: ExportFormat::Html,
             template: PODCAST_TEMPLATE.to_string(),
+            include_speakers: true,
+            include_timestamps: true,
+            include_confidence: false,
+            custom_fields: HashMap::new(),
+        });
+
+        // Meeting Notes as a Word document: the same body as the Markdown
+        // meeting template, written as .docx for people who have to hand the
+        // recap to someone who works in Word.
+        self.register_template(ExportTemplate {
+            id: "meeting_word".to_string(),
+            name: "Meeting Notes (Word)".to_string(),
+            description: "The meeting recap written as a Word .docx file".to_string(),
+            format: ExportFormat::Docx,
+            template: MEETING_TEMPLATE.to_string(),
             include_speakers: true,
             include_timestamps: true,
             include_confidence: false,

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -91,6 +92,12 @@ const rustBridgePath = path.join(
   "platform",
   "macos_speech.rs",
 );
+const dictationParityPath = path.join(
+  repoRoot,
+  "rust-sidecar",
+  "src",
+  "dictation_parity.rs",
+);
 
 for (const [filePath, label] of [
   [sourcePath, "Swift helper source"],
@@ -102,6 +109,7 @@ for (const [filePath, label] of [
   [signScriptPath, "macOS signing adapter"],
   [sidecarEnvPath, "Electron sidecar environment allowlist"],
   [rustBridgePath, "Rust macOS Speech bridge"],
+  [dictationParityPath, "Rust dictation parity rules"],
 ]) {
   requireFile(filePath, label);
 }
@@ -116,6 +124,7 @@ const builder = fs.readFileSync(builderPath, "utf8");
 const signScript = fs.readFileSync(signScriptPath, "utf8");
 const sidecarEnv = fs.readFileSync(sidecarEnvPath, "utf8");
 const rustBridge = fs.readFileSync(rustBridgePath, "utf8");
+const dictationParity = fs.readFileSync(dictationParityPath, "utf8");
 
 requireMatch(
   buildScript,
@@ -167,6 +176,141 @@ forbidMatch(
   /requiresOnDeviceRecognition\s*=\s*[^t\s]/,
   "helper must not conditionally allow Apple server fallback",
 );
+
+// SpeechAnalyzer (macOS 26+) additions. The helper still has to build and run
+// with a 13.0 deployment target, so every use has to sit behind an
+// `#available` guard, and the analyzer path has to be as strict about staying
+// on-device as the SFSpeechRecognizer path: no download it was not asked for,
+// and a refusal rather than a fallback when the locale's assets are missing.
+requireMatch(
+  source,
+  /if #available\(macOS 26, \*\)/,
+  "SpeechAnalyzer use must be guarded by #available(macOS 26, *)",
+);
+// `#available` is a runtime guard only: the symbols still have to resolve at
+// compile time, so an SDK older than macOS 26 needs the section compiled out
+// entirely or the whole app stops building.
+requireMatch(
+  source,
+  /#if !NO_SPEECH_ANALYZER/,
+  "SpeechAnalyzer sources must be compilable out with -D NO_SPEECH_ANALYZER for older SDKs",
+);
+requireMatch(
+  buildScript,
+  /"--sdk",\s*"macosx",\s*"--show-sdk-version"/,
+  "build.rs must probe the macOS SDK version before compiling the SpeechAnalyzer section",
+);
+requireMatch(
+  buildScript,
+  /"-D",\s*"NO_SPEECH_ANALYZER"/,
+  "build.rs must pass -D NO_SPEECH_ANALYZER when the SDK predates the SpeechAnalyzer API",
+);
+requireMatch(
+  source,
+  /SpeechTranscriber\.supportedLocales/,
+  "helper probe must report the SpeechAnalyzer locale list from the framework",
+);
+requireMatch(
+  source,
+  /AssetInventory\.status\(/,
+  "helper probe must check SpeechAnalyzer asset state through AssetInventory",
+);
+requireMatch(
+  source,
+  /attributeOptions: \[\.audioTimeRange/,
+  "SpeechAnalyzer transcription must request audio time ranges for segment timestamps",
+);
+requireMatch(
+  source,
+  /guard facts\.assetsInstalled else \{[\s\S]{0,400}code: \.assetsNotInstalled/,
+  "SpeechAnalyzer must refuse when the locale's assets are not installed",
+);
+requireMatch(
+  source,
+  /engine: engine \?\? \.sfSpeechRecognizer/,
+  "--live must keep the SFSpeechRecognizer event protocol unless SpeechAnalyzer is named outright",
+);
+// The SpeechAnalyzer branches never return, so an authorization check that
+// only lives inside `recognitionContext` covers SFSpeechRecognizer alone --
+// the helper would transcribe with permission still `not_determined`. Both
+// transcription entry points have to check before choosing an engine.
+requireMatch(
+  source,
+  /private func requireSpeechAuthorization\(\) -> SFSpeechRecognizerAuthorizationStatus/,
+  "the helper must have one shared Speech authorization gate",
+);
+for (const [entryPoint, label] of [
+  ["runFileRecognition", "--transcribe-file"],
+  ["runLiveRecognition", "--live"],
+]) {
+  const start = source.indexOf(`private func ${entryPoint}(`);
+  if (start < 0) fail(`${entryPoint} must exist`);
+  const analyzerBranch = source.indexOf("#if !NO_SPEECH_ANALYZER", start);
+  const authorizationCheck = source.indexOf("requireSpeechAuthorization()", start);
+  if (authorizationCheck < 0 || analyzerBranch < 0 || authorizationCheck > analyzerBranch) {
+    fail(`${label} must check Speech authorization before it can reach SpeechAnalyzer`);
+  }
+}
+// Vocabulary hints (contextual strings). The terms are the user's own
+// dictionary entries, so the contract has two halves: they must reach both
+// engines, and they must never travel as command-line arguments, where every
+// process on the machine can read them out of the argument list.
+requireMatch(
+  source,
+  /--contextual-strings-file/,
+  "the helper must accept vocabulary terms through a file, not inline arguments",
+);
+requireMatch(
+  source,
+  /private func loadContextualStrings\(path: String\?\) -> \[String\][\s\S]{0,400}Data\(contentsOf: url\)/,
+  "the helper must read vocabulary terms from the file it was pointed at",
+);
+requireMatch(
+  source,
+  /context\.contextualStrings\[\.general\] = contextualStrings/,
+  "SpeechAnalyzer must receive the vocabulary terms through AnalysisContext",
+);
+const sfContextualAssignments =
+  source.match(/request\.contextualStrings = contextualStrings/g) ?? [];
+if (sfContextualAssignments.length < 2) {
+  fail(
+    "both SFSpeechRecognizer requests (file and live) must receive the vocabulary terms",
+  );
+}
+// The caps are the whisper prompt's, and they live in Rust. The helper repeats
+// them because it is a separate binary; the two copies must stay equal.
+const rustTermCap = dictationParity.match(
+  /VOCABULARY_HINT_MAX_TERMS:\s*usize\s*=\s*(\d+)/,
+);
+const rustCharCap = dictationParity.match(
+  /VOCABULARY_HINT_MAX_CHARS:\s*usize\s*=\s*(\d+)/,
+);
+if (!rustTermCap || !rustCharCap) {
+  fail("could not read the Rust vocabulary hint caps from dictation_parity.rs");
+}
+const helperTermCap = source.match(/contextualStringsMaxTerms\s*=\s*(\d+)/);
+const helperCharCap = source.match(/contextualStringsMaxCharacters\s*=\s*(\d+)/);
+if (!helperTermCap || !helperCharCap) {
+  fail("the helper must declare its own vocabulary term and character caps");
+}
+if (helperTermCap[1] !== rustTermCap[1] || helperCharCap[1] !== rustCharCap[1]) {
+  fail(
+    `helper vocabulary caps (${helperTermCap[1]} terms / ${helperCharCap[1]} chars) must match the Rust caps (${rustTermCap[1]} / ${rustCharCap[1]})`,
+  );
+}
+// The count the app reports has to be the helper's own answer, not the number
+// of terms the app sent, or the audit log would claim the dictionary reached a
+// recognizer that never saw it.
+requireMatch(
+  rustBridge,
+  /vocabulary_hint_terms_applied:\s*payload\.contextual_strings_applied/,
+  "the Rust bridge must report the applied term count the helper returned",
+);
+requireMatch(
+  rustBridge,
+  /options\.mode\(0o600\)/,
+  "the staged vocabulary file must be created private to the user",
+);
 forbidMatch(
   sidecarEnv,
   /PLAINSONG_MACOS_SPEECH_HELPER_PATH/,
@@ -194,6 +338,8 @@ requireMatch(
 );
 
 for (const code of [
+  "assets_not_installed",
+  "asset_install_failed",
   "authorization_denied",
   "authorization_restricted",
   "authorization_not_determined",
@@ -305,7 +451,96 @@ if (!helperPath && !sourceOnly) {
   );
 }
 
+/**
+ * Compile the helper the way a machine with a pre-macOS-26 SDK would, and
+ * check the binary that comes out.
+ *
+ * This is the only proof that the older-SDK path is real: on this Mac the SDK
+ * is new, so the normal build never exercises it, and the failure it guards
+ * against (`cannot find 'SpeechAnalyzer' in scope`) stops the whole app from
+ * building on someone else's machine. The fallback binary must also be honest
+ * about what it can do -- `speech_analyzer_available: false` -- rather than
+ * claiming a capability whose symbols it does not contain.
+ *
+ * @returns {{ compiled: true, engine: string, speechAnalyzerAvailable: boolean }}
+ */
+function verifyOlderSdkFallbackBuild() {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-speech-helper-"));
+  const fallbackPath = path.join(scratch, "macos-speech-helper-no-speech-analyzer");
+  try {
+    run("/usr/bin/xcrun", [
+      "swiftc",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-D",
+      "NO_SPEECH_ANALYZER",
+      sourcePath,
+      "-framework",
+      "Speech",
+      "-framework",
+      "Foundation",
+      "-framework",
+      "AVFoundation",
+      "-o",
+      fallbackPath,
+    ]);
+    const fallbackProbe = parseLastJsonLine(
+      run(fallbackPath, ["--probe"]).stdout,
+      "older-SDK helper --probe",
+    );
+    if (fallbackProbe.speech_analyzer_available !== false) {
+      fail(
+        `the older-SDK helper must report speech_analyzer_available: false, got ${JSON.stringify(
+          fallbackProbe.speech_analyzer_available,
+        )}`,
+      );
+    }
+    if (fallbackProbe.engine !== "sf_speech_recognizer") {
+      fail(`the older-SDK helper must resolve SFSpeechRecognizer, got ${fallbackProbe.engine}`);
+    }
+    const analyzerRequest = run(fallbackPath, ["--live", "--sample-rate", "16000", "--engine", "speech_analyzer"], {
+      allowFailure: true,
+    });
+    if (analyzerRequest.status === 0) {
+      fail("the older-SDK helper must refuse an explicit SpeechAnalyzer request");
+    }
+    const analyzerPayload = parseLastJsonLine(
+      analyzerRequest.stdout,
+      "older-SDK helper SpeechAnalyzer request",
+    );
+    // Which refusal comes first depends on this machine's Speech
+    // authorization -- the helper checks that before it chooses an engine --
+    // so any of the typed refusals is correct here. What must never happen is
+    // the request proceeding; `speech_analyzer_available: false` above is what
+    // proves the symbols are gone.
+    const acceptableRefusals = new Set([
+      "on_device_unavailable",
+      "authorization_not_determined",
+      "authorization_denied",
+      "authorization_restricted",
+    ]);
+    if (
+      analyzerPayload.type !== "error" ||
+      !acceptableRefusals.has(analyzerPayload.code)
+    ) {
+      fail(
+        `the older-SDK helper must refuse SpeechAnalyzer with a typed error: ${JSON.stringify(
+          analyzerPayload,
+        )}`,
+      );
+    }
+    return {
+      compiled: true,
+      engine: fallbackProbe.engine,
+      speechAnalyzerAvailable: fallbackProbe.speech_analyzer_available,
+    };
+  } finally {
+    fs.rmSync(scratch, { force: true, recursive: true });
+  }
+}
+
 let probe = null;
+let olderSdkFallback = null;
 if (!sourceOnly) {
   if (process.platform !== "darwin") {
     fail("Mach-O helper auditing requires macOS; pass --source-only on other platforms");
@@ -353,9 +588,27 @@ if (!sourceOnly) {
     typeof probe.locale_supported !== "boolean" ||
     typeof probe.on_device_available !== "boolean" ||
     typeof probe.speech_analyzer_available !== "boolean" ||
+    typeof probe.speech_analyzer_locale_supported !== "boolean" ||
+    typeof probe.speech_analyzer_assets_installed !== "boolean" ||
+    typeof probe.speech_analyzer_asset_status !== "string" ||
+    !Array.isArray(probe.speech_analyzer_locales) ||
+    !Array.isArray(probe.speech_analyzer_installed_locales) ||
+    typeof probe.engine !== "string" ||
     typeof probe.operating_system_version !== "string"
   ) {
     fail(`helper --probe does not match the Rust contract: ${JSON.stringify(probe)}`);
+  }
+  if (!["speech_analyzer", "sf_speech_recognizer"].includes(probe.engine)) {
+    fail(`helper --probe reported an unknown engine: ${probe.engine}`);
+  }
+  if (probe.engine === "speech_analyzer" && !probe.speech_analyzer_available) {
+    fail("helper --probe resolved SpeechAnalyzer while reporting it unavailable");
+  }
+  if (
+    probe.speech_analyzer_locales.some((locale) => typeof locale !== "string") ||
+    probe.speech_analyzer_installed_locales.some((locale) => typeof locale !== "string")
+  ) {
+    fail("helper --probe locale lists must contain strings only");
   }
 
   const malformed = run(helperPath, ["--not-a-command"], { allowFailure: true });
@@ -364,6 +617,71 @@ if (!sourceOnly) {
   if (malformedPayload.type !== "error" || malformedPayload.code !== "malformed_request") {
     fail(`malformed request did not return its typed error: ${JSON.stringify(malformedPayload)}`);
   }
+
+  const badEngine = run(
+    helperPath,
+    ["--transcribe-file", "/nonexistent.wav", "--engine", "not-an-engine"],
+    { allowFailure: true },
+  );
+  if (badEngine.status === 0) fail("an unknown --engine must exit non-zero");
+  const badEnginePayload = parseLastJsonLine(badEngine.stdout, "unknown --engine request");
+  if (badEnginePayload.type !== "error" || badEnginePayload.code !== "malformed_request") {
+    fail(`unknown --engine did not return its typed error: ${JSON.stringify(badEnginePayload)}`);
+  }
+
+  // Argument parsing runs before the authorization gate, so these are the
+  // only vocabulary-hint checks that give the same answer on a machine whose
+  // Speech Recognition permission is still undecided.
+  for (const [label, commandArgs] of [
+    [
+      "--transcribe-file --contextual-strings-file with no path",
+      ["--transcribe-file", "/nonexistent.wav", "--contextual-strings-file"],
+    ],
+    [
+      "--transcribe-file --contextual-strings-file twice",
+      [
+        "--transcribe-file",
+        "/nonexistent.wav",
+        "--contextual-strings-file",
+        "/a.json",
+        "--contextual-strings-file",
+        "/b.json",
+      ],
+    ],
+    [
+      "--live --contextual-strings-file with no path",
+      [
+        "--live",
+        "--sample-rate",
+        "16000",
+        "--engine",
+        "speech_analyzer",
+        "--contextual-strings-file",
+      ],
+    ],
+  ]) {
+    const result = run(helperPath, commandArgs, { allowFailure: true });
+    if (result.status === 0) fail(`${label} must exit non-zero`);
+    const payload = parseLastJsonLine(result.stdout, label);
+    if (payload.type !== "error" || payload.code !== "malformed_request") {
+      fail(`${label} did not return its typed error: ${JSON.stringify(payload)}`);
+    }
+  }
+
+  // Live mode does not auto-select: the two engines emit different event
+  // shapes, so a caller has to name one.
+  const liveAuto = run(
+    helperPath,
+    ["--live", "--sample-rate", "16000", "--engine", "auto"],
+    { allowFailure: true },
+  );
+  if (liveAuto.status === 0) fail("--live --engine auto must exit non-zero");
+  const liveAutoPayload = parseLastJsonLine(liveAuto.stdout, "--live --engine auto");
+  if (liveAutoPayload.type !== "error" || liveAutoPayload.code !== "malformed_request") {
+    fail(`--live --engine auto did not return its typed error: ${JSON.stringify(liveAutoPayload)}`);
+  }
+
+  olderSdkFallback = verifyOlderSdkFallbackBuild();
 
   const signature = run("/usr/bin/codesign", ["-d", "--entitlements", ":-", helperPath], {
     allowFailure: true,
@@ -403,5 +721,7 @@ console.log(
     architecture: "arm64",
     strictOnDevice: true,
     probe,
+    engine: probe ? probe.engine : null,
+    olderSdkFallback,
   }),
 );

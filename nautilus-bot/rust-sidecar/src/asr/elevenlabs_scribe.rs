@@ -2,7 +2,7 @@ use super::{
     cloud_asr_status_error,
     openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
     read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus, ModelInfo,
-    TranscriptSegment, TranscriptionResult,
+    TranscriptSegment, TranscriptionOptions, TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
@@ -84,7 +84,11 @@ impl ElevenLabsScribeProvider {
         }
     }
 
-    async fn transcribe_impl(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
+    async fn transcribe_impl(
+        &self,
+        audio_data: &[u8],
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context("ELEVENLABS_API_KEY environment variable not set")?;
 
         let start = std::time::Instant::now();
@@ -92,9 +96,22 @@ impl ElevenLabsScribeProvider {
         let part = reqwest::multipart::Part::bytes(audio_data.to_vec())
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .part("audio", part)
             .text("model_id", self.model_id.clone());
+
+        // Personal-dictionary vocabulary bias. Scribe's documented field is
+        // `keyterms` (one multipart field per term). ElevenLabs bills a 20%
+        // surcharge on a request that carries keyterms, which is why this is
+        // only ever sent when the user's own dictionary has applicable
+        // entries — see CHANGELOG and docs/evals/dictation-dictionary-fixture-report.md.
+        let mut vocabulary_hint_terms_applied = 0usize;
+        if let Some(hint) = options.vocabulary_hint.as_ref() {
+            for term in scribe_keyterms(hint.terms()) {
+                vocabulary_hint_terms_applied += 1;
+                form = form.text("keyterms", term);
+            }
+        }
 
         let response = self
             .client
@@ -145,6 +162,8 @@ impl ElevenLabsScribeProvider {
             actual_engine: Some("provider_default".to_string()),
             optimization_applied: false,
             fallback_reason: None,
+            vocabulary_hint_terms_applied,
+            speaker_turns: Vec::new(),
         })
     }
 
@@ -188,11 +207,21 @@ impl AsrProvider for ElevenLabsScribeProvider {
         let audio_data = tokio::fs::read(audio_path)
             .await
             .context("Failed to read audio file for ElevenLabs Scribe")?;
-        self.transcribe_impl(&audio_data).await
+        self.transcribe_impl(&audio_data, &TranscriptionOptions::default())
+            .await
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        self.transcribe_impl(audio_data).await
+        self.transcribe_impl(audio_data, &TranscriptionOptions::default())
+            .await
+    }
+
+    async fn transcribe_bytes_with_options(
+        &self,
+        audio_data: &[u8],
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        self.transcribe_impl(audio_data, options).await
     }
 
     fn download_status(&self) -> DownloadStatus {
@@ -254,5 +283,63 @@ mod tests {
             sanitize_elevenlabs_asr_model_id("scribe_v1_experimental"),
             "scribe_v2_experimental"
         );
+    }
+}
+
+/// Scribe's documented `keyterms` limits: at most 50 characters and 5 words
+/// per term, none of `< > { } [ ] \`, and at most 1,000 terms per request.
+/// Terms that break a limit are dropped rather than failing the whole
+/// transcription — the hint is an accuracy aid, never a precondition.
+fn scribe_keyterms(terms: &[String]) -> Vec<String> {
+    const MAX_TERMS: usize = 1000;
+    const MAX_CHARS: usize = 50;
+    const MAX_WORDS: usize = 5;
+    terms
+        .iter()
+        .map(|term| term.trim())
+        .filter(|term| !term.is_empty())
+        .filter(|term| term.chars().count() <= MAX_CHARS)
+        .filter(|term| term.split_whitespace().count() <= MAX_WORDS)
+        .filter(|term| {
+            !term
+                .chars()
+                .any(|ch| matches!(ch, '<' | '>' | '{' | '}' | '[' | ']' | '\\'))
+        })
+        .take(MAX_TERMS)
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod keyterm_tests {
+    use super::scribe_keyterms;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn keyterms_that_break_scribes_documented_limits_are_dropped_not_fatal() {
+        let terms = strings(&[
+            "Plainsong",
+            "  Kubernetes ",
+            "",
+            "one two three four five six",
+            "angle<bracket>",
+            "brace{s}",
+            "square[s]",
+            "back\\slash",
+            "this term is far too long to be a keyterm for scribe at all, over fifty",
+        ]);
+        assert_eq!(
+            scribe_keyterms(&terms),
+            strings(&["Plainsong", "Kubernetes"])
+        );
+    }
+
+    #[test]
+    fn five_word_phrases_and_fifty_char_terms_are_still_allowed() {
+        let terms = strings(&["one two three four five", &"x".repeat(50)]);
+        assert_eq!(scribe_keyterms(&terms).len(), 2);
     }
 }

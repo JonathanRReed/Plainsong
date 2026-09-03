@@ -15,8 +15,19 @@ manifests/
 dist-ssr/
 *.local
 
-# Generated QA/benchmark evidence (never commit)
-artifacts/
+# Generated QA/benchmark evidence. Raw captures (audio, logs, bundles) stay
+# out, but the Markdown/JSON receipts under artifacts/qa/ are tracked by
+# default so evidence cited from docs, LAUNCH.md and the CHANGELOG is not
+# silently dropped. The two dictation-latency JSON receipts stay ignored on
+# purpose: they are regenerated per machine by `bun run benchmark:latency`
+# and attached to release evidence by hand (see 05dfc4a6).
+artifacts/**
+!artifacts/qa/
+!artifacts/qa/**/
+!artifacts/qa/**/*.md
+!artifacts/qa/**/*.json
+artifacts/qa/dictation-latency.json
+artifacts/qa/dictation-latency-e2e.json
 
 # Python bytecode
 __pycache__/

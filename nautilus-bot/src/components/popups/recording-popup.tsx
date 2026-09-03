@@ -7,6 +7,8 @@ import {
   PanelsTopLeft,
   Minimize2,
   AppWindow,
+  Pause,
+  Play,
   Square,
   Monitor,
   CheckCircle2,
@@ -16,6 +18,8 @@ import {
 import {
   getRecording,
   getWaveformData,
+  pauseRecording,
+  resumeRecording,
   stopRecording,
   updateRecordingNotes,
 } from "@/lib/backend/recordings";
@@ -42,11 +46,24 @@ import { AudioWaveform } from "@/components/ui/audio-waveform";
 import {
   INITIAL_MEETING_LIFECYCLE_STATE,
   meetingCaptureRestarted,
+  meetingElapsedSeconds,
   reduceMeetingLifecycleState,
   type MeetingLifecycleEvent,
   type MeetingLifecyclePhase,
   type MeetingLifecycleState,
 } from "@/features/meetings/runtime";
+
+type PauseView = Pick<MeetingLifecycleState, "paused" | "closedPausedMs" | "pauseStartedAtMs">;
+
+const NOT_PAUSED: PauseView = { paused: false, closedPausedMs: 0, pauseStartedAtMs: null };
+
+function pauseViewOf(state: MeetingLifecycleState): PauseView {
+  return {
+    paused: state.paused,
+    closedPausedMs: state.closedPausedMs,
+    pauseStartedAtMs: state.pauseStartedAtMs,
+  };
+}
 
 type DisplayMode = "full" | "compact" | "minimal";
 
@@ -65,6 +82,8 @@ export function RecordingPopup() {
     useState<AudioSourceWarningDescriptor | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [stopping, setStopping] = useState(false);
+  const [pauseView, setPauseView] = useState<PauseView>(NOT_PAUSED);
+  const [togglingPause, setTogglingPause] = useState(false);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
   const [levels, setLevels] = useState<number[]>([]);
   const [message, setMessage] = useState<string | null>(null);
@@ -171,6 +190,7 @@ export function RecordingPopup() {
           setConsentNoticeMessage(null);
           setPhase(next.phase);
           setMessage(next.message);
+          setPauseView(pauseViewOf(next));
         }
       } catch (error) {
         console.error("Failed to load initial recording popup state:", error);
@@ -194,6 +214,7 @@ export function RecordingPopup() {
             setConsentNoticeMessage(null);
             setPhase(next.phase);
             setMessage(next.message);
+            setPauseView(pauseViewOf(next));
             // Only on an actual transition into capture. The sidecar re-emits
             // `recording` mid-meeting to carry a warning (dead writer, filling
             // disk); resetting on those would erase the visible source warning
@@ -218,6 +239,7 @@ export function RecordingPopup() {
           setConsentNoticeMessage(null);
           setPhase("recording");
           setMessage(null);
+          setPauseView(NOT_PAUSED);
           setTranscriptionPreview("");
           setTranscriptCommitted(false);
           setPreviewDelay(describeTranscriptDelay(null));
@@ -291,14 +313,21 @@ export function RecordingPopup() {
       return;
     }
 
+    // Excludes every pause, and stands still while paused: the reader is
+    // looking at how much meeting has been kept, not how long the window
+    // has been open.
     const tick = () => {
-      const start = startedAtMs ?? Date.now();
-      setElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+      setElapsed(
+        meetingElapsedSeconds(
+          { startedAtMs: startedAtMs ?? Date.now(), ...pauseView },
+          Date.now(),
+        ),
+      );
     };
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
-  }, [phase, recordingId, startedAtMs]);
+  }, [pauseView, phase, recordingId, startedAtMs]);
 
   useEffect(() => {
     if (!recordingId || phase !== "recording") {
@@ -526,6 +555,34 @@ export function RecordingPopup() {
     }
   };
 
+  const handleTogglePause = async () => {
+    if (!recordingId || stopping || togglingPause) return;
+    setTogglingPause(true);
+    try {
+      // The sidecar's lifecycle event follows and is what every window
+      // renders from; applying the answer here only closes the gap.
+      const snapshot = pauseView.paused
+        ? await resumeRecording(recordingId)
+        : await pauseRecording(recordingId);
+      setPauseView({
+        paused: snapshot.paused,
+        closedPausedMs: snapshot.closedPausedMs,
+        pauseStartedAtMs: snapshot.pauseStartedAtMs,
+      });
+    } catch (error) {
+      console.error("Failed to pause or resume recording from popup:", error);
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : pauseView.paused
+            ? "Plainsong could not resume this meeting."
+            : "Plainsong could not pause this meeting.",
+      );
+    } finally {
+      setTogglingPause(false);
+    }
+  };
+
   const handleStop = async () => {
     if (!recordingId || stopping) return;
     setStopping(true);
@@ -603,8 +660,12 @@ export function RecordingPopup() {
             size="sm"
             barCount={9}
           />
-          <span className="font-mono text-xs font-medium uppercase tracking-[0.18em]">
-            {captureIsLive ? captureModeLabel : statusLabel}
+          <span
+            className={`font-mono text-xs font-medium uppercase tracking-[0.18em]${
+              captureIsLive && pauseView.paused ? " text-rust" : ""
+            }`}
+          >
+            {captureIsLive ? (pauseView.paused ? "Paused" : captureModeLabel) : statusLabel}
           </span>
           <span className="time-spec font-mono text-sm text-muted-foreground">
             {captureIsLive ? elapsedText : "…"}
@@ -618,6 +679,22 @@ export function RecordingPopup() {
           >
             <AppWindow className="h-3.5 w-3.5" />
           </button>
+          {captureIsLive && (
+            <button
+              type="button"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-border/80 bg-card text-foreground hover:bg-muted disabled:opacity-50"
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={() => void handleTogglePause()}
+              disabled={stopping || togglingPause}
+              aria-label={pauseView.paused ? "Resume recording" : "Pause recording"}
+            >
+              {pauseView.paused ? (
+                <Play className="h-3.5 w-3.5 fill-current" />
+              ) : (
+                <Pause className="h-3.5 w-3.5 fill-current" />
+              )}
+            </button>
+          )}
           {captureIsLive && (
             <button
               type="button"
@@ -698,6 +775,11 @@ export function RecordingPopup() {
             <span className="inline-flex items-center gap-2 rounded-full border border-rust/30 bg-rust/10 px-2.5 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-rust">
               <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
               {statusLabel}
+            </span>
+          ) : captureIsLive && pauseView.paused ? (
+            <span className="inline-flex items-center gap-2 rounded-full border border-rust/30 bg-rust/10 px-2.5 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-rust">
+              <span className="neume neume-hollow" aria-hidden="true" />
+              Paused
             </span>
           ) : (
             <span className="gilt-halo inline-flex items-center gap-2 rounded-full border border-gold/40 bg-gold/10 px-2.5 py-1 font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-gold-text">
@@ -810,12 +892,31 @@ export function RecordingPopup() {
           <div className="flex items-center gap-3">
             <div className="rounded-2xl border border-border/80 bg-muted/40 px-3 py-2 text-right shadow-lg shadow-foreground/10">
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                {captureIsLive ? "Elapsed" : "Status"}
+                {captureIsLive ? (pauseView.paused ? "Paused" : "Elapsed") : "Status"}
               </p>
-              <p className="time-spec font-mono text-base font-medium text-foreground">
+              <p
+                className={`time-spec font-mono text-base font-medium ${
+                  captureIsLive && pauseView.paused ? "text-muted-foreground" : "text-foreground"
+                }`}
+              >
                 {captureIsLive ? elapsedText : statusLabel}
               </p>
             </div>
+            {captureIsLive && (
+              <button
+                type="button"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-border/80 bg-card text-foreground hover:bg-muted hover:scale-105 transition-all disabled:opacity-50 disabled:hover:scale-100"
+                onClick={() => void handleTogglePause()}
+                disabled={stopping || togglingPause}
+                aria-label={pauseView.paused ? "Resume recording" : "Pause recording"}
+              >
+                {pauseView.paused ? (
+                  <Play className="h-4.5 w-4.5 fill-current" />
+                ) : (
+                  <Pause className="h-4.5 w-4.5 fill-current" />
+                )}
+              </button>
+            )}
             {captureIsLive && (
               <button
                 type="button"

@@ -32,15 +32,23 @@ import {
   type DictationCommandPreset,
   type DictationReprocessResult,
   type DictationHistoryDetails,
+  type DictationHistorySearchHit,
+  type DictationReprocessOutcome,
   type DictationInsights,
   getDictationHistoryDetails,
   getDictationInsights,
   captureSelectedTextForPlayback,
+  reprocessDictation,
   reprocessDictationText,
+  searchDictationHistory,
 } from "@/lib/backend/dictation";
 import { deleteRecording, getTranscript } from "@/lib/backend/recordings";
 import { downloadAsrModels, getAsrProviders } from "@/lib/backend/asr";
 import { getSettings, saveSettings } from "@/lib/backend/settings";
+import {
+  getLivePreviewEngineStatus,
+  type LivePreviewEngineStatus,
+} from "@/lib/backend/ai";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import {
   defaultDictationShortcut,
@@ -61,10 +69,28 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { StatusBanner } from "@/components/ui/status-banner";
 import { formatAppliedDictationCommandLabel } from "@/lib/dictation-command-labels";
 import {
+  probeDictationAiLane,
+  resolveTranslateToEnglishAvailability,
+} from "@/lib/dictation-translation";
+import {
   INSERTION_MODE_LABELS,
   formatInsertionModeLabel,
   normalizeInsertionMode,
+  splitHistorySnippet,
 } from "@/lib/dictation-history-labels";
+import {
+  CUSTOM_MODE_NUMBERS_CHOICE_LABELS,
+  DICTATION_NUMBER_MODE_IDS,
+  DICTATION_NUMBERS_SECTION_DESCRIPTION,
+  DICTATION_NUMBERS_SECTION_HEADING,
+  customModeNumbersChoice,
+  customModeNumbersValue,
+  numbersAsDigitsModeHint,
+  resolveCustomModeNumbersAsDigits,
+  resolveNumbersAsDigits,
+  type CustomModeNumbersChoice,
+  type DictationNumbersAsDigitsMap,
+} from "@/lib/dictation-numbers";
 import {
   CONTEXT_SOURCE_LABELS,
   DICTATION_MODE_DEFINITIONS,
@@ -88,13 +114,18 @@ import {
   requestMainView,
   requestReadinessDestination,
 } from "@/lib/navigation";
-import { sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
+import {
+  describeCloudDictationVocabularyNote,
+  describeDictationDeliveryRefusal,
+  sanitizeUserFacingDictationMessage,
+} from "@/lib/dictation-ui-message";
 import { invoke, listen } from "@/lib/electron";
 import { speakTextAloud, stopSpeakingText } from "@/lib/text-to-speech";
 import { useToast } from "@/components/toast";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -119,6 +150,7 @@ import {
   BookOpen,
   NotebookPen,
   Replace,
+  Search,
   SlidersHorizontal,
   Trash2,
 } from "lucide-react";
@@ -160,6 +192,7 @@ import {
   type DictationModePreset,
   type DictationPhase,
 } from "@/features/dictation/runtime";
+import { compareStrings, formatDateTime } from "@/lib/format-locale";
 
 function getSafeLocalStorage(): Pick<Storage, "getItem" | "setItem"> | null {
   if (typeof window === "undefined") {
@@ -265,7 +298,7 @@ function CorrectionSuggestionRow({
                 } ${group.appTarget}`
               : "Seen anywhere"}
             {" · "}
-            {new Date(group.updatedAt).toLocaleString()}
+            {formatDateTime(group.updatedAt)}
             {group.suggestionIds.length > 1
               ? ` · ${group.suggestionIds.length} similar edits`
               : ""}
@@ -316,6 +349,13 @@ type DictationCustomModeDraft = {
   activationDomainMatcher: string;
   languageOverride: string;
   livePreviewEnabled: boolean;
+  numbersAsDigits: CustomModeNumbersChoice;
+  /**
+   * Deliver English however the words were spoken. Mirrors
+   * `translateToEnglish` on the saved profile; whether it can be switched on
+   * depends on the model (see `resolveTranslateToEnglishAvailability`).
+   */
+  translateToEnglish: boolean;
 };
 
 type DictationRouteReadiness = {
@@ -672,6 +712,8 @@ function createCustomModeDraft(
     activationDomainMatcher: "",
     languageOverride: "",
     livePreviewEnabled: true,
+    numbersAsDigits: "inherit",
+    translateToEnglish: false,
     ...overrides,
   };
 }
@@ -880,6 +922,32 @@ export function DictationView() {
   const [dictationKeepWarm, setDictationKeepWarm] = useState<"off" | "on">(
     "on",
   );
+  const [dictationLivePreviewEngine, setDictationLivePreviewEngine] = useState<
+    "auto" | "redecode" | "streaming"
+  >("auto");
+  // Whether this build has a streaming preview engine, and whether its weights
+  // are installed. Null until the sidecar answers, and left null if it cannot:
+  // the engine control stays hidden rather than offering a choice between one
+  // engine that exists and one that might not.
+  const [livePreviewEngineStatus, setLivePreviewEngineStatus] =
+    useState<LivePreviewEngineStatus | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    void getLivePreviewEngineStatus()
+      .then((status) => {
+        if (!disposed) {
+          setLivePreviewEngineStatus(status);
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          setLivePreviewEngineStatus(null);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
   const [dictationLivePreviewEnabled, setDictationLivePreviewEnabled] =
     useState(true);
   const [nextCaptureRoutePreference, setNextCaptureRoutePreference] =
@@ -919,6 +987,8 @@ export function DictationView() {
     dictationAppCategoryOverrides,
     setDictationAppCategoryOverrides,
   ] = useState<DictationAppCategoryOverride[]>([]);
+  const [dictationNumbersAsDigits, setDictationNumbersAsDigits] =
+    useState<DictationNumbersAsDigitsMap>({});
   const [newCategoryOverrideAppMatcher, setNewCategoryOverrideAppMatcher] =
     useState("");
   const [newCategoryOverrideCategory, setNewCategoryOverrideCategory] =
@@ -967,6 +1037,7 @@ export function DictationView() {
   >("never");
   const [dictationRetentionCustomHours, setDictationRetentionCustomHours] =
     useState(24);
+  const [dictationKeepAudio, setDictationKeepAudio] = useState(false);
   const [hotkeyPressed, setHotkeyPressed] = useState(false);
   const [activeConfigTab, setActiveConfigTab] =
     useState<DictationConfigTab>("profiles");
@@ -1010,6 +1081,15 @@ export function DictationView() {
     useState<DictationReprocessResult | null>(null);
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
+  // "Process again": the kept audio through the recognizer and a chosen mode,
+  // saved as a new history entry. Distinct from the text-only restyle above.
+  const [processAgainModeId, setProcessAgainModeId] = useState<string>("voice");
+  const [processAgainOutcome, setProcessAgainOutcome] =
+    useState<DictationReprocessOutcome | null>(null);
+  const [isProcessingAgain, setIsProcessingAgain] = useState(false);
+  const [processAgainError, setProcessAgainError] = useState<string | null>(
+    null,
+  );
   const [currentDictationProvider, setCurrentDictationProvider] = useState<
     string | null
   >(null);
@@ -1020,6 +1100,13 @@ export function DictationView() {
     string | null
   >(null);
   const [useSharedAsrSelection, setUseSharedAsrSelection] = useState(true);
+  // Whether cloud AI is allowed at all, and whether the dictation AI lane can
+  // actually answer right now (`null` until the probe returns). Only the
+  // profile's translate-to-English switch reads them.
+  const [remoteProcessingEnabled, setRemoteProcessingEnabled] = useState(false);
+  const [dictationAiLaneReady, setDictationAiLaneReady] = useState<
+    boolean | null
+  >(null);
   const [dictationRouteReadiness, setDictationRouteReadiness] =
     useState<DictationRouteReadiness | null>(null);
   const [routeDownloadBusy, setRouteDownloadBusy] = useState(false);
@@ -1250,6 +1337,34 @@ export function DictationView() {
     () => asrLanguageOptions(dictationLanguageBoundary),
     [dictationLanguageBoundary],
   );
+  // Translate-to-English for a saved profile (roadmap item B7a). Multilingual
+  // whisper.cpp translates inside its own decode; every other recognizer needs
+  // the dictation AI lane, so the switch is only offered when that lane can
+  // answer. Re-probed whenever the lane's provider or the remote-processing
+  // switch changes.
+  useEffect(() => {
+    let mounted = true;
+    void probeDictationAiLane({
+      dictationAi: { provider: currentAiProvider ?? "", modelId: null },
+      remoteProcessingEnabled,
+    }).then((ready) => {
+      if (mounted) {
+        setDictationAiLaneReady(ready);
+      }
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [currentAiProvider, remoteProcessingEnabled]);
+  const profileTranslateAvailability = useMemo(
+    () =>
+      resolveTranslateToEnglishAvailability({
+        provider: currentDictationProvider,
+        modelId: currentDictationModelId,
+        aiLaneReady: dictationAiLaneReady,
+      }),
+    [currentDictationModelId, currentDictationProvider, dictationAiLaneReady],
+  );
   const dictationLanguageCodes = useMemo(
     () =>
       dictationLanguageBoundary.kind === "enumerated"
@@ -1445,6 +1560,13 @@ export function DictationView() {
     setIsLoadingTranscript(true);
     setReprocessedResult(null);
     setReprocessError(null);
+    setProcessAgainOutcome(null);
+    setProcessAgainError(null);
+    setProcessAgainModeId(
+      dictationModePreset === "custom"
+        ? (selectedCustomMode?.id ?? DEFAULT_BASE_MODE)
+        : dictationModePreset,
+    );
     setReprocessModePreset(
       dictationModePreset === "custom"
         ? (selectedCustomMode?.baseModePreset ?? DEFAULT_BASE_MODE)
@@ -1484,6 +1606,7 @@ export function DictationView() {
     dictationModePreset,
     isDialogOpen,
     selectedCustomMode?.baseModePreset,
+    selectedCustomMode?.id,
     selectedRecording,
   ]);
 
@@ -1497,6 +1620,71 @@ export function DictationView() {
         ),
     [recordings],
   );
+
+  // History search: the query is debounced so typing does not send a request
+  // per keystroke, and results are keyed to the query that produced them so a
+  // slow answer to an old query can never overwrite a newer one.
+  const [historySearchQuery, setHistorySearchQuery] = useState("");
+  const [historySearchResults, setHistorySearchResults] = useState<
+    DictationHistorySearchHit[] | null
+  >(null);
+  const [historySearchPending, setHistorySearchPending] = useState(false);
+  const [historySearchError, setHistorySearchError] = useState<string | null>(
+    null,
+  );
+  const historyResultRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const trimmedHistorySearchQuery = historySearchQuery.trim();
+  useEffect(() => {
+    if (!trimmedHistorySearchQuery) {
+      setHistorySearchResults(null);
+      setHistorySearchPending(false);
+      setHistorySearchError(null);
+      return;
+    }
+    let cancelled = false;
+    setHistorySearchPending(true);
+    const timer = window.setTimeout(() => {
+      searchDictationHistory(trimmedHistorySearchQuery, { limit: 25 })
+        .then((hits) => {
+          if (cancelled) return;
+          setHistorySearchResults(hits);
+          setHistorySearchError(null);
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setHistorySearchResults([]);
+          setHistorySearchError(
+            error instanceof Error ? error.message : String(error),
+          );
+        })
+        .finally(() => {
+          if (!cancelled) setHistorySearchPending(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // `recordings` is a dependency on purpose: a new or deleted dictation
+    // re-runs the same query so the list never shows a stale hit.
+  }, [trimmedHistorySearchQuery, recordings]);
+  const openHistoryEntryById = (recordingId: string) => {
+    const recording = recordings.find((entry) => entry.id === recordingId);
+    if (!recording) return;
+    setSelectedRecording(recording);
+    setIsDialogOpen(true);
+  };
+  // Arrow keys wrap around the rendered hits. The ref array is trimmed to the
+  // current result count first, so a shorter result set cannot send focus to a
+  // button that no longer exists.
+  const focusHistoryResult = (index: number) => {
+    const count = historySearchResults?.length ?? 0;
+    historyResultRefs.current.length = count;
+    if (count === 0) return;
+    const clamped = ((index % count) + count) % count;
+    historyResultRefs.current[clamped]?.focus();
+  };
+
   const lastDictationStatus = useMemo<LastDictationSummary | null>(() => {
     const hasTelemetry =
       Boolean(lastProvider) ||
@@ -1801,6 +1989,9 @@ export function DictationView() {
         // Dictation cleanup runs on the dictation lane, never the meetings one.
         setCurrentAiProvider(settings.privacy.dictationAi?.provider ?? null);
         setCurrentAiModelId(settings.privacy.dictationAi?.modelId ?? null);
+        setRemoteProcessingEnabled(
+          settings.privacy.remoteProcessingEnabled ?? false,
+        );
         setDefaultProjectId(
           settings.transcription.dictationProjectId || "inbox",
         );
@@ -1817,6 +2008,9 @@ export function DictationView() {
         );
         setDictationLivePreviewEnabled(
           settings.transcription.dictationLivePreviewEnabled ?? true,
+        );
+        setDictationLivePreviewEngine(
+          settings.transcription.dictationLivePreviewEngine ?? "auto",
         );
         setDictationContextSource(nextContextSource);
         setDictationCopyToClipboard(nextCopyToClipboard);
@@ -1853,11 +2047,15 @@ export function DictationView() {
         setDictationRetentionCustomHours(
           settings.transcription.dictationRetentionCustomHours ?? 24,
         );
+        setDictationKeepAudio(settings.transcription.dictationKeepAudio ?? false);
         setDictationCategoryFormattingEnabled(
           settings.transcription.dictationCategoryFormattingEnabled ?? true,
         );
         setDictationAppCategoryOverrides(
           settings.transcription.dictationAppCategoryOverrides ?? [],
+        );
+        setDictationNumbersAsDigits(
+          settings.transcription.dictationNumbersAsDigits ?? {},
         );
         const shortcut = settings.shortcuts.toggleDictation || defaultShortcut;
         setHotkeyLabel(formatShortcutForDisplay(shortcut));
@@ -2024,6 +2222,7 @@ export function DictationView() {
       routeOverrideEnabled: boolean;
       keepWarm: "off" | "on";
       livePreviewEnabled: boolean;
+      livePreviewEngine: "auto" | "redecode" | "streaming";
       copyToClipboard: boolean;
       commandModeEnabled: boolean;
       commandPrefix: string;
@@ -2036,8 +2235,10 @@ export function DictationView() {
       silenceTimeoutSeconds: number;
       retentionPreset: "immediate" | "24h" | "72h" | "never" | "custom";
       retentionCustomHours: number;
+      keepAudio: boolean;
       categoryFormattingEnabled: boolean;
       appCategoryOverrides: DictationAppCategoryOverride[];
+      numbersAsDigits: DictationNumbersAsDigitsMap;
     }>,
   ) => {
     try {
@@ -2055,6 +2256,8 @@ export function DictationView() {
       const nextKeepWarm = updates.keepWarm ?? dictationKeepWarm;
       const nextLivePreviewEnabled =
         updates.livePreviewEnabled ?? dictationLivePreviewEnabled;
+      const nextLivePreviewEngine =
+        updates.livePreviewEngine ?? dictationLivePreviewEngine;
       const nextCopyToClipboard =
         updates.copyToClipboard ?? dictationCopyToClipboard;
       const nextCommandModeEnabled =
@@ -2108,6 +2311,7 @@ export function DictationView() {
       settings.transcription.dictationKeepWarm = nextKeepWarm;
       settings.transcription.dictationLivePreviewEnabled =
         nextLivePreviewEnabled;
+      settings.transcription.dictationLivePreviewEngine = nextLivePreviewEngine;
       settings.transcription.dictationProjectId =
         updates.projectId ?? defaultProjectId;
       settings.transcription.dictationPushToTalk =
@@ -2133,10 +2337,14 @@ export function DictationView() {
         updates.retentionPreset ?? dictationRetentionPreset;
       settings.transcription.dictationRetentionCustomHours =
         updates.retentionCustomHours ?? dictationRetentionCustomHours;
+      settings.transcription.dictationKeepAudio =
+        updates.keepAudio ?? dictationKeepAudio;
       settings.transcription.dictationCategoryFormattingEnabled =
         nextCategoryFormattingEnabled;
       settings.transcription.dictationAppCategoryOverrides =
         nextAppCategoryOverrides;
+      settings.transcription.dictationNumbersAsDigits =
+        updates.numbersAsDigits ?? dictationNumbersAsDigits;
       await saveSettings(settings);
     } catch (error) {
       console.warn("Failed to persist dictation preferences:", error);
@@ -2248,6 +2456,14 @@ export function DictationView() {
       (customModeDraft.languageOverride.trim() || null),
     livePreviewEnabled:
       overrides?.livePreviewEnabled ?? customModeDraft.livePreviewEnabled,
+    numbersAsDigits:
+      overrides?.numbersAsDigits ??
+      customModeNumbersValue(customModeDraft.numbersAsDigits),
+    // A model that cannot translate must not save a profile claiming it will.
+    translateToEnglish:
+      overrides?.translateToEnglish ??
+      (profileTranslateAvailability.enabled &&
+        customModeDraft.translateToEnglish),
     insertionMode: overrides?.insertionMode ?? dictationInsertionMode,
     contextSource: overrides?.contextSource ?? dictationContextSource,
     saveToInbox: overrides?.saveToInbox ?? saveToInbox,
@@ -2284,6 +2500,8 @@ export function DictationView() {
         languageOverride: mode.languageOverride ?? "",
         livePreviewEnabled:
           mode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+        numbersAsDigits: customModeNumbersChoice(mode.numbersAsDigits),
+        translateToEnglish: mode.translateToEnglish ?? false,
       }),
     );
     setDictationProfile(mode.profile);
@@ -2381,6 +2599,7 @@ export function DictationView() {
         languageOverride: nextMode.languageOverride ?? "",
         livePreviewEnabled:
           nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+        numbersAsDigits: customModeNumbersChoice(nextMode.numbersAsDigits),
       }),
     );
     await persistDictationPreferences({
@@ -2468,6 +2687,7 @@ export function DictationView() {
         languageOverride: nextMode.languageOverride ?? "",
         livePreviewEnabled:
           nextMode.livePreviewEnabled ?? dictationLivePreviewEnabled,
+        numbersAsDigits: customModeNumbersChoice(nextMode.numbersAsDigits),
       }),
     );
     setDictationProfile(nextMode.profile);
@@ -2568,6 +2788,9 @@ export function DictationView() {
           livePreviewEnabled:
             selectedCustomMode.livePreviewEnabled ??
             dictationLivePreviewEnabled,
+          numbersAsDigits: customModeNumbersChoice(
+            selectedCustomMode.numbersAsDigits,
+          ),
         }),
       );
       return;
@@ -2691,14 +2914,19 @@ export function DictationView() {
     // so an unconditional "also copied" would send the user to Cmd+V for
     // whatever they had copied before dictating.
     const leftOnClipboard = payload.copied === true;
+    // A refused delivery (password or secure field) is not "ready to review":
+    // nothing was inserted or copied, and the message has to say so.
+    const deliveryRefusal = describeDictationDeliveryRefusal(payload.outcome);
     setDictationPhaseMessage(
-      payload.pasted
-        ? leftOnClipboard
-          ? "Inserted into the target app and copied to the clipboard."
-          : "Inserted into the target app."
-        : leftOnClipboard
-          ? "Copied to the clipboard and ready to paste."
-          : "Result is ready to review.",
+      deliveryRefusal
+        ? deliveryRefusal.message
+        : payload.pasted
+          ? leftOnClipboard
+            ? "Inserted into the target app and copied to the clipboard."
+            : "Inserted into the target app."
+          : leftOnClipboard
+            ? "Copied to the clipboard and ready to paste."
+            : "Result is ready to review.",
     );
     setDictationPhasePreview(text || null);
     if (payload.pasted) {
@@ -3137,7 +3365,7 @@ export function DictationView() {
         );
       }
       return [...prev, learnedEntry].sort((left, right) =>
-        left.spokenForm.localeCompare(right.spokenForm),
+        compareStrings(left.spokenForm, right.spokenForm),
       );
     });
   };
@@ -3385,6 +3613,32 @@ export function DictationView() {
       setReprocessedResult(null);
     } finally {
       setIsReprocessing(false);
+    }
+  };
+
+  // "Process again": the sidecar re-runs the kept audio and saves a NEW
+  // history entry. It inserts nothing, so the only thing to do here is
+  // refresh the list and show what was saved.
+  const handleProcessSelectedDictationAgain = async () => {
+    if (!selectedRecording) {
+      return;
+    }
+    setIsProcessingAgain(true);
+    setProcessAgainError(null);
+    try {
+      const outcome = await reprocessDictation({
+        historyId: selectedRecording.id,
+        modeId: processAgainModeId,
+      });
+      setProcessAgainOutcome(outcome);
+      await refetchDictationHistory();
+      void refreshDictationInsights();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setProcessAgainError(sanitizeUserFacingDictationMessage(message));
+      setProcessAgainOutcome(null);
+    } finally {
+      setIsProcessingAgain(false);
     }
   };
 
@@ -3988,7 +4242,105 @@ export function DictationView() {
                 dictations are retained in history.
               </p>
             )}
-            {dictationHistoryLoading ? (
+            <div className="space-y-2">
+              <div className="relative">
+                <Search
+                  aria-hidden="true"
+                  className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+                />
+                <Input
+                  aria-label="Search saved dictations"
+                  className="bg-muted/30 pl-9"
+                  placeholder="Search saved dictations…"
+                  value={historySearchQuery}
+                  onChange={(event) =>
+                    setHistorySearchQuery(event.target.value)
+                  }
+                  onKeyDown={(event) => {
+                    // Down from the field lands on the first hit; Escape
+                    // clears the query and puts the whole list back.
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      focusHistoryResult(0);
+                    } else if (event.key === "Escape") {
+                      setHistorySearchQuery("");
+                    }
+                  }}
+                />
+              </div>
+              {trimmedHistorySearchQuery && (
+                <p className="text-sm text-muted-foreground">
+                  Searches what was delivered and, where it was kept, what the
+                  recognizer heard.
+                </p>
+              )}
+            </div>
+            {trimmedHistorySearchQuery ? (
+              historySearchError ? (
+                <div className="rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-sm text-rust">
+                  Search failed: {historySearchError}
+                </div>
+              ) : historySearchResults === null || historySearchPending ? (
+                <p className="text-sm text-muted-foreground">Searching…</p>
+              ) : historySearchResults.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No saved dictation matches &ldquo;
+                  {trimmedHistorySearchQuery}&rdquo;. Only dictations still in
+                  history can be searched — auto-delete removes the rest.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-sm text-muted-foreground">
+                    {historySearchResults.length === 1
+                      ? "1 match"
+                      : `${historySearchResults.length} matches`}
+                  </p>
+                  {historySearchResults.map((hit, index) => (
+                    <button
+                      key={hit.recordingId}
+                      type="button"
+                      ref={(element) => {
+                        historyResultRefs.current[index] = element;
+                      }}
+                      aria-label={`Open saved dictation: ${hit.recordingTitle}`}
+                      className="w-full rounded-md border p-3 text-left outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      onClick={() => openHistoryEntryById(hit.recordingId)}
+                      onKeyDown={(event) => {
+                        if (event.key === "ArrowDown") {
+                          event.preventDefault();
+                          focusHistoryResult(index + 1);
+                        } else if (event.key === "ArrowUp") {
+                          event.preventDefault();
+                          focusHistoryResult(index - 1);
+                        }
+                      }}
+                    >
+                      <p className="font-medium">{hit.recordingTitle}</p>
+                      <p className="text-sm">
+                        {splitHistorySnippet(hit.snippet).map((run, runIndex) =>
+                          run.matched ? (
+                            <mark
+                              key={runIndex}
+                              className="rounded-sm bg-gold/25 text-foreground"
+                            >
+                              {run.text}
+                            </mark>
+                          ) : (
+                            <span key={runIndex}>{run.text}</span>
+                          ),
+                        )}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        {formatDateTime(hit.createdAt)} ·{" "}
+                        {hit.matchedField === "raw"
+                          ? "Matched what Plainsong heard"
+                          : "Matched the delivered text"}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              )
+            ) : dictationHistoryLoading ? (
               <p className="text-sm text-muted-foreground">
                 Loading dictation history...
               </p>
@@ -4015,7 +4367,7 @@ export function DictationView() {
                     >
                       <p className="font-medium">{recording.title}</p>
                       <p className="text-sm text-muted-foreground">
-                        {new Date(recording.createdAt).toLocaleString()} ·{" "}
+                        {formatDateTime(recording.createdAt)} ·{" "}
                         {recording.status}
                       </p>
                     </button>
@@ -4233,6 +4585,12 @@ export function DictationView() {
                           : "on this Mac."
                         : "somewhere not yet known."}
                     </p>
+                    {currentDictationProvider &&
+                    describeCloudDictationVocabularyNote(currentDictationProvider) ? (
+                      <p className="text-sm text-muted-foreground">
+                        {describeCloudDictationVocabularyNote(currentDictationProvider)}
+                      </p>
+                    ) : null}
                     {!useSharedAsrSelection &&
                     currentDictationProvider &&
                     currentMeetingProvider &&
@@ -4547,6 +4905,53 @@ export function DictationView() {
                           own style prompt runs.
                         </p>
                       </div>
+                      <div className="space-y-2">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="custom-profile-numbers"
+                        >
+                          {DICTATION_NUMBERS_SECTION_HEADING}
+                        </label>
+                        <select
+                          id="custom-profile-numbers"
+                          aria-label="Numbers as digits"
+                          className="w-full rounded-md border bg-background p-2 text-sm"
+                          value={customModeDraft.numbersAsDigits}
+                          onChange={(event) =>
+                            setCustomModeDraft((current) => ({
+                              ...current,
+                              numbersAsDigits: event.target
+                                .value as CustomModeNumbersChoice,
+                            }))
+                          }
+                        >
+                          {(
+                            Object.keys(
+                              CUSTOM_MODE_NUMBERS_CHOICE_LABELS,
+                            ) as CustomModeNumbersChoice[]
+                          ).map((choice) => (
+                            <option key={choice} value={choice}>
+                              {CUSTOM_MODE_NUMBERS_CHOICE_LABELS[choice]}
+                            </option>
+                          ))}
+                        </select>
+                        <p className="text-sm text-muted-foreground">
+                          {customModeDraft.numbersAsDigits === "inherit"
+                            ? numbersAsDigitsModeHint(
+                                customModeDraft.baseModePreset,
+                              )
+                            : DICTATION_NUMBERS_SECTION_DESCRIPTION}{" "}
+                          {resolveCustomModeNumbersAsDigits(
+                            customModeNumbersValue(
+                              customModeDraft.numbersAsDigits,
+                            ),
+                            customModeDraft.baseModePreset,
+                            dictationNumbersAsDigits,
+                          )
+                            ? "Right now this profile writes numbers as digits."
+                            : "Right now this profile keeps numbers as spoken."}
+                        </p>
+                      </div>
                       <div className="space-y-2 md:col-span-2">
                         <label
                           className="text-sm font-medium"
@@ -4741,6 +5146,30 @@ export function DictationView() {
                             {currentDictationProvider === "macos_apple_speech"
                               ? "Unavailable with Apple Speech, which waits for the final on-device result."
                               : "Turn this off when watching partial text is distracting."}
+                          </p>
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-sm font-medium">Translate to English</p>
+                          <label className="inline-flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm">
+                            <input
+                              type="checkbox"
+                              aria-label="Translate to English"
+                              checked={
+                                profileTranslateAvailability.enabled &&
+                                customModeDraft.translateToEnglish
+                              }
+                              disabled={!profileTranslateAvailability.enabled}
+                              onChange={(event) =>
+                                setCustomModeDraft((current) => ({
+                                  ...current,
+                                  translateToEnglish: event.target.checked,
+                                }))
+                              }
+                            />
+                            Deliver English whatever language you speak
+                          </label>
+                          <p className="text-sm text-muted-foreground">
+                            {profileTranslateAvailability.description}
                           </p>
                         </div>
                       </div>
@@ -5184,6 +5613,49 @@ export function DictationView() {
                     </p>
                   </div>
 
+                  {dictationLivePreviewEnabled &&
+                  currentDictationProvider !== "macos_apple_speech" &&
+                  livePreviewEngineStatus?.supported ? (
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="dictation-live-preview-engine"
+                      >
+                        What draws the live preview
+                      </label>
+                      <select
+                        id="dictation-live-preview-engine"
+                        className="w-full rounded-md border bg-background p-2 text-sm"
+                        value={dictationLivePreviewEngine}
+                        onChange={(event) => {
+                          const next = event.target.value as
+                            | "auto"
+                            | "redecode"
+                            | "streaming";
+                          setDictationLivePreviewEngine(next);
+                          void persistDictationPreferences({
+                            livePreviewEngine: next,
+                          });
+                        }}
+                      >
+                        <option value="auto">
+                          Whichever is available (recommended)
+                        </option>
+                        <option value="streaming">
+                          Streaming engine when it can
+                        </option>
+                        <option value="redecode">
+                          Re-transcribe as you speak
+                        </option>
+                      </select>
+                      <p className="text-sm text-muted-foreground">
+                        {livePreviewEngineStatus.ready
+                          ? "The streaming engine is installed, so the preview keeps what it has already heard and the words land while you are still talking. Whichever engine draws it, the text Plainsong types is the finished transcription from your dictation engine, made after you stop."
+                          : "The streaming engine is not downloaded, so the preview re-transcribes everything you have said so far every few hundred milliseconds and the words arrive a little behind you. Install it from the Models screen. Either way, the text Plainsong types is the finished transcription from your dictation engine, made after you stop."}
+                      </p>
+                    </div>
+                  ) : null}
+
                   <div className="space-y-2">
                     <label
                       className="text-sm font-medium"
@@ -5261,8 +5733,9 @@ export function DictationView() {
                       Loads the dictation model as soon as a session starts, so
                       the first result does not wait on a cold load. Off loads
                       it during that first result instead, which makes only
-                      that one slower. Either way the model stays in memory
-                      until you quit.
+                      that one slower. The speech model stays in memory until
+                      you quit either way; with this off, the built-in cleanup
+                      model is released a minute after your last dictation.
                     </p>
                   </div>
 
@@ -5395,6 +5868,34 @@ export function DictationView() {
                       </div>
                     )}
                   </div>
+
+                  <div className="space-y-2 md:col-span-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <label
+                          className="text-sm font-medium"
+                          htmlFor="dictation-keep-audio"
+                        >
+                          Keep dictation audio for Process again
+                        </label>
+                        <p className="text-sm text-muted-foreground">
+                          Off by default. When on, each new dictation keeps its
+                          recording in Plainsong's local recordings folder so
+                          you can run it through another engine or style later.
+                          The audio is deleted with the history entry, by
+                          auto-delete or by hand.
+                        </p>
+                      </div>
+                      <Switch
+                        id="dictation-keep-audio"
+                        checked={dictationKeepAudio}
+                        onCheckedChange={(checked) => {
+                          setDictationKeepAudio(checked);
+                          void persistDictationPreferences({ keepAudio: checked });
+                        }}
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 <div className="rounded-md border bg-muted/30 px-3 py-3 text-sm text-muted-foreground">
@@ -5483,7 +5984,7 @@ export function DictationView() {
                             </span>
                           </span>
                           <span className="shrink-0 text-muted-foreground">
-                            {new Date(entry.updatedAt).toLocaleString()}
+                            {formatDateTime(entry.updatedAt)}
                           </span>
                         </li>
                       ))}
@@ -6271,6 +6772,54 @@ export function DictationView() {
                   />
                 </div>
 
+                <div
+                  className="space-y-3 border-t pt-4"
+                  data-testid="numbers-as-digits-section"
+                >
+                  <div>
+                    <h4 className="section-heading">
+                      {DICTATION_NUMBERS_SECTION_HEADING}
+                    </h4>
+                    <p className="text-sm text-muted-foreground">
+                      {DICTATION_NUMBERS_SECTION_DESCRIPTION}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    {DICTATION_NUMBER_MODE_IDS.map((modeId) => (
+                      <div
+                        key={modeId}
+                        className="flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <p className="text-sm font-medium">
+                            {DICTATION_MODE_DEFINITION_BY_ID[modeId].label}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            {numbersAsDigitsModeHint(modeId)}
+                          </p>
+                        </div>
+                        <Switch
+                          aria-label={`${DICTATION_MODE_DEFINITION_BY_ID[modeId].label}: numbers as digits`}
+                          checked={resolveNumbersAsDigits(
+                            modeId,
+                            dictationNumbersAsDigits,
+                          )}
+                          onCheckedChange={(checked) => {
+                            const next = {
+                              ...dictationNumbersAsDigits,
+                              [modeId]: checked,
+                            };
+                            setDictationNumbersAsDigits(next);
+                            void persistDictationPreferences({
+                              numbersAsDigits: next,
+                            });
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 <div className="space-y-2">
                   <h4 className="section-heading">Built-in categories</h4>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -6442,6 +6991,22 @@ export function DictationView() {
         isReprocessing={isReprocessing}
         reprocessError={reprocessError}
         onReprocess={() => void handleReprocessSelectedDictation()}
+        processAgainModeId={processAgainModeId}
+        onProcessAgainModeIdChange={setProcessAgainModeId}
+        processAgainCustomModes={dictationCustomModes.map((mode) => ({
+          id: mode.id,
+          name: mode.name,
+        }))}
+        processAgainOutcome={processAgainOutcome}
+        isProcessingAgain={isProcessingAgain}
+        processAgainError={processAgainError}
+        onProcessAgain={() => void handleProcessSelectedDictationAgain()}
+        onOpenProcessAgainResult={() => {
+          if (!processAgainOutcome) {
+            return;
+          }
+          setSelectedRecording(processAgainOutcome.recording);
+        }}
         onUseReprocessedResult={() => {
           if (!reprocessedResult) {
             return;

@@ -9,6 +9,15 @@ import type { ProductReadinessSnapshot } from "@/features/readiness/product-read
 const getAsrProviderInventoryMock = vi.fn();
 const listDownloadedModelsMock = vi.fn();
 const downloadAsrModelsMock = vi.fn();
+const getBundledCleanupModelStatusMock = vi.fn();
+const downloadBundledCleanupModelMock = vi.fn();
+const deleteBundledCleanupModelMock = vi.fn();
+const getAppleLanguageModelAvailabilityMock = vi.fn();
+const getLivePreviewEngineStatusMock = vi.fn();
+const downloadLivePreviewEngineModelMock = vi.fn();
+const deleteLivePreviewEngineModelMock = vi.fn();
+const installAppleSpeechLanguageMock = vi.fn();
+const cancelAppleSpeechLanguageInstallMock = vi.fn();
 const readinessContext = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
   productReadiness: {
@@ -36,9 +45,95 @@ vi.mock("@/lib/backend/asr", () => ({
     downloadAsrModelsMock(providerType, modelId),
 }));
 
+vi.mock("@/lib/backend/ai", () => ({
+  getBundledCleanupModelStatus: () => getBundledCleanupModelStatusMock(),
+  downloadBundledCleanupModel: () => downloadBundledCleanupModelMock(),
+  deleteBundledCleanupModel: () => deleteBundledCleanupModelMock(),
+  getAppleLanguageModelAvailability: (refresh: boolean) =>
+    getAppleLanguageModelAvailabilityMock(refresh),
+  getLivePreviewEngineStatus: () => getLivePreviewEngineStatusMock(),
+  downloadLivePreviewEngineModel: () => downloadLivePreviewEngineModelMock(),
+  deleteLivePreviewEngineModel: () => deleteLivePreviewEngineModelMock(),
+}));
+
+/** A build with the streaming engine compiled in, weights not yet fetched. */
+const LIVE_PREVIEW_STATUS = {
+  supported: true,
+  ready: false,
+  modelId: "nemotron-3.5-asr-streaming-0.6b-q8_0",
+  displayName: "Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0)",
+  engineName: "Nemotron 3.5 ASR Streaming via transcribe.cpp",
+  license: "OpenMDW-1.1",
+  upstreamUrl: "https://example.invalid/nemotron",
+  downloadBytes: 751_094_240,
+  bytesOnDisk: 0,
+  languages: ["en", "es", "fr"],
+  chunkMs: 560,
+  path: "/models/transcribe_cpp/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+};
+vi.mock("@/lib/backend/settings", () => ({
+  installAppleSpeechLanguage: (locale?: string) =>
+    installAppleSpeechLanguageMock(locale),
+  cancelAppleSpeechLanguageInstall: () => cancelAppleSpeechLanguageInstallMock(),
+}));
+
 vi.mock("@/lib/electron", () => ({
   listen: vi.fn(async () => () => {}),
 }));
+
+/**
+ * An Apple Speech readiness that runs SpeechAnalyzer: macOS 26+, the language
+ * supported and its assets on disk. That is the only configuration in which
+ * the route returns per-segment timestamps, which is what the meeting lane is
+ * assembled from.
+ */
+const SPEECH_ANALYZER_READINESS = {
+  status: "ready",
+  ready: true,
+  platformSupported: true,
+  helperPresent: true,
+  authorization: "authorized",
+  locale: "en_US",
+  localeSupported: true,
+  onDeviceAvailable: true,
+  recognizerAvailable: true,
+  message: "Apple Speech is ready.",
+  setupAction: null,
+  speechAnalyzerAvailable: true,
+  speechAnalyzerLocaleSupported: true,
+  speechAnalyzerAssetsInstalled: true,
+  speechAnalyzerAssetStatus: "installed",
+  speechAnalyzerLocales: ["en_US", "fr_FR"],
+  speechAnalyzerInstalledLocales: ["en_US"],
+  engine: "speech_analyzer",
+  operatingSystemVersion: "27.0.0",
+};
+
+const BUNDLED_STATUS = {
+  provider: "bundled_local",
+  modelId: "s1-mini",
+  displayName: "S1-mini",
+  vendor: "Superwhisper",
+  downloadBytes: 495_654_965,
+  bytesOnDisk: 0,
+  ready: false,
+  missingFiles: ["s1-mini-q4_k_m.gguf"],
+  path: "/models/bundled_cleanup",
+  backend: "metal",
+  backendMeetsBudget: true,
+  backendPresent: true,
+  residentBytes: 484_219_808,
+};
+
+const APPLE_AVAILABILITY = {
+  provider: "apple_language_model",
+  displayName: "Apple on-device model",
+  available: false,
+  reason: "apple_intelligence_not_enabled",
+  detail:
+    "Apple Intelligence is turned off. Turn it on in System Settings to use the Apple on-device model.",
+  operatingSystemVersion: "27.0.0",
+};
 
 const WHISPER_MODEL_OPTIONS = [
   { id: "tiny", label: "tiny (fastest)" },
@@ -214,6 +309,95 @@ describe("Models screen", () => {
       },
     ]);
     downloadAsrModelsMock.mockResolvedValue(undefined);
+    getBundledCleanupModelStatusMock.mockResolvedValue(BUNDLED_STATUS);
+    downloadBundledCleanupModelMock.mockResolvedValue({
+      ...BUNDLED_STATUS,
+      ready: true,
+      bytesOnDisk: 495_654_965,
+      missingFiles: [],
+    });
+    deleteBundledCleanupModelMock.mockResolvedValue(BUNDLED_STATUS);
+    getAppleLanguageModelAvailabilityMock.mockResolvedValue(APPLE_AVAILABILITY);
+    getLivePreviewEngineStatusMock.mockResolvedValue(LIVE_PREVIEW_STATUS);
+    downloadLivePreviewEngineModelMock.mockResolvedValue({
+      ...LIVE_PREVIEW_STATUS,
+      ready: true,
+      bytesOnDisk: 751_094_240,
+    });
+    deleteLivePreviewEngineModelMock.mockResolvedValue(LIVE_PREVIEW_STATUS);
+    installAppleSpeechLanguageMock.mockResolvedValue({
+      install: {
+        locale: "en_US",
+        installed: true,
+        assetStatus: "installed",
+        engine: "speech_analyzer",
+      },
+      readiness: SPEECH_ANALYZER_READINESS,
+      notes: [],
+    });
+    cancelAppleSpeechLanguageInstallMock.mockResolvedValue(undefined);
+  });
+
+  it("never offers a dictation-only provider for meeting notes", async () => {
+    // Both on-device providers refuse meeting work in the sidecar. Offering
+    // them here would only be a way to choose a guaranteed failure.
+    render(<Harness />);
+
+    const meetingsPicker = (await screen.findByLabelText(
+      "Who writes summaries, answers, and actions",
+    )) as HTMLSelectElement;
+    const values = [...meetingsPicker.options].map((option) => option.value);
+    expect(values).not.toContain("bundled_local");
+    expect(values).not.toContain("apple_language_model");
+
+    const dictationPicker = screen.getByLabelText(
+      "Who cleans up dictation",
+    ) as HTMLSelectElement;
+    expect([...dictationPicker.options].map((option) => option.value)).toContain(
+      "bundled_local",
+    );
+  });
+
+  it("offers the built-in model's download, with its size and what it cannot do", async () => {
+    const settings = settingsFixture();
+    settings.privacy.dictationAi = { provider: "bundled_local", modelId: null };
+    render(<Harness initial={settings} />);
+
+    const row = await screen.findByRole("region", {
+      name: "Built-in dictation cleanup model",
+    });
+    expect(row.textContent).toContain("S1-mini by Superwhisper");
+    expect(row.textContent).toContain("473 MiB to download");
+    expect(row.textContent).toContain("does not summarize");
+
+    fireEvent.click(within(row).getByRole("button", { name: "Download" }));
+    await waitFor(() =>
+      expect(downloadBundledCleanupModelMock).toHaveBeenCalledTimes(1),
+    );
+    await waitFor(() =>
+      expect(within(row).getByRole("button", { name: "Delete" })).toBeTruthy(),
+    );
+  });
+
+  it("says why Apple's on-device model is unavailable rather than only that it is", async () => {
+    const settings = settingsFixture();
+    settings.privacy.dictationAi = {
+      provider: "apple_language_model",
+      modelId: null,
+    };
+    render(<Harness initial={settings} />);
+
+    const row = await screen.findByRole("region", {
+      name: "Apple on-device model",
+    });
+    await waitFor(() =>
+      expect(row.textContent).toContain("Apple Intelligence is turned off"),
+    );
+
+    fireEvent.click(within(row).getByRole("button", { name: "Check again" }));
+    await waitFor(() =>
+      expect(getAppleLanguageModelAvailabilityMock).toHaveBeenCalledWith(true),
+    );
   });
 
   it("shows one row per task and a measured disk total", async () => {
@@ -488,12 +672,194 @@ describe("Models screen", () => {
     });
 
     const options = within(meetings).getAllByRole("radio");
-    const labels = options.map((option) => option.textContent ?? "");
-    expect(labels.some((label) => label.includes("base.en"))).toBe(false);
-    expect(labels.some((label) => label.includes("Apple Speech"))).toBe(false);
-    expect(labels.some((label) => label.includes("Parakeet TDT 0.6B v3"))).toBe(
+    // The route's own name, not the whole card: a card's fact sentence may
+    // legitimately name another model to give a size or speed comparison
+    // ("about eleven times the size of base.en"), and matching on the card
+    // text read that as an offer of base.en.
+    const names = options.map(
+      (option) => option.querySelector("span > span")?.textContent ?? "",
+    );
+
+    // Positive first, and exhaustive. A `?? ""` fallback means a selector that
+    // stops matching the name element yields a list of empty strings, and a
+    // suite that only asks "does any name contain base.en" passes on that
+    // happily while checking nothing at all. Naming every option the lane
+    // offers makes the list itself the assertion.
+    expect(names).toEqual([
+      "large-v3-turbo (fast + accurate)",
+      "Distil Whisper Large v3.5",
+      "Parakeet TDT 0.6B v3",
+    ]);
+    expect(names.every((name) => name.trim().length > 0)).toBe(true);
+
+    // And then the exclusions the list above already implies, spelled out so a
+    // future addition to the fixture cannot quietly bring one back.
+    expect(names.some((name) => name.includes("base.en"))).toBe(false);
+    expect(names.some((name) => name.includes("Apple Speech"))).toBe(false);
+    expect(names.some((name) => name.includes("Parakeet TDT 0.6B v3"))).toBe(
       true,
     );
+    // whisper.cpp reaches this lane only through a multilingual model.
+    expect(names.some((name) => name.includes("large-v3-turbo"))).toBe(true);
+  });
+
+  /** Apple Speech is not a promoted route, so its row lives in the drawer. */
+  function appleSpeechDrawerRow(): HTMLElement {
+    fireEvent.click(screen.getByRole("button", { name: /Show \d+ more models/ }));
+    const drawer = screen.getByRole("region", { name: "More models" });
+    const label = within(drawer).getByText("Apple Speech · on-device dictation");
+    return label.closest("div.rounded-md") as HTMLElement;
+  }
+
+  it("offers Apple Speech for meetings once SpeechAnalyzer is the engine that runs", async () => {
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          platformReadiness: SPEECH_ANALYZER_READINESS,
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    await screen.findByRole("region", { name: "Speech for dictation" });
+    const row = appleSpeechDrawerRow();
+
+    expect(
+      within(row).getByRole("button", { name: "Use for meetings" }),
+    ).toBeEnabled();
+    expect(within(row).queryByText(/Dictation only/)).toBeNull();
+  });
+
+  it("still keeps Apple Speech out of meetings when it runs SFSpeechRecognizer", async () => {
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          platformReadiness: {
+            ...SPEECH_ANALYZER_READINESS,
+            speechAnalyzerAvailable: false,
+            speechAnalyzerLocaleSupported: false,
+            speechAnalyzerAssetsInstalled: false,
+            speechAnalyzerAssetStatus: "unavailable",
+            engine: "sf_speech_recognizer",
+            operatingSystemVersion: "15.5.0",
+          },
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    const meetings = await screen.findByRole("region", {
+      name: "Speech for meetings",
+    });
+    const names = within(meetings)
+      .getAllByRole("radio")
+      .map((option) => option.querySelector("span > span")?.textContent ?? "");
+    expect(names.some((name) => name.includes("Apple Speech"))).toBe(false);
+
+    const row = appleSpeechDrawerRow();
+    expect(
+      within(row).queryByRole("button", { name: "Use for meetings" }),
+    ).toBeNull();
+    expect(within(row).getByText(/Dictation only/)).toBeInTheDocument();
+  });
+
+  it("offers the language install when SpeechAnalyzer is there but its assets are not", async () => {
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          platformReadiness: {
+            ...SPEECH_ANALYZER_READINESS,
+            speechAnalyzerAssetsInstalled: false,
+            speechAnalyzerAssetStatus: "supported",
+            speechAnalyzerInstalledLocales: [],
+            engine: "sf_speech_recognizer",
+          },
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    await screen.findByRole("region", { name: "Speech for dictation" });
+    // Point the dictation lane at Apple Speech so its header is the one that
+    // answers for the route.
+    fireEvent.click(
+      within(appleSpeechDrawerRow()).getByRole("button", {
+        name: "Use for dictation",
+      }),
+    );
+
+    const dictation = await screen.findByRole("region", {
+      name: "Speech for dictation",
+    });
+    const installButton = await within(dictation).findByRole("button", {
+      name: "Install language",
+    });
+    fireEvent.click(installButton);
+
+    await waitFor(() =>
+      expect(installAppleSpeechLanguageMock).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  /**
+   * macOS owns the download and it can run for minutes. Without a way out,
+   * "Installing language…" was a state the reader could only leave by
+   * quitting.
+   */
+  it("lets the reader stop a language install that is taking too long", async () => {
+    let releaseInstall: (value: unknown) => void = () => {};
+    installAppleSpeechLanguageMock.mockImplementation(
+      () =>
+        new Promise<unknown>((resolve) => {
+          releaseInstall = resolve;
+        }),
+    );
+    getAsrProviderInventoryMock.mockResolvedValue(
+      inventoryFixture({
+        macos_apple_speech: {
+          platformReadiness: {
+            ...SPEECH_ANALYZER_READINESS,
+            speechAnalyzerAssetsInstalled: false,
+            speechAnalyzerAssetStatus: "supported",
+            speechAnalyzerInstalledLocales: [],
+            engine: "sf_speech_recognizer",
+          },
+        } as Partial<AsrProviderInventory>,
+      }),
+    );
+
+    render(<Harness />);
+    await screen.findByRole("region", { name: "Speech for dictation" });
+    fireEvent.click(
+      within(appleSpeechDrawerRow()).getByRole("button", {
+        name: "Use for dictation",
+      }),
+    );
+
+    const dictation = await screen.findByRole("region", {
+      name: "Speech for dictation",
+    });
+    fireEvent.click(
+      await within(dictation).findByRole("button", { name: "Install language" }),
+    );
+
+    // While it runs, the button says so and a way out appears beside it.
+    await screen.findByRole("button", { name: "Installing language…" });
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    await waitFor(() =>
+      expect(cancelAppleSpeechLanguageInstallMock).toHaveBeenCalledTimes(1),
+    );
+    await screen.findByRole("button", { name: "Stopping…" });
+
+    // The install call returns (the sidecar reports a cancelled install), and
+    // the screen goes back to offering it rather than staying stuck.
+    releaseInstall({
+      install: null,
+      readiness: SPEECH_ANALYZER_READINESS,
+      notes: ["Apple Speech language install failed: cancelled"],
+    });
+    await screen.findByRole("button", { name: "Install language" });
   });
 
   it("keeps an engine whose permission was denied visible but unpickable", async () => {
@@ -607,5 +973,121 @@ describe("Models screen", () => {
         /639 MiB, 25 European languages listed upstream; English verified in Plainsong/,
       ),
     ).toBeInTheDocument();
+  });
+  it("offers the live preview engine as a download that changes no transcription", async () => {
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(
+      within(row).getByText(/never changes what Plainsong types for you/i),
+    ).toBeInTheDocument();
+    expect(within(row).getByText("716 MiB to download")).toBeInTheDocument();
+    // Not downloaded: the row says what happens without it, rather than
+    // implying the preview is off.
+    expect(
+      within(row).getByText(/Plainsong re-transcribes what you have said so far/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(row).getByRole("button", { name: "Download" }));
+    await waitFor(() => {
+      expect(downloadLivePreviewEngineModelMock).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await within(row).findByRole("button", { name: "Delete" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says which languages the engine's own file declares", async () => {
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(
+      within(row).getByText(/declares 3 languages \(en, es, fr\)/),
+    ).toBeInTheDocument();
+    expect(
+      within(row).getByText(/a dictation language outside that list keeps the older preview/i),
+    ).toBeInTheDocument();
+  });
+
+  it("says a short file is an unfinished download, not a bad checksum", async () => {
+    getLivePreviewEngineStatusMock.mockResolvedValue({
+      ...LIVE_PREVIEW_STATUS,
+      ready: false,
+      // An interrupted download: some of the bytes landed, none of them are
+      // wrong. Accusing the file of failing its checksum sends the user
+      // hunting for a problem that is not there.
+      bytesOnDisk: 120_000_000,
+    });
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(
+      within(row).getByText(/the download did not finish/i),
+    ).toBeInTheDocument();
+    expect(
+      within(row).queryByText(/checksum/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says a whole-but-unusable file could not be verified", async () => {
+    getLivePreviewEngineStatusMock.mockResolvedValue({
+      ...LIVE_PREVIEW_STATUS,
+      ready: false,
+      // Every byte is there and it still will not load: a real mismatch, or a
+      // missing integrity receipt. The copy says what Plainsong knows --- it
+      // could not verify it --- rather than asserting which.
+      bytesOnDisk: LIVE_PREVIEW_STATUS.downloadBytes,
+    });
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(
+      within(row).getByText(/could not verify the file on disk against its pinned checksum/i),
+    ).toBeInTheDocument();
+    expect(
+      within(row).queryByText(/the download did not finish/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says nothing about the file when there is none on disk", async () => {
+    render(<Harness />);
+
+    const row = (await screen.findByRole("region", {
+      name: "Live preview engine",
+    })) as HTMLElement;
+    expect(within(row).queryByText(/checksum/i)).not.toBeInTheDocument();
+    expect(
+      within(row).queryByText(/the download did not finish/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows nothing at all when this build has no streaming engine", async () => {
+    getLivePreviewEngineStatusMock.mockResolvedValue({
+      ...LIVE_PREVIEW_STATUS,
+      supported: false,
+      ready: false,
+      modelId: null,
+      displayName: null,
+      engineName: null,
+      license: null,
+      downloadBytes: 0,
+      languages: [],
+      chunkMs: null,
+      path: null,
+    });
+    render(<Harness />);
+
+    await screen.findByRole("region", { name: "Speech for dictation" });
+    expect(
+      screen.queryByRole("region", { name: "Live preview engine" }),
+    ).not.toBeInTheDocument();
   });
 });

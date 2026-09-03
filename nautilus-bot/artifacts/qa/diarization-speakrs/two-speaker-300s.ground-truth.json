@@ -1,0 +1,264 @@
+{
+  "audio": "artifacts/qa/diarization-speakrs/two-speaker-300s.wav",
+  "source": "scripts/fixtures/real-speech-44s.wav",
+  "sampleRate": 16000,
+  "durationSeconds": 300,
+  "turnSeconds": 6,
+  "pitchRatio": 0.82,
+  "speakers": [
+    "A",
+    "B"
+  ],
+  "turns": [
+    {
+      "start": 0,
+      "end": 6,
+      "speaker": "A"
+    },
+    {
+      "start": 6,
+      "end": 12,
+      "speaker": "B"
+    },
+    {
+      "start": 12,
+      "end": 18,
+      "speaker": "A"
+    },
+    {
+      "start": 18,
+      "end": 24,
+      "speaker": "B"
+    },
+    {
+      "start": 24,
+      "end": 30,
+      "speaker": "A"
+    },
+    {
+      "start": 30,
+      "end": 36,
+      "speaker": "B"
+    },
+    {
+      "start": 36,
+      "end": 42,
+      "speaker": "A"
+    },
+    {
+      "start": 42,
+      "end": 48,
+      "speaker": "B"
+    },
+    {
+      "start": 48,
+      "end": 54,
+      "speaker": "A"
+    },
+    {
+      "start": 54,
+      "end": 60,
+      "speaker": "B"
+    },
+    {
+      "start": 60,
+      "end": 66,
+      "speaker": "A"
+    },
+    {
+      "start": 66,
+      "end": 72,
+      "speaker": "B"
+    },
+    {
+      "start": 72,
+      "end": 78,
+      "speaker": "A"
+    },
+    {
+      "start": 78,
+      "end": 84,
+      "speaker": "B"
+    },
+    {
+      "start": 84,
+      "end": 90,
+      "speaker": "A"
+    },
+    {
+      "start": 90,
+      "end": 96,
+      "speaker": "B"
+    },
+    {
+      "start": 96,
+      "end": 102,
+      "speaker": "A"
+    },
+    {
+      "start": 102,
+      "end": 108,
+      "speaker": "B"
+    },
+    {
+      "start": 108,
+      "end": 114,
+      "speaker": "A"
+    },
+    {
+      "start": 114,
+      "end": 120,
+      "speaker": "B"
+    },
+    {
+      "start": 120,
+      "end": 126,
+      "speaker": "A"
+    },
+    {
+      "start": 126,
+      "end": 132,
+      "speaker": "B"
+    },
+    {
+      "start": 132,
+      "end": 138,
+      "speaker": "A"
+    },
+    {
+      "start": 138,
+      "end": 144,
+      "speaker": "B"
+    },
+    {
+      "start": 144,
+      "end": 150,
+      "speaker": "A"
+    },
+    {
+      "start": 150,
+      "end": 156,
+      "speaker": "B"
+    },
+    {
+      "start": 156,
+      "end": 162,
+      "speaker": "A"
+    },
+    {
+      "start": 162,
+      "end": 168,
+      "speaker": "B"
+    },
+    {
+      "start": 168,
+      "end": 174,
+      "speaker": "A"
+    },
+    {
+      "start": 174,
+      "end": 180,
+      "speaker": "B"
+    },
+    {
+      "start": 180,
+      "end": 186,
+      "speaker": "A"
+    },
+    {
+      "start": 186,
+      "end": 192,
+      "speaker": "B"
+    },
+    {
+      "start": 192,
+      "end": 198,
+      "speaker": "A"
+    },
+    {
+      "start": 198,
+      "end": 204,
+      "speaker": "B"
+    },
+    {
+      "start": 204,
+      "end": 210,
+      "speaker": "A"
+    },
+    {
+      "start": 210,
+      "end": 216,
+      "speaker": "B"
+    },
+    {
+      "start": 216,
+      "end": 222,
+      "speaker": "A"
+    },
+    {
+      "start": 222,
+      "end": 228,
+      "speaker": "B"
+    },
+    {
+      "start": 228,
+      "end": 234,
+      "speaker": "A"
+    },
+    {
+      "start": 234,
+      "end": 240,
+      "speaker": "B"
+    },
+    {
+      "start": 240,
+      "end": 246,
+      "speaker": "A"
+    },
+    {
+      "start": 246,
+      "end": 252,
+      "speaker": "B"
+    },
+    {
+      "start": 252,
+      "end": 258,
+      "speaker": "A"
+    },
+    {
+      "start": 258,
+      "end": 264,
+      "speaker": "B"
+    },
+    {
+      "start": 264,
+      "end": 270,
+      "speaker": "A"
+    },
+    {
+      "start": 270,
+      "end": 276,
+      "speaker": "B"
+    },
+    {
+      "start": 276,
+      "end": 282,
+      "speaker": "A"
+    },
+    {
+      "start": 282,
+      "end": 288,
+      "speaker": "B"
+    },
+    {
+      "start": 288,
+      "end": 294,
+      "speaker": "A"
+    },
+    {
+      "start": 294,
+      "end": 300,
+      "speaker": "B"
+    }
+  ]
+}

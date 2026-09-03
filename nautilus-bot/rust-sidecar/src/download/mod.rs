@@ -75,6 +75,138 @@ fn diarization_model_info(model_id: &str) -> Option<DiarizationModelInfo> {
     }
 }
 
+/// Model id for the experimental speakrs (pyannote community-1) diarizer.
+///
+/// Not a `DiarizationModelInfo` entry because speakrs needs a *bundle* of ten
+/// files (segmentation ONNX, embedding ONNX + external weights, and six PLDA
+/// parameter arrays), not one `.onnx`. Only defined when the backend is
+/// compiled in, so a default build cannot offer, download, or select a model
+/// it has no code to run.
+#[cfg(feature = "diarization-speakrs")]
+pub(crate) const SPEAKRS_MODEL_ID: &str = "speakrs_community1";
+
+/// Sub-directory of `models/diarization/` holding the speakrs bundle.
+/// speakrs resolves every file of the bundle by name inside one directory
+/// (`ModelBundle::from_dir`), so the layout is fixed by the crate.
+///
+/// Not feature-gated, unlike the file list: a build that can no longer download
+/// the bundle still has to find, size and delete a copy an earlier build left
+/// on disk.
+pub(crate) const SPEAKRS_BUNDLE_DIR: &str = "speakrs";
+
+#[cfg(feature = "diarization-speakrs")]
+#[derive(Clone, Copy)]
+pub(crate) struct SpeakrsBundleFile {
+    pub(crate) url: &'static str,
+    pub(crate) file_name: &'static str,
+    pub(crate) sha256: &'static str,
+    pub(crate) max_bytes: u64,
+}
+
+/// The ten files speakrs 0.5's `ExecutionMode::Cpu` pipeline needs, pinned to
+/// one immutable `avencera/speakrs-models` revision (never `/resolve/main/`).
+/// Every SHA-256 below was verified by downloading the file at this revision
+/// and hashing it locally; they also match the LFS object ids the Hugging Face
+/// tree API reports for the same revision.
+///
+/// Licensing (recorded here because the app redistributes nothing but does
+/// fetch these at runtime): the `avencera/speakrs-models` card declares NO
+/// license of its own and says users are responsible for the upstream terms.
+/// Upstream is `pyannote/speaker-diarization-community-1`, which is CC-BY-4.0
+/// and gated on Hugging Face; its segmentation component
+/// (`pyannote/segmentation-3.0`) is MIT and the embedder
+/// (`pyannote/wespeaker-voxceleb-resnet34-LM`) is CC-BY-4.0. See
+/// artifacts/qa/diarization-speakrs-spike-2026-09-02.md.
+#[cfg(feature = "diarization-speakrs")]
+pub(crate) const SPEAKRS_BUNDLE: &[SpeakrsBundleFile] = &[
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/segmentation-3.0.onnx",
+        file_name: "segmentation-3.0.onnx",
+        sha256: "038b971741ed623af9773ecafdefa4b7bc523520099c2a68f8568b24189e8ad9",
+        max_bytes: 32 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.onnx",
+        file_name: "wespeaker-voxceleb-resnet34.onnx",
+        sha256: "203a4c67112167580ab1fcb62f4568c633499fb283805890aebe1c48564fcc0f",
+        max_bytes: 128 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.onnx.data",
+        file_name: "wespeaker-voxceleb-resnet34.onnx.data",
+        sha256: "dc105e7857156611381b95cc961b277d8e1e098e7af1c919a77c68c7257ce956",
+        max_bytes: 128 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_lda.npy",
+        file_name: "plda_lda.npy",
+        sha256: "e20c9b012bebd1aabda5a38a127e63a43cf35debdc502715fc143e2fb6bc3c4b",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_tr.npy",
+        file_name: "plda_tr.npy",
+        sha256: "e700b68cb319de3fafb5fa093eb9222c23c447084741f8d3a533640d425510ee",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mu.npy",
+        file_name: "plda_mu.npy",
+        sha256: "d286d48acf99bbc1ed1502fed0a3e361ae5626ce1870c8be9f7397c5e47886c6",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_psi.npy",
+        file_name: "plda_psi.npy",
+        sha256: "d7128c9ed2f28a9781971805131129f077c04f948e2df12e52dcdb99f2b4e5f5",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mean1.npy",
+        file_name: "plda_mean1.npy",
+        sha256: "e424c0c352182aa8e0f555dec1f3b30e29a20b9ed6b25d339f112af92e51e36f",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mean2.npy",
+        file_name: "plda_mean2.npy",
+        sha256: "6f6fb708a2037197b5b84ffeaa8f140cb878088fbecd6ab042ad26a7691bd2cf",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.min_num_samples.txt",
+        file_name: "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+        sha256: "e4df891c484d7abb985dadf539fa1883a646dab6337af5cae4159c587b7050cc",
+        max_bytes: 4 * 1024,
+    },
+];
+
+/// All-or-nothing readiness for a multi-file model bundle: every named file
+/// must exist in `bundle_dir` and carry an integrity receipt matching the
+/// expected hash beside it. Generic over the file list so the rule can be
+/// tested with fixtures instead of the real multi-megabyte weights.
+#[cfg(feature = "diarization-speakrs")]
+fn is_bundle_trusted<'a>(
+    bundle_dir: &Path,
+    files: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    files.into_iter().all(|(file_name, sha256)| {
+        is_model_artifact_trusted(&bundle_dir.join(file_name), Some(sha256))
+    })
+}
+
+/// Every file of the speakrs bundle carries a receipt whose hash matches its
+/// pin. Bundle-wide, because a partial bundle loads no pipeline at all.
+#[cfg(feature = "diarization-speakrs")]
+pub(crate) fn is_speakrs_bundle_trusted(bundle_dir: &Path) -> bool {
+    is_bundle_trusted(
+        bundle_dir,
+        SPEAKRS_BUNDLE
+            .iter()
+            .map(|file| (file.file_name, file.sha256)),
+    )
+}
+
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
@@ -281,6 +413,25 @@ pub(crate) fn is_diarization_model_artifact_trusted(model_id: &str, path: &Path)
         .is_some_and(|model| is_model_artifact_trusted(path, Some(model.sha256)))
 }
 
+/// Test seam: the digest `is_diarization_model_artifact_trusted` demands for
+/// `model_id`, so a readiness test can write the receipt the download path
+/// would have written for that model.
+#[cfg(test)]
+pub(crate) fn diarization_model_expected_sha256(model_id: &str) -> Option<&'static str> {
+    diarization_model_info(model_id).map(|model| model.sha256)
+}
+
+/// Test seam: write the receipt the download path writes once a file's hash
+/// matched its pin, so a provider test can prove readiness follows the
+/// receipt rather than the bytes. Test builds use a fixed MAC key.
+#[cfg(test)]
+pub(crate) async fn record_model_integrity_receipt_for_tests(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<()> {
+    write_model_integrity_receipt(path, expected_sha256).await
+}
+
 async fn write_model_integrity_receipt(path: &Path, expected_sha256: &str) -> Result<()> {
     let receipt_path = model_integrity_receipt_path(path);
     let temp_receipt_path = path_with_suffix(&receipt_path, ".tmp");
@@ -467,6 +618,17 @@ pub(crate) fn managed_model_integrity_artifacts(models_root: &Path) -> Vec<(Path
                 model.sha256.to_string(),
             ));
         }
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    for file in SPEAKRS_BUNDLE {
+        artifacts.push((
+            models_root
+                .join("diarization")
+                .join(SPEAKRS_BUNDLE_DIR)
+                .join(file.file_name),
+            file.sha256.to_string(),
+        ));
     }
 
     artifacts.push((
@@ -1151,6 +1313,53 @@ impl DownloadManager {
         Ok(destination)
     }
 
+    /// Directory the speakrs (pyannote community-1) bundle lives in.
+    #[cfg(feature = "diarization-speakrs")]
+    pub fn speakrs_bundle_dir(&self) -> PathBuf {
+        self.models_dir.join("diarization").join(SPEAKRS_BUNDLE_DIR)
+    }
+
+    /// Download every file of the speakrs bundle, each pinned by SHA-256 and
+    /// size-bounded like the single-file diarization models. Files already
+    /// present with a valid integrity receipt are left alone, so a retry after
+    /// a dropped connection only fetches what is missing.
+    #[cfg(feature = "diarization-speakrs")]
+    pub async fn download_speakrs_bundle(
+        &self,
+        progress_callback: impl Fn(DownloadProgress) + Send + Sync + Clone + 'static,
+    ) -> Result<PathBuf> {
+        let bundle_dir = self.speakrs_bundle_dir();
+        tokio::fs::create_dir_all(&bundle_dir).await?;
+
+        for file in SPEAKRS_BUNDLE {
+            let destination = bundle_dir.join(file.file_name);
+            if destination.exists()
+                && verify_or_record_model_integrity(&destination, Some(file.sha256)).await?
+            {
+                continue;
+            }
+            if destination.exists() {
+                tracing::warn!(
+                    "speakrs bundle file {} failed integrity verification. Re-downloading.",
+                    file.file_name
+                );
+                remove_model_artifact(&destination).await;
+            }
+
+            self.download_file_verified(
+                file.url,
+                &destination,
+                Some(file.sha256),
+                file.max_bytes,
+                progress_callback.clone(),
+            )
+            .await?;
+        }
+
+        tracing::info!("speakrs diarization bundle ready at {:?}", bundle_dir);
+        Ok(bundle_dir)
+    }
+
     /// Check if diarization model is downloaded
     #[expect(
         dead_code,
@@ -1397,6 +1606,88 @@ impl DownloadManager {
             }
         }
 
+        // Check diarization models. Without this branch the four speaker
+        // embedders and any speakrs bundle on disk were invisible in the models
+        // list and missing from the storage total, so a user could neither see
+        // them nor delete them -- the app downloaded files it then refused to
+        // account for. Named with the picker's own labels so a row can be
+        // matched to the entry that fetched it.
+        let diarization_dir = self.models_dir.join("diarization");
+        if diarization_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&diarization_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if is_internal_model_metadata_file(&path) {
+                    continue;
+                }
+                let metadata = entry.metadata().await?;
+                if metadata.is_file() {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let model_id = file_name.strip_suffix(".onnx").unwrap_or(&file_name);
+                    models.push(DownloadedModel {
+                        name: format!(
+                            "Speaker embedding {}",
+                            crate::diarization::model_label(model_id)
+                        ),
+                        provider: "diarization".to_string(),
+                        path,
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                    continue;
+                }
+                if !metadata.is_dir() {
+                    continue;
+                }
+
+                // A bundle is one model in several files (speakrs needs ten),
+                // so it is summed into a single deletable entry the way the
+                // Qwen3-ASR and cleanup bundles are.
+                let dir_name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let mut total_size = 0u64;
+                let mut files = 0usize;
+                let mut modified: Option<std::time::SystemTime> = None;
+                let mut bundle_entries = tokio::fs::read_dir(&path).await?;
+                while let Some(bundle_entry) = bundle_entries.next_entry().await? {
+                    let bundle_path = bundle_entry.path();
+                    if is_internal_model_metadata_file(&bundle_path) {
+                        continue;
+                    }
+                    if let Ok(metadata) = bundle_entry.metadata().await {
+                        if !metadata.is_file() {
+                            continue;
+                        }
+                        total_size += metadata.len();
+                        files += 1;
+                        if let Ok(entry_modified) = metadata.modified() {
+                            modified = Some(match modified {
+                                Some(existing) if existing >= entry_modified => existing,
+                                _ => entry_modified,
+                            });
+                        }
+                    }
+                }
+                if files == 0 {
+                    continue;
+                }
+                let name = if dir_name == SPEAKRS_BUNDLE_DIR {
+                    "Speaker diarization pyannote community-1 (speakrs)".to_string()
+                } else {
+                    format!("Speaker diarization {dir_name}")
+                };
+                models.push(DownloadedModel {
+                    name,
+                    provider: "diarization".to_string(),
+                    path,
+                    size_bytes: total_size,
+                    downloaded_at: modified.unwrap_or_else(std::time::SystemTime::now),
+                });
+            }
+        }
+
         // The macOS MLX sidecar's stub asset listing has been removed along
         // with the retired engine (see `PlatformEngine::MacosMlxSidecar` and
         // `mlx_sidecar::probe`). Any leftover `models/mlx/manifest.json` from
@@ -1424,12 +1715,34 @@ impl DownloadManager {
             }
         }
 
-        // Check Qwen3-ASR models
+        // Check Qwen3-ASR models. The shipped bundle is seven flat files
+        // directly under `models/qwen3_asr` (see asr/qwen3_asr.rs), so they
+        // are summed into one entry; a subdirectory is listed as its own
+        // bundle in case a later export moves to per-model directories.
         let qwen3_dir = self.models_dir.join("qwen3_asr");
         if qwen3_dir.exists() {
+            let mut flat_size = 0u64;
+            let mut flat_files = 0usize;
+            let mut flat_modified: Option<std::time::SystemTime> = None;
             let mut entries = tokio::fs::read_dir(&qwen3_dir).await?;
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
+                if path.is_file() {
+                    if is_internal_model_metadata_file(&path) {
+                        continue;
+                    }
+                    if let Ok(metadata) = entry.metadata().await {
+                        flat_size += metadata.len();
+                        flat_files += 1;
+                        if let Ok(modified) = metadata.modified() {
+                            flat_modified = Some(match flat_modified {
+                                Some(existing) if existing >= modified => existing,
+                                _ => modified,
+                            });
+                        }
+                    }
+                    continue;
+                }
                 if path.is_dir() {
                     let name = path
                         .file_name()
@@ -1464,27 +1777,133 @@ impl DownloadManager {
                     }
                 }
             }
+            if flat_files > 0 {
+                models.push(DownloadedModel {
+                    name: "qwen3-asr-0.6b".to_string(),
+                    provider: "qwen3_asr".to_string(),
+                    path: qwen3_dir.clone(),
+                    size_bytes: flat_size,
+                    downloaded_at: flat_modified.unwrap_or_else(std::time::SystemTime::now),
+                });
+            }
         }
 
-        // Check punctuation models
-        let punct_dir = self.models_dir.join("punctuation");
-        if punct_dir.exists() {
-            let onnx = punct_dir.join("punct_cap_seg_en.onnx");
-            let tokenizer = punct_dir.join("spe_32k_lc_en.model");
-            if onnx.is_file() && tokenizer.is_file() {
-                let mut total_size = 0u64;
-                if let Ok(meta) = tokio::fs::metadata(&onnx).await {
-                    total_size += meta.len();
+        // Check the local Cohere Transcribe bundle: eight flat files under
+        // `models/cohere_local` (see asr/cohere_local.rs), summed into one
+        // entry. At 2.0 GiB it is the largest thing this app downloads, so a
+        // user looking for disk to reclaim has to be able to see it.
+        let cohere_local_dir = self
+            .models_dir
+            .join(crate::asr::cohere_local::COHERE_LOCAL_MODEL_DIR);
+        if cohere_local_dir.exists() {
+            let mut total_size = 0u64;
+            let mut files = 0usize;
+            let mut modified: Option<std::time::SystemTime> = None;
+            let mut entries = tokio::fs::read_dir(&cohere_local_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if !path.is_file() || is_internal_model_metadata_file(&path) {
+                    continue;
                 }
-                if let Ok(meta) = tokio::fs::metadata(&tokenizer).await {
-                    total_size += meta.len();
+                if let Ok(metadata) = entry.metadata().await {
+                    total_size += metadata.len();
+                    files += 1;
+                    if let Ok(entry_modified) = metadata.modified() {
+                        modified = Some(match modified {
+                            Some(existing) if existing >= entry_modified => existing,
+                            _ => entry_modified,
+                        });
+                    }
                 }
+            }
+            if files > 0 {
                 models.push(DownloadedModel {
-                    name: "punct_cap_seg_en".to_string(),
-                    provider: "punctuation".to_string(),
-                    path: punct_dir,
+                    name: crate::asr::cohere_local::COHERE_LOCAL_MODEL_ID.to_string(),
+                    provider: "cohere_local".to_string(),
+                    path: cohere_local_dir.clone(),
                     size_bytes: total_size,
-                    downloaded_at: std::time::SystemTime::now(),
+                    downloaded_at: modified.unwrap_or_else(std::time::SystemTime::now),
+                });
+            }
+        }
+
+        // Check the bundled dictation-cleanup model. Four flat files directly
+        // under `models/bundled_cleanup` (see llm/bundled_local.rs), summed
+        // into one entry like the Qwen3-ASR bundle above.
+        //
+        // Without this branch the largest single thing the app downloads --
+        // 473 MiB -- was invisible in the models list and missing from the
+        // storage total, so a user looking for what to delete could neither
+        // see it nor account for the disk it had used.
+        let bundled_cleanup_dir = self
+            .models_dir
+            .join(crate::llm::bundled_local::MODEL_DIR_NAME);
+        if bundled_cleanup_dir.exists() {
+            let mut total_size = 0u64;
+            let mut files = 0usize;
+            let mut modified: Option<std::time::SystemTime> = None;
+            let mut entries = tokio::fs::read_dir(&bundled_cleanup_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if !path.is_file() || is_internal_model_metadata_file(&path) {
+                    continue;
+                }
+                if let Ok(metadata) = entry.metadata().await {
+                    total_size += metadata.len();
+                    files += 1;
+                    if let Ok(entry_modified) = metadata.modified() {
+                        modified = Some(match modified {
+                            Some(existing) if existing >= entry_modified => existing,
+                            _ => entry_modified,
+                        });
+                    }
+                }
+            }
+            if files > 0 {
+                models.push(DownloadedModel {
+                    // The license requires this exact name wherever the model
+                    // is named: "S1-mini" by "Superwhisper".
+                    name: format!(
+                        "{} by {}",
+                        crate::llm::bundled_local::MODEL_DISPLAY_NAME,
+                        crate::llm::bundled_local::MODEL_VENDOR
+                    ),
+                    provider: crate::llm::bundled_local::PROVIDER_SETTINGS_VALUE.to_string(),
+                    path: bundled_cleanup_dir.clone(),
+                    size_bytes: total_size,
+                    downloaded_at: modified.unwrap_or_else(std::time::SystemTime::now),
+                });
+            }
+        }
+
+        // Check transcribe.cpp models. Flat, like the Qwen3 bundle, but every
+        // model is one self-contained GGUF, so each file is its own entry
+        // rather than a summed bundle -- `delete_model` removes a file, so a
+        // directory-shaped entry would be listed and then refuse to delete.
+        //
+        // Deliberately NOT behind `#[cfg(feature = "asr-transcribe-cpp")]`: the
+        // directory is left on disk by any build that ever ran the spike, and a
+        // release build that cannot list it is a release build in which 1.42 GiB
+        // of weights are invisible and undeletable from the model manager.
+        let transcribe_cpp_dir = self.models_dir.join("transcribe_cpp");
+        if transcribe_cpp_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&transcribe_cpp_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if !path.is_file() || is_internal_model_metadata_file(&path) {
+                    continue;
+                }
+                let Ok(metadata) = entry.metadata().await else {
+                    continue;
+                };
+                models.push(DownloadedModel {
+                    name: entry.file_name().to_string_lossy().to_string(),
+                    provider: "transcribe_cpp".to_string(),
+                    path,
+                    size_bytes: metadata.len(),
+                    downloaded_at: metadata
+                        .modified()
+                        .unwrap_or_else(|_| std::time::SystemTime::now()),
                 });
             }
         }
@@ -1533,6 +1952,22 @@ impl DownloadManager {
                 "Refusing to delete file outside models directory: {:?}",
                 path
             ));
+        }
+        if canonical == models_canonical {
+            return Err(anyhow::anyhow!(
+                "Refusing to delete the models directory itself: {:?}",
+                path
+            ));
+        }
+
+        // Several listed models are bundles: a directory of files with their
+        // receipts beside them (speakrs, Qwen3-ASR, the cleanup model). The
+        // listing hands back the directory as the deletable path, so deleting
+        // one has to remove the directory rather than fail on `remove_file`.
+        if canonical.is_dir() {
+            tokio::fs::remove_dir_all(&canonical).await?;
+            tracing::info!("Deleted model bundle at {:?}", canonical);
+            return Ok(());
         }
 
         tokio::fs::remove_file(&canonical).await?;
@@ -1917,6 +2352,157 @@ mod tests {
             .all(|character| character.is_ascii_hexdigit()));
     }
 
+    /// The feature gate has to cover the download path, not only the picker: a
+    /// default build that listed no speakrs entry but still fetched the bundle
+    /// when asked by id would ship a route to weights whose license is
+    /// unresolved. The id is written out rather than referenced, because
+    /// `SPEAKRS_MODEL_ID` does not exist in this build -- which is the point.
+    #[cfg(not(feature = "diarization-speakrs"))]
+    #[tokio::test]
+    async fn a_default_build_refuses_to_download_the_speakrs_bundle() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-speakrs-gate")
+            .join(uuid::Uuid::new_v4().to_string());
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+
+        let error = manager
+            .download_diarization_model_by_id("speakrs_community1", |_| {})
+            .await
+            .expect_err("a build without the backend must not fetch its weights");
+        assert!(
+            error.to_string().contains("Unknown diarization model"),
+            "got {error}"
+        );
+
+        // Nor is the bundle reachable as a "trusted" artifact by that id.
+        assert!(!is_diarization_model_artifact_trusted(
+            "speakrs_community1",
+            &models_dir.join("diarization").join("speakrs")
+        ));
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    #[test]
+    fn speakrs_bundle_is_pinned_by_revision_hash_and_size() {
+        // The bundle is only useful whole: speakrs's CPU pipeline loads the
+        // segmentation ONNX, the embedding ONNX with its external weights, and
+        // six PLDA arrays plus the min-samples marker.
+        assert_eq!(SPEAKRS_BUNDLE.len(), 10);
+
+        let mut names: Vec<&str> = SPEAKRS_BUNDLE.iter().map(|f| f.file_name).collect();
+        names.sort_unstable();
+        let mut unique = names.clone();
+        unique.dedup();
+        assert_eq!(names, unique, "bundle file names must be unique");
+        assert!(names.contains(&"segmentation-3.0.onnx"));
+        assert!(names.contains(&"wespeaker-voxceleb-resnet34.onnx"));
+        assert!(names.contains(&"wespeaker-voxceleb-resnet34.onnx.data"));
+
+        for file in SPEAKRS_BUNDLE {
+            // Pinned to one immutable revision: `/resolve/main/` would let the
+            // upstream repo swap weights under a hash we verified once.
+            assert!(
+                !file.url.contains("/resolve/main/"),
+                "{} must not track a branch",
+                file.file_name
+            );
+            assert!(
+                file.url
+                    .starts_with("https://huggingface.co/avencera/speakrs-models/resolve/"),
+                "{} must come from the pinned model repo",
+                file.file_name
+            );
+            assert!(
+                file.url.ends_with(file.file_name),
+                "{} URL and destination name must agree",
+                file.file_name
+            );
+            assert_eq!(file.sha256.len(), 64, "{}", file.file_name);
+            assert!(file
+                .sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()));
+            assert!(file.max_bytes > 0, "{}", file.file_name);
+        }
+
+        // One revision for the whole bundle, or the PLDA arrays could come
+        // from a different export than the embedder they transform.
+        let revisions: std::collections::BTreeSet<&str> = SPEAKRS_BUNDLE
+            .iter()
+            .filter_map(|file| file.url.split("/resolve/").nth(1))
+            .filter_map(|rest| rest.split('/').next())
+            .collect();
+        assert_eq!(revisions.len(), 1, "bundle must pin a single revision");
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    #[tokio::test]
+    async fn a_model_bundle_is_trusted_only_when_every_file_is() {
+        use sha2::Digest as _;
+
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-speakrs-bundle")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("temp dir");
+
+        // Fixture stand-ins for the real weights: the rule under test is
+        // "every file, with a receipt, matching its pin", which does not
+        // depend on the bytes being 26 MB of ONNX.
+        let names = ["segmentation.onnx", "weights.data", "plda.npy"];
+        let mut expected: Vec<(String, String)> = Vec::new();
+        for name in names {
+            let contents = format!("speakrs-fixture-{name}");
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(contents.as_bytes());
+            expected.push((name.to_string(), hex::encode(hasher.finalize())));
+            tokio::fs::write(test_dir.join(name), contents)
+                .await
+                .expect("write fixture");
+        }
+        let pins = || {
+            expected
+                .iter()
+                .map(|(name, sha)| (name.as_str(), sha.as_str()))
+        };
+
+        // Bytes alone are not enough: readiness follows the receipt.
+        assert!(!is_bundle_trusted(&test_dir, pins()));
+
+        for (index, (name, sha)) in expected.iter().enumerate() {
+            record_model_integrity_receipt_for_tests(&test_dir.join(name), sha)
+                .await
+                .expect("receipt");
+            let complete = index + 1 == expected.len();
+            assert_eq!(
+                is_bundle_trusted(&test_dir, pins()),
+                complete,
+                "bundle with {} of {} receipts",
+                index + 1,
+                expected.len()
+            );
+        }
+
+        // One file swapped after verification invalidates the whole bundle,
+        // not just that file.
+        tokio::fs::write(test_dir.join(names[1]), "tampered")
+            .await
+            .expect("tamper");
+        assert!(!is_bundle_trusted(&test_dir, pins()));
+
+        // And the real table is wired to the same rule: nothing is downloaded
+        // here, so the shipped bundle must read as not installed.
+        assert!(!is_speakrs_bundle_trusted(&test_dir));
+
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    }
+
     #[tokio::test]
     async fn integrity_receipt_trusts_only_the_unchanged_verified_artifact() {
         let test_dir = std::env::temp_dir()
@@ -2207,6 +2793,304 @@ mod tests {
             listed.iter().all(|model| model.provider == "parakeet"),
             "both routes report the parakeet provider"
         );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn downloaded_model_listing_sums_the_flat_qwen3_bundle() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-qwen3-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let qwen3_dir = models_dir.join("qwen3_asr");
+        std::fs::create_dir_all(&qwen3_dir).expect("create qwen3 dir");
+        std::fs::write(qwen3_dir.join("encoder.int4.onnx"), vec![0u8; 1000]).expect("encoder");
+        std::fs::write(qwen3_dir.join("decoder_weights.int4.data"), vec![0u8; 500])
+            .expect("weights");
+        std::fs::write(qwen3_dir.join("config.json"), b"{}").expect("config");
+        std::fs::write(
+            qwen3_dir.join("config.json.plainsong-integrity"),
+            b"receipt",
+        )
+        .expect("receipt is metadata, not model footprint");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let qwen3: Vec<&DownloadedModel> = listed
+            .iter()
+            .filter(|model| model.provider == "qwen3_asr")
+            .collect();
+        assert_eq!(qwen3.len(), 1, "one flat bundle entry, got {qwen3:?}");
+        assert_eq!(qwen3[0].name, "qwen3-asr-0.6b");
+        assert_eq!(qwen3[0].path, qwen3_dir);
+        assert_eq!(
+            qwen3[0].size_bytes,
+            1000 + 500 + 2,
+            "the flat files are the footprint; the receipt is not"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// 473 MiB of dictation-cleanup weights were invisible here: the listing
+    /// had no branch for `models/bundled_cleanup`, so the Models screen could
+    /// not show them and the storage total did not count them.
+    #[tokio::test]
+    async fn downloaded_model_listing_sums_the_bundled_cleanup_model() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-bundled-cleanup-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let bundled_dir = models_dir.join(crate::llm::bundled_local::MODEL_DIR_NAME);
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled cleanup dir");
+        std::fs::write(bundled_dir.join("s1-mini-q4_k_m.gguf"), vec![0u8; 4_000]).expect("weights");
+        std::fs::write(bundled_dir.join("tokenizer.json"), vec![0u8; 900]).expect("tokenizer");
+        std::fs::write(bundled_dir.join("LICENSE"), vec![0u8; 80]).expect("license");
+        std::fs::write(bundled_dir.join("NOTICE"), vec![0u8; 20]).expect("notice");
+        std::fs::write(
+            model_integrity_receipt_path(&bundled_dir.join("LICENSE")),
+            b"receipt",
+        )
+        .expect("receipt is metadata, not model footprint");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let bundled: Vec<&DownloadedModel> = listed
+            .iter()
+            .filter(|model| model.provider == crate::llm::bundled_local::PROVIDER_SETTINGS_VALUE)
+            .collect();
+        assert_eq!(bundled.len(), 1, "one bundle entry, got {bundled:?}");
+        // Apache-2.0 + naming clause: this exact capitalization, wherever used.
+        assert_eq!(bundled[0].name, "S1-mini by Superwhisper");
+        assert_eq!(bundled[0].path, bundled_dir);
+        assert_eq!(
+            bundled[0].size_bytes,
+            4_000 + 900 + 80 + 20,
+            "every pinned file counts toward the footprint; the receipt does not"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// The transcribe.cpp GGUFs were invisible to the model manager: the
+    /// listing had no branch for `models/transcribe_cpp`, and `delete_model`
+    /// only ever removes something the listing surfaced, so 1.42 GiB of weights
+    /// could be downloaded and then neither seen nor reclaimed.
+    #[tokio::test]
+    async fn downloaded_model_listing_shows_and_can_delete_each_transcribe_cpp_gguf() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-transcribe-cpp-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let dir = models_dir.join("transcribe_cpp");
+        std::fs::create_dir_all(&dir).expect("create transcribe_cpp dir");
+        let parakeet = dir.join("parakeet-tdt-0.6b-v3-Q8_0.gguf");
+        let nemotron = dir.join("nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf");
+        std::fs::write(&parakeet, vec![0u8; 4096]).expect("parakeet gguf");
+        std::fs::write(&nemotron, vec![0u8; 2048]).expect("nemotron gguf");
+        std::fs::write(model_integrity_receipt_path(&parakeet), b"receipt").expect("receipt");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let spike: Vec<&DownloadedModel> = listed
+            .iter()
+            .filter(|model| model.provider == "transcribe_cpp")
+            .collect();
+        assert_eq!(
+            spike.len(),
+            2,
+            "one entry per GGUF, and the receipt is not one, got {spike:?}"
+        );
+        let listed_parakeet = spike
+            .iter()
+            .find(|model| model.path == parakeet)
+            .expect("the Parakeet GGUF must be listed");
+        assert_eq!(listed_parakeet.name, "parakeet-tdt-0.6b-v3-Q8_0.gguf");
+        assert_eq!(listed_parakeet.size_bytes, 4096);
+        assert!(spike.iter().any(|model| model.path == nemotron));
+
+        // Every entry names a file, so the path the listing hands back is one
+        // `delete_model` can actually remove -- with its receipt.
+        for model in [parakeet.clone(), nemotron.clone()] {
+            manager
+                .delete_model(&model)
+                .await
+                .unwrap_or_else(|error| panic!("delete {}: {error}", model.display()));
+            assert!(!model.exists());
+        }
+        assert!(!model_integrity_receipt_path(&parakeet).exists());
+        assert!(manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed")
+            .iter()
+            .all(|model| model.provider != "transcribe_cpp"));
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// The four speaker embedders and any speakrs bundle were downloaded into
+    /// `models/diarization` and then never listed, so the Models screen could
+    /// not show them and `delete_model` had no path to hand back.
+    #[tokio::test]
+    async fn downloaded_model_listing_includes_diarization_models_and_bundles() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-diarization-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let diarization_dir = models_dir.join("diarization");
+        let bundle_dir = diarization_dir.join(SPEAKRS_BUNDLE_DIR);
+        std::fs::create_dir_all(&bundle_dir).expect("create bundle dir");
+
+        std::fs::write(
+            diarization_dir.join("ecapa_tdnn_speaker.onnx"),
+            vec![0u8; 2_000],
+        )
+        .expect("ecapa");
+        std::fs::write(
+            diarization_dir.join("campplus_speaker.onnx"),
+            vec![0u8; 3_000],
+        )
+        .expect("campplus");
+        std::fs::write(
+            model_integrity_receipt_path(&diarization_dir.join("campplus_speaker.onnx")),
+            b"receipt",
+        )
+        .expect("receipt is metadata, not model footprint");
+        std::fs::write(bundle_dir.join("segmentation-3.0.onnx"), vec![0u8; 500]).expect("seg");
+        std::fs::write(bundle_dir.join("plda_lda.npy"), vec![0u8; 120]).expect("plda");
+        std::fs::write(
+            model_integrity_receipt_path(&bundle_dir.join("plda_lda.npy")),
+            b"receipt",
+        )
+        .expect("bundle receipt");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let diarization: Vec<&DownloadedModel> = listed
+            .iter()
+            .filter(|model| model.provider == "diarization")
+            .collect();
+        assert_eq!(
+            diarization.len(),
+            3,
+            "two embedders and one bundle: {diarization:?}"
+        );
+
+        let ecapa = diarization
+            .iter()
+            .find(|model| model.path == diarization_dir.join("ecapa_tdnn_speaker.onnx"))
+            .expect("ECAPA listed");
+        // The picker's own label, so a row can be matched to the entry that
+        // downloaded it.
+        assert_eq!(ecapa.name, "Speaker embedding ECAPA-TDNN 512");
+        assert_eq!(ecapa.size_bytes, 2_000);
+
+        let campplus = diarization
+            .iter()
+            .find(|model| model.path == diarization_dir.join("campplus_speaker.onnx"))
+            .expect("CAM++ listed");
+        assert_eq!(campplus.name, "Speaker embedding CAM++");
+        assert_eq!(campplus.size_bytes, 3_000);
+
+        let bundle = diarization
+            .iter()
+            .find(|model| model.path == bundle_dir)
+            .expect("speakrs bundle listed as one entry");
+        assert!(bundle.name.contains("community-1"), "{}", bundle.name);
+        assert_eq!(
+            bundle.size_bytes,
+            500 + 120,
+            "the bundle's files are the footprint; the receipts are not"
+        );
+        assert!(
+            listed
+                .iter()
+                .all(|model| !is_internal_model_metadata_file(&model.path)),
+            "receipts must not be listed as models"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// A bundle is listed by its directory, so deleting one has to remove the
+    /// directory. `remove_file` returned an error on every bundle entry, which
+    /// is why the speakrs bundle (and the Qwen3-ASR and cleanup bundles beside
+    /// it) could be seen but not deleted.
+    #[tokio::test]
+    async fn deleting_a_model_bundle_removes_the_whole_directory() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-delete-bundle")
+            .join(uuid::Uuid::new_v4().to_string());
+        let bundle_dir = models_dir.join("diarization").join(SPEAKRS_BUNDLE_DIR);
+        std::fs::create_dir_all(&bundle_dir).expect("create bundle dir");
+        let payload = bundle_dir.join("segmentation-3.0.onnx");
+        std::fs::write(&payload, b"weights").expect("write payload");
+        std::fs::write(model_integrity_receipt_path(&payload), b"receipt").expect("write receipt");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        manager
+            .delete_model(&bundle_dir)
+            .await
+            .expect("a bundle directory is deletable");
+
+        assert!(!bundle_dir.exists(), "the bundle and its receipts are gone");
+        assert!(
+            models_dir.join("diarization").exists(),
+            "only the bundle is removed, not its parent"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn deleting_the_models_directory_itself_is_refused() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-delete-root")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(models_dir.join("diarization")).expect("create models dir");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let error = manager
+            .delete_model(&models_dir)
+            .await
+            .expect_err("the managed root is not a model");
+        assert!(
+            error.to_string().contains("models directory itself"),
+            "got {error}"
+        );
+        assert!(models_dir.exists());
 
         std::fs::remove_dir_all(&models_dir).ok();
     }

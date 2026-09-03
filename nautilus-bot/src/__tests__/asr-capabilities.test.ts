@@ -14,15 +14,64 @@ import {
   isMeetingEligibleModel,
   isMeetingEligibleProvider,
   isSharedMeetingCompatible,
+  providerReturnsSpeakerLabels,
   resolveAsrLanguageBoundary,
 } from "@/lib/asr-capabilities";
+import { compareStrings } from "@/lib/format-locale";
 
 describe("ASR capability mappings", () => {
   it("recognises only the engines this build can still run", () => {
-    expect(ASR_PROVIDER_TYPES).toHaveLength(12);
+    // 12 engines that shipped before September 2026, plus Deepgram, Gemini
+    // Transcribe and the offline Cohere Transcribe route, plus
+    // `transcribe_cpp`, which only a sidecar built with
+    // `--features asr-transcribe-cpp` ever reports. The renderer keeps a name
+    // for that one so a developer build's route renders instead of silently
+    // vanishing from the picker; nothing in a release build sends it.
+    expect(ASR_PROVIDER_TYPES).toHaveLength(16);
     expect(isKnownAsrProvider("whisper")).toBe(true);
     expect(isKnownAsrProvider("parakeet")).toBe(true);
     expect(isKnownAsrProvider("macos_apple_speech")).toBe(true);
+    expect(isKnownAsrProvider("deepgram")).toBe(true);
+    expect(isKnownAsrProvider("gemini_transcribe")).toBe(true);
+    expect(isKnownAsrProvider("transcribe_cpp")).toBe(true);
+    expect(isKnownAsrProvider("cohere_local")).toBe(true);
+  });
+
+  it("names only the providers that actually return speaker labels", () => {
+    // This set is what decides whether a meeting keeps the provider's speakers
+    // or pays for a local diarization pass, so a provider must not appear here
+    // on the strength of being a cloud route. None of the four cloud providers
+    // that shipped before September 2026 returns labels at all.
+    expect(providerReturnsSpeakerLabels("deepgram")).toBe(true);
+    expect(providerReturnsSpeakerLabels("gemini_transcribe")).toBe(true);
+    for (const providerType of [
+      "openai_cloud",
+      "groq",
+      "elevenlabs_scribe",
+      "cohere_transcribe",
+      "parakeet",
+      "whisper",
+      "distil_whisper",
+      "qwen3_asr",
+      "macos_apple_speech",
+    ] as const) {
+      expect(
+        providerReturnsSpeakerLabels(providerType),
+        `${providerType} does not return speaker labels`,
+      ).toBe(false);
+    }
+  });
+
+  it("keeps the websocket-only Gemini model out of the meeting lane", () => {
+    // gemini-3.5-transcribe-live cannot diarize and is not served by the batch
+    // interactions endpoint the provider posts to.
+    expect(isMeetingEligibleModel("gemini_transcribe", "gemini-3.5-transcribe")).toBe(true);
+    expect(isMeetingEligibleModel("gemini_transcribe", "gemini-3.5-transcribe-live")).toBe(
+      false,
+    );
+    expect(isMeetingEligibleModel("deepgram", "nova-3")).toBe(true);
+    expect(isMeetingEligibleModel("deepgram", "nova-3-medical")).toBe(true);
+    expect(isMeetingEligibleModel("deepgram", "flux")).toBe(false);
   });
 
   it("rejects the deleted Python-backed engines a stale settings file may still name", () => {
@@ -34,7 +83,9 @@ describe("ASR capability mappings", () => {
   });
 
   it("keeps frontend provider eligibility aligned with backend meeting rules", () => {
-    expect(isDictationOnlyProvider("whisper")).toBe(true);
+    // whisper.cpp is per model (see the matrix below), so the provider as a
+    // whole is neither dictation-only nor meeting-grade.
+    expect(isDictationOnlyProvider("whisper")).toBe(false);
     expect(isDictationOnlyProvider("moonshine")).toBe(true);
     expect(isDictationOnlyProvider("whisper_candle")).toBe(true);
     expect(isMeetingEligibleProvider("distil_whisper")).toBe(true);
@@ -45,6 +96,18 @@ describe("ASR capability mappings", () => {
     expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-0.6b-v3")).toBe(true);
     expect(isSharedMeetingCompatible("whisper", "base.en")).toBe(false);
     expect(isSharedMeetingCompatible("whisper_candle", "whisper-large-v3-turbo")).toBe(false);
+  });
+
+  it("admits only the multilingual whisper.cpp models from small up to the meeting lane", () => {
+    // Mirrors WHISPER_MEETING_MODEL_IDS in rust-sidecar/src/lib.rs.
+    for (const modelId of ["small", "medium", "large-v3", "large-v3-turbo"]) {
+      expect(isSharedMeetingCompatible("whisper", modelId)).toBe(true);
+    }
+    for (const modelId of ["tiny", "tiny.en", "base", "base.en", "small.en", "medium.en"]) {
+      expect(isSharedMeetingCompatible("whisper", modelId)).toBe(false);
+    }
+    // No meeting-safe default: the provider default is base.en.
+    expect(isMeetingEligibleModel("whisper", "")).toBe(false);
   });
 
   it("keeps the short-form legacy Parakeet export out of the meeting lane", () => {
@@ -201,6 +264,14 @@ describe("ASR model capability metadata", () => {
     expect(cap?.sizeMib).toBe(1927);
     expect(cap?.pauseBehavior).toBe("encoder_decoder");
     expect(cap?.tier).toBe("more");
+    // English is the only language exercised with real audio in Plainsong;
+    // the copy must say so and must name the CPU cost, not hide it.
+    expect(cap?.languageEvidence.verifiedLanguages).toEqual(["English"]);
+    const summary = describeAsrModel("qwen3_asr", "qwen3-asr-0.6b");
+    expect(summary).toContain("English verified in Plainsong");
+    expect(summary).toContain("experimental");
+    expect(summary).toContain("real time");
+    expect(summary).not.toContain("gated");
   });
 
   it("treats Qwen3-ASR as meeting-eligible to match the Rust side", () => {
@@ -256,6 +327,36 @@ describe("language boundaries", () => {
     }
   });
 
+  it("says whose claim a diarizing cloud route's languages are", () => {
+    // Neither has a capability-table entry -- that table is about downloads,
+    // and a hosted route has none -- so both used to fall through to the
+    // generic "the selected model's languages", which tells a user nothing
+    // about a route they are paying per minute for.
+    expect(getAsrModelCapability("deepgram", "nova-3")).toBeNull();
+    expect(
+      getAsrModelCapability("gemini_transcribe", "gemini-3.5-transcribe"),
+    ).toBeNull();
+
+    for (const [provider, model, expected] of [
+      ["deepgram", "nova-3", "multilingual code-switching, listed by Deepgram"],
+      ["deepgram", "nova-3-medical", "English, listed by Deepgram"],
+      [
+        "gemini_transcribe",
+        "gemini-3.5-transcribe",
+        "85+ languages, listed by Google",
+      ],
+    ] as const) {
+      const boundary = resolveAsrLanguageBoundary(provider, model);
+      // Unenumerated, not enumerated: Plainsong has never exercised these
+      // sets, and a fabricated list in the session-language picker would be a
+      // capability claim the app cannot back.
+      expect(boundary.kind).toBe("unenumerated");
+      expect(boundary.label).toBe(expected);
+      expect(boundary.label).not.toBe("the selected model's languages");
+      expect(asrLanguageOptions(boundary)).toEqual([]);
+    }
+  });
+
   it("gives a hosted Whisper release its own published coverage", () => {
     expect(getAsrModelCapability("openai_cloud", "whisper-1")).toBeNull();
 
@@ -293,10 +394,26 @@ describe("language boundaries", () => {
   });
 
   it("says so rather than guessing when the set is not known", () => {
-    expect(resolveAsrLanguageBoundary("qwen3_asr", "qwen3-asr-0.6b").kind).toBe(
+    expect(resolveAsrLanguageBoundary("elevenlabs_scribe", "scribe_v2").kind).toBe(
       "unenumerated",
     );
     expect(resolveAsrLanguageBoundary(null, null).kind).toBe("unenumerated");
+  });
+
+  it("names Qwen3-ASR's 30 languages, including Chinese, Japanese and Korean", () => {
+    const boundary = resolveAsrLanguageBoundary("qwen3_asr", "qwen3-asr-0.6b");
+    expect(boundary.kind).toBe("enumerated");
+    if (boundary.kind !== "enumerated") {
+      throw new Error("expected an enumerated boundary");
+    }
+    expect(boundary.codes).toHaveLength(30);
+    for (const code of ["en", "zh", "ja", "ko", "yue", "fil"]) {
+      expect(boundary.codes).toContain(code);
+    }
+    expect(boundary.label).toBe("30 languages + 22 Chinese dialects");
+    const labels = asrLanguageOptions(boundary).map((option) => option.label);
+    expect(labels).toContain("Filipino");
+    expect(labels).toContain("Cantonese");
   });
 
   it("names and sorts the options it hands the picker", () => {
@@ -305,7 +422,7 @@ describe("language boundaries", () => {
     );
 
     expect(options).toHaveLength(25);
-    expect(options[0].label.localeCompare(options[1].label)).toBeLessThanOrEqual(0);
+    expect(compareStrings(options[0].label, options[1].label)).toBeLessThanOrEqual(0);
     expect(options).toContainEqual({ value: "uk", label: "Ukrainian" });
     expect(asrLanguageName("yue")).toBe("Cantonese");
     // An unnamed code degrades to itself rather than to a blank row.

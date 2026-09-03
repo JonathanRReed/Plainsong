@@ -7,6 +7,8 @@ import type { Recording } from "@/types";
 import * as backend from "@/lib/backend";
 import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
 import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/navigation";
+import { publishCallCaptureRequest } from "@/lib/call-capture-request";
+import { formatDateTime } from "@/lib/format-locale";
 
 const speechSynthesisMock = {
   speak: vi.fn(),
@@ -267,11 +269,29 @@ vi.mock("@/lib/backend", () => ({
   getRecording: vi.fn(async () => ({})) as any,
   getRecordingWaveform: vi.fn() as any,
   openRecordingAudio: vi.fn() as any,
+  prepareRecordingPlayback: vi.fn(async (recordingId: string) => ({
+    token: "0123456789abcdef0123456789abcdef",
+    url: "plainsong://playback/0123456789abcdef0123456789abcdef",
+    recordingId,
+    protection: "plaintext",
+    durationSeconds: 14,
+  })) as any,
+  releaseRecordingPlayback: vi.fn(async () => {}) as any,
   getSpeakers: vi.fn() as any,
   getTranscript: vi.fn(async () => ({})) as any,
   getMeetingTranscriptDetails: vi.fn(async () => ({})) as any,
   runDiarization: vi.fn() as any,
   renameSpeaker: vi.fn() as any,
+  suggestSpeakerVoices: vi.fn(async () => ({
+    enabled: false,
+    clusters: [],
+    nameOptions: [],
+  })) as any,
+  rememberSpeakerVoice: vi.fn(async () => ({
+    profileId: "p-dana",
+    displayName: "Dana",
+  })) as any,
+  rejectSpeakerVoice: vi.fn(async () => {}) as any,
   deleteRecording: vi.fn() as any,
   renameRecording: vi.fn() as any,
   retranscribeRecording: vi.fn() as any,
@@ -280,6 +300,7 @@ vi.mock("@/lib/backend", () => ({
   revalidateRecordingAudio: vi.fn(async () => ({})) as any,
   acknowledgeIncompleteTranscript: vi.fn(async () => ({})) as any,
   setRecordingSourceType: vi.fn() as any,
+  importAudioFile: vi.fn(async () => null) as any,
   isDiarizationModelAvailable: vi.fn(async () => false) as any,
   getMeetingChatMessages: vi.fn(async () => []) as any,
   updateMeetingChatMessages: vi.fn(async () => {}) as any,
@@ -446,6 +467,16 @@ describe("RecordingsView", () => {
     });
     backend.getSpeakers.mockResolvedValue([]);
     backend.renameSpeaker.mockResolvedValue(undefined);
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: false,
+      clusters: [],
+      nameOptions: [],
+    });
+    backend.rememberSpeakerVoice.mockResolvedValue({
+      profileId: "p-dana",
+      displayName: "Dana",
+    });
+    backend.rejectSpeakerVoice.mockResolvedValue(undefined);
     backend.editTranscriptSpeakerTurn.mockResolvedValue(undefined);
     backend.deleteRecording.mockResolvedValue(undefined);
     backend.searchTranscripts.mockResolvedValue([]);
@@ -2210,6 +2241,48 @@ describe("RecordingsView", () => {
     expect(screen.getByLabelText("Meeting title")).toHaveValue("Weekly sync");
   });
 
+  it("carries the accepted call offer's id and service into the capture", async () => {
+    // The sidecar binds this meeting's auto-stop to exactly this call. A
+    // capture that arrived without the id would let any call that happened to
+    // be live when it started stop it later.
+    startMeeting.mockResolvedValueOnce("r-live");
+    publishCallCaptureRequest({
+      callId: 12,
+      app: "zoom",
+      appLabel: "Zoom",
+      videoService: "zoom",
+      detectedAtMs: new Date(2026, 8, 2, 14, 5, 0).getTime(),
+    });
+
+    render(<RecordingsView />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalledWith(
+        expect.objectContaining({ detectedCallId: 12, videoService: "zoom" }),
+      );
+    });
+    await waitFor(() => {
+      expect(backend.renameRecording).toHaveBeenCalledWith("r-live", "Zoom call, 14:05");
+    });
+  });
+
+  it("starts a meeting nobody offered without binding it to a call", async () => {
+    startMeeting.mockResolvedValueOnce("r-live");
+
+    render(<RecordingsView />);
+
+    fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
+
+    await waitFor(() => {
+      expect(startMeeting).toHaveBeenCalledWith(
+        expect.objectContaining({ detectedCallId: undefined, videoService: undefined }),
+      );
+    });
+  });
+
   it("starts meeting capture after consent and stops an active meeting", async () => {
     startMeeting.mockResolvedValueOnce("r-live");
 
@@ -2516,7 +2589,7 @@ describe("RecordingsView", () => {
 
       // The banner used to live only in the list branch, so the workspace's own
       // Play audio failed with nothing on screen but a toast.
-      fireEvent.click(screen.getByRole("button", { name: "Play audio" }));
+      fireEvent.click(screen.getByRole("button", { name: "Open audio file" }));
 
       expect(
         await screen.findByText(
@@ -2539,7 +2612,7 @@ describe("RecordingsView", () => {
 
     fireEvent.click(screen.getByText("Weekly sync"));
     await screen.findByText("The record");
-    fireEvent.click(screen.getByRole("button", { name: "Play audio" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open audio file" }));
     expect(await screen.findByText("Audio file is missing.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "All meetings" }));
@@ -2941,7 +3014,7 @@ describe("RecordingsView", () => {
     // and again in the header strip, so a bare date here is unreadable.
     expect(
       screen.getByText(
-        `ollama · llama3.2 · finished ${new Date("2026-07-25T12:00:00.000Z").toLocaleString()}`
+        `ollama · llama3.2 · finished ${formatDateTime("2026-07-25T12:00:00.000Z")}`
       )
     ).toBeInTheDocument();
   });
@@ -3793,5 +3866,304 @@ describe("RecordingsView", () => {
       ).not.toBeInTheDocument();
       expect(screen.queryByText("Connect your calendar")).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("RecordingsView remembered voices", () => {
+  /**
+   * Renaming has to work on a meeting that was diarized before "Remember
+   * voices" was ever turned on. Such a meeting has no signature for any of its
+   * clusters, the sidecar refuses `rememberSpeakerVoice`, and taking the
+   * remember branch anyway made an ordinary rename impossible there.
+   */
+  it("falls back to a plain rename when the cluster has no voice signature", async () => {
+    backend.getSpeakers.mockResolvedValue([
+      { id: "speaker_0", name: "Speaker 1", color: "#000", sampleCount: 1 },
+    ]);
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [],
+      nameOptions: [],
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.speakerVoices).toEqual({});
+    });
+
+    backend.renameSpeaker.mockClear();
+    backend.rememberSpeakerVoice.mockClear();
+
+    await act(async () => {
+      await transcriptViewerProps.current.onRenameSpeaker(
+        "speaker_0",
+        "Alice",
+        true,
+      );
+    });
+
+    expect(backend.rememberSpeakerVoice).not.toHaveBeenCalled();
+    expect(backend.renameSpeaker).toHaveBeenCalledWith("r1", "speaker_0", "Alice");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current.speakerNames).toEqual({
+        speaker_0: "Alice",
+      });
+    });
+  });
+
+  it("remembers the voice when the cluster does have a signature", async () => {
+    backend.getSpeakers.mockResolvedValue([
+      { id: "speaker_0", name: "Speaker 1", color: "#000", sampleCount: 1 },
+    ]);
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [
+        { speakerId: "speaker_0", appliedProfileId: null, matchState: null, suggestion: null },
+      ],
+      nameOptions: [],
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(transcriptViewerProps.current?.speakerVoices).toHaveProperty("speaker_0");
+    });
+
+    // This suite does not reset call history between cases, and the fallback
+    // test above renames through the same mock.
+    backend.renameSpeaker.mockClear();
+    backend.rememberSpeakerVoice.mockClear();
+
+    await act(async () => {
+      await transcriptViewerProps.current.onRenameSpeaker(
+        "speaker_0",
+        "Dana",
+        true,
+      );
+    });
+
+    expect(backend.rememberSpeakerVoice).toHaveBeenCalledWith({
+      recordingId: "r1",
+      speakerId: "speaker_0",
+      name: "Dana",
+    });
+    expect(backend.renameSpeaker).not.toHaveBeenCalled();
+  });
+
+  /**
+   * "Delete all" in Settings used to leave the open transcript offering names
+   * for voices that no longer existed, because the suggestions were only
+   * re-asked when the selected meeting changed.
+   */
+  it("clears the chips on the open transcript when a remembered voice is forgotten", async () => {
+    backend.getSpeakers.mockResolvedValue([
+      { id: "speaker_0", name: "Speaker 1", color: "#000", sampleCount: 1 },
+    ]);
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [
+        {
+          speakerId: "speaker_0",
+          appliedProfileId: null,
+          matchState: null,
+          suggestion: { profileId: "p-dana", displayName: "Dana", percent: 91 },
+        },
+      ],
+      nameOptions: ["Dana"],
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByText("The record");
+    await waitFor(() => {
+      expect(
+        transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion,
+      ).toMatchObject({ displayName: "Dana" });
+    });
+
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [],
+      nameOptions: [],
+    });
+
+    await act(async () => {
+      eventListeners.get("remembered-voices-changed")?.({
+        payload: { removed: 1 },
+      });
+    });
+
+    await waitFor(() => {
+      expect(transcriptViewerProps.current.speakerVoices).toEqual({});
+      expect(transcriptViewerProps.current.speakerNameOptions).toEqual([]);
+    });
+  });
+});
+
+describe("RecordingsView audio import", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    recordingsLoading = false;
+    recordingsHaveLoaded = true;
+    recordingsError = null;
+    recordingState = {
+      isRecording: false,
+      recordingId: null,
+      formattedDuration: "00:00",
+      meetingPhase: "idle",
+      meetingMessage: null,
+    };
+    readinessContext.productReadiness = {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", state: "ready", cause: null },
+      meetings: { domain: "meetings", state: "ready", cause: null },
+      meetingsCapture: {
+        domain: "meetings_capture",
+        state: "ready",
+        cause: null,
+      },
+      fullCapture: { domain: "full_capture", state: "ready", cause: null },
+      overall: { domain: "overall", state: "ready", cause: null },
+    };
+    recordings = [
+      {
+        id: "r1",
+        title: "Weekly sync",
+        projectId: "default",
+        duration: 120,
+        createdAt: "2026-03-06T12:00:00Z",
+        updatedAt: "2026-03-06T12:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/weekly-sync.wav",
+        meetingCaptureMode: "me_and_them",
+        status: "completed" as const,
+      } as Recording,
+    ];
+    backend.getRecording.mockResolvedValue({ ...recordings[0] });
+    backend.getTranscript.mockResolvedValue({
+      id: "t1",
+      recordingId: "r1",
+      segments: [],
+      fullText: "",
+      language: "en",
+      confidence: 0.9,
+      model: "parakeet",
+      createdAt: "2026-03-06T12:02:00Z",
+    });
+    backend.getMeetingTranscriptDetails.mockResolvedValue({});
+  });
+
+  it("offers Import audio beside New meeting and hands the picker's file to the sidecar", async () => {
+    backend.importAudioFile.mockResolvedValue({
+      recordingId: "r2",
+      title: "Q3 planning call",
+      sourceFileName: "Q3 planning call.m4a",
+      durationSeconds: 1800,
+    });
+
+    render(<RecordingsView />);
+    await screen.findByRole("heading", { name: "Meetings" });
+
+    const importButton = screen.getByRole("button", { name: /import audio/i });
+    // The one gold CTA on this surface stays "New meeting".
+    expect(screen.getByRole("button", { name: /new meeting/i })).toBeInTheDocument();
+    fireEvent.click(importButton);
+
+    await waitFor(() => {
+      expect(backend.importAudioFile).toHaveBeenCalledTimes(1);
+      // The renderer never names a path; the main process picks the file.
+      expect(backend.importAudioFile).toHaveBeenCalledWith();
+    });
+    await waitFor(() => {
+      expect(refetchRecordings).toHaveBeenCalled();
+      expect(toast).toHaveBeenCalledWith(
+        "Importing Q3 planning call.m4a. Transcription is running now.",
+        "success",
+      );
+    });
+    // No consent step: nobody is being recorded.
+    expect(
+      screen.queryByRole("button", { name: "Confirm meeting consent" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says Importing while the file is being decoded, and nothing at all when the picker is dismissed", async () => {
+    const pending = deferred<any>();
+    backend.importAudioFile.mockReturnValue(pending.promise);
+
+    render(<RecordingsView />);
+    await screen.findByRole("heading", { name: "Meetings" });
+    fireEvent.click(screen.getByRole("button", { name: /import audio/i }));
+
+    const importing = await screen.findByRole("button", { name: /importing/i });
+    expect(importing).toBeDisabled();
+
+    // A dismissed picker resolves with nothing: no toast, no reload, no noise.
+    await act(async () => {
+      pending.resolve(null);
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /import audio/i }),
+      ).not.toBeDisabled();
+    });
+    expect(toast).not.toHaveBeenCalled();
+    expect(refetchRecordings).not.toHaveBeenCalled();
+  });
+
+  it("cannot start an import while a meeting is being recorded", async () => {
+    recordingState = {
+      isRecording: true,
+      recordingId: "r9",
+      formattedDuration: "00:42",
+      meetingPhase: "recording",
+      meetingMessage: null,
+    };
+
+    render(<RecordingsView />);
+    await screen.findByRole("heading", { name: "Meetings" });
+
+    expect(screen.getByRole("button", { name: /import audio/i })).toBeDisabled();
+  });
+
+  it("labels an imported meeting as a file, not as Me + Them, and says which file", async () => {
+    recordings = [
+      {
+        id: "imported-1",
+        title: "Q3 planning call",
+        projectId: "default",
+        duration: 1800,
+        createdAt: "2026-03-06T12:00:00Z",
+        updatedAt: "2026-03-06T12:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/recording_1_abcdefgh.wav",
+        meetingCaptureMode: "imported",
+        importedSourceName: "Q3 planning call.m4a",
+        status: "completed" as const,
+      } as Recording,
+    ];
+    backend.getRecording.mockResolvedValue({ ...recordings[0] });
+    backend.getTranscript.mockResolvedValue({
+      id: "t2",
+      recordingId: "imported-1",
+      segments: [],
+      fullText: "",
+      language: "en",
+      confidence: 0.9,
+      model: "parakeet",
+      createdAt: "2026-03-06T12:02:00Z",
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(await screen.findByText("Q3 planning call"));
+    await screen.findByText("The record");
+
+    expect(await screen.findByText("Imported file")).toBeInTheDocument();
+    expect(screen.queryByText("Me + Them")).not.toBeInTheDocument();
+    // The meeting can be renamed; the file it came from is stated separately.
+    expect(screen.getByText("From Q3 planning call.m4a")).toBeInTheDocument();
   });
 });

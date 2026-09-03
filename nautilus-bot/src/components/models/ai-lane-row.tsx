@@ -1,11 +1,12 @@
-import type { ChangeEvent } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import {
-  ANALYSIS_PROVIDER_OPTIONS,
   analysisModelChoices,
+  analysisProviderOptionsForLane,
   describeAnalysisDestination,
   isRemoteAnalysisProvider,
+  isZeroSetupAnalysisProvider,
   type AiLaneKey,
 } from "@/components/models/ai-lanes";
 import type { AiLaneSettings } from "@/types/settings";
@@ -20,6 +21,13 @@ interface AiLaneRowProps {
   modelsLoading: boolean;
   onProviderChange: (lane: AiLaneKey, providerName: string) => void;
   onModelChange: (lane: AiLaneKey, modelId: string | null) => void;
+  /**
+   * Rendered under the picker when the selected provider is one of the
+   * zero-setup on-device ones, which have a fixed model and their own
+   * readiness (a download for the bundled model, an OS capability for
+   * Apple's). The Models screen owns that state, so it supplies the node.
+   */
+  zeroSetupSlot?: ReactNode;
 }
 
 /**
@@ -37,8 +45,11 @@ export function AiLaneRow({
   modelsLoading,
   onProviderChange,
   onModelChange,
+  zeroSetupSlot,
 }: AiLaneRowProps) {
   const choices = analysisModelChoices(value.provider, models);
+  const zeroSetup = isZeroSetupAnalysisProvider(value.provider);
+  const options = analysisProviderOptionsForLane(lane);
 
   return (
     <div className="space-y-4">
@@ -57,7 +68,7 @@ export function AiLaneRow({
           }
           className="w-full rounded-md border bg-background p-2 text-sm"
         >
-          {ANALYSIS_PROVIDER_OPTIONS.map((option) => (
+          {options.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
@@ -68,6 +79,14 @@ export function AiLaneRow({
             ? `Text you dictate or record is sent to ${describeAnalysisDestination(value.provider)} for this step.`
             : `Runs on ${describeAnalysisDestination(value.provider)}; nothing leaves the machine for this step.`}
         </p>
+        {zeroSetup ? (
+          <p className="text-sm leading-6 text-muted-foreground">
+            Nothing to install and no key to paste. It cleans up dictation only
+            — it cannot write meeting notes, and it does not run custom modes
+            or dictation commands, which fall back to Plainsong&apos;s built-in
+            text transforms.
+          </p>
+        ) : null}
         {!remoteProcessingEnabled && isRemoteAnalysisProvider(value.provider) ? (
           <p className="text-sm leading-6 text-rust">
             This one runs in the cloud, but cloud AI is turned off — so nothing
@@ -76,6 +95,9 @@ export function AiLaneRow({
         ) : null}
       </div>
 
+      {zeroSetup ? (
+        zeroSetupSlot ?? null
+      ) : (
       <div className="space-y-2">
         <Label htmlFor={`${lane}-model`} className="flex items-center gap-2">
           Model
@@ -118,6 +140,7 @@ export function AiLaneRow({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

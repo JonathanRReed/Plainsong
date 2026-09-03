@@ -32,10 +32,15 @@ describe("reproducible package and release configuration", () => {
     const builder = readRepoFile("electron-builder.yml");
     const release = readWorkspaceFile(".github/workflows/release.yml");
 
-    expect(packageJson.version).toBe("0.9.0-beta.2");
-    expect(cargoToml).toMatch(/^version = "0\.9\.0-beta\.2"$/m);
+    // The beta identity is whatever package.json says; the point of this
+    // test is that Cargo.toml and Cargo.lock carry the *same* version and
+    // that it is still a 0.9.0 beta, not that it equals one hardcoded tag
+    // (which broke on the beta.2 -> beta.3 bump).
+    expect(packageJson.version).toMatch(/^0\.9\.0-beta\.\d+$/);
+    const escapedVersion = packageJson.version.replace(/\./g, "\\.");
+    expect(cargoToml).toMatch(new RegExp(`^version = "${escapedVersion}"$`, "m"));
     expect(cargoLock).toMatch(
-      /name = "plainsong"\nversion = "0\.9\.0-beta\.2"/,
+      new RegExp(`name = "plainsong"\\nversion = "${escapedVersion}"`),
     );
     expect(builder).toMatch(
       /publish:\s*[\s\S]*?provider:\s*generic[\s\S]*?url:\s*https:\/\/updates\.plainsong\.jonathanrreed\.com\/beta\/[\s\S]*?channel:\s*beta[\s\S]*?useMultipleRangeRequest:\s*false/,
@@ -85,13 +90,19 @@ describe("reproducible package and release configuration", () => {
     };
     const sidecarBuild = readRepoFile("scripts/build-rust-sidecar.mjs");
 
+    // Contributor cargo commands go through scripts/cargo-sidecar.mjs so they
+    // compile the same feature set the release sidecar ships on this host;
+    // that wrapper's feature handling is pinned in
+    // sidecar-cargo-features.test.ts. Here: still `--locked`.
     expect(packageJson.scripts["lint:rust"]).toContain(
-      "cargo clippy --locked",
+      "node scripts/cargo-sidecar.mjs clippy --locked",
     );
-    expect(packageJson.scripts["test:rust"]).toContain("cargo test --locked");
+    expect(packageJson.scripts["test:rust"]).toContain(
+      "node scripts/cargo-sidecar.mjs test --locked",
+    );
     expect(packageJson.scripts["test:rust"]).toContain("--bins");
     expect(packageJson.scripts["benchmark:latency"]).toContain(
-      "cargo run --release --locked",
+      "node scripts/cargo-sidecar.mjs run --release --locked",
     );
     expect(packageJson.scripts["gate:dictation-latency"]).toContain(
       "verify-dictation-latency.mjs",
