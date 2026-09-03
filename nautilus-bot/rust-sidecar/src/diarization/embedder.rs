@@ -251,7 +251,7 @@ fn run_embedding_inference(session: &mut Session, samples: &[f32]) -> Result<Arr
 
 /// Compute log Mel filterbank features from audio samples
 #[cfg(feature = "diarization")]
-fn compute_fbank_features(
+pub(super) fn compute_fbank_features(
     samples: &[f32],
     sample_rate: u32,
     num_mel_bins: usize,

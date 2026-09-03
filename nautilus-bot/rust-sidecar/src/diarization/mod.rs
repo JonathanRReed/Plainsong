@@ -20,6 +20,11 @@ mod embedder;
 #[cfg(feature = "diarization-speakrs")]
 mod speakrs_backend;
 
+/// Test-only reproduction of the CAM++ ONNX Runtime divergence.
+/// See `artifacts/qa/campplus-divergence-2026-09-02.md`.
+#[cfg(all(test, feature = "diarization"))]
+mod ort_parity;
+
 #[cfg(feature = "diarization")]
 pub use embedder::{generate_segments, EmbeddingClusterer};
 
