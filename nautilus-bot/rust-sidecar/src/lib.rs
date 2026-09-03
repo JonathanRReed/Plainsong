@@ -9454,6 +9454,74 @@ fn resolve_speaker_name(
     Some(format!("Speaker {}", index + 1))
 }
 
+/// Persist this meeting's per-cluster voice signatures and, when the user
+/// asked for it, apply a confident match without being asked.
+///
+/// Every caller reads `meetings.rememberVoices` itself before calling: the
+/// promise is "nothing is stored while it is off", and that promise should be
+/// visible at the call site rather than buried in here.
+///
+/// Returns whether any speaker name changed, so the caller knows whether the
+/// transcript needs a refresh event.
+async fn store_and_match_cluster_voices(
+    state: &AppState,
+    recording_id: &str,
+    embedding_model_id: &str,
+    cluster_centroids: &std::collections::HashMap<String, Vec<f32>>,
+    auto_apply_enabled: bool,
+) -> Result<bool, String> {
+    if cluster_centroids.is_empty() {
+        return Ok(false);
+    }
+    let mut db = state.db.lock().await;
+    db.record_cluster_voice_signatures(recording_id, embedding_model_id, cluster_centroids, true)
+        .map_err(|e| e.to_string())?;
+
+    if !auto_apply_enabled {
+        return Ok(false);
+    }
+
+    let signatures = db
+        .get_cluster_voice_signatures(recording_id)
+        .map_err(|e| e.to_string())?;
+    let profiles = db.list_speaker_profiles().map_err(|e| e.to_string())?;
+    // Nothing records who was in a meeting in this build, so the attendee list
+    // is empty and ranking falls back to similarity order. See lane B-notes.
+    let attendees: Vec<String> = Vec::new();
+
+    let mut applied = false;
+    for cluster in diarization::voiceprints::build_suggestions(&signatures, &profiles, &attendees) {
+        let Some(matched) = cluster.suggestion.as_ref() else {
+            continue;
+        };
+        let existing_is_specific = signatures
+            .iter()
+            .find(|signature| signature.speaker_id == cluster.speaker_id)
+            .and_then(|signature| signature.name.as_deref())
+            .is_some_and(|name| !is_generic_speaker_name(name));
+        if !diarization::voiceprints::should_auto_apply(matched, true, existing_is_specific) {
+            continue;
+        }
+        db.upsert_speaker_alias(
+            recording_id,
+            &cluster.speaker_id,
+            Some(&matched.display_name),
+            None,
+            0,
+        )
+        .map_err(|e| e.to_string())?;
+        db.set_cluster_voice_match(
+            recording_id,
+            &cluster.speaker_id,
+            &matched.profile_id,
+            diarization::voiceprints::MATCH_STATE_AUTO,
+        )
+        .map_err(|e| e.to_string())?;
+        applied = true;
+    }
+    Ok(applied)
+}
+
 fn normalize_person_name(raw: &str) -> Option<String> {
     let cleaned = raw
         .trim()
@@ -29447,6 +29515,34 @@ async fn run_meeting_transcription_pipeline(
                                 Ok(true) => {
                                     transcript.segments = enriched_segments;
                                     diarization_updated = true;
+                                    // Voiceprints, on the same terms as the
+                                    // manual run: only when the switch is on,
+                                    // and best effort — a meeting is not
+                                    // failed by a voice that could not be
+                                    // remembered. `run_diarization` above
+                                    // uses the default embedder.
+                                    let voice_settings = {
+                                        let sm =
+                                            state_clone.settings_manager.lock().await;
+                                        sm.settings().meetings.clone()
+                                    };
+                                    if voice_settings.remember_voices {
+                                        if let Err(error) = store_and_match_cluster_voices(
+                                            state_clone.as_ref(),
+                                            &recording_id_clone,
+                                            "ecapa_tdnn_speaker",
+                                            &result.cluster_centroids,
+                                            voice_settings.auto_apply_confident_voices,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                "Voice matching after diarization of {} did not finish: {}",
+                                                recording_id_clone,
+                                                error
+                                            );
+                                        }
+                                    }
                                 }
                                 Ok(false) => tracing::warn!(
                                     "Skipped diarization enrichment for {} because the transcript changed while diarization was running",
@@ -31392,6 +31488,242 @@ pub async fn dispatch_command(
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
         }
+        // ── Voiceprints (opt-in, local only) ─────────────────────────────
+        "suggest_speaker_voices" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let remember_voices = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .meetings
+                .remember_voices;
+            if !remember_voices {
+                // Not an error: the reader simply has the feature off, and the
+                // transcript should show no chips rather than a failure.
+                return Ok(serde_json::json!({
+                    "enabled": false,
+                    "clusters": [],
+                    "nameOptions": [],
+                }));
+            }
+            let (signatures, profiles) = {
+                let db = state.db.lock().await;
+                (
+                    db.get_cluster_voice_signatures(&recording_id)
+                        .map_err(|e| e.to_string())?,
+                    db.list_speaker_profiles().map_err(|e| e.to_string())?,
+                )
+            };
+            // Nothing records who was in a meeting in this build; see lane
+            // B-notes. Ranking falls back to similarity order.
+            let attendees: Vec<String> = Vec::new();
+            let clusters =
+                diarization::voiceprints::build_suggestions(&signatures, &profiles, &attendees);
+            let remembered: Vec<String> = profiles
+                .iter()
+                .map(|profile| profile.display_name.clone())
+                .collect();
+            let name_options =
+                diarization::voiceprints::confirm_name_options(&attendees, &remembered);
+            let clusters: Vec<serde_json::Value> = clusters
+                .into_iter()
+                .map(|cluster| {
+                    serde_json::json!({
+                        "speakerId": cluster.speaker_id,
+                        "appliedProfileId": cluster.applied_profile_id,
+                        "matchState": cluster.match_state,
+                        // The centroid itself never leaves the sidecar.
+                        "suggestion": cluster.suggestion.map(|matched| serde_json::json!({
+                            "profileId": matched.profile_id,
+                            "displayName": matched.display_name,
+                            "percent": matched.percent(),
+                            "confident": matches!(
+                                matched.confidence,
+                                diarization::voiceprints::MatchConfidence::Confident
+                            ),
+                        })),
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "enabled": true,
+                "clusters": clusters,
+                "nameOptions": name_options,
+            }))
+        }
+        "remember_speaker_voice" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let speaker_id: String =
+                serde_json::from_value(params["speakerId"].clone()).map_err(|e| e.to_string())?;
+            let requested_profile_id: Option<String> = params
+                .get("profileId")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let requested_name: Option<String> = params
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+
+            let remember_voices = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .meetings
+                .remember_voices;
+            if !remember_voices {
+                return Err(
+                    "Remembering voices is off. Turn on \"Remember voices\" in Settings > General > Meetings first."
+                        .to_string(),
+                );
+            }
+
+            let mut db = state.db.lock().await;
+            let signature = db
+                .get_cluster_voice_signatures(&recording_id)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|signature| signature.speaker_id == speaker_id)
+                .ok_or_else(|| {
+                    "Plainsong has no voice signature for this speaker. Run speaker identification again with \"Remember voices\" on."
+                        .to_string()
+                })?;
+
+            // A profile id decides the name, so a chip and the stored voice can
+            // never drift apart; only the free-text path uses `name`.
+            let (profile_id, display_name) = match requested_profile_id {
+                Some(profile_id) => {
+                    let profile = db
+                        .list_speaker_profiles()
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .find(|profile| profile.id == profile_id)
+                        .ok_or("That remembered voice no longer exists.")?;
+                    if profile.embedding_model_id != signature.embedding_model_id {
+                        return Err(
+                            "That voice was remembered with a different speaker model, so Plainsong cannot compare it with this meeting."
+                                .to_string(),
+                        );
+                    }
+                    db.add_speaker_profile_sample(
+                        &profile.id,
+                        &signature.centroid,
+                        Some(&recording_id),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    (profile.id, profile.display_name)
+                }
+                None => {
+                    let name = requested_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .ok_or("A remembered voice needs a name.")?
+                        .to_string();
+                    let profile_id = db
+                        .remember_speaker_voice(
+                            &name,
+                            &signature.embedding_model_id,
+                            &signature.centroid,
+                            Some(&recording_id),
+                            None,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    (profile_id, name)
+                }
+            };
+
+            // The alias goes through the same rename path the pencil button
+            // uses, so remembering a voice and renaming a speaker cannot
+            // disagree about what the transcript says.
+            db.rename_speaker(&recording_id, &speaker_id, &display_name)
+                .map_err(|e| e.to_string())?;
+            db.set_cluster_voice_match(
+                &recording_id,
+                &speaker_id,
+                &profile_id,
+                diarization::voiceprints::MATCH_STATE_CONFIRMED,
+            )
+            .map_err(|e| e.to_string())?;
+            drop(db);
+
+            handle.emit_event(
+                "transcript-updated",
+                serde_json::json!({
+                    "recordingId": &recording_id,
+                    "reason": "speaker-voice",
+                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+            Ok(serde_json::json!({
+                "profileId": profile_id,
+                "displayName": display_name,
+            }))
+        }
+        "reject_speaker_voice" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let speaker_id: String =
+                serde_json::from_value(params["speakerId"].clone()).map_err(|e| e.to_string())?;
+            let profile_id: String =
+                serde_json::from_value(params["profileId"].clone()).map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            db.reject_cluster_voice_match(&recording_id, &speaker_id, &profile_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Null)
+        }
+        "list_remembered_voices" => {
+            let db = state.db.lock().await;
+            let profiles = db.list_speaker_profiles().map_err(|e| e.to_string())?;
+            // Deliberately no centroid and no samples: the renderer never needs
+            // the numbers, and a voice signature that reaches a window is a
+            // voice signature that can end up in a screenshot or a log.
+            let voices: Vec<serde_json::Value> = profiles
+                .into_iter()
+                .map(|profile| {
+                    serde_json::json!({
+                        "id": profile.id,
+                        "displayName": profile.display_name,
+                        "embeddingModelId": profile.embedding_model_id,
+                        "sampleCount": profile.sample_count,
+                        "createdAt": profile.created_at,
+                        "updatedAt": profile.updated_at,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!(voices))
+        }
+        "forget_remembered_voice" => {
+            let profile_id: String =
+                serde_json::from_value(params["profileId"].clone()).map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            let removed = db
+                .forget_speaker_voice(&profile_id)
+                .map_err(|e| e.to_string())?;
+            // The name is user content and stays out of the audit log; that a
+            // voice was deleted is the fact worth keeping.
+            db.log_audit_event(
+                "voiceprint_forgotten",
+                Some(serde_json::json!({ "removed": removed })),
+                "info",
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(removed))
+        }
+        "forget_all_remembered_voices" => {
+            let mut db = state.db.lock().await;
+            let removed = db.forget_all_speaker_voices().map_err(|e| e.to_string())?;
+            db.log_audit_event(
+                "voiceprints_forgotten_all",
+                Some(serde_json::json!({ "removed": removed })),
+                "info",
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!(removed))
+        }
         "list_diarization_models" => {
             let models = list_diarization_models();
             serde_json::to_value(models).map_err(|e| e.to_string())
@@ -31499,6 +31831,32 @@ pub async fn dispatch_command(
                     "Transcript changed while speaker identification was running; no diarization changes were applied. Run speaker identification again."
                         .to_string(),
                 );
+            }
+
+            // Voiceprints. Read the switch here rather than inside the helper,
+            // so "nothing is stored while it is off" is visible at the call
+            // site. `cluster_centroids` is dropped with `diarization` either
+            // way — it is `#[serde(skip)]` and never reaches the renderer.
+            let voice_settings = {
+                let sm = state.settings_manager.lock().await;
+                sm.settings().meetings.clone()
+            };
+            if voice_settings.remember_voices {
+                if let Err(error) = store_and_match_cluster_voices(
+                    state.as_ref(),
+                    &recording_id,
+                    &diarization_model_id,
+                    &diarization.cluster_centroids,
+                    voice_settings.auto_apply_confident_voices,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "Speaker identification finished for {} but voice matching did not: {}",
+                        recording_id,
+                        error
+                    );
+                }
             }
 
             handle.emit_event(
