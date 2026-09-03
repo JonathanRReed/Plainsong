@@ -129,6 +129,38 @@ describe("macOS Apple Speech helper contract", () => {
     180_000,
   );
 
+  /**
+   * The helper is its own binary with its own Speech entitlement. The app's
+   * gate is not the only thing that has to hold: both SpeechAnalyzer branches
+   * exit the function without returning, so an authorization check that only
+   * lives inside `recognitionContext` never runs for them.
+   */
+  it("checks Speech authorization before either engine can transcribe", () => {
+    const helper = fs.readFileSync(
+      path.join(repoRoot, "rust-sidecar/native/macos_speech_helper.swift"),
+      "utf8",
+    );
+
+    expect(helper).toContain(
+      "private func requireSpeechAuthorization() -> SFSpeechRecognizerAuthorizationStatus",
+    );
+    for (const entryPoint of ["runFileRecognition", "runLiveRecognition"]) {
+      const start = helper.indexOf(`private func ${entryPoint}(`);
+      expect(start).toBeGreaterThan(-1);
+      const gate = helper.indexOf("requireSpeechAuthorization()", start);
+      const analyzerBranch = helper.indexOf("#if !NO_SPEECH_ANALYZER", start);
+      expect(gate).toBeGreaterThan(-1);
+      expect(analyzerBranch).toBeGreaterThan(-1);
+      expect(gate).toBeLessThan(analyzerBranch);
+    }
+    // The probe reports authorization; it must never demand it.
+    const probeStart = helper.indexOf("private func capabilityProbe(");
+    const probeEnd = helper.indexOf("\n}\n", probeStart);
+    expect(helper.slice(probeStart, probeEnd)).not.toContain(
+      "requireSpeechAuthorization()",
+    );
+  });
+
   it("uses helper-specific Speech-only entitlements while signing", () => {
     const signScript = fs.readFileSync(
       path.join(repoRoot, "scripts/sign-macos.mjs"),

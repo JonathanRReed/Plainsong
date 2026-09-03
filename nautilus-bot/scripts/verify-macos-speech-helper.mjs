@@ -222,6 +222,27 @@ requireMatch(
   /engine: engine \?\? \.sfSpeechRecognizer/,
   "--live must keep the SFSpeechRecognizer event protocol unless SpeechAnalyzer is named outright",
 );
+// The SpeechAnalyzer branches never return, so an authorization check that
+// only lives inside `recognitionContext` covers SFSpeechRecognizer alone --
+// the helper would transcribe with permission still `not_determined`. Both
+// transcription entry points have to check before choosing an engine.
+requireMatch(
+  source,
+  /private func requireSpeechAuthorization\(\) -> SFSpeechRecognizerAuthorizationStatus/,
+  "the helper must have one shared Speech authorization gate",
+);
+for (const [entryPoint, label] of [
+  ["runFileRecognition", "--transcribe-file"],
+  ["runLiveRecognition", "--live"],
+]) {
+  const start = source.indexOf(`private func ${entryPoint}(`);
+  if (start < 0) fail(`${entryPoint} must exist`);
+  const analyzerBranch = source.indexOf("#if !NO_SPEECH_ANALYZER", start);
+  const authorizationCheck = source.indexOf("requireSpeechAuthorization()", start);
+  if (authorizationCheck < 0 || analyzerBranch < 0 || authorizationCheck > analyzerBranch) {
+    fail(`${label} must check Speech authorization before it can reach SpeechAnalyzer`);
+  }
+}
 forbidMatch(
   sidecarEnv,
   /PLAINSONG_MACOS_SPEECH_HELPER_PATH/,

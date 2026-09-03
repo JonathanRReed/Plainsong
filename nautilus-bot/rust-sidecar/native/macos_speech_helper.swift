@@ -1030,7 +1030,19 @@ private struct RecognitionContext {
   let language: String
 }
 
-private func recognitionContext(localeIdentifier: String?) -> RecognitionContext {
+/// The authorization gate every transcription path has to pass.
+///
+/// Extracted from `recognitionContext` so the SpeechAnalyzer branches enforce
+/// it too. They used to reach the analyzer before `recognitionContext` ran, so
+/// the helper on disk would transcribe with Speech authorization still
+/// `not_determined` -- the app's own gate was the only thing stopping it, and
+/// the helper is a separate binary anyone can run. Never prompts: the prompt
+/// belongs to `--request-authorization`, from the packaged app.
+///
+/// Returns the status it read so a caller that also needs the probe does not
+/// ask macOS twice.
+@discardableResult
+private func requireSpeechAuthorization() -> SFSpeechRecognizerAuthorizationStatus {
   let status = SFSpeechRecognizer.authorizationStatus()
   switch status {
   case .authorized:
@@ -1060,6 +1072,11 @@ private func recognitionContext(localeIdentifier: String?) -> RecognitionContext
       details: ["authorization_code": String(status.rawValue)]
     )
   }
+  return status
+}
+
+private func recognitionContext(localeIdentifier: String?) -> RecognitionContext {
+  let status = requireSpeechAuthorization()
 
   let probe = capabilityProbe(
     authorizationStatus: status,
@@ -1225,6 +1242,11 @@ private func runFileRecognition(
       details: ["path": inputPath]
     )
   }
+
+  // Before the engine is chosen, not after: the SpeechAnalyzer branch below
+  // never returns, so an authorization check placed after it (as
+  // `recognitionContext` is) would only ever cover SFSpeechRecognizer.
+  requireSpeechAuthorization()
 
   #if !NO_SPEECH_ANALYZER
     if #available(macOS 26, *) {
@@ -1423,6 +1445,10 @@ private func runLiveRecognition(
   // spans instead of one growing best guess), so callers opt into it
   // explicitly and the existing consumer keeps the protocol it was written
   // against.
+  // Same reason as `runFileRecognition`: the analyzer branch never returns, so
+  // the check has to happen before it rather than inside `recognitionContext`.
+  requireSpeechAuthorization()
+
   if engineRequest == .speechAnalyzer {
     #if !NO_SPEECH_ANALYZER
       guard #available(macOS 26, *) else {
