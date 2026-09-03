@@ -34,6 +34,16 @@
 //! - Simple ordinals ("first" .. "tenth") convert only in a date context.
 //! - Units keep the user's word: "twenty five kilometers" -> "25 kilometers",
 //!   never "25 km".
+//! - All-or-nothing per phrase: a number phrase no single rule can finish
+//!   stays entirely as words rather than coming out half-written. "ten to one
+//!   odds", "point five" and an eight-digit spoken run are all left alone,
+//!   because "10 to one odds", "point 5" and "1234 five six seven" are worse
+//!   than the words the user said. A run containing a spoken "oh" is written
+//!   whole ("room two oh one" -> "room 201") for the same reason: nothing
+//!   else can consume the "oh".
+//! - Thousands separators are written the way the number would be typed:
+//!   cardinals from 10,000 up ("75,000"), currency from 1,000 up ("$1,200"),
+//!   years never.
 //! - Running the stage over already-numeric text is a no-op (idempotence).
 
 /// One whitespace-delimited chunk of the input, split into the punctuation
@@ -140,8 +150,15 @@ fn tokenize(text: &str) -> Vec<Token> {
 }
 
 /// Marks every token overlapping an occurrence of one of `phrases` as
-/// protected. Used for dictionary replacements, whose text is the user's own
-/// spelling and must survive this stage verbatim.
+/// protected. Used for dictionary replacements and snippet triggers, whose
+/// text is the user's own and must survive this stage verbatim.
+///
+/// A match only counts when it starts and ends on a token boundary. Without
+/// that anchor a short replacement splits a word it merely appears inside --
+/// a one-letter entry like "v" matched the middle of "five" and protected
+/// that token alone, so "twenty five servers" came out "20 five servers".
+/// Both the core and the outer (punctuation-inclusive) edges are accepted, so
+/// a replacement that carries its own punctuation ("U.S.") still anchors.
 fn mark_protected_phrases(text: &str, tokens: &mut [Token], phrases: &[String]) {
     if phrases.is_empty() {
         return;
@@ -150,12 +167,20 @@ fn mark_protected_phrases(text: &str, tokens: &mut [Token], phrases: &[String]) 
     // Recompute token byte ranges over the rendered string, which is
     // byte-identical to `text` by construction.
     let mut ranges = Vec::with_capacity(tokens.len());
+    let mut boundary_starts = Vec::with_capacity(tokens.len() * 2);
+    let mut boundary_ends = Vec::with_capacity(tokens.len() * 2);
     let mut cursor = 0usize;
     for token in tokens.iter() {
-        let start = cursor + token.space_before.len() + token.lead.len();
+        let outer_start = cursor + token.space_before.len();
+        let start = outer_start + token.lead.len();
         let end = start + token.core.len();
-        cursor = end + token.trail.len();
+        let outer_end = end + token.trail.len();
+        cursor = outer_end;
         ranges.push((start, end));
+        boundary_starts.push(outer_start);
+        boundary_starts.push(start);
+        boundary_ends.push(end);
+        boundary_ends.push(outer_end);
     }
 
     for phrase in phrases {
@@ -164,15 +189,26 @@ fn mark_protected_phrases(text: &str, tokens: &mut [Token], phrases: &[String]) 
             continue;
         }
         let mut from = 0usize;
-        while let Some(found) = text[from..].find(needle) {
+        while from <= text.len() {
+            let Some(found) = text[from..].find(needle) else {
+                break;
+            };
             let start = from + found;
             let end = start + needle.len();
-            for (index, (token_start, token_end)) in ranges.iter().enumerate() {
-                if *token_start < end && start < *token_end {
-                    tokens[index].protected = true;
+            if boundary_starts.contains(&start) && boundary_ends.contains(&end) {
+                for (index, (token_start, token_end)) in ranges.iter().enumerate() {
+                    if *token_start < end && start < *token_end {
+                        tokens[index].protected = true;
+                    }
                 }
+                from = end;
+            } else {
+                // Step past this false match by one character rather than by
+                // the whole needle, so a real match that overlaps it is still
+                // found. `start` and the character length keep `from` on a
+                // char boundary.
+                from = start + needle.chars().next().map_or(1, char::len_utf8);
             }
-            from = end;
             if from >= text.len() {
                 break;
             }
@@ -272,12 +308,75 @@ fn ordinal_value(word: &str) -> Option<u64> {
     })
 }
 
+/// The hyphens a decoder puts inside a spoken compound: ASCII hyphen-minus
+/// and the non-breaking hyphen U+2011 that several cloud decoders emit.
+const COMPOUND_HYPHENS: &[char] = &['-', '\u{2011}'];
+
+/// Splits "twenty-one" / "twenty\u{2011}one" into its two halves.
+fn split_compound(word: &str) -> Option<(&str, &str)> {
+    let index = word.find(COMPOUND_HYPHENS)?;
+    let (head, rest) = word.split_at(index);
+    let tail = &rest[rest.chars().next()?.len_utf8()..];
+    Some((head, tail))
+}
+
+/// A hyphenated tens-and-unit cardinal arriving as one token ("twenty-one").
+/// The ordinal form ("twenty-first") has always been handled in
+/// `parse_ordinal`; the cardinal form was not, so "twenty-one servers" came
+/// out unchanged while "twenty one servers" became "21 servers".
+fn hyphenated_tens_unit(word: &str) -> Option<u64> {
+    let (head, tail) = split_compound(word)?;
+    let tens = tens_value(head)?;
+    let unit = unit_value(tail)?;
+    if unit == 0 {
+        return None;
+    }
+    Some(tens + unit)
+}
+
 fn is_number_word(word: &str) -> bool {
     unit_value(word).is_some()
         || teen_value(word).is_some()
         || tens_value(word).is_some()
         || scale_value(word).is_some()
+        || hyphenated_tens_unit(word).is_some()
         || word == "hundred"
+}
+
+/// Digits with thousands separators, the way the number would be typed.
+fn group_digits(value: u64) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (offset, digit) in digits.chars().enumerate() {
+        if offset > 0 && (digits.len() - offset) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+/// A standalone cardinal. Separators start at 10,000: a four-digit number
+/// spoken as a cardinal reads as a year or a build number ("two thousand and
+/// twenty six") at least as often as it does a quantity, and "2,026" would be
+/// wrong for those. Years never reach here -- `try_date` formats them itself.
+fn format_cardinal(value: u64) -> String {
+    if value >= 10_000 {
+        group_digits(value)
+    } else {
+        value.to_string()
+    }
+}
+
+/// A currency amount. Money is written with separators from four digits up
+/// ("$1,200"), where the year reading that holds bare cardinals back does not
+/// apply.
+fn format_currency_amount(value: u64) -> String {
+    if value >= 1_000 {
+        group_digits(value)
+    } else {
+        value.to_string()
+    }
 }
 
 fn month_index(word: &str) -> Option<(usize, &'static str)> {
@@ -345,6 +444,16 @@ fn span_continues(tokens: &[Token], start: usize, index: usize) -> bool {
         (Some(previous), Some(current)) => previous.trail.is_empty() && current.lead.is_empty(),
         _ => false,
     }
+}
+
+/// Every token a rewrite consumes has to be joined to the next without
+/// intervening punctuation. `emit_rewrite` keeps only the first token's lead
+/// and the last token's trail, so anything between them would be silently
+/// dropped -- "ten per (cent" became "10%" and lost the paren. Each rule
+/// checks its own boundaries; this is the backstop that holds the invariant
+/// for rules added later.
+fn span_is_contiguous(tokens: &[Token], start: usize, end: usize) -> bool {
+    (start + 1..end).all(|index| span_continues(tokens, start, index))
 }
 
 /// Parses one English cardinal starting at `start`.
@@ -418,6 +527,21 @@ fn parse_cardinal(tokens: &[Token], start: usize) -> Option<(u64, usize)> {
                 Piece::Hundred | Piece::Scale => {
                     current += value;
                     last = Piece::Tens;
+                }
+                _ => break,
+            }
+        } else if let Some(value) = hyphenated_tens_unit(word) {
+            // "twenty-one" is one token but two pieces; it closes on a unit,
+            // so "twenty-one five" stays two numbers exactly as "twenty one
+            // five" does.
+            match last {
+                Piece::None => {
+                    current = value;
+                    last = Piece::Unit;
+                }
+                Piece::Hundred | Piece::Scale => {
+                    current += value;
+                    last = Piece::Unit;
                 }
                 _ => break,
             }
@@ -511,11 +635,14 @@ struct Rewrite {
 
 /// A phone-number-shaped run of individually spoken digits. Seven digits is
 /// the shortest run that is far more likely to be a number than a count.
+///
+/// Only the three lengths that have a written phone shape are claimed: local
+/// (7), national (10) and national with a leading country code (11). Any
+/// other length -- 8, 9, 12 -- is not a phone number in any format this stage
+/// knows, and collapsing it into an unseparated blob was a guess, so those
+/// runs are left as the words the user said.
 fn try_phone(tokens: &[Token], start: usize) -> Option<Rewrite> {
     let (digits, end) = single_digit_run(tokens, start);
-    if digits.len() < 7 {
-        return None;
-    }
     let formatted = match digits.len() {
         7 => format!("{}-{}", &digits[..3], &digits[3..]),
         10 => format!("{}-{}-{}", &digits[..3], &digits[3..6], &digits[6..]),
@@ -526,12 +653,38 @@ fn try_phone(tokens: &[Token], start: usize) -> Option<Rewrite> {
             &digits[4..7],
             &digits[7..]
         ),
-        _ => digits.clone(),
+        _ => return None,
     };
     Some(Rewrite {
         text: formatted,
         end,
     })
+}
+
+/// A short run of individually spoken digits containing a spoken zero: "room
+/// two oh one" is room 201.
+///
+/// "oh" only means zero inside a digit string, so a run that contains one is
+/// a digit string and is written whole -- the alternative was the half-
+/// converted "room 2 oh one", since no other rule can consume an "oh". A
+/// leading "oh" is excluded because that one is the interjection. Bounded to
+/// 3..=6 digits: `try_phone` runs first and owns the phone lengths, and a run
+/// of any other length stays as words.
+fn try_digit_string(tokens: &[Token], start: usize) -> Option<Rewrite> {
+    let (digits, end) = single_digit_run(tokens, start);
+    if !(3..=6).contains(&digits.len()) {
+        return None;
+    }
+    if tokens[start].core_lower == "oh" {
+        return None;
+    }
+    if !tokens[start..end]
+        .iter()
+        .any(|token| token.core_lower == "oh")
+    {
+        return None;
+    }
+    Some(Rewrite { text: digits, end })
 }
 
 /// A four-digit year, either composed ("two thousand and twenty six") or
@@ -654,6 +807,12 @@ fn try_ordinal_of_month(tokens: &[Token], start: usize) -> Option<Rewrite> {
     if of_token.protected || of_token.core_lower != "of" || !of_token.trail.is_empty() {
         return None;
     }
+    // Punctuation between "of" and the month ends the phrase: "the first of
+    // (May" must keep its paren, which a rewrite spanning the boundary would
+    // drop.
+    if !span_continues(tokens, start, after_ordinal + 1) {
+        return None;
+    }
     let month_token = tokens.get(after_ordinal + 1)?;
     if month_token.protected {
         return None;
@@ -662,7 +821,7 @@ fn try_ordinal_of_month(tokens: &[Token], start: usize) -> Option<Rewrite> {
 
     let mut index = after_ordinal + 2;
     let mut suffix = String::new();
-    if month_token.trail.is_empty() {
+    if month_token.trail.is_empty() && span_continues(tokens, start, index) {
         if let Some((year, end)) = parse_year(tokens, index) {
             suffix = format!(" {}", year);
             index = end;
@@ -702,8 +861,9 @@ fn parse_ordinal(tokens: &[Token], start: usize) -> Option<(u64, usize)> {
         }
         return None;
     }
-    // Hyphenated compounds ("twenty-first") arrive as one token.
-    if let Some((head, tail)) = token.core_lower.split_once('-') {
+    // Hyphenated compounds ("twenty-first") arrive as one token, with either
+    // hyphen character (see `COMPOUND_HYPHENS`).
+    if let Some((head, tail)) = split_compound(&token.core_lower) {
         if let (Some(tens), Some(unit)) = (tens_value(head), ordinal_value(tail)) {
             if unit < 10 {
                 return Some((tens + unit, start + 1));
@@ -753,34 +913,44 @@ fn try_currency(tokens: &[Token], start: usize) -> Option<Rewrite> {
     let mut index = after_amount + 1;
     let mut cents: Option<u64> = None;
 
-    if unit_token.trail.is_empty() {
+    // Every step past the currency word has to stay inside one unpunctuated
+    // run, because the rewrite replaces the whole span and keeps only its
+    // outer punctuation: "twelve dollars and fifty (cents" must not swallow
+    // the paren.
+    if unit_token.trail.is_empty() && span_continues(tokens, start, index) {
         let mut cents_start = index;
+        let mut boundary_holds = true;
         if tokens
             .get(cents_start)
             .is_some_and(|next| !next.protected && next.core_lower == "and")
         {
+            boundary_holds = span_continues(tokens, start, cents_start + 1);
             cents_start += 1;
         }
-        if let Some((value, end)) = parse_cardinal_bounded(tokens, cents_start, 2) {
-            if value <= 99 {
-                let explicit = tokens
-                    .get(end)
-                    .is_some_and(|next| matches!(next.core_lower.as_str(), "cent" | "cents"));
-                if explicit {
-                    cents = Some(value);
-                    index = end + 1;
-                } else if value >= 10 {
-                    // A bare trailing number is only cents when it reads as a
-                    // two-digit one ("twelve dollars fifty"). "twelve dollars
-                    // five" could be $12.05 or twelve dollars and five of
-                    // something, so it is left alone.
-                    cents = Some(value);
-                    index = end;
+        if boundary_holds {
+            if let Some((value, end)) = parse_cardinal_bounded(tokens, cents_start, 2) {
+                if value <= 99 {
+                    let explicit = span_continues(tokens, start, end)
+                        && tokens.get(end).is_some_and(|next| {
+                            !next.protected && matches!(next.core_lower.as_str(), "cent" | "cents")
+                        });
+                    if explicit {
+                        cents = Some(value);
+                        index = end + 1;
+                    } else if value >= 10 {
+                        // A bare trailing number is only cents when it reads as
+                        // a two-digit one ("twelve dollars fifty"). "twelve
+                        // dollars five" could be $12.05 or twelve dollars and
+                        // five of something, so it is left alone.
+                        cents = Some(value);
+                        index = end;
+                    }
                 }
             }
         }
     }
 
+    let amount = format_currency_amount(amount);
     let text = match cents {
         Some(cents) => format!("{}{}.{:02}", symbol, amount, cents),
         None => format!("{}{}", symbol, amount),
@@ -788,9 +958,10 @@ fn try_currency(tokens: &[Token], start: usize) -> Option<Rewrite> {
     Some(Rewrite { text, end: index })
 }
 
-/// `<hour> <minutes> [am|pm]`, gated on an "at"-style preposition or an
-/// explicit meridiem so "three thirty" alone stays as words.
-fn try_time(tokens: &[Token], start: usize, previous_word: Option<&str>) -> Option<Rewrite> {
+/// `<hour> <minutes> [am|pm]`, gated on an open time context (an "at"-style
+/// preposition, see `time_context_survives`) or an explicit meridiem, so
+/// "three thirty" alone stays as words.
+fn try_time(tokens: &[Token], start: usize, time_context_open: bool) -> Option<Rewrite> {
     let (hour, after_hour) = parse_cardinal_bounded(tokens, start, 1)?;
     if !(1..=12).contains(&hour) {
         return None;
@@ -819,8 +990,7 @@ fn try_time(tokens: &[Token], start: usize, previous_word: Option<&str>) -> Opti
     let has_meridiem = tokens
         .get(end)
         .is_some_and(|next| !next.protected && is_meridiem(&next.core_lower));
-    let has_preposition = previous_word.is_some_and(|word| TIME_CONTEXT_WORDS.contains(&word));
-    if !has_meridiem && !has_preposition {
+    if !has_meridiem && !time_context_open {
         return None;
     }
 
@@ -841,11 +1011,14 @@ fn parse_decimal(tokens: &[Token], start: usize) -> Option<(String, usize)> {
     if point.protected || point.core_lower != "point" || !point.trail.is_empty() {
         return None;
     }
+    if !span_continues(tokens, start, after_integer + 1) {
+        return None;
+    }
     let (digits, end) = single_digit_run(tokens, after_integer + 1);
     if digits.is_empty() {
         return None;
     }
-    Some((format!("{}.{}", integer, digits), end))
+    Some((format!("{}.{}", format_cardinal(integer), digits), end))
 }
 
 /// `<number|decimal> percent` (and the two-word "per cent").
@@ -854,7 +1027,7 @@ fn try_percent(tokens: &[Token], start: usize) -> Option<Rewrite> {
         Some((text, end)) => (text, end),
         None => {
             let (value, end) = parse_cardinal(tokens, start)?;
-            (value.to_string(), end)
+            (format_cardinal(value), end)
         }
     };
     if !span_continues(tokens, start, after_value) {
@@ -868,9 +1041,12 @@ fn try_percent(tokens: &[Token], start: usize) -> Option<Rewrite> {
         after_value + 1
     } else if next.core_lower == "per"
         && next.trail.is_empty()
+        // "ten per (cent" is not a percentage: a rewrite spanning that
+        // boundary would drop the paren.
+        && span_continues(tokens, start, after_value + 1)
         && tokens
             .get(after_value + 1)
-            .is_some_and(|word| word.core_lower == "cent")
+            .is_some_and(|word| !word.protected && word.core_lower == "cent")
     {
         after_value + 2
     } else {
@@ -881,6 +1057,64 @@ fn try_percent(tokens: &[Token], start: usize) -> Option<Rewrite> {
         text: format!("{}%", value),
         end,
     })
+}
+
+/// Whether the clock-time context is still open after `tokens[start..end]`.
+///
+/// A time preposition opens it, and it survives the glue that separates items
+/// in a list -- "at three fifteen, three thirty and three forty five" is
+/// three times, not one time and two loose number pairs. Any other word, or
+/// the end of a sentence, closes it.
+fn time_context_survives(
+    open: bool,
+    tokens: &[Token],
+    start: usize,
+    end: usize,
+    consumed_a_number: bool,
+) -> bool {
+    let mut open = open;
+    for token in &tokens[start..end] {
+        let word = token.core_lower.as_str();
+        if TIME_CONTEXT_WORDS.contains(&word) {
+            open = true;
+        } else if !consumed_a_number
+            && !matches!(word, "and" | "or" | "oh")
+            && !is_meridiem(word)
+            && !is_number_word(word)
+        {
+            open = false;
+        }
+    }
+    if tokens[end - 1]
+        .trail
+        .chars()
+        .any(|ch| matches!(ch, '.' | '!' | '?' | ';'))
+    {
+        open = false;
+    }
+    open
+}
+
+/// True when the number at `start` is only the head of a ratio or range whose
+/// other half will not convert ("ten to one odds", "twenty to one"). Writing
+/// one side as a digit and leaving the other as a word is the half-converted
+/// form the all-or-nothing rule exists to prevent, so the head stays a word
+/// too.
+fn ratio_partner_stays_a_word(tokens: &[Token], end: usize) -> bool {
+    let Some(bridge) = tokens.get(end) else {
+        return false;
+    };
+    if bridge.protected || !matches!(bridge.core_lower.as_str(), "to" | "or") {
+        return false;
+    }
+    if !span_continues(tokens, end - 1, end) || !span_continues(tokens, end, end + 1) {
+        return false;
+    }
+    let Some((value, partner_end)) = parse_cardinal(tokens, end + 1) else {
+        return false;
+    };
+    // A bare "one" is the only cardinal that never converts on its own.
+    partner_end == end + 2 && value == 1
 }
 
 /// The full extent of a chain of number groups that sit next to each other
@@ -931,30 +1165,32 @@ pub fn inverse_text_normalize_protecting(text: &str, protected_phrases: &[String
 
     let mut output = String::with_capacity(text.len());
     let mut index = 0usize;
+    let mut time_context_open = false;
 
     while index < tokens.len() {
         let token = &tokens[index];
         if token.protected || token.core.is_empty() {
             output.push_str(&token.render());
+            time_context_open = false;
             index += 1;
             continue;
         }
 
-        let previous_word = if index > 0 {
-            Some(tokens[index - 1].core_lower.as_str())
-        } else {
-            None
-        };
-
         let rewrite = try_phone(&tokens, index)
             .or_else(|| try_date(&tokens, index))
-            .or_else(|| try_time(&tokens, index, previous_word))
+            .or_else(|| try_time(&tokens, index, time_context_open))
+            .or_else(|| try_digit_string(&tokens, index))
             .or_else(|| try_currency(&tokens, index))
             .or_else(|| try_percent(&tokens, index))
-            .or_else(|| parse_decimal(&tokens, index).map(|(text, end)| Rewrite { text, end }));
+            .or_else(|| parse_decimal(&tokens, index).map(|(text, end)| Rewrite { text, end }))
+            // Backstop for the invariant `emit_rewrite` relies on; each rule
+            // also checks its own boundaries.
+            .filter(|rewrite| span_is_contiguous(&tokens, index, rewrite.end));
 
         if let Some(rewrite) = rewrite {
             emit_rewrite(&mut output, &tokens, index, &rewrite);
+            time_context_open =
+                time_context_survives(time_context_open, &tokens, index, rewrite.end, true);
             index = rewrite.end;
             continue;
         }
@@ -962,7 +1198,9 @@ pub fn inverse_text_normalize_protecting(text: &str, protected_phrases: &[String
         // Ordinals are tried before cardinals so "twenty first" is 21st
         // rather than "20 first".
         if let Some((value, end)) = parse_ordinal(&tokens, index) {
-            if standalone_ordinal_is_convertible(value, end - index) {
+            if standalone_ordinal_is_convertible(value, end - index)
+                && span_is_contiguous(&tokens, index, end)
+            {
                 emit_rewrite(
                     &mut output,
                     &tokens,
@@ -972,15 +1210,37 @@ pub fn inverse_text_normalize_protecting(text: &str, protected_phrases: &[String
                         end,
                     },
                 );
+                time_context_open =
+                    time_context_survives(time_context_open, &tokens, index, end, true);
                 index = end;
                 continue;
             }
+        }
+
+        // A run of spoken digits that no rule above claimed -- an eight- or
+        // nine-digit string, or a two-digit "oh five" -- stays whole. No rule
+        // can consume the "oh", so converting the digits around it is exactly
+        // the half-written form all-or-nothing exists to prevent.
+        let (run_digits, run_end) = single_digit_run(&tokens, index);
+        if run_digits.len() >= 2
+            && tokens[index..run_end]
+                .iter()
+                .any(|token| token.core_lower == "oh")
+        {
+            for token in &tokens[index..run_end] {
+                output.push_str(&token.render());
+            }
+            time_context_open =
+                time_context_survives(time_context_open, &tokens, index, run_end, true);
+            index = run_end;
+            continue;
         }
 
         if let Some(end) = ambiguous_adjacency_end(&tokens, index) {
             for token in &tokens[index..end] {
                 output.push_str(&token.render());
             }
+            time_context_open = time_context_survives(time_context_open, &tokens, index, end, true);
             index = end;
             continue;
         }
@@ -988,22 +1248,37 @@ pub fn inverse_text_normalize_protecting(text: &str, protected_phrases: &[String
         if let Some((value, end)) = parse_cardinal(&tokens, index) {
             // A bare "one" is a determiner as often as it is a count.
             let bare_one = end - index == 1 && value == 1;
-            if !bare_one {
+            // The tail of a decimal whose integer half never arrived: "point
+            // five" is 0.5 spoken loosely, and "point 5" is neither form.
+            let orphaned_decimal_tail = index
+                .checked_sub(1)
+                .and_then(|previous| tokens.get(previous))
+                .is_some_and(|previous| !previous.protected && previous.core_lower == "point")
+                && span_continues(&tokens, index - 1, index);
+            if !bare_one
+                && !orphaned_decimal_tail
+                && !ratio_partner_stays_a_word(&tokens, end)
+                && span_is_contiguous(&tokens, index, end)
+            {
                 emit_rewrite(
                     &mut output,
                     &tokens,
                     index,
                     &Rewrite {
-                        text: value.to_string(),
+                        text: format_cardinal(value),
                         end,
                     },
                 );
+                time_context_open =
+                    time_context_survives(time_context_open, &tokens, index, end, true);
                 index = end;
                 continue;
             }
         }
 
         output.push_str(&token.render());
+        time_context_open =
+            time_context_survives(time_context_open, &tokens, index, index + 1, false);
         index += 1;
     }
 
@@ -1032,7 +1307,7 @@ mod tests {
         assert_eq!(itn("one hundred twenty three"), "123");
         assert_eq!(itn("two thousand and twenty six"), "2026");
         assert_eq!(itn("twenty five kilometers"), "25 kilometers");
-        assert_eq!(itn("three million four hundred thousand"), "3400000");
+        assert_eq!(itn("three million four hundred thousand"), "3,400,000");
         assert_eq!(itn("we need forty two servers"), "we need 42 servers");
     }
 
@@ -1260,5 +1535,164 @@ mod tests {
     fn multibyte_text_is_left_alone() {
         assert_eq!(itn("日本語のテキストです"), "日本語のテキストです");
         assert_eq!(itn("caf\u{e9} twenty five"), "caf\u{e9} 25");
+    }
+
+    /// A rewrite replaces a whole span and keeps only its outer punctuation,
+    /// so no rule may reach across an interior lead or trail: the paren in
+    /// each of these used to disappear.
+    #[test]
+    fn punctuation_inside_a_span_stops_the_rule() {
+        assert_eq!(itn("ten per (cent"), "10 per (cent");
+        assert_eq!(itn("the first of (May"), "the first of (May");
+        assert_eq!(
+            itn("twelve dollars and fifty (cents"),
+            "$12.50 (cents",
+            "the amount still converts; the paren must survive"
+        );
+        assert_eq!(itn("three point (five"), "3 point (5");
+        assert_eq!(itn("the first of \"May"), "the first of \"May");
+        // The unpunctuated forms are unaffected.
+        assert_eq!(itn("ten per cent"), "10%");
+        assert_eq!(itn("the first of May"), "the 1st of May");
+        assert_eq!(itn("twelve dollars and fifty cents"), "$12.50");
+    }
+
+    /// A dictionary replacement or snippet trigger only protects the tokens
+    /// it actually spans. A one-letter phrase used to match inside a word and
+    /// split the number around it.
+    #[test]
+    fn a_protected_phrase_must_land_on_token_boundaries() {
+        let one_letter = vec!["v".to_string()];
+        assert_eq!(
+            inverse_text_normalize_protecting("twenty five servers", &one_letter),
+            "25 servers",
+            "the v inside \"five\" is not a phrase match"
+        );
+        let other_letter = vec!["a".to_string()];
+        assert_eq!(
+            inverse_text_normalize_protecting("we have twenty five candidates", &other_letter),
+            "we have 25 candidates"
+        );
+        // A phrase that does land on token boundaries still protects.
+        assert_eq!(
+            inverse_text_normalize_protecting("one hundred twenty three", &["one".to_string()]),
+            "one hundred 23"
+        );
+        assert_eq!(
+            inverse_text_normalize_protecting(
+                "take Route sixty six for twenty miles",
+                &["Route sixty six".to_string()]
+            ),
+            "take Route sixty six for 20 miles"
+        );
+        // Punctuation-carrying replacements anchor on the outer edge.
+        assert_eq!(
+            inverse_text_normalize_protecting(
+                "the U.S. twenty five percent tariff",
+                &["U.S.".to_string()]
+            ),
+            "the U.S. 25% tariff"
+        );
+    }
+
+    /// Half-written numbers are worse than the words the user said.
+    #[test]
+    fn a_phrase_no_rule_can_finish_stays_as_words() {
+        assert_eq!(itn("ten to one odds"), "ten to one odds");
+        assert_eq!(itn("twenty to one"), "twenty to one");
+        assert_eq!(itn("point five"), "point five");
+        // The same words with a partner that does convert are unaffected.
+        assert_eq!(itn("five to ten minutes"), "5 to 10 minutes");
+        assert_eq!(itn("three point five"), "3.5");
+        assert_eq!(itn("to two places"), "to 2 places");
+        // Punctuation breaks the phrase, so the number is on its own again.
+        assert_eq!(
+            itn("at this point, five people left"),
+            "at this point, 5 people left"
+        );
+    }
+
+    /// "oh" is only ever a zero inside a run of spoken digits, and nothing
+    /// else can consume it -- so the run converts whole or not at all.
+    #[test]
+    fn spoken_oh_is_a_zero_inside_a_digit_run() {
+        assert_eq!(itn("room two oh one"), "room 201");
+        assert_eq!(itn("take route one oh one"), "take route 101");
+        assert_eq!(itn("suite four oh five six"), "suite 4056");
+        // A leading "oh" is the interjection, not a digit.
+        assert_eq!(itn("oh five more"), "oh five more");
+        // A time context still wins: this one is a clock time.
+        assert_eq!(itn("call at three oh five"), "call at 3:05");
+    }
+
+    /// A time preposition stays in scope across the glue of a list, so the
+    /// items do not come out as one time and two loose number pairs.
+    #[test]
+    fn a_time_context_survives_a_list() {
+        assert_eq!(
+            itn("the slots are at three fifteen, three thirty and three forty five"),
+            "the slots are at 3:15, 3:30 and 3:45"
+        );
+        // A word that is not list glue closes the context again.
+        assert_eq!(
+            itn("meet at three thirty tomorrow three forty five works too"),
+            "meet at 3:30 tomorrow three forty five works too"
+        );
+        // A sentence boundary closes it.
+        assert_eq!(
+            itn("meet at three thirty. three forty five"),
+            "meet at 3:30. three forty five"
+        );
+    }
+
+    #[test]
+    fn thousands_separators_follow_how_the_number_is_written() {
+        assert_eq!(itn("seventy five thousand dollars"), "$75,000");
+        assert_eq!(
+            itn("we hired seventy five thousand people"),
+            "we hired 75,000 people"
+        );
+        assert_eq!(itn("two million five hundred thousand"), "2,500,000");
+        assert_eq!(itn("one thousand two hundred dollars"), "$1,200");
+        // Below the thresholds, and for years, the digits stay bare.
+        assert_eq!(itn("nine thousand nine hundred"), "9900");
+        assert_eq!(itn("two thousand and twenty six"), "2026");
+        assert_eq!(itn("january fifth twenty twenty five"), "January 5, 2025");
+        assert_eq!(itn("one hundred dollars"), "$100");
+    }
+
+    #[test]
+    fn hyphenated_cardinals_convert_like_hyphenated_ordinals() {
+        assert_eq!(itn("twenty-one servers"), "21 servers");
+        assert_eq!(itn("twenty\u{2011}one servers"), "21 servers");
+        assert_eq!(itn("the twenty-first item"), "the 21st item");
+        assert_eq!(itn("the twenty\u{2011}first item"), "the 21st item");
+        assert_eq!(itn("one hundred twenty-three"), "123");
+        assert_eq!(itn("twenty-one thousand"), "21,000");
+        // Not every hyphenated word is a number.
+        assert_eq!(itn("a well-known issue"), "a well-known issue");
+        assert_eq!(itn("the five-ten range"), "the five-ten range");
+    }
+
+    #[test]
+    fn only_phone_shaped_digit_run_lengths_are_formatted() {
+        assert_eq!(
+            itn("call one five five five one two three four five six seven"),
+            "call 1-555-123-4567"
+        );
+        // Eight, nine and twelve digits have no written phone shape, so the
+        // run stays as words rather than collapsing into a blob.
+        assert_eq!(
+            itn("code five five five one two three four five"),
+            "code five five five one two three four five"
+        );
+        assert_eq!(
+            itn("code five five five one two three four five six"),
+            "code five five five one two three four five six"
+        );
+        assert_eq!(
+            itn("code two five five five one two three four five six seven"),
+            "code two five five five one two three four five six seven"
+        );
     }
 }
