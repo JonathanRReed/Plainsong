@@ -1970,6 +1970,43 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationCategoryFormattingEnabled).toBe(false);
   });
 
+  it("shows a numbers-as-digits switch per profile and says why Voice ships off", async () => {
+    render(<DictationView />);
+
+    await openConfigTab("Destinations");
+    const section = await screen.findByTestId("numbers-as-digits-section");
+    expect(
+      within(section).getByText("Numbers as digits"),
+    ).toBeInTheDocument();
+    expect(
+      within(section).getByText(
+        "Off by default: raw voice mode keeps your words as spoken.",
+      ),
+    ).toBeInTheDocument();
+
+    const voiceSwitch = within(section).getByRole("switch", {
+      name: "General: numbers as digits",
+    });
+    expect(voiceSwitch).toHaveAttribute("aria-checked", "false");
+    const writingSwitch = within(section).getByRole("switch", {
+      name: "Writing: numbers as digits",
+    });
+    expect(writingSwitch).toHaveAttribute("aria-checked", "true");
+
+    fireEvent.click(voiceSwitch);
+
+    await waitFor(() => {
+      expect(backendMocks.saveSettings).toHaveBeenCalled();
+    });
+    const saveCalls = backendMocks.saveSettings.mock.calls as unknown as Array<
+      [any]
+    >;
+    const latestSettings = saveCalls[saveCalls.length - 1]?.[0];
+    expect(latestSettings.transcription.dictationNumbersAsDigits).toMatchObject({
+      voice: true,
+    });
+  });
+
   it("adds and removes a per-app category override", async () => {
     render(<DictationView />);
 

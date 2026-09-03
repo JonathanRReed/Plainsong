@@ -571,6 +571,9 @@ async fn run_fixture_benchmark(
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            // The "voice" preset ships with numbers as digits off, so the
+            // baseline measures what that preset actually runs.
+            numbers_as_digits: false,
             recent_inserted_text: None,
             destination_category: DictationAppCategory::Other,
         });
@@ -584,6 +587,9 @@ async fn run_fixture_benchmark(
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: true,
+            // Formatting on measures the full local text pipeline, inverse
+            // text normalization included.
+            numbers_as_digits: true,
             recent_inserted_text: None,
             destination_category: DictationAppCategory::Other,
         });

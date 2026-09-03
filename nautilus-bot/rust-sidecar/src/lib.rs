@@ -4233,6 +4233,23 @@ async fn reprocess_dictation_impl(
     // Stage two: the same local pipeline the live path runs, then the mode's
     // transform. Commands are deliberately not re-executed: a "delete that"
     // said last week must not act on whatever is focused now.
+    // Numbers as digits follows the mode this re-run selected, for the same
+    // reason translate-to-English above does: the selected profile's own
+    // override first, then the user's setting for the preset it is built on,
+    // then that preset's default.
+    let numbers_as_digits = custom_mode
+        .as_ref()
+        .and_then(|mode| mode.numbers_as_digits)
+        .unwrap_or_else(|| {
+            settings_snapshot
+                .transcription
+                .dictation_numbers_as_digits
+                .get(base_preset.as_str())
+                .copied()
+                .unwrap_or_else(|| {
+                    settings::default_dictation_numbers_as_digits(base_preset.as_str())
+                })
+        });
     let pipeline_result = crate::dictation_pipeline::apply_dictation_pipeline(
         crate::dictation_pipeline::DictationPipelineInput {
             text: raw_text.as_str(),
@@ -4243,6 +4260,7 @@ async fn reprocess_dictation_impl(
             smart_formatting_enabled: true,
             recent_inserted_text: None,
             destination_category,
+            numbers_as_digits,
         },
     );
     let mut final_text = pipeline_result.text.trim().to_string();
@@ -6739,16 +6757,29 @@ fn default_dictation_command_prompt(command_key: &str) -> Option<&'static str> {
     crate::dictation_parity::default_dictation_command_prompt(command_key)
 }
 
+/// The instruction that keeps the LLM formatting pass from undoing the local
+/// inverse-text-normalization stage.
+///
+/// ITN runs first (in `dictation_pipeline`), and it is on by default for
+/// exactly the presets that have a transform prompt here plus "notes", so by
+/// the time the model sees the text the numbers are already written the way
+/// the user's profile asked for. Without this line the model is free to spell
+/// "$12.50" back out as "twelve dollars and fifty cents", or to restyle
+/// "3:30 pm" and "January 5, 2025" -- silently reversing a setting the user
+/// turned on. Appended to every prompt that can run after that stage.
+const DICTATION_NUMBER_PRESERVATION_INSTRUCTION: &str =
+    "Keep numerals, currency, times and dates exactly as written.";
+
 fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
     match normalize_dictation_mode_preset(mode_preset) {
         "messages" => Some(
-            "Rewrite the user's text as a short, natural message. Keep it concise, clear, and conversational. Return only the final message.",
+            "Rewrite the user's text as a short, natural message. Keep it concise, clear, and conversational. Keep numerals, currency, times and dates exactly as written. Return only the final message.",
         ),
         "email" => Some(
-            "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Return only the final text.",
+            "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Keep numerals, currency, times and dates exactly as written. Return only the final text.",
         ),
         "meeting_follow_up" => Some(
-            "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Return only the final follow-up text.",
+            "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Keep numerals, currency, times and dates exactly as written. Return only the final follow-up text.",
         ),
         _ => None,
     }
@@ -7300,6 +7331,32 @@ fn resolved_dictation_mode_preset(settings: &settings::Settings) -> &'static str
     }
 }
 
+/// Whether the inverse-text-normalization stage runs for the profile that is
+/// active right now.
+///
+/// Resolution order, most specific first: the active custom profile's own
+/// `numbers_as_digits`, then the user's override for the mode preset that
+/// profile is built on (or the plain preset when no custom profile is
+/// active), then the preset default from
+/// `settings::default_dictation_numbers_as_digits`. A custom profile saved
+/// before this setting existed carries `None` and therefore inherits, which
+/// is why the field is an `Option<bool>` rather than a `bool`.
+fn resolve_dictation_numbers_as_digits(settings: &settings::Settings) -> bool {
+    if let Some(mode) = active_dictation_custom_mode(settings) {
+        if let Some(explicit) = mode.numbers_as_digits {
+            return explicit;
+        }
+    }
+
+    let preset = resolved_dictation_mode_preset(settings);
+    settings
+        .transcription
+        .dictation_numbers_as_digits
+        .get(preset)
+        .copied()
+        .unwrap_or_else(|| settings::default_dictation_numbers_as_digits(preset))
+}
+
 fn resolved_dictation_base_mode_label(settings: &settings::Settings) -> String {
     dictation_mode_label(
         resolved_dictation_mode_preset(settings),
@@ -7408,19 +7465,26 @@ fn generate_default_dictation_prompt(
             The user is currently dictating into the application: '{}'.
             Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). {}
             Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+            {}
             Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
             {}
             Just output the corrected text directly.",
-            app_name, category_fragment, DICTATION_PROMPT_INJECTION_GUARDRAIL
+            app_name,
+            category_fragment,
+            DICTATION_NUMBER_PRESERVATION_INSTRUCTION,
+            DICTATION_PROMPT_INJECTION_GUARDRAIL
         )
     } else {
         format!(
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text. {}
         Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+        {}
         Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
         {}
         Just output the corrected text directly.",
-            category_fragment, DICTATION_PROMPT_INJECTION_GUARDRAIL
+            category_fragment,
+            DICTATION_NUMBER_PRESERVATION_INSTRUCTION,
+            DICTATION_PROMPT_INJECTION_GUARDRAIL
         )
     }
 }
@@ -13580,6 +13644,7 @@ mod tests {
             route_preference: Some("local".to_string()),
             language_override: None,
             live_preview_enabled: Some(true),
+            numbers_as_digits: None,
             insertion_mode: "paste".to_string(),
             context_source: "selected_text".to_string(),
             save_to_inbox: false,
@@ -14353,6 +14418,7 @@ mod tests {
             route_preference: None,
             language_override: None,
             live_preview_enabled: None,
+            numbers_as_digits: None,
             insertion_mode: "auto".to_string(),
             context_source: "none".to_string(),
             save_to_inbox: true,
@@ -14516,6 +14582,41 @@ mod tests {
         assert!(dictation_mode_transform_prompt("voice").is_none());
     }
 
+    /// Snapshot: the LLM formatting pass runs *after* the local ITN stage,
+    /// which is on by default for exactly these presets. Every prompt that
+    /// can see that output has to tell the model to leave the numbers alone,
+    /// or the model quietly undoes a setting the user turned on.
+    #[test]
+    fn every_prompt_that_runs_after_itn_says_to_keep_the_numbers() {
+        for preset in ["messages", "email", "meeting_follow_up"] {
+            let prompt = dictation_mode_transform_prompt(preset).expect("generic prompt exists");
+            assert!(
+                prompt.contains(DICTATION_NUMBER_PRESERVATION_INSTRUCTION),
+                "{preset} transform prompt must carry the number-preservation line: {prompt}"
+            );
+        }
+
+        // The default formatting prompt, in both of its shapes.
+        for prompt in [
+            generate_default_dictation_prompt(None, text::format::DictationAppCategory::Other),
+            generate_default_dictation_prompt(
+                Some("Mail".to_string()),
+                text::format::DictationAppCategory::Email,
+            ),
+        ] {
+            assert!(
+                prompt.contains(DICTATION_NUMBER_PRESERVATION_INSTRUCTION),
+                "default dictation prompt must carry the number-preservation line: {prompt}"
+            );
+        }
+
+        assert_eq!(
+            DICTATION_NUMBER_PRESERVATION_INSTRUCTION,
+            "Keep numerals, currency, times and dates exactly as written.",
+            "the wording is part of the snapshot: changing it changes what every prompt asks for"
+        );
+    }
+
     #[test]
     fn default_dictation_prompt_includes_ai_chat_guardrail_for_chatgpt() {
         let category =
@@ -14616,6 +14717,7 @@ mod tests {
             route_preference: Some("local".to_string()),
             language_override: None,
             live_preview_enabled: Some(true),
+            numbers_as_digits: None,
             insertion_mode: "paste".to_string(),
             context_source: "selected_text".to_string(),
             save_to_inbox: true,
@@ -14650,6 +14752,7 @@ mod tests {
             route_preference: Some("local".to_string()),
             language_override: None,
             live_preview_enabled: Some(true),
+            numbers_as_digits: None,
             insertion_mode: "paste".to_string(),
             context_source: "application_context".to_string(),
             save_to_inbox: false,
@@ -14678,6 +14781,63 @@ mod tests {
             custom_prompt,
         )];
         settings
+    }
+
+    #[test]
+    fn numbers_as_digits_follows_the_mode_preset_by_default() {
+        let mut settings = settings::Settings::default();
+        // A fresh install is on "voice", the one preset that keeps the words
+        // as spoken.
+        assert!(!resolve_dictation_numbers_as_digits(&settings));
+
+        for preset in ["messages", "email", "notes", "meeting_follow_up"] {
+            settings.transcription.dictation_mode_preset = preset.to_string();
+            assert!(
+                resolve_dictation_numbers_as_digits(&settings),
+                "{preset} should default to digits"
+            );
+        }
+    }
+
+    #[test]
+    fn numbers_as_digits_uses_the_users_per_preset_override() {
+        let mut settings = settings::Settings::default();
+        settings
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("voice".to_string(), true);
+        assert!(resolve_dictation_numbers_as_digits(&settings));
+
+        settings.transcription.dictation_mode_preset = "email".to_string();
+        settings
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("email".to_string(), false);
+        assert!(!resolve_dictation_numbers_as_digits(&settings));
+    }
+
+    #[test]
+    fn numbers_as_digits_lets_a_custom_profile_inherit_or_override() {
+        // Inherits its base preset when it stores nothing (which is what a
+        // profile saved before this setting carries).
+        let mut settings = settings_with_active_custom_mode(Some("voice"), None);
+        assert!(!resolve_dictation_numbers_as_digits(&settings));
+
+        settings.transcription.dictation_custom_modes[0].numbers_as_digits = Some(true);
+        assert!(resolve_dictation_numbers_as_digits(&settings));
+
+        let mut inheriting = settings_with_active_custom_mode(Some("email"), None);
+        assert!(resolve_dictation_numbers_as_digits(&inheriting));
+        inheriting.transcription.dictation_custom_modes[0].numbers_as_digits = Some(false);
+        assert!(!resolve_dictation_numbers_as_digits(&inheriting));
+
+        // Inheritance follows the user's preset override, not only the default.
+        let mut overridden = settings_with_active_custom_mode(Some("voice"), None);
+        overridden
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("voice".to_string(), true);
+        assert!(resolve_dictation_numbers_as_digits(&overridden));
     }
 
     #[test]
@@ -14764,6 +14924,7 @@ mod tests {
             route_preference: Some("local".to_string()),
             language_override: None,
             live_preview_enabled: Some(true),
+            numbers_as_digits: None,
             insertion_mode: "paste".to_string(),
             context_source: "application_context".to_string(),
             save_to_inbox: false,
@@ -23546,6 +23707,9 @@ async fn save_settings_for_sidecar(
     // a crafted payload cannot mint an undeletable prompt.
     settings.ai.saved_prompts =
         settings::sanitize_saved_prompts(std::mem::take(&mut settings.ai.saved_prompts));
+    settings::sanitize_dictation_numbers_as_digits(
+        &mut settings.transcription.dictation_numbers_as_digits,
+    );
     settings.transcription.dictation_command_prefix =
         normalize_dictation_command_prefix(&settings.transcription.dictation_command_prefix)
             .to_string();
@@ -25564,6 +25728,7 @@ async fn stop_dictation_for_sidecar(
                 app_target: app_target.as_deref(),
                 mode_preset: effective_mode.as_str(),
                 smart_formatting_enabled: true,
+                numbers_as_digits: resolve_dictation_numbers_as_digits(&settings_snapshot),
                 recent_inserted_text,
                 destination_category,
             },
