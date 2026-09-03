@@ -12398,18 +12398,20 @@ mod tests {
             asr::AsrProviderType::CohereTranscribe,
         ] {
             assert!(
-                !should_request_whole_file_meeting(provider, true, 60.0, 1_000_000),
+                !should_request_whole_file_meeting(provider, true, true, 60.0, 1_000_000),
                 "{provider:?} must not take the whole-file route"
             );
         }
         assert!(should_request_whole_file_meeting(
             asr::AsrProviderType::Deepgram,
             true,
+            true,
             60.0,
             1_000_000
         ));
         assert!(should_request_whole_file_meeting(
             asr::AsrProviderType::GeminiTranscribe,
+            true,
             true,
             60.0,
             1_000_000
@@ -12426,17 +12428,20 @@ mod tests {
         assert!(should_request_whole_file_meeting(
             asr::AsrProviderType::GeminiTranscribe,
             true,
+            true,
             twenty_nine_minutes,
             1_000_000
         ));
         assert!(!should_request_whole_file_meeting(
             asr::AsrProviderType::GeminiTranscribe,
             true,
+            true,
             thirty_one_minutes,
             1_000_000
         ));
         assert!(should_request_whole_file_meeting(
             asr::AsrProviderType::Deepgram,
+            true,
             true,
             thirty_one_minutes,
             1_000_000
@@ -12446,17 +12451,20 @@ mod tests {
         assert!(!should_request_whole_file_meeting(
             asr::AsrProviderType::Deepgram,
             true,
+            true,
             60.0,
             8 * 1024 * 1024 * 1024
         ));
         assert!(!should_request_whole_file_meeting(
             asr::AsrProviderType::Deepgram,
             true,
+            true,
             0.0,
             1_000_000
         ));
         assert!(!should_request_whole_file_meeting(
             asr::AsrProviderType::Deepgram,
+            true,
             true,
             60.0,
             0
@@ -12466,10 +12474,49 @@ mod tests {
         // when the user does not want them.
         assert!(!should_request_whole_file_meeting(
             asr::AsrProviderType::Deepgram,
+            true,
             false,
             60.0,
             1_000_000
         ));
+    }
+
+    /// Speaker separation off must stop the request, not just the labels.
+    ///
+    /// `resolve_meeting_diarizer` already refused to use provider turns with
+    /// diarization off, but it runs after the response has arrived. Until this
+    /// gate moved up, a user with speaker separation turned off still had the
+    /// whole meeting uploaded as one diarized request -- speaker analysis they
+    /// had switched off, performed by a third party, paid for, and then
+    /// discarded.
+    #[test]
+    fn speaker_separation_off_keeps_the_meeting_off_the_whole_file_route() {
+        for provider in [
+            asr::AsrProviderType::Deepgram,
+            asr::AsrProviderType::GeminiTranscribe,
+        ] {
+            assert!(
+                should_request_whole_file_meeting(provider, true, true, 60.0, 1_000_000),
+                "{provider:?} takes the whole-file route with both switches on"
+            );
+            assert!(
+                !should_request_whole_file_meeting(provider, false, true, 60.0, 1_000_000),
+                "{provider:?} must not send one diarized request with speaker separation off"
+            );
+            // Both off is the same answer, and so is the master switch off
+            // while the provider preference is on -- the preference is a
+            // choice *between* diarizers, not a way to re-enable diarization.
+            assert!(!should_request_whole_file_meeting(
+                provider, false, false, 60.0, 1_000_000
+            ));
+
+            // And the downstream check still agrees, so neither gate is now
+            // carrying the rule alone.
+            assert_eq!(
+                resolve_meeting_diarizer(false, true, false, provider, 12, true),
+                MeetingDiarizer::None
+            );
+        }
     }
 
     #[test]
@@ -19364,18 +19411,27 @@ fn whole_file_meeting_limits(provider: asr::AsrProviderType) -> Option<WholeFile
 ///
 /// The only reason to do so is to get one consistent speaker space out of a
 /// provider that diarizes -- see `provider_speaker_turns_survive_chunking` --
-/// so the answer is no whenever provider diarization is switched off, and no
-/// for every provider that does not return speaker labels. A recording past
-/// the provider's documented ceiling also gets a no: chunked transcription
-/// with Plainsong's own diarizer is a worse answer than provider labels, but a
-/// far better one than a rejected request.
+/// so the answer is no whenever speaker separation is off at all, no when the
+/// user prefers Plainsong's own diarizer, and no for every provider that does
+/// not return speaker labels. A recording past the provider's documented
+/// ceiling also gets a no: chunked transcription with Plainsong's own diarizer
+/// is a worse answer than provider labels, but a far better one than a
+/// rejected request.
+///
+/// `enable_diarization` is the master switch and is checked here rather than
+/// only downstream. It used to be checked only by `resolve_meeting_diarizer`,
+/// after the request had already gone out: a user with speaker separation
+/// turned off still had the whole meeting uploaded as a single diarized
+/// request, paid for the speaker analysis they had declined, and then had the
+/// labels thrown away on arrival.
 fn should_request_whole_file_meeting(
     provider: asr::AsrProviderType,
+    enable_diarization: bool,
     prefer_provider_diarization: bool,
     duration_seconds: f64,
     byte_len: u64,
 ) -> bool {
-    if !prefer_provider_diarization {
+    if !enable_diarization || !prefer_provider_diarization {
         return false;
     }
     let Some(limits) = whole_file_meeting_limits(provider) else {
@@ -20486,6 +20542,7 @@ async fn transcribe_single_source_meeting(
     audio_path: &Path,
     provider: asr::AsrProviderType,
     model_id: String,
+    enable_diarization: bool,
     prefer_provider_diarization: bool,
 ) -> Result<asr::TranscriptionResult, String> {
     let byte_len = tokio::fs::metadata(audio_path)
@@ -20497,6 +20554,7 @@ async fn transcribe_single_source_meeting(
 
     if should_request_whole_file_meeting(
         provider,
+        enable_diarization,
         prefer_provider_diarization,
         duration_seconds,
         byte_len,
@@ -20556,6 +20614,7 @@ async fn transcribe_meeting_recording(
     system_audio_path: Option<&Path>,
     provider: asr::AsrProviderType,
     model_id: String,
+    enable_diarization: bool,
     prefer_provider_diarization: bool,
 ) -> Result<MeetingTranscriptionOutput, String> {
     let mic_path = mic_audio_path.filter(|path| path.exists());
@@ -20569,6 +20628,7 @@ async fn transcribe_meeting_recording(
             mixed_audio_path,
             provider,
             model_id,
+            enable_diarization,
             prefer_provider_diarization,
         )
         .await?;
@@ -20645,6 +20705,7 @@ async fn transcribe_meeting_recording(
             mixed_audio_path,
             provider,
             model_id,
+            enable_diarization,
             prefer_provider_diarization,
         )
         .await?;
@@ -30751,9 +30812,16 @@ async fn run_meeting_transcription_pipeline(
         tracing::warn!("{}", warning);
     }
 
-    let prefer_provider_diarization = {
+    // Both switches, read together: "keep the speakers a cloud provider sends
+    // back" only means anything while speaker separation is on at all, and the
+    // whole-file request exists solely to make those labels usable.
+    let (enable_diarization, prefer_provider_diarization) = {
         let sm = state_clone.settings_manager.lock().await;
-        sm.settings().meetings.prefer_provider_diarization
+        let settings = sm.settings();
+        (
+            settings.transcription.enable_diarization,
+            settings.meetings.prefer_provider_diarization,
+        )
     };
 
     match transcribe_meeting_recording(
@@ -30765,6 +30833,7 @@ async fn run_meeting_transcription_pipeline(
         resolved_audio.system.as_deref(),
         meeting_provider,
         meeting_model_id.clone(),
+        enable_diarization,
         prefer_provider_diarization,
     )
     .await

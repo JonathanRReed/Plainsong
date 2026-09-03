@@ -378,6 +378,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Turning speaker separation off now also stops the meeting being sent as one
+  diarized request. The whole-recording request exists only to get usable
+  speaker labels out of a cloud provider, but it was gated on "keep the
+  speakers a cloud provider sends back" alone: with speaker separation off,
+  the meeting still went out in one diarized request, was charged for the
+  speaker analysis, and the labels were discarded on arrival.
 - Deepgram and Gemini Transcribe can actually be chosen for meetings. The
   sidecar's list of meeting-capable providers never gained either one, so
   both counted as dictation-only: settings normalization rewrote a Deepgram
