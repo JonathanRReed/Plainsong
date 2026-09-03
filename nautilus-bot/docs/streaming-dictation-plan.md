@@ -1,7 +1,19 @@
 # Plan: live streaming partial transcription
 
-**Status: IMPLEMENTED** (the re-decode-a-separate-accumulator approach below),
-hardened via a 4-reviewer adversarial pass. The partial path is UI-only and
+**Status: IMPLEMENTED TWICE.** The re-decode-a-separate-accumulator approach
+below is the fallback and still the only preview a default build has. Lane C1
+added a real streaming engine beside it — a `StreamingAsrSession` trait in
+`rust-sidecar/src/asr/mod.rs` and an implementation for Nemotron 3.5 ASR
+Streaming through transcribe.cpp, behind the `asr-transcribe-cpp` feature — so
+that when its weights are installed the preview keeps its encoder state instead
+of re-transcribing from the top. Which engine runs is
+`resolve_dictation_live_preview_engine` in `lib.rs`, gated by the existing Live
+Preview setting plus `dictationLivePreviewEngine`. Measurements:
+`artifacts/qa/streaming-partials-receipt-2026-09-02.md`. **The hard guarantee
+below is unchanged and now has source-scan tests behind it:** the inserted text
+is the batch decode either way.
+
+Hardened via a 4-reviewer adversarial pass. The partial path is UI-only and
 provably never changes the final inserted text; it is gated behind the existing
 Live Preview setting and local providers only, with Apple Speech explicitly
 excluded because the generic path would restart its batch helper every tick. What still needs a real
@@ -90,6 +102,22 @@ the measured ~74× real-time for `base.en` on real speech
   whether to cap re-decode to the last N seconds for very long dictations,
   and greedy-vs-beam params for partials (greedy is faster and fine for preview;
   the final pass keeps beam search).
+
+## What a meeting caption path would need from this trait
+
+Not this lane, and not a small addition. `StreamingAsrSession` is scoped to one
+utterance: dictation opens a session, feeds it, and closes it within seconds,
+so it never has to decide when to forget. A meeting runs for an hour with long
+pauses and speaker changes, so a caption path would need the trait's `reset` to
+become a *commit-and-continue* — fold the volatile tail into a committed
+transcript, drop the encoder's stale context, and keep rendering everything
+already committed rather than clearing the display, which is what `reset` does
+today — plus a per-session decision about when a pause is long enough to
+warrant it, timestamps on each committed span so captions can be aligned to the
+recording, and an answer to the one-in-flight-compute-per-model constraint in
+`artifacts/qa/transcribe-cpp-spike-2026-09-02.md` (a meeting caption stream and
+a dictation preview would serialize on the same model, or need a second copy of
+the weights in memory). `streaming.rs` is deliberately untouched.
 
 ## Alternative: Apple SpeechAnalyzer live session (macOS 26+)
 

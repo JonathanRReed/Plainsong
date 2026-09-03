@@ -31,6 +31,20 @@ evidence is stale and must be recaptured before this becomes a candidate.
   close to tell apart. Thresholds are per model and calibrated against
   synthetic fixtures at a zero-false-accept operating point —
   `artifacts/qa/voiceprint-calibration-2026-09-02.md`.
+- The dictation live preview can be drawn by a real streaming recognizer
+  instead of by re-transcribing. Until now the popup's live text was a batch
+  re-decode of everything you had said so far, run again every few hundred
+  milliseconds, so the words landed a whole decode behind you. With the new
+  live preview engine installed — a 716 MB download on the Models screen,
+  experimental, off unless you fetch it — the recognizer keeps what it has
+  already heard, and the popup shows the words it has settled on apart from
+  the tail it may still change. **What Plainsong types is unchanged**: the
+  inserted text is still the finished transcription from your dictation
+  engine, made after you stop. Without the download, or in a language the
+  engine's own model file does not declare, the previous preview runs exactly
+  as before. Settings gains "What draws the live preview" (whichever is
+  available / streaming / re-transcribe) under the existing Live preview
+  control.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,
@@ -428,6 +442,28 @@ evidence is stale and must be recaptured before this becomes a candidate.
   that no longer exist until you navigate away and back.
 - "Not them" is refused while "Remember voices" is off, like every other write
   the feature makes. It wrote to the voiceprint columns with the switch off.
+- The streaming live preview no longer shows a word twice. When the recognizer
+  reported a shorter settled prefix than the popup was already showing —
+  ordinary flicker, and deliberately ignored — the tail that came with it was
+  pasted on unchanged, so "ship the" followed by "ship" + " the release" was
+  drawn as "ship the the release". The tail is now re-cut at the boundary the
+  popup kept.
+- The streaming live preview now hears the last half-second of what you said.
+  It fed the recognizer only whole chunks and never closed the stream, so up
+  to 560 ms of speech reached nothing and the last words stayed uncommitted.
+  It now feeds the remainder and finalizes once before the recognizer is put
+  down. What gets typed is unchanged either way: that is still the finished
+  transcription made after you stop.
+- A live preview that stops answering can no longer leave a second copy of its
+  model loaded. The stop path gave up after two seconds and *detached* the
+  task rather than cancelling it, so the next dictation could open a second
+  ~1 GB engine beside the first. The task is now aborted, and only one preview
+  engine may be resident at a time — a dictation that cannot get the slot goes
+  without a streaming preview instead.
+- The Models screen no longer accuses an interrupted download of failing its
+  checksum. Any live-preview engine file that was on disk and not ready got
+  "did not match its pinned checksum"; a short file now says the download did
+  not finish, and a whole one says Plainsong could not verify it.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

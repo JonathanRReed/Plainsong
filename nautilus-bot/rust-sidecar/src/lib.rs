@@ -103,6 +103,10 @@ pub struct AppState {
     accessibility_trust_observed: Arc<AtomicBool>,
     last_cursor_insert_status: Arc<StdMutex<Option<CursorInsertStatus>>>,
     recent_dictation_delivery: Arc<Mutex<Option<RecentDictationDelivery>>>,
+    /// The streaming live preview running for the active dictation session, if
+    /// any. Held here so every dictation stop path can close the recognizer
+    /// before the batch decode that produces the inserted text starts.
+    dictation_live_preview: Arc<Mutex<Option<DictationLivePreviewControl>>>,
     streaming_transcriber: Arc<streaming::StreamingTranscriber>,
     vault_state: Arc<Mutex<VaultRuntimeState>>,
     /// What the startup vault check found: whether a plaintext database that
@@ -10412,6 +10416,27 @@ mod dictation_idle_reset_tests {
             body.contains("DICTATION_IDLE_RESET_ERROR_MS"),
             "the error path must use the longer error window, not the success one"
         );
+        // Every terminal stop failure funnels through here, and several of
+        // them (audio finalization failing, an unreadable capture) happen
+        // before the success path's own close. Without this the streaming
+        // preview would keep its recognizer -- and its model -- alive after
+        // the session it belonged to had already ended in an error.
+        assert!(
+            body.contains("stop_dictation_live_preview(state).await;"),
+            "the terminal error path must close the live preview; a failed stop otherwise \
+             leaves the streaming engine loaded with no session to end it"
+        );
+        let close = body
+            .find("stop_dictation_live_preview(state).await;")
+            .expect("the error path must close the live preview");
+        let reset = body
+            .find("reset_dictation_session_runtime(")
+            .expect("the error path must reset the session runtime");
+        assert!(
+            close < reset,
+            "the preview must be closed before the session runtime is reset, so nothing is \
+             still feeding a session that no longer exists"
+        );
     }
 }
 
@@ -11738,6 +11763,455 @@ mod tests {
             true,
             DictationSessionState::Idle
         ));
+    }
+
+    /// The whole feature rests on this: a streaming preview is an upgrade to
+    /// the preview, never a requirement for having one.
+    #[test]
+    fn the_live_preview_falls_back_to_re_decoding_whenever_streaming_is_not_there() {
+        let base = DictationLivePreviewInputs {
+            live_preview_enabled: true,
+            engine_setting: "auto",
+            provider_supports_redecode: true,
+            streaming_compiled_in: true,
+            streaming_model_ready: true,
+            streaming_language_supported: true,
+        };
+        assert_eq!(
+            resolve_dictation_live_preview_engine(base),
+            DictationLivePreviewEngine::Streaming
+        );
+
+        for missing in [
+            DictationLivePreviewInputs {
+                streaming_compiled_in: false,
+                ..base
+            },
+            DictationLivePreviewInputs {
+                streaming_model_ready: false,
+                ..base
+            },
+            DictationLivePreviewInputs {
+                streaming_language_supported: false,
+                ..base
+            },
+        ] {
+            assert_eq!(
+                resolve_dictation_live_preview_engine(missing),
+                DictationLivePreviewEngine::Redecode,
+                "a missing streaming engine must leave the old preview running"
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_preview_setting_still_decides_whether_there_is_a_preview_at_all() {
+        for engine_setting in ["auto", "redecode", "streaming", "nonsense"] {
+            assert_eq!(
+                resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+                    live_preview_enabled: false,
+                    engine_setting,
+                    provider_supports_redecode: true,
+                    streaming_compiled_in: true,
+                    streaming_model_ready: true,
+                    streaming_language_supported: true,
+                }),
+                DictationLivePreviewEngine::Off,
+                "Live Preview off means off, whatever the engine setting says"
+            );
+        }
+    }
+
+    #[test]
+    fn pinning_the_re_decode_engine_never_starts_the_streaming_one() {
+        assert_eq!(
+            resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+                live_preview_enabled: true,
+                engine_setting: "redecode",
+                provider_supports_redecode: true,
+                streaming_compiled_in: true,
+                streaming_model_ready: true,
+                streaming_language_supported: true,
+            }),
+            DictationLivePreviewEngine::Redecode
+        );
+    }
+
+    #[test]
+    fn asking_for_streaming_when_it_cannot_run_shows_the_slower_preview_rather_than_none() {
+        assert_eq!(
+            resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+                live_preview_enabled: true,
+                engine_setting: "streaming",
+                provider_supports_redecode: true,
+                streaming_compiled_in: true,
+                streaming_model_ready: false,
+                streaming_language_supported: true,
+            }),
+            DictationLivePreviewEngine::Redecode
+        );
+        // ...and with no engine able to draw it, honestly nothing.
+        assert_eq!(
+            resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+                live_preview_enabled: true,
+                engine_setting: "streaming",
+                provider_supports_redecode: false,
+                streaming_compiled_in: false,
+                streaming_model_ready: false,
+                streaming_language_supported: false,
+            }),
+            DictationLivePreviewEngine::Off
+        );
+    }
+
+    /// Apple Speech has no re-decode preview (its helper would relaunch every
+    /// tick), so on that route "auto" with no streaming engine is Off, not a
+    /// preview the provider cannot serve.
+    #[test]
+    fn a_provider_that_cannot_serve_the_re_decode_preview_gets_no_preview() {
+        assert_eq!(
+            resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+                live_preview_enabled: true,
+                engine_setting: "auto",
+                provider_supports_redecode: false,
+                streaming_compiled_in: true,
+                streaming_model_ready: false,
+                streaming_language_supported: true,
+            }),
+            DictationLivePreviewEngine::Off
+        );
+        // A streaming engine that IS there serves it regardless: it does not
+        // go through the dictation provider at all.
+        assert_eq!(
+            resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+                live_preview_enabled: true,
+                engine_setting: "auto",
+                provider_supports_redecode: false,
+                streaming_compiled_in: true,
+                streaming_model_ready: true,
+                streaming_language_supported: true,
+            }),
+            DictationLivePreviewEngine::Streaming
+        );
+    }
+
+    /// The hard guarantee, checked against the source rather than trusted.
+    ///
+    /// The inserted text must be the batch decode. `stop_dictation_for_sidecar`
+    /// is where the transcript is built and handed to insertion, so no name
+    /// belonging to the preview path may appear anywhere in it after the
+    /// session-ownership anchor -- except the one call that *stops* the
+    /// preview.
+    #[test]
+    fn dictation_insertion_never_reads_a_streaming_partial() {
+        let body = owned_stop_dictation_body();
+        for forbidden in [
+            "StreamingPartialTracker",
+            "StreamingAsrSession",
+            "StreamingAsrProvider",
+            "spawn_streaming_live_preview",
+            "open_streaming_live_preview_session",
+            "partial_text",
+            "partialText",
+            "partialStableText",
+            "partialVolatileText",
+            "dictation_partial_buffer",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the dictation stop path must never read '{forbidden}': the inserted text is the \
+                 batch decode, and a preview is UI only"
+            );
+        }
+        // The one thing it may say about the preview is "stop".
+        assert!(
+            body.contains("stop_dictation_live_preview(state).await;"),
+            "the stop path must close the live preview before the batch decode"
+        );
+    }
+
+    /// Ordering, not just presence: the recognizer has to be released before
+    /// the decode that produces the inserted text asks for the same GPU.
+    #[test]
+    fn the_live_preview_is_closed_before_the_final_transcription_starts() {
+        let body = owned_stop_dictation_body();
+        let close = body
+            .find("stop_dictation_live_preview(state).await;")
+            .expect("the stop path must close the live preview");
+        let transcribe = body
+            .find("transcribe_bytes_for_dictation")
+            .expect("the stop path must run the final transcription");
+        assert!(
+            close < transcribe,
+            "the live preview must be closed before the final transcription is started"
+        );
+    }
+
+    /// The preview task itself must not be able to write a transcript.
+    #[test]
+    fn the_streaming_preview_task_only_ever_emits_a_preview_event() {
+        const SOURCE: &str = include_str!("lib.rs");
+        let start = SOURCE
+            .find("\nfn spawn_streaming_live_preview(")
+            .expect("the streaming preview task must exist");
+        let end = start
+            + SOURCE[start..]
+                .find("\n}\n")
+                .expect("the streaming preview task must be closed");
+        let body = &SOURCE[start..end];
+        for forbidden in [
+            "insert_text",
+            "paste_text_systemwide",
+            "copy_to_clipboard",
+            "save_dictation",
+            "dictation-text-ready",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the live-preview task must not reach '{forbidden}'"
+            );
+        }
+        assert!(
+            body.contains("\"dictation-state-changed\""),
+            "the live-preview task emits the preview event and nothing else"
+        );
+    }
+
+    /// A stub that records the order of the calls made to it. The ordering is
+    /// the whole content of "close the utterance properly", so it is what the
+    /// test asserts.
+    #[derive(Default)]
+    struct RecordingStreamingSession {
+        calls: Vec<String>,
+        fed_samples: usize,
+        finalize_fails: bool,
+    }
+
+    impl asr::StreamingAsrSession for RecordingStreamingSession {
+        fn feed(&mut self, pcm16k: &[f32]) -> anyhow::Result<asr::Partial> {
+            self.calls.push(format!("feed:{}", pcm16k.len()));
+            self.fed_samples += pcm16k.len();
+            Ok(asr::Partial {
+                stable_prefix: "ship".to_string(),
+                volatile_suffix: " the".to_string(),
+                elapsed_audio_s: 0.0,
+            })
+        }
+
+        fn finalize(&mut self) -> anyhow::Result<asr::Partial> {
+            self.calls.push("finalize".to_string());
+            if self.finalize_fails {
+                anyhow::bail!("the engine stopped answering");
+            }
+            Ok(asr::Partial {
+                stable_prefix: "ship the release".to_string(),
+                volatile_suffix: String::new(),
+                elapsed_audio_s: 0.0,
+            })
+        }
+
+        fn reset(&mut self) -> anyhow::Result<()> {
+            self.calls.push("reset".to_string());
+            Ok(())
+        }
+    }
+
+    /// The trailing audio the chunker is still holding -- up to one whole
+    /// chunk, well over half a second of speech -- has to reach the recognizer
+    /// before the stream is closed, and the stream has to be finalized once so
+    /// its last words are committed rather than left volatile.
+    #[test]
+    fn closing_the_preview_feeds_the_last_fragment_and_finalizes_once() {
+        let mut session = RecordingStreamingSession::default();
+        let last = finish_streaming_utterance(&mut session, Some(vec![0.01_f32; 4_096]));
+
+        assert_eq!(
+            session.calls,
+            vec!["feed:4096".to_string(), "finalize".to_string()],
+            "the remainder must be fed strictly before the single finalize"
+        );
+        assert_eq!(session.fed_samples, 4_096, "no trailing audio is discarded");
+        let last = last.expect("the finalized preview");
+        assert_eq!(last.stable_prefix, "ship the release");
+        assert!(
+            last.volatile_suffix.is_empty(),
+            "a finalized utterance leaves nothing uncommitted"
+        );
+    }
+
+    /// Nothing pending is the ordinary case at a chunk boundary: finalize
+    /// still runs, and exactly once.
+    #[test]
+    fn closing_the_preview_with_nothing_pending_still_finalizes() {
+        let mut session = RecordingStreamingSession::default();
+        assert!(finish_streaming_utterance(&mut session, None).is_some());
+        assert_eq!(session.calls, vec!["finalize".to_string()]);
+    }
+
+    /// A wedged engine must not turn "close the preview" into an error the
+    /// dictation has to care about: the preview is best-effort throughout.
+    #[test]
+    fn a_failing_finalize_closes_the_preview_without_a_partial() {
+        let mut session = RecordingStreamingSession {
+            finalize_fails: true,
+            ..Default::default()
+        };
+        assert!(finish_streaming_utterance(&mut session, Some(vec![0.0; 8])).is_none());
+        assert_eq!(
+            session.calls,
+            vec!["feed:8".to_string(), "finalize".to_string()]
+        );
+    }
+
+    /// Only one streaming engine may be loaded at a time.
+    ///
+    /// A session that stopped answering is detached rather than joined, so its
+    /// model stays resident; without this the next dictation would open a
+    /// second `Model::load_with` beside it -- another gigabyte of weights and
+    /// a second Metal context -- for a preview.
+    #[tokio::test(start_paused = true)]
+    async fn a_second_live_preview_engine_cannot_load_while_the_first_is_resident() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let first = acquire_engine_slot(&permits, Duration::from_millis(1_500))
+            .await
+            .expect("the first session takes the only slot");
+
+        // While the first engine is still held -- the detaching case -- the
+        // second waits its bounded wait and then goes without a preview.
+        assert!(
+            acquire_engine_slot(&permits, Duration::from_millis(1_500))
+                .await
+                .is_none(),
+            "a second engine must not load while the first is still resident"
+        );
+
+        // The slot is released by dropping the engine, not by the task ending,
+        // so the next dictation gets its preview back.
+        drop(first);
+        assert!(
+            acquire_engine_slot(&permits, Duration::from_millis(1_500))
+                .await
+                .is_some(),
+            "releasing the recognizer must let the next session load one"
+        );
+    }
+
+    /// The bounded wait is a wait, not a `try`: an orderly close that is a few
+    /// milliseconds behind a fast stop->start still gets its preview.
+    #[tokio::test(start_paused = true)]
+    async fn a_preview_waits_briefly_for_the_previous_engine_to_let_go() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = acquire_engine_slot(&permits, Duration::from_millis(1_500))
+            .await
+            .expect("the first slot");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(held);
+        });
+        assert!(
+            acquire_engine_slot(&permits, DICTATION_LIVE_PREVIEW_ENGINE_WAIT)
+                .await
+                .is_some(),
+            "a slot freed well inside the wait must be taken, not skipped"
+        );
+    }
+
+    /// The process-wide slot is exactly one, which is the whole policy.
+    #[test]
+    fn the_live_preview_engine_has_exactly_one_slot() {
+        assert_eq!(live_preview_engine_permits().available_permits(), 1);
+    }
+
+    /// Dropping a `JoinHandle` detaches the task rather than cancelling it, so
+    /// the stop path's timeout used to leave a wedged preview running -- with
+    /// its model loaded -- while the dictation went on to the batch decode.
+    #[tokio::test(start_paused = true)]
+    async fn a_preview_that_will_not_stop_is_aborted_rather_than_detached() {
+        let task = tokio::spawn(async {
+            // Never finishes on its own: exactly the wedged engine the timeout
+            // exists for.
+            std::future::pending::<()>().await;
+        });
+        let abort = task.abort_handle();
+
+        assert!(
+            !await_live_preview_task(task, 7).await,
+            "a task that outlives the close timeout did not stop on its own"
+        );
+        // Let the abort land, then check it actually did.
+        for _ in 0..100 {
+            if abort.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            abort.is_finished(),
+            "the stop path must abort a preview task it gave up waiting for, not detach it"
+        );
+    }
+
+    /// The ordinary case still just waits: a preview that puts itself down is
+    /// reported as having stopped on its own, and is never aborted.
+    #[tokio::test(start_paused = true)]
+    async fn a_preview_that_stops_on_its_own_is_not_aborted() {
+        let task = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+        assert!(
+            await_live_preview_task(task, 7).await,
+            "a preview that closes inside the timeout stopped on its own"
+        );
+    }
+
+    /// A build with no streaming engine must say so rather than offering a
+    /// download that cannot happen.
+    #[test]
+    fn the_live_preview_engine_status_matches_what_this_build_can_do() {
+        let status = streaming_live_preview_status();
+        assert_eq!(
+            status["supported"],
+            serde_json::Value::Bool(streaming_live_preview_compiled_in())
+        );
+        if !streaming_live_preview_compiled_in() {
+            assert_eq!(status["ready"], serde_json::Value::Bool(false));
+            assert_eq!(status["downloadBytes"], serde_json::json!(0));
+            assert!(status["modelId"].is_null());
+        } else {
+            assert!(status["modelId"].is_string());
+            assert!(status["downloadBytes"].as_u64().unwrap_or(0) > 0);
+            assert!(
+                status["languages"]
+                    .as_array()
+                    .map(|languages| !languages.is_empty())
+                    .unwrap_or(false),
+                "a supported engine names the languages its own weights declare"
+            );
+        }
+    }
+
+    /// Without the engine compiled in the streaming branch is unreachable, so
+    /// nothing can start a session that would immediately fail.
+    #[test]
+    fn a_build_without_a_streaming_engine_never_resolves_to_streaming() {
+        if streaming_live_preview_compiled_in() {
+            return;
+        }
+        assert!(!streaming_live_preview_model_ready());
+        assert!(!streaming_live_preview_supports_language(Some("en")));
+        assert!(!streaming_live_preview_supports_language(None));
+        assert_eq!(
+            resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+                live_preview_enabled: true,
+                engine_setting: "streaming",
+                provider_supports_redecode: true,
+                streaming_compiled_in: streaming_live_preview_compiled_in(),
+                streaming_model_ready: streaming_live_preview_model_ready(),
+                streaming_language_supported: streaming_live_preview_supports_language(Some("en")),
+            }),
+            DictationLivePreviewEngine::Redecode
+        );
     }
 
     #[test]
@@ -19321,6 +19795,649 @@ fn meeting_route_is_dictation_only(provider: asr::AsrProviderType, model_id: &st
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dictation live preview: which engine draws it
+// ---------------------------------------------------------------------------
+
+/// Which engine draws the dictation live preview for one session.
+///
+/// Whichever it is, **the inserted text is unaffected**: it is always the batch
+/// decode of the selected dictation engine, run after capture stops. See
+/// `docs/streaming-dictation-plan.md` and the source-scan test
+/// `dictation_insertion_never_reads_a_streaming_partial`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictationLivePreviewEngine {
+    /// No preview. The popup shows the finished text and nothing before it.
+    Off,
+    /// Re-decode a growing copy of the audio with the dictation engine every
+    /// few hundred milliseconds. Works with any local batch engine; the words
+    /// arrive a re-decode behind the speaker.
+    Redecode,
+    /// A cache-aware streaming recognizer fed chunk by chunk, which keeps its
+    /// encoder state instead of starting over.
+    Streaming,
+}
+
+impl DictationLivePreviewEngine {
+    fn as_event_value(self) -> &'static str {
+        match self {
+            DictationLivePreviewEngine::Off => "off",
+            DictationLivePreviewEngine::Redecode => "redecode",
+            DictationLivePreviewEngine::Streaming => "streaming",
+        }
+    }
+}
+
+/// Everything the engine choice depends on, so the choice itself is a pure
+/// function with no model on disk and no microphone.
+#[derive(Debug, Clone, Copy)]
+pub struct DictationLivePreviewInputs<'a> {
+    /// The existing Live Preview setting. False means no preview, full stop.
+    pub live_preview_enabled: bool,
+    /// `dictation_live_preview_engine`: auto, redecode or streaming.
+    pub engine_setting: &'a str,
+    /// Whether the selected dictation engine can serve the re-decode preview
+    /// (local, and not Apple Speech, whose helper would relaunch per tick).
+    pub provider_supports_redecode: bool,
+    /// Whether a streaming engine is compiled into this build at all.
+    pub streaming_compiled_in: bool,
+    /// Whether its weights are downloaded AND carry a trusted integrity
+    /// receipt.
+    pub streaming_model_ready: bool,
+    /// Whether the streaming engine covers the language this session will use.
+    pub streaming_language_supported: bool,
+}
+
+/// Pick the live-preview engine for one dictation session.
+///
+/// The rule the whole feature rests on: streaming is an *upgrade to the
+/// preview*, never a requirement. If it is not compiled in, not downloaded,
+/// not verified, or does not speak the language, the re-decode preview runs
+/// exactly as it did before. An explicit `streaming` choice falls back the same
+/// way, because a user who asked for the faster preview wants a preview, and
+/// showing nothing would be a worse answer than showing the slower one.
+fn resolve_dictation_live_preview_engine(
+    inputs: DictationLivePreviewInputs<'_>,
+) -> DictationLivePreviewEngine {
+    if !inputs.live_preview_enabled {
+        return DictationLivePreviewEngine::Off;
+    }
+    let streaming_available = inputs.streaming_compiled_in
+        && inputs.streaming_model_ready
+        && inputs.streaming_language_supported;
+    let fallback = if inputs.provider_supports_redecode {
+        DictationLivePreviewEngine::Redecode
+    } else {
+        DictationLivePreviewEngine::Off
+    };
+    match inputs.engine_setting.trim() {
+        "redecode" => fallback,
+        _ if streaming_available => DictationLivePreviewEngine::Streaming,
+        _ => fallback,
+    }
+}
+
+/// Whether this build has a streaming live-preview engine compiled in at all.
+fn streaming_live_preview_compiled_in() -> bool {
+    cfg!(feature = "asr-transcribe-cpp")
+}
+
+/// Whether the streaming engine's weights are on disk with a trusted receipt.
+fn streaming_live_preview_model_ready() -> bool {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        use asr::StreamingAsrProvider;
+        asr::transcribe_cpp::TranscribeCppStreamingProvider::new().is_streaming_available()
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    {
+        false
+    }
+}
+
+/// Whether the streaming engine covers `language` (`None` = let it decide).
+fn streaming_live_preview_supports_language(language: Option<&str>) -> bool {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        use asr::StreamingAsrProvider;
+        asr::transcribe_cpp::TranscribeCppStreamingProvider::new().supports_language(language)
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    {
+        let _ = language;
+        false
+    }
+}
+
+/// The streaming live preview's status, for the Models screen and Settings.
+fn streaming_live_preview_status() -> serde_json::Value {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        use asr::StreamingAsrProvider;
+        let provider = asr::transcribe_cpp::TranscribeCppStreamingProvider::new();
+        let spec = asr::transcribe_cpp::TranscribeCppStreamingProvider::spec();
+        let path = provider.model_path();
+        let bytes_on_disk = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        serde_json::json!({
+            "supported": true,
+            "ready": provider.is_streaming_available(),
+            "modelId": provider.streaming_model_id(),
+            "displayName": spec.display_name,
+            "engineName": provider.streaming_engine_name(),
+            "license": spec.license,
+            "upstreamUrl": spec.upstream_url,
+            "downloadBytes": spec.size_bytes,
+            "bytesOnDisk": bytes_on_disk,
+            "languages": asr::transcribe_cpp::NEMOTRON_STREAMING_LANGUAGES,
+            "chunkMs": provider.chunk_ms(),
+            "path": path.to_string_lossy(),
+        })
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    {
+        serde_json::json!({
+            "supported": false,
+            "ready": false,
+            "modelId": serde_json::Value::Null,
+            "displayName": serde_json::Value::Null,
+            "engineName": serde_json::Value::Null,
+            "license": serde_json::Value::Null,
+            "upstreamUrl": serde_json::Value::Null,
+            "downloadBytes": 0,
+            "bytesOnDisk": 0,
+            "languages": Vec::<String>::new(),
+            "chunkMs": serde_json::Value::Null,
+            "path": serde_json::Value::Null,
+        })
+    }
+}
+
+/// Download the streaming live-preview engine's weights through the same
+/// pinned-SHA-256 path every other model uses.
+async fn download_live_preview_engine_model(
+    handle: &crate::sidecar_handle::SidecarHandle,
+) -> Result<(), String> {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        let provider = asr::transcribe_cpp::TranscribeCppProvider::new(Some(
+            asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID,
+        ));
+        let progress_handle = handle.clone();
+        let progress: Box<dyn Fn(f32) + Send + Sync> = Box::new(move |percentage| {
+            progress_handle.emit_event(
+                "model-download-progress",
+                serde_json::json!({
+                    "modelName": asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID,
+                    "percentage": percentage,
+                }),
+            );
+        });
+        asr::AsrProvider::download_models(&provider, progress)
+            .await
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    {
+        let _ = handle;
+        Err(
+            "This build has no streaming live-preview engine, so there is nothing to download."
+                .to_string(),
+        )
+    }
+}
+
+/// Delete those weights and their integrity receipt.
+async fn delete_live_preview_engine_model() -> Result<(), String> {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        let path = asr::transcribe_cpp::TranscribeCppStreamingProvider::new().model_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let manager = crate::download::DownloadManager::new().map_err(|error| error.to_string())?;
+        manager
+            .delete_model(&path)
+            .await
+            .map_err(|error| error.to_string())?;
+        // The batch route caches one loaded model per process; if it happened
+        // to be these weights, keep it from serving a file that is now gone.
+        asr::transcribe_cpp::clear_cached_runtime();
+        Ok(())
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    {
+        Ok(())
+    }
+}
+
+/// A running streaming live preview, and the handle that stops it.
+///
+/// Held in `AppState` so `stop_dictation_for_sidecar` can close the session
+/// *before* it starts the batch decode: the two would otherwise contend for the
+/// same GPU, and the final text is the one that matters.
+struct DictationLivePreviewControl {
+    session_id: u64,
+    stop: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// How long the stop path waits for the preview task to put its session down.
+/// Longer than a chunk decode by a wide margin; short enough that a wedged
+/// engine costs the user a moment rather than the dictation.
+const DICTATION_LIVE_PREVIEW_CLOSE_TIMEOUT: Duration = Duration::from_millis(2_000);
+
+/// How often the streaming preview drains the capture buffer. Matched to a
+/// capture callback's cadence, not to the chunk size: the chunker regroups.
+const DICTATION_STREAMING_POLL_MS: u64 = 100;
+
+/// How long a starting preview waits for the previous session's recognizer to
+/// let go of the one engine slot below.
+///
+/// Long enough that an orderly close a few milliseconds behind a fast
+/// stop->start still gets its preview; short enough that a wedged engine costs
+/// the next dictation only its preview, and never a second model load.
+const DICTATION_LIVE_PREVIEW_ENGINE_WAIT: Duration = Duration::from_millis(1_500);
+
+/// The one process-wide permit for a loaded streaming live-preview engine.
+///
+/// Each session loads its own copy of the weights — roughly a gigabyte, plus a
+/// Metal context — and a session that stops answering is *detached* rather
+/// than joined, precisely so a wedged engine cannot hold the dictation stop
+/// path open. Without this permit that detached engine would still be resident
+/// when the next dictation opened a second one beside it. The permit travels
+/// with the session (see [`StreamingLivePreviewEngine`]) and is released by
+/// whichever thread finally drops it, detached or not.
+fn live_preview_engine_permits() -> &'static Arc<tokio::sync::Semaphore> {
+    static PERMITS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+}
+
+/// Wait up to `wait` for a slot in `permits`.
+///
+/// `None` means it never came free: the previous session's recognizer is still
+/// resident, so this dictation goes without a streaming preview rather than
+/// opening a second model beside it. A preview is not worth a gigabyte. Takes
+/// the semaphore rather than reaching for the global one so the policy is
+/// testable without process-wide state.
+async fn acquire_engine_slot(
+    permits: &Arc<tokio::sync::Semaphore>,
+    wait: Duration,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    tokio::time::timeout(wait, Arc::clone(permits).acquire_owned())
+        .await
+        .ok()
+        .and_then(Result::ok)
+}
+
+/// [`acquire_engine_slot`] against the one process-wide live-preview slot.
+async fn acquire_live_preview_engine_slot(
+    wait: Duration,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    acquire_engine_slot(live_preview_engine_permits(), wait).await
+}
+
+/// A loaded streaming recognizer and the engine slot it occupies.
+///
+/// The two move together everywhere — onto the blocking pool for each batch of
+/// chunks, and into the blocking task that finally drops them — so the slot is
+/// released exactly when the model's memory is. Keeping the permit in the
+/// owning async task instead would release it the moment that task was
+/// aborted, while the recognizer was still alive on a detached thread.
+struct StreamingLivePreviewEngine {
+    session: Box<dyn asr::StreamingAsrSession>,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+/// Close one streaming utterance: feed whatever the chunker still holds, then
+/// finalize, exactly once. Returns the recognizer's last preview.
+///
+/// Both halves matter. The chunker holds up to one whole chunk (~560 ms of
+/// speech) that has never been fed, and without a `finalize` the stream's last
+/// words are never committed — so the preview ended on a tail the engine had
+/// not finished thinking about, and on audio it had never heard. Blocking, and
+/// split out from the task so the ordering is testable with a stub.
+fn finish_streaming_utterance(
+    session: &mut dyn asr::StreamingAsrSession,
+    remainder: Option<Vec<f32>>,
+) -> Option<asr::Partial> {
+    if let Some(tail) = remainder {
+        if let Err(error) = session.feed(&tail) {
+            // Losing the last fragment makes the preview worse, not wrong, and
+            // finalize may still commit everything before it.
+            tracing::debug!(
+                "The live preview could not feed its last partial chunk: {}",
+                error
+            );
+        }
+    }
+    match session.finalize() {
+        Ok(partial) => Some(partial),
+        Err(error) => {
+            tracing::debug!("The live preview could not finalize: {}", error);
+            None
+        }
+    }
+}
+
+/// Wait for one live-preview task to end, and *abort* it if it will not.
+///
+/// Returns true when the task ended on its own. Dropping a `JoinHandle`
+/// detaches the task rather than cancelling it, so a bare `timeout` left a
+/// wedged preview running — with its model resident — while the next dictation
+/// started. The abort is what makes "the preview is closed" true rather than
+/// hopeful; the engine slot in [`live_preview_engine_permits`] is what keeps a
+/// second model from loading in the window where it is not yet.
+async fn await_live_preview_task(task: tokio::task::JoinHandle<()>, session_id: u64) -> bool {
+    let abort = task.abort_handle();
+    match tokio::time::timeout(DICTATION_LIVE_PREVIEW_CLOSE_TIMEOUT, task).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::debug!("The live-preview task ended abnormally: {}", error);
+            false
+        }
+        Err(_) => {
+            abort.abort();
+            tracing::warn!(
+                "The live-preview task for dictation session {} did not stop within {} ms; \
+                 aborted it and continued to the final transcription without it",
+                session_id,
+                DICTATION_LIVE_PREVIEW_CLOSE_TIMEOUT.as_millis()
+            );
+            false
+        }
+    }
+}
+
+/// Stop the streaming live preview, if one is running, and wait for it to
+/// release the recognizer.
+///
+/// Called on every dictation stop path before transcription starts. Waits, but
+/// never forever: a preview that will not put itself down must not take the
+/// user's words with it.
+async fn stop_dictation_live_preview(state: &AppState) {
+    let control = { state.dictation_live_preview.lock().await.take() };
+    let Some(control) = control else {
+        return;
+    };
+    control
+        .stop
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    await_live_preview_task(control.task, control.session_id).await;
+}
+
+/// Open a streaming session from whichever streaming engine this build has.
+///
+/// One place, so `spawn_streaming_live_preview` below needs no `#[cfg]` of its
+/// own and the default build still compiles every line of it.
+fn open_streaming_live_preview_session(
+    language: Option<&str>,
+) -> anyhow::Result<Box<dyn asr::StreamingAsrSession>> {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        use asr::StreamingAsrProvider;
+        asr::transcribe_cpp::TranscribeCppStreamingProvider::new().open_session(language)
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    {
+        let _ = language;
+        anyhow::bail!("This build has no streaming live-preview engine compiled in.")
+    }
+}
+
+/// Drive the streaming live preview for one dictation session.
+///
+/// Reads the same UI-only sample buffer the re-decode preview reads, resamples
+/// it once, feeds it to the recognizer chunk by chunk, and emits the same
+/// `dictation-state-changed` preview event. It writes nothing else: no
+/// transcript, no history row, nothing the insertion path reads.
+///
+/// Best-effort throughout. Every failure -- the model refusing to load, a chunk
+/// erroring, the engine going quiet -- ends the preview and leaves the session
+/// otherwise untouched, because a preview is not worth failing a dictation for.
+#[allow(clippy::too_many_arguments)]
+fn spawn_streaming_live_preview(
+    session_tracker: Arc<Mutex<DictationSessionTracker>>,
+    handle: crate::sidecar_handle::SidecarHandle,
+    session_id: u64,
+    partial_buffer: Arc<StdMutex<audio::DictationPartialBuffer>>,
+    is_dictating: Arc<AtomicBool>,
+    sample_rate: u32,
+    language: Option<String>,
+) -> DictationLivePreviewControl {
+    /// The one preview payload, built in one place so the stop-path emit and
+    /// the in-loop emit cannot drift apart. Nested rather than a free function
+    /// so the guarantee scan still reads it as part of this task's body.
+    fn preview_event(session_id: u64, tracker: &asr::StreamingPartialTracker) -> serde_json::Value {
+        // The two halves are rendered side by side, so the leading space
+        // belongs to neither: trim it off whichever half is first and leave
+        // the seam between them alone.
+        let stable = tracker.stable().trim_start();
+        let volatile = if stable.is_empty() {
+            tracker.volatile().trim_start()
+        } else {
+            tracker.volatile()
+        };
+        serde_json::json!({
+            "phase": "recording",
+            "sessionId": session_id,
+            "partialText": tracker.display().trim(),
+            "partialStableText": stable,
+            "partialVolatileText": volatile,
+            "partialEngine": DictationLivePreviewEngine::Streaming.as_event_value(),
+        })
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let task_stop = Arc::clone(&stop);
+    let task = tokio::spawn(async move {
+        // One loaded engine at a time, process-wide: a previous session whose
+        // recognizer had to be detached is still holding roughly a gigabyte,
+        // and a preview is not worth a second copy of it.
+        let Some(slot) = acquire_live_preview_engine_slot(DICTATION_LIVE_PREVIEW_ENGINE_WAIT).await
+        else {
+            tracing::warn!(
+                "Live preview stayed off for dictation session {}: the previous session's \
+                 recognizer has not been released yet",
+                session_id
+            );
+            return;
+        };
+        let opened = tokio::task::spawn_blocking(move || {
+            open_streaming_live_preview_session(language.as_deref())
+        })
+        .await;
+        let mut engine = match opened {
+            Ok(Ok(session)) => StreamingLivePreviewEngine {
+                session,
+                _slot: slot,
+            },
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "Live preview stayed off for dictation session {}: {}",
+                    session_id,
+                    error
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!("The live-preview session failed to open: {}", error);
+                return;
+            }
+        };
+
+        let mut resampler = asr::StreamingResampler::new(sample_rate);
+        let mut chunker = asr::PcmChunker::new(engine.session.chunk_samples());
+        let mut tracker = asr::StreamingPartialTracker::new();
+        // How much of the capture buffer's monotonic sample count has been fed.
+        let mut consumed: u64 = 0;
+
+        loop {
+            tokio::time::sleep(Duration::from_millis(DICTATION_STREAMING_POLL_MS)).await;
+            if task_stop.load(std::sync::atomic::Ordering::SeqCst)
+                || !is_dictating.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                break;
+            }
+            // Gate on the monotonic session id, not the shared `is_dictating`
+            // flag, which a fast stop->restart flips back to true: a stale task
+            // must never paint a partial into a newer session's popup.
+            if session_tracker.lock().await.active_session_id != Some(session_id) {
+                break;
+            }
+
+            let fresh = {
+                let Ok(buffer) = partial_buffer.lock() else {
+                    break;
+                };
+                let total = buffer.total_samples;
+                if total <= consumed {
+                    Vec::new()
+                } else {
+                    let wanted = (total - consumed) as usize;
+                    // The capture buffer is a sliding window. If this task ever
+                    // falls further behind than the window is long, the audio in
+                    // between is gone; take what is there and resync rather than
+                    // feeding the recognizer the wrong samples.
+                    let available = buffer.samples.len();
+                    if wanted > available {
+                        tracing::debug!(
+                            "Live preview fell {} samples behind the capture window; resyncing",
+                            wanted - available
+                        );
+                    }
+                    let take = wanted.min(available);
+                    consumed = total;
+                    buffer.samples[available - take..].to_vec()
+                }
+            };
+            if fresh.is_empty() {
+                continue;
+            }
+
+            let chunks = chunker.push(&resampler.push(&fresh));
+            if chunks.is_empty() {
+                continue;
+            }
+
+            // The native call blocks, so it goes to the blocking pool; the
+            // engine moves with it and comes back, because it is `Send` and
+            // owned by exactly one place at a time.
+            let fed = tokio::task::spawn_blocking(move || {
+                let mut partials = Vec::with_capacity(chunks.len());
+                for chunk in chunks {
+                    match engine.session.feed(&chunk) {
+                        Ok(partial) => partials.push(Ok(partial)),
+                        Err(error) => {
+                            partials.push(Err(error));
+                            break;
+                        }
+                    }
+                }
+                (engine, partials)
+            })
+            .await;
+            let (returned, partials) = match fed {
+                Ok(pair) => pair,
+                Err(error) => {
+                    tracing::debug!("The live-preview feed task panicked: {}", error);
+                    return;
+                }
+            };
+            engine = returned;
+
+            let mut failed = false;
+            for partial in partials {
+                match partial {
+                    Ok(partial) => {
+                        if !tracker.accept(&partial) || tracker.is_empty() {
+                            continue;
+                        }
+                        let still_current = is_dictating.load(std::sync::atomic::Ordering::SeqCst)
+                            && session_tracker.lock().await.active_session_id == Some(session_id);
+                        if !still_current {
+                            failed = true;
+                            break;
+                        }
+                        {
+                            let mut tracker_guard = session_tracker.lock().await;
+                            if tracker_guard.active_session_id == Some(session_id)
+                                && tracker_guard.first_stable_partial_at_epoch_ms.is_none()
+                            {
+                                tracker_guard.first_stable_partial_at_epoch_ms =
+                                    Some(chrono::Utc::now().timestamp_millis());
+                            }
+                        }
+                        handle.emit_event(
+                            "dictation-state-changed",
+                            preview_event(session_id, &tracker),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!("Live preview chunk failed: {}", error);
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            if failed {
+                break;
+            }
+        }
+
+        // Close the utterance before the recognizer goes. The chunker still
+        // holds up to one whole chunk of speech that was never fed, and the
+        // stream's last words are never committed without a `finalize`, so the
+        // preview otherwise ended on audio the engine had not heard and a tail
+        // it had not finished. Same blocking pool, engine still owned here.
+        let remainder = chunker.take_remainder();
+        let closed = tokio::task::spawn_blocking(move || {
+            let last = finish_streaming_utterance(engine.session.as_mut(), remainder);
+            (engine, last)
+        })
+        .await;
+        let (engine, last) = match closed {
+            Ok(pair) => pair,
+            Err(error) => {
+                tracing::debug!("Closing the live-preview utterance panicked: {}", error);
+                return;
+            }
+        };
+
+        // Paint the finished utterance only while the popup is still on this
+        // session's recording phase. On the ordinary stop path it is not:
+        // capture has already ended and the HUD has moved to "stopping", and a
+        // late "recording" event would walk it backwards. This is for the
+        // other ways the loop ends -- the capture buffer going away underneath
+        // it while the user is still speaking.
+        if let Some(partial) = last {
+            if tracker.accept(&partial)
+                && !tracker.is_empty()
+                && is_dictating.load(std::sync::atomic::Ordering::SeqCst)
+                && session_tracker.lock().await.active_session_id == Some(session_id)
+            {
+                handle.emit_event(
+                    "dictation-state-changed",
+                    preview_event(session_id, &tracker),
+                );
+            }
+        }
+
+        // Put the recognizer down on the blocking pool: dropping the session
+        // joins its worker thread, which is what makes "the GPU is free before
+        // the batch decode" true rather than hopeful. Dropping it also releases
+        // the engine slot, so the next dictation may load its own.
+        if let Err(error) = tokio::task::spawn_blocking(move || drop(engine)).await {
+            tracing::debug!("Closing the live-preview session panicked: {}", error);
+        }
+    });
+
+    DictationLivePreviewControl {
+        session_id,
+        stop,
+        task,
+    }
+}
+
 fn provider_supports_generic_live_preview(provider: asr::AsrProviderType) -> bool {
     !provider.is_remote() && provider != asr::AsrProviderType::MacosAppleSpeech
 }
@@ -23891,6 +25008,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
         accessibility_trust_observed: Arc::new(AtomicBool::new(false)),
         last_cursor_insert_status: Arc::new(StdMutex::new(None)),
         recent_dictation_delivery: Arc::new(Mutex::new(None)),
+        dictation_live_preview: Arc::new(Mutex::new(None)),
         streaming_transcriber,
         vault_state: Arc::new(Mutex::new(VaultRuntimeState::default())),
         vault_startup_migration,
@@ -25178,16 +26296,30 @@ async fn start_dictation_for_sidecar(
         }
     };
 
-    // Streaming partials are UI-only and only run for local providers (cloud
-    // providers must not be hit per-tick). Apple Speech is also excluded: this
-    // generic mechanism repeatedly batch-decodes the growing WAV buffer, which
-    // would launch a new helper process about every 700 ms. The restored Apple
-    // live helper remains internal until capture is connected to its single,
-    // long-lived streaming-session seam.
-    let streaming_partials_enabled = settings_snapshot
-        .transcription
-        .dictation_live_preview_enabled
-        && provider_supports_generic_live_preview(dictation_provider);
+    // Which engine draws the live preview, if any. The re-decode preview is
+    // UI-only and only runs for local providers (cloud providers must not be
+    // hit per-tick); Apple Speech is excluded because that generic mechanism
+    // repeatedly batch-decodes the growing WAV buffer, which would launch a new
+    // helper process about every 700 ms. Streaming replaces the *preview*
+    // only -- the inserted text is the batch decode either way.
+    let live_preview_language = options.language_override.clone();
+    let live_preview_engine = resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+        live_preview_enabled: settings_snapshot
+            .transcription
+            .dictation_live_preview_enabled,
+        engine_setting: &settings_snapshot
+            .transcription
+            .dictation_live_preview_engine,
+        provider_supports_redecode: provider_supports_generic_live_preview(dictation_provider),
+        streaming_compiled_in: streaming_live_preview_compiled_in(),
+        streaming_model_ready: streaming_live_preview_model_ready(),
+        streaming_language_supported: streaming_live_preview_supports_language(
+            live_preview_language.as_deref(),
+        ),
+    });
+    // Both engines read the same UI-only sample buffer, so the capture callback
+    // fills it for either.
+    let streaming_partials_enabled = live_preview_engine != DictationLivePreviewEngine::Off;
 
     // Auto-stop after sustained silence: gated on `dictation_silence_timeout_seconds`
     // (0 = disabled, matching the field's existing "0 disables" contract already
@@ -25267,11 +26399,42 @@ async fn start_dictation_for_sidecar(
         }
     }
 
-    // Spawn the UI-only streaming-partial task. It re-decodes a copy of the audio
-    // periodically and emits live-preview text. It NEVER feeds the final transcript:
-    // the only thing it writes is a `partialText` field on `dictation-state-changed`.
-    // Best-effort and detached; it swallows all errors and stops when dictation does.
-    if let Some((partial_buffer, is_dictating, sample_rate)) = partial_task_handles {
+    // Spawn the UI-only live-preview task. Both engines emit live-preview text
+    // and NEITHER feeds the final transcript: the only thing they write is a
+    // `partialText` field on `dictation-state-changed`. Best-effort; they
+    // swallow their own errors and stop when dictation does.
+    if let Some((partial_buffer, is_dictating, sample_rate)) = partial_task_handles.clone() {
+        if live_preview_engine == DictationLivePreviewEngine::Streaming {
+            // Signal and abort any preview still in the slot *before* spawning
+            // this one: the new task waits for the single engine permit, and
+            // the old one only releases it once its recognizer is dropped.
+            {
+                let mut slot = state.dictation_live_preview.lock().await;
+                if let Some(previous) = slot.take() {
+                    previous
+                        .stop
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    previous.task.abort();
+                }
+            }
+            // The streaming preview is held in AppState rather than detached,
+            // because the stop path has to be able to close the recognizer
+            // before the batch decode that produces the inserted text starts.
+            let control = spawn_streaming_live_preview(
+                Arc::clone(&state.dictation_session_tracker),
+                handle.clone(),
+                session_id,
+                partial_buffer,
+                is_dictating,
+                sample_rate,
+                live_preview_language.clone(),
+            );
+            state.dictation_live_preview.lock().await.replace(control);
+        }
+    }
+    if let Some((partial_buffer, is_dictating, sample_rate)) =
+        partial_task_handles.filter(|_| live_preview_engine == DictationLivePreviewEngine::Redecode)
+    {
         let asr_manager = Arc::clone(&state.asr_manager);
         let session_tracker = Arc::clone(&state.dictation_session_tracker);
         let provider = dictation_provider;
@@ -25489,6 +26652,9 @@ async fn fail_dictation_stop(
     fallback_reason: Option<String>,
     message: String,
 ) -> String {
+    // Every terminal stop failure comes through here, so this is where a
+    // preview that outlived its session is guaranteed to be closed.
+    stop_dictation_live_preview(state).await;
     reset_dictation_session_runtime(
         &state.dictation_runtime_state,
         &state.dictation_session_tracker,
@@ -25836,6 +27002,13 @@ async fn stop_dictation_for_sidecar(
             }
         }
     };
+    // Put the live preview down before anything asks the GPU for the final
+    // result. Capture has ended, so the preview has nothing left to show, and
+    // the streaming recognizer holds its model's compute lease until its
+    // session is closed -- which this awaits. The preview never fed the
+    // transcript; this only stops it competing with the decode that does.
+    stop_dictation_live_preview(state).await;
+
     let audio_finalized_ms = Some(
         stop_signal_instant
             .elapsed()
@@ -32939,6 +34112,21 @@ pub async fn dispatch_command(
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
+        }
+        // ── Streaming live-preview engine (Nemotron 3.5 ASR Streaming) ────
+        // Its own three commands rather than the ASR route commands: the
+        // weights are not a route, `model_options()` never offers them, and
+        // nothing here can select them for dictation or meetings. All three
+        // answer honestly in a build with no streaming engine compiled in --
+        // `supported: false`, and the download refuses.
+        "get_live_preview_engine_status" => Ok(streaming_live_preview_status()),
+        "download_live_preview_engine_model" => {
+            download_live_preview_engine_model(handle).await?;
+            Ok(streaming_live_preview_status())
+        }
+        "delete_live_preview_engine_model" => {
+            delete_live_preview_engine_model().await?;
+            Ok(streaming_live_preview_status())
         }
         // ── Bundled cleanup model (S1-mini by Superwhisper) ────────────────
         "get_bundled_cleanup_model_status" => Ok(bundled_cleanup_model_status()),

@@ -45,6 +45,10 @@ import {
 import { deleteRecording, getTranscript } from "@/lib/backend/recordings";
 import { downloadAsrModels, getAsrProviders } from "@/lib/backend/asr";
 import { getSettings, saveSettings } from "@/lib/backend/settings";
+import {
+  getLivePreviewEngineStatus,
+  type LivePreviewEngineStatus,
+} from "@/lib/backend/ai";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import {
   defaultDictationShortcut,
@@ -918,6 +922,32 @@ export function DictationView() {
   const [dictationKeepWarm, setDictationKeepWarm] = useState<"off" | "on">(
     "on",
   );
+  const [dictationLivePreviewEngine, setDictationLivePreviewEngine] = useState<
+    "auto" | "redecode" | "streaming"
+  >("auto");
+  // Whether this build has a streaming preview engine, and whether its weights
+  // are installed. Null until the sidecar answers, and left null if it cannot:
+  // the engine control stays hidden rather than offering a choice between one
+  // engine that exists and one that might not.
+  const [livePreviewEngineStatus, setLivePreviewEngineStatus] =
+    useState<LivePreviewEngineStatus | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    void getLivePreviewEngineStatus()
+      .then((status) => {
+        if (!disposed) {
+          setLivePreviewEngineStatus(status);
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          setLivePreviewEngineStatus(null);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, []);
   const [dictationLivePreviewEnabled, setDictationLivePreviewEnabled] =
     useState(true);
   const [nextCaptureRoutePreference, setNextCaptureRoutePreference] =
@@ -1979,6 +2009,9 @@ export function DictationView() {
         setDictationLivePreviewEnabled(
           settings.transcription.dictationLivePreviewEnabled ?? true,
         );
+        setDictationLivePreviewEngine(
+          settings.transcription.dictationLivePreviewEngine ?? "auto",
+        );
         setDictationContextSource(nextContextSource);
         setDictationCopyToClipboard(nextCopyToClipboard);
         setDictationCommandModeEnabled(nextCommandModeEnabled);
@@ -2189,6 +2222,7 @@ export function DictationView() {
       routeOverrideEnabled: boolean;
       keepWarm: "off" | "on";
       livePreviewEnabled: boolean;
+      livePreviewEngine: "auto" | "redecode" | "streaming";
       copyToClipboard: boolean;
       commandModeEnabled: boolean;
       commandPrefix: string;
@@ -2222,6 +2256,8 @@ export function DictationView() {
       const nextKeepWarm = updates.keepWarm ?? dictationKeepWarm;
       const nextLivePreviewEnabled =
         updates.livePreviewEnabled ?? dictationLivePreviewEnabled;
+      const nextLivePreviewEngine =
+        updates.livePreviewEngine ?? dictationLivePreviewEngine;
       const nextCopyToClipboard =
         updates.copyToClipboard ?? dictationCopyToClipboard;
       const nextCommandModeEnabled =
@@ -2275,6 +2311,7 @@ export function DictationView() {
       settings.transcription.dictationKeepWarm = nextKeepWarm;
       settings.transcription.dictationLivePreviewEnabled =
         nextLivePreviewEnabled;
+      settings.transcription.dictationLivePreviewEngine = nextLivePreviewEngine;
       settings.transcription.dictationProjectId =
         updates.projectId ?? defaultProjectId;
       settings.transcription.dictationPushToTalk =
@@ -5575,6 +5612,49 @@ export function DictationView() {
                         : "Rough text appears in the popup while you talk, then is replaced by the finished version."}
                     </p>
                   </div>
+
+                  {dictationLivePreviewEnabled &&
+                  currentDictationProvider !== "macos_apple_speech" &&
+                  livePreviewEngineStatus?.supported ? (
+                    <div className="space-y-2">
+                      <label
+                        className="text-sm font-medium"
+                        htmlFor="dictation-live-preview-engine"
+                      >
+                        What draws the live preview
+                      </label>
+                      <select
+                        id="dictation-live-preview-engine"
+                        className="w-full rounded-md border bg-background p-2 text-sm"
+                        value={dictationLivePreviewEngine}
+                        onChange={(event) => {
+                          const next = event.target.value as
+                            | "auto"
+                            | "redecode"
+                            | "streaming";
+                          setDictationLivePreviewEngine(next);
+                          void persistDictationPreferences({
+                            livePreviewEngine: next,
+                          });
+                        }}
+                      >
+                        <option value="auto">
+                          Whichever is available (recommended)
+                        </option>
+                        <option value="streaming">
+                          Streaming engine when it can
+                        </option>
+                        <option value="redecode">
+                          Re-transcribe as you speak
+                        </option>
+                      </select>
+                      <p className="text-sm text-muted-foreground">
+                        {livePreviewEngineStatus.ready
+                          ? "The streaming engine is installed, so the preview keeps what it has already heard and the words land while you are still talking. Whichever engine draws it, the text Plainsong types is the finished transcription from your dictation engine, made after you stop."
+                          : "The streaming engine is not downloaded, so the preview re-transcribes everything you have said so far every few hundred milliseconds and the words arrive a little behind you. Install it from the Models screen. Either way, the text Plainsong types is the finished transcription from your dictation engine, made after you stop."}
+                      </p>
+                    </div>
+                  ) : null}
 
                   <div className="space-y-2">
                     <label

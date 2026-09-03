@@ -42,6 +42,16 @@ export interface DictationStateChangedEvent {
   message?: string | null;
   preview?: string | null;
   partialText?: string | null;
+  /**
+   * The live preview split into the half the recognizer has committed to and
+   * the half it may still rewrite. Only the streaming engine produces the
+   * split; the re-decode engine sends `partialText` alone, and the popup then
+   * renders the whole thing as volatile, which is what it is.
+   */
+  partialStableText?: string | null;
+  partialVolatileText?: string | null;
+  /** Which engine drew this preview: "streaming" or "redecode". */
+  partialEngine?: "streaming" | "redecode" | null;
   sessionId?: number | null;
   stopReason?: string | null;
   outcome?: string | null;
@@ -188,6 +198,9 @@ const VOLATILE_SESSION_FIELDS = [
   "message",
   "preview",
   "partialText",
+  "partialStableText",
+  "partialVolatileText",
+  "partialEngine",
   "outcome",
   "stopReason",
   "fallbackReason",

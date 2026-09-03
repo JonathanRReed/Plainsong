@@ -65,4 +65,46 @@ describe("reduceDictationStateEvent", () => {
     expect(idle.message).toBe("Ready.");
     expect(idle.outcome ?? null).toBeNull();
   });
+  it("clears a streaming preview's split halves when the session goes idle", () => {
+    const recording = reduceDictationStateEvent(null, {
+      phase: "recording",
+      sessionId: 12,
+      partialText: "ship the release",
+      partialStableText: "ship the",
+      partialVolatileText: " release",
+      partialEngine: "streaming",
+    });
+    expect(recording.preview).toBe("ship the release");
+    expect(recording.partialStableText).toBe("ship the");
+
+    const idle = reduceDictationStateEvent(recording, {
+      phase: "idle",
+      sessionId: 12,
+    });
+    // A preview that outlived its session would otherwise sit in the popup
+    // as if it described the next one.
+    expect(idle.partialStableText ?? null).toBeNull();
+    expect(idle.partialVolatileText ?? null).toBeNull();
+    expect(idle.partialEngine ?? null).toBeNull();
+    expect(idle.preview ?? null).toBeNull();
+  });
+
+  it("carries a streaming preview's halves across non-idle updates", () => {
+    const recording = reduceDictationStateEvent(null, {
+      phase: "recording",
+      sessionId: 13,
+      partialText: "ship the release",
+      partialStableText: "ship the",
+      partialVolatileText: " release",
+      partialEngine: "streaming",
+    });
+    const transcribing = reduceDictationStateEvent(recording, {
+      phase: "transcribing",
+      sessionId: 13,
+      message: "Transcribing…",
+    });
+    expect(transcribing.partialStableText).toBe("ship the");
+    expect(transcribing.partialVolatileText).toBe(" release");
+    expect(transcribing.partialEngine).toBe("streaming");
+  });
 });

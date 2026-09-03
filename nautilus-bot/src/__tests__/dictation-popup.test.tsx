@@ -1009,4 +1009,198 @@ describe("DictationPopup", () => {
     expect(notice.querySelector(".neume-rust")).toBeTruthy();
     expect(screen.getByText("Notes").className).toMatch(/text-foreground/);
   });
+  it("renders a streaming preview's settled words apart from the tail it may still change", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 11,
+          partialText: "ship the release",
+          partialStableText: "ship the",
+          partialVolatileText: " release",
+          partialEngine: "streaming",
+        },
+      });
+    });
+
+    const settled = await screen.findByText("ship the");
+    const volatileTail = screen.getByText("release");
+    // The committed half reads as text; the half the recognizer may still
+    // rewrite is muted. No new colours -- the muted foreground the rest of
+    // the popup already uses.
+    expect(settled.className).not.toMatch(/text-muted-foreground/);
+    expect(volatileTail.className).toMatch(/text-muted-foreground/);
+    expect(volatileTail.className).not.toMatch(/gold|rust/);
+  });
+
+  it("renders a re-decode preview as one run, because none of it is settled", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    await act(async () => {
+      popupMocks.listeners.get("dictation-state-changed")?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 12,
+          partialText: "ship the release",
+        },
+      });
+    });
+
+    const preview = await screen.findByText("ship the release");
+    expect(preview.querySelector("span")).toBeNull();
+  });
+
+  it("never reads a live partial aloud, only the finished result", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    // A live preview is on screen and the session then *fails*, so there is
+    // no finished result. The read-aloud button is not offered here, but the
+    // handler must refuse on its own too: a partial is half-heard text, and
+    // speaking it back would present a guess as the transcription.
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 21,
+          partialText: "ship the release",
+          partialStableText: "ship the",
+          partialVolatileText: " release",
+          partialEngine: "streaming",
+        },
+      });
+    });
+    expect(await screen.findByText("ship the")).toBeInTheDocument();
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "error",
+          sessionId: 21,
+          message: "The dictation engine stopped.",
+        },
+      });
+    });
+
+    expect(
+      screen.queryByRole("button", { name: /^Read aloud/i }),
+    ).not.toBeInTheDocument();
+    expect(popupMocks.speechSynthesis.speak).not.toHaveBeenCalled();
+  });
+
+  it("reads back the finished text even when a preview is still on screen", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+    const textReadyHandler = popupMocks.listeners.get("dictation-text-ready");
+
+    // The preview and the result deliberately disagree: the preview is the
+    // recognizer's half-heard guess, the result is the batch decode. Read
+    // aloud must speak the second one, whatever the first still says.
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 22,
+          partialText: "ship the realease",
+          partialStableText: "ship the",
+          partialVolatileText: " realease",
+          partialEngine: "streaming",
+        },
+      });
+    });
+
+    await act(async () => {
+      textReadyHandler?.({
+        payload: {
+          text: "Ship the release.",
+          pasted: true,
+          appTarget: "Slack",
+        },
+      });
+      handler?.({
+        payload: { phase: "done", sessionId: 22, outcome: "pasted" },
+      });
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^Read aloud/i }),
+    );
+
+    await waitFor(() => {
+      expect(popupMocks.speechSynthesis.speak).toHaveBeenCalled();
+    });
+    const spoken = popupMocks.speechSynthesis.speak.mock.calls.map(
+      (call: unknown[]) => (call[0] as { text: string }).text,
+    );
+    expect(spoken).toEqual(["Ship the release."]);
+    expect(spoken.join(" ")).not.toContain("realease");
+  });
+
+  it("drops the streaming preview split when the session goes idle", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() => {
+      expect(popupMocks.listeners.get("dictation-state-changed")).toBeDefined();
+    });
+
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "recording",
+          startedAtMs: Date.now(),
+          sessionId: 13,
+          partialText: "ship the release",
+          partialStableText: "ship the",
+          partialVolatileText: " release",
+          partialEngine: "streaming",
+        },
+      });
+    });
+    expect(await screen.findByText("ship the")).toBeInTheDocument();
+
+    await act(async () => {
+      handler?.({ payload: { phase: "idle", sessionId: 13 } });
+    });
+
+    expect(screen.queryByText("ship the")).not.toBeInTheDocument();
+    expect(screen.queryByText("release")).not.toBeInTheDocument();
+  });
 });
