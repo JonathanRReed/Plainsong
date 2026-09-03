@@ -76,7 +76,7 @@ read-only tools and no resources or prompts:
 | --- | --- |
 | `list_meetings` | ids, dates, durations; `since`, `project`, `limit`, `cursor` |
 | `search_meetings` | transcript passages matching `query` |
-| `get_meeting` | summary, notes, action items for one id |
+| `get_meeting` | summary, notes, action items, attendee names for one id |
 | `get_transcript` | timestamped, speaker-labelled segments, paginated by `cursor` |
 | `list_dictations` | dictation history text, newest first |
 | `export_meeting` | the Markdown / JSON / plain-text export as a string |

@@ -7,9 +7,10 @@
  * tested without a subprocess.
  *
  * The renderer never sees the helper's raw payload. It sees `CalendarSnapshot`,
- * which carries titles and times and a service name — and, deliberately, no
- * URLs, no locations and no notes. A conferencing link is only ever reported as
- * "this looks like a Zoom call"; the link itself stops here.
+ * which carries titles and times, a service name, and the invitee list — and,
+ * deliberately, no URLs, no locations and no notes. A conferencing link is
+ * only ever reported as "this looks like a Zoom call"; the link itself stops
+ * here.
  */
 
 /**
@@ -46,6 +47,22 @@ export type CalendarVideoService =
   | "bluejeans"
   | "jitsi";
 
+/**
+ * One invitee, as the helper reports them.
+ *
+ * `email` is present only when EventKit had a `mailto:` for the participant.
+ * It is carried because it is the only reliable way to recognize the same
+ * person across two meetings — display names differ between accounts — and it
+ * is deliberately never shown in a prompt: see `attendeeNamesForContext` in
+ * src/lib/attendees.ts.
+ */
+export interface CalendarAttendee {
+  name: string;
+  email: string | null;
+  isOrganizer: boolean;
+  isCurrentUser: boolean;
+}
+
 export interface CalendarEventSummary {
   id: string;
   title: string;
@@ -64,6 +81,12 @@ export interface CalendarEventSummary {
    * this code cannot support.
    */
   videoService: CalendarVideoService | null;
+  /**
+   * Who was invited. Empty for an event with no invitees, and for one read by
+   * a protocol-1 helper left behind by a partial install — the field is
+   * tolerated as absent rather than making the whole event unparseable.
+   */
+  attendees: CalendarAttendee[];
 }
 
 export interface CalendarSourceSummary {
@@ -181,6 +204,30 @@ function readTimestamp(value: unknown): string | null {
   return Number.isNaN(Date.parse(text)) ? null : text;
 }
 
+/**
+ * How many invitees survive the wire.
+ *
+ * The helper caps at 40 already; this is the same ceiling enforced on the
+ * side that would have to render them, so a hand-fed payload cannot put 5000
+ * chips in a meeting header.
+ */
+const MAX_ATTENDEES_PER_EVENT = 40;
+
+function parseAttendee(raw: unknown): CalendarAttendee | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const name = readString(record.name)?.trim();
+  const email = readString(record.email)?.trim() ?? null;
+  // A participant with no name and no address cannot be rendered or matched.
+  if (!name) return null;
+  return {
+    name,
+    email,
+    isOrganizer: record.is_organizer === true,
+    isCurrentUser: record.is_current_user === true,
+  };
+}
+
 function parseEvent(raw: unknown): CalendarEventSummary | null {
   if (!raw || typeof raw !== "object") return null;
   const record = raw as Record<string, unknown>;
@@ -202,6 +249,10 @@ function parseEvent(raw: unknown): CalendarEventSummary | null {
     videoService: detectVideoService(
       Array.isArray(record.conference_urls) ? record.conference_urls : [],
     ),
+    attendees: (Array.isArray(record.attendees) ? record.attendees : [])
+      .map(parseAttendee)
+      .filter((attendee): attendee is CalendarAttendee => attendee !== null)
+      .slice(0, MAX_ATTENDEES_PER_EVENT),
   };
 }
 

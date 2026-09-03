@@ -45,6 +45,36 @@ evidence is stale and must be recaptured before this becomes a candidate.
   whisper.cpp never enters the meeting lane on its own: a `base.en` default
   still resolves meetings to Parakeet, and whisper runs a meeting only when
   one of those four models is picked for the meeting lane.
+- A local pre-meeting brief. "Prepare" on a calendar cue reads meetings
+  already on this Mac that share an attendee or a normalized meeting name with
+  the one you are about to join, and writes a short brief — what was last
+  agreed, what is still open, what you owe anyone — citing the meetings it
+  came from. Related meetings are found and ranked locally; the only thing
+  that leaves the Mac is the prompt, down whichever AI lane you already chose
+  for meetings. With no analysis provider configured it shows the related
+  meetings and their open items instead of an error. Cached per event and
+  input, with a "Refresh".
+- Meetings started from a calendar cue now record who was invited. The macOS
+  calendar helper reports each attendee's name (and the address the calendar
+  had for them, when it had one); the meeting header shows them as chips with
+  the address on hover, and any meeting can have attendees added or removed by
+  hand. Renaming a speaker offers those names. When a meeting has attendees,
+  its summary and chat prompts carry one `Attendees: ...` line of NAMES only,
+  inside the same fenced non-instruction block the notes use — addresses are
+  never sent to an AI provider. Locations and notes are still stripped inside
+  the helper exactly as before. See `docs/beta/PRIVACY-AND-CLOUD.md`.
+- Saved prompts for the two chat boxes. Type "/" in a meeting's chat or in
+  "Ask your meetings" to pick a question you keep asking; "Save as prompt" on
+  a message you already sent turns it into one. Six starters ship (decisions,
+  open questions, what you committed to, risks and blockers, a follow-up
+  draft, a catch-up explanation); they can be edited, reordered and hidden,
+  but not deleted, because they would only come back. Manage them from
+  Settings → AI or the picker's own footer. They live in your settings file
+  on this Mac and choosing one only fills the box.
+- A meeting export now says who was there. Markdown, Word, plain text and
+  JSON carry the attendee list with names and addresses — an export is your
+  own file — while the local `plainsong` CLI and MCP server return attendee
+  names only. Prompts are unchanged: still names, never addresses.
 - Plainsong now notices a live call and offers to record it. Every few
   seconds the sidecar checks, locally, which apps are running; when Zoom,
   Microsoft Teams, Webex, FaceTime, Slack, Discord, or a browser window
@@ -355,6 +385,22 @@ evidence is stale and must be recaptured before this becomes a candidate.
   replacement you wrote yourself — are rewritten as plain text before the
   built-in model sees them, so a dictation cannot open a second turn and
   address the model as its instructions.
+- A question that starts with a path can be asked again. Any leading "/"
+  opened the saved-prompt picker, and both chat boxes refuse to send while it
+  is open, so "/Users/me/notes.txt is failing to import" could not be sent at
+  all. The picker now closes as soon as nothing matches what you typed, and
+  its footer says Esc closes it.
+- A pre-meeting brief's citations are numbered references you can click,
+  each naming the meeting it came from, instead of the raw "L1"/"L4" evidence
+  IDs the model wrote.
+- A saved-prompt change that fails to write now says so in the Manage prompts
+  dialog. Settings reported every such change as saved without waiting to
+  find out.
+- Attendee names arriving from a calendar invite are stripped of bidi
+  overrides and control characters before they are shown, exported or put in
+  a prompt.
+- "Prepare" on a calendar cue no longer reads the whole meeting library to
+  look at the newest few hundred.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some

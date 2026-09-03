@@ -5,6 +5,7 @@ import {
   videoServiceLabel,
   type CalendarCapturePrefill,
 } from "@/lib/calendar-events";
+import { PreMeetingBriefPanel } from "@/components/meetings/pre-meeting-brief-panel";
 import { useCalendarEvents } from "@/hooks/use-calendar-events";
 import { openCalendarPrivacySettings } from "@/lib/backend/calendar";
 
@@ -17,6 +18,8 @@ interface CalendarMeetingCueProps {
   onStartCapture: (prefill: CalendarCapturePrefill) => void;
   /** Hidden outright while a meeting is running: there is nothing to offer. */
   captureInProgress: boolean;
+  /** Opens a prior meeting the brief cited, when the view can. */
+  onOpenMeeting?: (recordingId: string) => void;
 }
 
 /**
@@ -43,6 +46,7 @@ interface CalendarMeetingCueProps {
 export function CalendarMeetingCue({
   onStartCapture,
   captureInProgress,
+  onOpenMeeting,
 }: CalendarMeetingCueProps) {
   const calendar = useCalendarEvents();
 
@@ -149,41 +153,51 @@ export function CalendarMeetingCue({
 
   return (
     <div
-      className="mx-6 mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-border/80 bg-muted/30 px-4 py-2.5"
+      className="mx-6 mb-4 rounded-md border border-border/80 bg-muted/30 px-4 py-2.5"
       role="status"
       aria-label="Next meeting on your calendar"
     >
-      <div className="flex min-w-0 items-center gap-2.5">
-        <CalendarClock
-          className="h-4 w-4 shrink-0 text-muted-foreground"
-          aria-hidden="true"
-        />
-        <p className="min-w-0 truncate text-sm">
-          <span className="font-medium">{event.title}</span>
-          <span className="text-muted-foreground"> {lead.text}</span>
-          {event.videoService ? (
-            <span className="text-muted-foreground">
-              {" · "}
-              <Video className="inline h-3.5 w-3.5 align-[-0.15em]" aria-hidden="true" />{" "}
-              {videoServiceLabel(event.videoService)}
-            </span>
-          ) : null}
-        </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <CalendarClock
+            className="h-4 w-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <p className="min-w-0 truncate text-sm">
+            <span className="font-medium">{event.title}</span>
+            <span className="text-muted-foreground"> {lead.text}</span>
+            {event.videoService ? (
+              <span className="text-muted-foreground">
+                {" · "}
+                <Video className="inline h-3.5 w-3.5 align-[-0.15em]" aria-hidden="true" />{" "}
+                {videoServiceLabel(event.videoService)}
+              </span>
+            ) : null}
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <Button size="sm" variant="outline" onClick={() => onStartCapture(prefill)}>
+            Start capture
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            // The whole event, so the dismissal is scoped to this occurrence:
+            // waving away today's standup must not silence next Tuesday's.
+            onClick={() => calendar.dismiss(event)}
+          >
+            Dismiss
+          </Button>
+        </div>
       </div>
-      <div className="flex shrink-0 gap-2">
-        <Button size="sm" variant="outline" onClick={() => onStartCapture(prefill)}>
-          Start capture
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          // The whole event, so the dismissal is scoped to this occurrence:
-          // waving away today's standup must not silence next Tuesday's.
-          onClick={() => calendar.dismiss(event)}
-        >
-          Dismiss
-        </Button>
-      </div>
+      {/* Keyed on the occurrence, not the identifier: a weekly standup reuses
+          its EventKit id, and a brief prepared for last Tuesday must not
+          appear under this Tuesday's cue. */}
+      <PreMeetingBriefPanel
+        key={`${event.id}@${event.startsAt}`}
+        event={event}
+        onOpenMeeting={onOpenMeeting}
+      />
     </div>
   );
 }
