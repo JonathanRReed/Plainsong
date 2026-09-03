@@ -1801,6 +1801,32 @@ export function RecordingsView() {
     void refreshSpeakerVoices(selectedRecording.id);
   }, [selectedRecording, refreshSpeakerVoices]);
 
+  // And whenever a remembered voice is forgotten. "Delete all" in Settings
+  // used to leave the open transcript offering names for voices that no
+  // longer existed until the reader navigated away and back.
+  useEffect(() => {
+    if (!selectedRecording) {
+      return;
+    }
+    const recordingId = selectedRecording.id;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      const stop = await listen("remembered-voices-changed", () => {
+        void refreshSpeakerVoices(recordingId);
+      });
+      if (cancelled) {
+        stop();
+        return;
+      }
+      unlisten = stop;
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [selectedRecording, refreshSpeakerVoices]);
+
   const handleConfirmSpeakerVoice = async (speakerId: string, profileId: string) => {
     if (!selectedRecording) {
       return;
@@ -2795,8 +2821,14 @@ export function RecordingsView() {
       throw error;
     }
 
+    // Remembering needs a voice signature for this cluster, and only clusters
+    // that have one appear in `speakerVoices`. A meeting diarized before the
+    // feature was turned on has none, and the sidecar refuses -- which used to
+    // mean the rename failed outright rather than falling back to the plain
+    // one the reader actually asked for.
+    const canRemember = Boolean(remember && speakerVoices[speakerId]);
     try {
-      if (remember) {
+      if (canRemember) {
         // One call: it renames the speaker through the same path below and
         // stores the voice, so the two can never disagree.
         await rememberSpeakerVoice({
@@ -2810,6 +2842,9 @@ export function RecordingsView() {
       }
       await renameSpeaker(selectedRecording.id, speakerId, newName);
       setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
+      // A rename clears the voice link and the "auto" marker in the sidecar,
+      // so the header has to stop saying "auto" without a reload.
+      await refreshSpeakerVoices(selectedRecording.id);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Couldn't rename this speaker.";

@@ -375,6 +375,32 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Remembered voices now store what Settings says they store. A per-meeting
+  voice signature is written only for a speaker who is given a name — by you,
+  or by "Apply a confident match without asking" — instead of for every
+  speaker in the room. Other speakers' numbers are held in memory while
+  Plainsong is open and never written down, so an unnamed voice leaves nothing
+  behind; the visible cost, now documented, is that reopening a meeting after
+  a restart offers no suggestions for speakers nobody named until speaker
+  identification runs again.
+- Renaming a speaker works again on meetings recorded before "Remember voices"
+  was turned on. The rename editor offered to remember a voice Plainsong had
+  no signature for, defaulted that offer to on, and the save was then refused
+  outright — so an ordinary rename failed. The offer now appears only where
+  there is a signature, and asking to remember one that does not exist falls
+  back to a plain rename.
+- Typing a speaker's name over one Plainsong applied by itself now clears the
+  "auto" marker and unlinks the remembered voice it replaced, instead of
+  leaving the transcript claiming a name you just corrected came from a voice
+  match.
+- Dismissing a suggestion with "Not them" is remembered for speakers you have
+  not named. It previously did nothing at all for them, so the same wrong
+  suggestion came back on every visit.
+- "Delete all" under Remembered voices now clears the suggestion chips on the
+  meeting you have open, instead of leaving them offering names for voices
+  that no longer exist until you navigate away and back.
+- "Not them" is refused while "Remember voices" is off, like every other write
+  the feature makes. It wrote to the voiceprint columns with the switch off.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

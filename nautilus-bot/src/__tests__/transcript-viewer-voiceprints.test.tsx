@@ -33,6 +33,16 @@ const TWO_SPEAKER_SEGMENTS = [
   },
 ];
 
+/**
+ * A cluster the sidecar holds a signature for but has matched to nothing.
+ *
+ * `speakerVoices` only ever carries clusters that have a signature, so its
+ * presence is what tells the editor a voice can be remembered at all.
+ */
+const S1_HAS_A_SIGNATURE: Record<string, SpeakerVoiceState> = {
+  S1: { matchState: null, suggestion: null },
+};
+
 const DANA_SUGGESTION: Record<string, SpeakerVoiceState> = {
   S1: {
     matchState: null,
@@ -170,6 +180,7 @@ describe("TranscriptViewer rename-and-remember", () => {
       <TranscriptViewer
         segments={TWO_SPEAKER_SEGMENTS}
         rememberVoicesEnabled
+        speakerVoices={S1_HAS_A_SIGNATURE}
         onRenameSpeaker={onRenameSpeaker}
       />,
     );
@@ -199,6 +210,7 @@ describe("TranscriptViewer rename-and-remember", () => {
       <TranscriptViewer
         segments={TWO_SPEAKER_SEGMENTS}
         rememberVoicesEnabled
+        speakerVoices={S1_HAS_A_SIGNATURE}
         speakerNameOptions={["Dana", "Devon", "Ravi"]}
         onRenameSpeaker={vi.fn(async () => {})}
       />,
@@ -237,6 +249,7 @@ describe("TranscriptViewer rename-and-remember", () => {
       <TranscriptViewer
         segments={TWO_SPEAKER_SEGMENTS}
         rememberVoicesEnabled
+        speakerVoices={S1_HAS_A_SIGNATURE}
         onRenameSpeaker={onRenameSpeaker}
       />,
     );
@@ -253,5 +266,106 @@ describe("TranscriptViewer rename-and-remember", () => {
     });
 
     expect(onRenameSpeaker).toHaveBeenCalledWith("S1", "Dana", false);
+  });
+
+  /// A meeting diarized before "Remember voices" was turned on has no
+  /// signature for any of its clusters. Offering the switch there produced a
+  /// rename the sidecar refused outright, which made an ordinary rename
+  /// impossible on every such meeting.
+  it("does not offer to remember a voice it has no signature for", async () => {
+    const onRenameSpeaker = vi.fn(async () => {});
+    render(
+      <TranscriptViewer
+        segments={TWO_SPEAKER_SEGMENTS}
+        rememberVoicesEnabled
+        speakerVoices={{}}
+        onRenameSpeaker={onRenameSpeaker}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit speaker name" })[0]);
+    fireEvent.change(screen.getByLabelText("Speaker name"), {
+      target: { value: "Dana" },
+    });
+
+    expect(screen.queryByLabelText(/Remember this voice/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save speaker name" }));
+    });
+
+    // The plain rename still goes through, and asks for no remembering.
+    expect(onRenameSpeaker).toHaveBeenCalledWith("S1", "Dana", false);
+  });
+
+  // The speaker with a signature gets the offer; the one without does not,
+  // in the same transcript.
+  it("offers the switch only on the clusters that have a signature", () => {
+    render(
+      <TranscriptViewer
+        segments={TWO_SPEAKER_SEGMENTS}
+        rememberVoicesEnabled
+        speakerVoices={S1_HAS_A_SIGNATURE}
+        onRenameSpeaker={vi.fn(async () => {})}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    const editors = screen.getAllByRole("button", { name: "Edit speaker name" });
+    fireEvent.click(editors[0]);
+    expect(screen.getByLabelText(/Remember this voice/)).toBeInTheDocument();
+
+    // Close S1's editor, open S2's: same setting, no signature, no offer.
+    fireEvent.keyDown(screen.getByLabelText("Speaker name"), { key: "Escape" });
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "Edit speaker name" })[1],
+    );
+    expect(screen.queryByLabelText(/Remember this voice/)).not.toBeInTheDocument();
+  });
+
+  // Both lanes that landed a name list feed the same editor: the ranked
+  // voiceprint options, then this meeting's attendees. One list, in that
+  // order, with nothing offered twice.
+  it("merges the ranked options with the meeting's attendees, deduped and in order", () => {
+    render(
+      <TranscriptViewer
+        segments={TWO_SPEAKER_SEGMENTS}
+        rememberVoicesEnabled
+        speakerVoices={S1_HAS_A_SIGNATURE}
+        speakerNameOptions={["Dana", "Devon"]}
+        speakerNameSuggestions={["devon", "Priya", "  "]}
+        onRenameSpeaker={vi.fn(async () => {})}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit speaker name" })[0]);
+
+    const list = screen.getByTestId("speaker-name-options");
+    expect(
+      Array.from(list.querySelectorAll("option")).map((option) => option.value),
+    ).toEqual(["Dana", "Devon", "Priya"]);
+  });
+
+  // Attendees alone still populate the list: renaming a speaker on a meeting
+  // that came from a calendar event works with voiceprints off.
+  it("offers the attendees on their own when voiceprints have nothing to add", () => {
+    render(
+      <TranscriptViewer
+        segments={TWO_SPEAKER_SEGMENTS}
+        speakerNameSuggestions={["Priya", "Ravi"]}
+        onRenameSpeaker={vi.fn(async () => {})}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename Speakers" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit speaker name" })[0]);
+
+    const list = screen.getByTestId("speaker-name-options");
+    expect(
+      Array.from(list.querySelectorAll("option")).map((option) => option.value),
+    ).toEqual(["Priya", "Ravi"]);
+    expect(screen.queryByLabelText(/Remember this voice/)).not.toBeInTheDocument();
   });
 });

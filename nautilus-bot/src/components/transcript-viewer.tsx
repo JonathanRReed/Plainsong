@@ -225,16 +225,20 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
     }
   };
 
-  // One list, two sources: the ranked voiceprint/attendee options this
-  // meeting produced, then any remaining calendar attendees. Order is the
-  // offer order, and a name never appears twice.
+  // One list, two sources: the ranked options the sidecar produced for this
+  // meeting, then any calendar attendee it did not already name. Order is the
+  // offer order, and a name never appears twice -- de-duplicated
+  // case-insensitively, the same rule `confirm_name_options` applies in the
+  // sidecar, so "Devon" from one source and "devon" from the other are one
+  // entry rather than two lines that look like a bug.
   const offeredNames = useMemo(() => {
     const seen = new Set<string>();
     const merged: string[] = [];
     for (const name of [...(nameOptions ?? []), ...(nameSuggestions ?? [])]) {
       const trimmed = name.trim();
-      if (!trimmed || seen.has(trimmed)) continue;
-      seen.add(trimmed);
+      const key = trimmed.toLocaleLowerCase();
+      if (!trimmed || seen.has(key)) continue;
+      seen.add(key);
       merged.push(trimmed);
     }
     return merged;
@@ -935,6 +939,14 @@ export const TranscriptViewer = memo(function TranscriptViewer({
                       handleRenameSpeaker(speakerId, name, remember)
                   : undefined;
               const voiceState = speakerId ? speakerVoices?.[speakerId] : undefined;
+              // Remembering a voice needs a signature for this cluster, and
+              // only clusters the sidecar has one for appear in `speakerVoices`.
+              // Without that check the switch showed up on a meeting diarized
+              // before the feature existed, defaulted to on, and the save
+              // failed at the RPC — so an ordinary rename became impossible.
+              const canRememberVoiceForGroup = Boolean(
+                rememberVoicesEnabled && speakerId && voiceState
+              );
               const isFirstSpeakerMention = firstSpeakerGroupIndices.has(groupIndex);
 
               // Check if this group is currently playing
@@ -988,7 +1000,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
                       isActive={isActive}
                       isFirstMention={isFirstSpeakerMention}
                       onRename={renameSpeakerForGroup}
-                      canRememberVoice={Boolean(rememberVoicesEnabled && speakerId)}
+                      canRememberVoice={canRememberVoiceForGroup}
                       isAutoNamed={voiceState?.matchState === "auto"}
                       nameOptions={speakerNameOptions}
                       nameSuggestions={speakerNameSuggestions}
