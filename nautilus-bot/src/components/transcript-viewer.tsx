@@ -236,7 +236,10 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
     const merged: string[] = [];
     for (const name of [...(nameOptions ?? []), ...(nameSuggestions ?? [])]) {
       const trimmed = name.trim();
-      const key = trimmed.toLocaleLowerCase();
+      // An identity key, not display text: pin the locale so a Turkish
+      // system does not fold "I" to a dotless i and let two different
+      // names collide (see src/lib/string-registry.ts for the same rule).
+      const key = trimmed.toLocaleLowerCase("en-US");
       if (!trimmed || seen.has(key)) continue;
       seen.add(key);
       merged.push(trimmed);
