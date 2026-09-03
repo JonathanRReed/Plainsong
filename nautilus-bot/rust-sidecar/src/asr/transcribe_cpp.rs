@@ -1087,6 +1087,47 @@ pub(crate) fn att_context_right_for_chunk_ms(chunk_ms: u32) -> i32 {
 /// (tens of milliseconds) so ordinary contention never trips it.
 const STREAM_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// What [`TranscribeCppStreamingSession::open`] should do with the live-preview
+/// thread after waiting for it to report that its model is loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerDisposition {
+    /// The worker answered, or hung up: it is on its way out, so joining it is
+    /// bounded and reclaims the thread.
+    Join,
+    /// It never answered. It may still be inside the native load, so joining
+    /// would block the caller for exactly as long as that does.
+    Detach,
+}
+
+/// Wait for the worker's "ready", with a ceiling, and say what to do with the
+/// thread afterwards.
+///
+/// Split out from `open` so the join-versus-detach decision is testable with a
+/// plain channel and no model on disk.
+fn await_worker_ready(
+    ready_rx: &std::sync::mpsc::Receiver<Result<u64>>,
+    timeout: Duration,
+    model_label: &str,
+) -> (WorkerDisposition, Result<u64>) {
+    match ready_rx.recv_timeout(timeout) {
+        Ok(Ok(load_ms)) => (WorkerDisposition::Join, Ok(load_ms)),
+        Ok(Err(error)) => (WorkerDisposition::Join, Err(error)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (
+            WorkerDisposition::Detach,
+            Err(anyhow::anyhow!(
+                "The live-preview engine did not load '{model_label}' within {} s.",
+                timeout.as_secs()
+            )),
+        ),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => (
+            WorkerDisposition::Join,
+            Err(anyhow::anyhow!(
+                "The live-preview engine stopped before it could load '{model_label}'."
+            )),
+        ),
+    }
+}
+
 /// What one `feed`/`finalize` produced, moved back over the channel.
 struct StreamOutcome {
     stable: String,
@@ -1276,17 +1317,30 @@ impl TranscribeCppStreamingSession {
             })
             .context("Failed to start the live-preview thread")?;
 
-        let load_ms = match ready_rx.recv() {
-            Ok(Ok(load_ms)) => load_ms,
-            Ok(Err(error)) => {
+        // Bounded, and detaching on timeout, exactly like `call()` below. A
+        // `Model::load_with` that never returns used to park this wait
+        // forever: the caller sat on a blocking-pool thread, the preview never
+        // opened and never failed, and every later dictation stop paid the
+        // close timeout in full.
+        let load_ms = match await_worker_ready(&ready_rx, STREAM_CALL_TIMEOUT, &model_label) {
+            // Loaded: the worker stays, because it is the session.
+            (_, Ok(load_ms)) => load_ms,
+            (WorkerDisposition::Join, Err(error)) => {
+                // It answered with a failure, or hung up: either way it is on
+                // its way out, so joining is bounded and reclaims the thread.
                 let _ = worker.join();
                 return Err(error);
             }
-            Err(_) => {
-                let _ = worker.join();
-                anyhow::bail!(
-                    "The live-preview engine stopped before it could load '{model_label}'."
+            (WorkerDisposition::Detach, Err(error)) => {
+                // Still inside the native load: joining would block whoever
+                // asked for the preview for as long as that does.
+                tracing::warn!(
+                    "Left the live-preview thread detached: '{}' did not load within {} s",
+                    model_label,
+                    STREAM_CALL_TIMEOUT.as_secs()
                 );
+                drop(worker);
+                return Err(error);
             }
         };
 
@@ -2370,5 +2424,97 @@ mod tests {
             Path::new("/models/transcribe_cpp/parakeet-tdt-0.6b-v3-Q8_0.gguf")
         );
         assert!(!provider.is_available(), "nothing is on disk at /models");
+    }
+
+    /// The ordinary open: the worker reported its load time, so the thread is
+    /// finishing and joining it costs nothing.
+    #[test]
+    fn a_worker_that_reports_its_load_time_is_joined() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u64>>();
+        ready_tx.send(Ok(512)).expect("send ready");
+        let (disposition, outcome) =
+            await_worker_ready(&ready_rx, Duration::from_secs(5), "nemotron.gguf");
+        assert_eq!(disposition, WorkerDisposition::Join);
+        assert_eq!(outcome.expect("a load time"), 512);
+    }
+
+    /// It answered with a failure -- a missing file, a non-streaming model --
+    /// so it is on its way out and the error is the caller's.
+    #[test]
+    fn a_worker_that_reports_a_load_failure_is_joined() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u64>>();
+        ready_tx
+            .send(Err(anyhow::anyhow!("could not read the weights")))
+            .expect("send failure");
+        let (disposition, outcome) =
+            await_worker_ready(&ready_rx, Duration::from_secs(5), "nemotron.gguf");
+        assert_eq!(disposition, WorkerDisposition::Join);
+        assert!(outcome
+            .expect_err("a failure")
+            .to_string()
+            .contains("could not read the weights"));
+    }
+
+    /// The worker died without a word. Its channel is gone, so joining is
+    /// bounded and the caller still gets a named failure.
+    #[test]
+    fn a_worker_that_hangs_up_is_joined_and_named() {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u64>>();
+        drop(ready_tx);
+        let (disposition, outcome) =
+            await_worker_ready(&ready_rx, Duration::from_secs(5), "nemotron.gguf");
+        assert_eq!(disposition, WorkerDisposition::Join);
+        assert!(outcome
+            .expect_err("a failure")
+            .to_string()
+            .contains("nemotron.gguf"));
+    }
+
+    /// The finding this exists for: a `Model::load_with` that never returns
+    /// used to park `open` forever on a blocking-pool thread, so the preview
+    /// neither opened nor failed and every later stop paid the close timeout
+    /// in full. The wait is now bounded and the thread is detached, exactly
+    /// like a `feed` that stops answering.
+    #[test]
+    fn a_load_that_never_answers_times_out_and_detaches() {
+        // Held open on purpose: a live sender with nothing to say is the
+        // wedged load, not a hang-up.
+        let (_ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u64>>();
+        let started = Instant::now();
+        let (disposition, outcome) =
+            await_worker_ready(&ready_rx, Duration::from_millis(120), "nemotron.gguf");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wait must be bounded by its timeout, not by the load"
+        );
+        assert_eq!(
+            disposition,
+            WorkerDisposition::Detach,
+            "a thread that may still be inside the native load must not be joined"
+        );
+        let error = outcome.expect_err("a failure").to_string();
+        assert!(error.contains("nemotron.gguf"), "{error}");
+        assert!(error.contains("did not load"), "{error}");
+    }
+
+    /// The open path uses the same ceiling as every other call into the
+    /// engine, so "the preview stopped answering" means one thing.
+    #[test]
+    fn the_open_wait_uses_the_same_ceiling_as_every_other_call() {
+        const SOURCE: &str = include_str!("transcribe_cpp.rs");
+        let start = SOURCE.find("    fn open(").expect("open must exist");
+        let end = start
+            + SOURCE[start..]
+                .find("\n    }\n")
+                .expect("open must be closed");
+        let body = &SOURCE[start..end];
+        assert!(
+            body.contains("await_worker_ready(&ready_rx, STREAM_CALL_TIMEOUT"),
+            "open must wait with the shared ceiling rather than blocking forever"
+        );
+        assert!(
+            !body.contains("ready_rx.recv()"),
+            "an unbounded recv on the ready channel is the wedge this replaced"
+        );
     }
 }
