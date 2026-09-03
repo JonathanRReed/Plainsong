@@ -404,6 +404,41 @@ fn month_index(word: &str) -> Option<(usize, &'static str)> {
 /// stronger signal than "month followed by a number" before it fires.
 const MONTHS_THAT_ARE_ALSO_WORDS: &[&str] = &["march", "may", "august"];
 
+/// Words that make a following month name a date rather than a verb or an
+/// auxiliary: the prepositions that take a date, plus "the" ("the may fifth
+/// deadline"). Deliberately short -- anything not listed leaves an
+/// ordinary-word month needing one of the other signals in `try_date`.
+const DATE_CONTEXT_WORDS: &[&str] = &[
+    "on", "by", "until", "till", "since", "from", "before", "after", "in", "through", "the",
+];
+
+/// Ordinals that keep an ordinary-word reading straight after an
+/// ordinary-word month even at the head of a phrase: "May first, we ship" and
+/// "March second!" are sentences, "March third" is a date.
+fn ordinal_doubles_as_an_ordinary_word(value: u64) -> bool {
+    value == 1 || value == 2
+}
+
+/// True when `index` opens the phrase: the first token, or the first after
+/// sentence or clause punctuation. A month at the head of a phrase is far
+/// likelier to be a date than a verb -- "March third" against "we march
+/// third".
+fn at_phrase_start(tokens: &[Token], index: usize) -> bool {
+    match index
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+    {
+        None => true,
+        Some(previous) => {
+            previous.core.is_empty()
+                || previous
+                    .trail
+                    .chars()
+                    .any(|ch| matches!(ch, '.' | ',' | '!' | '?' | ';' | ':'))
+        }
+    }
+}
+
 fn ordinal_suffix(value: u64) -> &'static str {
     match (value % 100, value % 10) {
         (11..=13, _) => "th",
@@ -728,8 +763,33 @@ fn try_date(tokens: &[Token], start: usize) -> Option<Rewrite> {
         return None;
     }
     let (_, month_label) = month_index(&token.core_lower)?;
+    // May, March and August are also ordinary English words, so "month
+    // followed by a number" is not evidence enough on its own: "i may second
+    // that motion", "we may first go", "i march second in the parade" and "we
+    // march five miles" are not dates. Such a month takes a day only with one
+    // of these signals, and the guard covers the ordinal branch as well as the
+    // cardinal one (it used to sit on the cardinal branch alone, which is how
+    // "i may second that motion" became "i May 2 that motion"):
+    //
+    //   * a year after the day          -- "march five twenty twenty six"
+    //   * a date word before the month  -- "on may fifth", "by march third"
+    //   * an explicit "the" before the day -- "may the fourth"
+    //   * a clock time after the day    -- "meet march third at three thirty pm"
+    //   * the month opens the phrase    -- "march third"
+    //
+    // The last of those is not enough for "first" and "second", which keep
+    // their ordinary reading at the head of a phrase ("May first, we ship").
+    // A *cardinal* day after such a month always needs the year: "we march
+    // five miles" has no second signal available to tell it from a date.
     let month_is_also_an_ordinary_word =
         MONTHS_THAT_ARE_ALSO_WORDS.contains(&token.core_lower.as_str());
+    let preceded_by_a_date_word = start
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+        .is_some_and(|previous| {
+            !previous.protected && DATE_CONTEXT_WORDS.contains(&previous.core_lower.as_str())
+        });
+    let month_opens_the_phrase = at_phrase_start(tokens, start);
 
     let mut index = start + 1;
     let mut day: Option<u64> = None;
@@ -749,22 +809,34 @@ fn try_date(tokens: &[Token], start: usize) -> Option<Rewrite> {
 
     if year.is_none() && span_continues(tokens, start, index) {
         let mut day_start = index;
+        let mut explicit_the = false;
         if tokens
             .get(day_start)
-            .is_some_and(|next| next.core_lower == "the")
+            .is_some_and(|next| !next.protected && next.core_lower == "the")
+            && span_continues(tokens, start, day_start + 1)
         {
             day_start += 1;
+            explicit_the = true;
         }
         let parsed_day = parse_ordinal(tokens, day_start)
             .filter(|(value, _)| (1..=31).contains(value))
+            .filter(|(value, end)| {
+                if !month_is_also_an_ordinary_word || explicit_the || preceded_by_a_date_word {
+                    return true;
+                }
+                if parse_year(tokens, *end).is_some() || followed_by_a_clock_time(tokens, *end) {
+                    return true;
+                }
+                month_opens_the_phrase && !ordinal_doubles_as_an_ordinary_word(*value)
+            })
             .or_else(|| {
                 parse_cardinal_bounded(tokens, day_start, 2)
                     .filter(|(value, _)| (1..=31).contains(value))
-                    // "i may one day get to it" is not the 1st of May. A bare
+                    // "i may one day get to it" is not the 1st of May, and "we
+                    // march five miles" is not the 5th of March. A bare
                     // cardinal day after a month word that is also an ordinary
-                    // English word needs a year behind it before this reads as
-                    // a date; an ordinal day ("may fifth") never has the other
-                    // reading.
+                    // English word needs a year behind it, full stop: unlike an
+                    // ordinal it carries no shape of its own to lean on.
                     .filter(|(_, end)| {
                         !month_is_also_an_ordinary_word || parse_year(tokens, *end).is_some()
                     })
@@ -838,6 +910,18 @@ fn try_ordinal_of_month(tokens: &[Token], start: usize) -> Option<Rewrite> {
         ),
         end: index,
     })
+}
+
+/// A clock time straight after the day ("march third at three thirty pm") is
+/// a date signal on its own: nothing but a date puts a time there, which is
+/// what tells "let us meet march third at three thirty pm" from "i march
+/// second in the parade".
+fn followed_by_a_clock_time(tokens: &[Token], end: usize) -> bool {
+    let after_a_preposition = tokens.get(end).is_some_and(|next| {
+        !next.protected && TIME_CONTEXT_WORDS.contains(&next.core_lower.as_str())
+    }) && try_time(tokens, end + 1, true).is_some();
+    // The second form needs no preposition because it carries a meridiem.
+    after_a_preposition || try_time(tokens, end, false).is_some()
 }
 
 /// Simple ("third"), tens ("twentieth") and compound ("twenty first")
@@ -1376,11 +1460,55 @@ mod tests {
         assert_eq!(itn("i may one day get to it"), "i may one day get to it");
         assert_eq!(itn("we march five miles"), "we march 5 miles");
         assert_eq!(itn("we march twenty five miles"), "we march 25 miles");
-        // An ordinal, or a year, is signal enough.
+        // At the head of a phrase the month reading wins, so an ordinal day
+        // needs nothing more.
         assert_eq!(itn("may fifth"), "May 5");
+        assert_eq!(itn("may twenty second"), "May 22");
         assert_eq!(itn("march five twenty twenty six"), "March 5, 2026");
         // An unambiguous month name takes a bare cardinal day.
         assert_eq!(itn("january five"), "January 5");
+    }
+
+    /// The guard used to sit on the cardinal branch only, so an ordinal day
+    /// after "may"/"march" converted whatever the sentence around it said.
+    #[test]
+    fn an_ordinal_after_an_ordinary_word_month_needs_date_context_too() {
+        assert_eq!(itn("i may second that motion"), "i may second that motion");
+        assert_eq!(itn("we may first go"), "we may first go");
+        assert_eq!(
+            itn("i march second in the parade"),
+            "i march second in the parade"
+        );
+        assert_eq!(itn("we may third the motion"), "we may third the motion");
+        // "first"/"second" keep their ordinary reading even at the head of a
+        // phrase; every other ordinal is a date there.
+        assert_eq!(itn("may first we ship"), "may first we ship");
+        assert_eq!(
+            itn("march second in the parade"),
+            "march second in the parade"
+        );
+        assert_eq!(itn("march third"), "March 3");
+        // A clock time after the day is a date signal on its own, which is
+        // what keeps "let us meet march third at three thirty pm" a date
+        // while "i march second in the parade" is not.
+        assert_eq!(
+            itn("let us meet march third at three thirty pm"),
+            "let us meet March 3 at 3:30 pm"
+        );
+        assert_eq!(itn("we march first at dawn"), "we march first at dawn");
+        // A date word before the month, an explicit "the", or a year after
+        // the day is signal enough for any ordinal.
+        assert_eq!(itn("on may first"), "on May 1");
+        assert_eq!(itn("by march second"), "by March 2");
+        assert_eq!(itn("until august first"), "until August 1");
+        assert_eq!(itn("may the fourth"), "May 4");
+        assert_eq!(itn("may first twenty twenty six"), "May 1, 2026");
+        assert_eq!(itn("on may fifth"), "on May 5");
+        // An unambiguous month is unaffected by any of it.
+        assert_eq!(
+            itn("i january second that motion"),
+            "i January 2 that motion"
+        );
     }
 
     #[test]
