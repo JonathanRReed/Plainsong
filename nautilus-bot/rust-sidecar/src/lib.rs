@@ -1439,7 +1439,8 @@ fn diarization_model_path(model_id: &str) -> Option<std::path::PathBuf> {
 }
 
 fn list_diarization_models() -> Vec<DiarizationModelOption> {
-    vec![
+    #[allow(unused_mut)]
+    let mut models = vec![
         DiarizationModelOption {
             id: "ecapa_tdnn_speaker",
             label: "ECAPA-TDNN 512",
@@ -1472,12 +1473,42 @@ fn list_diarization_models() -> Vec<DiarizationModelOption> {
                 .map(|p| download::is_diarization_model_artifact_trusted("eres2netv2_speaker", &p))
                 .unwrap_or(false),
         },
-    ]
+    ];
+
+    // Only offered when the backend is compiled in, so the picker never lists
+    // a model this build has no code to run. The label says "experimental"
+    // because it is: no shipped build enables it, and Plainsong has no DER
+    // number of its own for either backend yet.
+    #[cfg(feature = "diarization-speakrs")]
+    models.push(DiarizationModelOption {
+        id: download::SPEAKRS_MODEL_ID,
+        label: "pyannote community-1 (experimental)",
+        description:
+            "Full pyannote pipeline with overlap handling, via speakrs. Slower than the embedding models and unmeasured on your audio (~60 MB, ten files)",
+        installed: is_speakrs_bundle_installed(),
+    });
+
+    models
+}
+
+#[cfg(feature = "diarization-speakrs")]
+fn is_speakrs_bundle_installed() -> bool {
+    let bundle_dir = crate::paths::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Plainsong")
+        .join("models")
+        .join("diarization")
+        .join(download::SPEAKRS_BUNDLE_DIR);
+    download::is_speakrs_bundle_trusted(&bundle_dir)
 }
 
 #[allow(non_snake_case)]
 fn is_diarization_model_available(modelId: Option<String>) -> bool {
     let id = modelId.as_deref().unwrap_or("ecapa_tdnn_speaker");
+    #[cfg(feature = "diarization-speakrs")]
+    if id == download::SPEAKRS_MODEL_ID {
+        return is_speakrs_bundle_installed();
+    }
     diarization_model_path(id)
         .map(|p| download::is_diarization_model_artifact_trusted(id, &p))
         .unwrap_or(false)
@@ -26585,15 +26616,31 @@ async fn run_meeting_transcription_pipeline(
             // this recording while best-effort enrichment is still reading it.
             let mut diarization_updated = false;
             if transcript_persisted {
-                let enable_diarization = {
+                // The automatic pass runs the model the user picked, not
+                // always the default one: the picker previously only affected
+                // the explicit "run diarization" command, so a recording
+                // enriched on completion silently used ECAPA-TDNN whatever the
+                // setting said. Readiness is asked per model for the same
+                // reason (the experimental speakrs backend needs a bundle, not
+                // one .onnx).
+                let (enable_diarization, diarization_model_id) = {
                     let sm = state_clone.settings_manager.lock().await;
-                    sm.settings().transcription.enable_diarization
+                    let transcription = &sm.settings().transcription;
+                    (
+                        transcription.enable_diarization,
+                        transcription
+                            .diarization_model_id
+                            .clone()
+                            .unwrap_or_else(|| "ecapa_tdnn_speaker".to_string()),
+                    )
                 };
                 if enable_diarization
                     && !transcript_has_source_aware_speakers(&transcript.segments)
-                    && diarization::DiarizationEngine::is_real_available()
+                    && diarization::is_model_available(&diarization_model_id)
                 {
-                    match diarization::run_diarization(&path).await {
+                    match diarization::run_diarization_with_model(&path, &diarization_model_id)
+                        .await
+                    {
                         Ok(result) => {
                             let engine = diarization::DiarizationEngine::new();
                             let mut enriched_segments = transcript.segments.clone();
@@ -28673,6 +28720,24 @@ pub async fn dispatch_command(
             let progress_handle = handle.clone();
             let id_for_cb = id.clone();
             let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
+            #[cfg(feature = "diarization-speakrs")]
+            if id == download::SPEAKRS_MODEL_ID {
+                manager
+                    .download_speakrs_bundle(move |progress: download::DownloadProgress| {
+                        progress_handle.emit_event(
+                            "model-download-progress",
+                            serde_json::json!({
+                                "modelName": &id_for_cb,
+                                "percentage": progress.percentage,
+                                "bytesDownloaded": progress.bytes_downloaded,
+                                "totalBytes": progress.total_bytes,
+                            }),
+                        );
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(serde_json::Value::Null);
+            }
             manager
                 .download_diarization_model_by_id(
                     &id,
@@ -30547,5 +30612,90 @@ mod playback_preparation_tests {
             0
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod diarization_model_picker_tests {
+    use super::*;
+
+    /// Every option the picker offers has to be a model this build can run and
+    /// download. The experimental speakrs backend is compiled out by default,
+    /// so the default build must not list it: offering it there would let a
+    /// user select a model that fails at run time with "unknown diarization
+    /// model".
+    #[test]
+    fn default_build_offers_only_the_embedding_models() {
+        let ids: Vec<&str> = list_diarization_models()
+            .iter()
+            .map(|model| model.id)
+            .collect();
+
+        #[cfg(not(feature = "diarization-speakrs"))]
+        {
+            assert_eq!(
+                ids,
+                vec![
+                    "ecapa_tdnn_speaker",
+                    "resnet34_speaker",
+                    "campplus_speaker",
+                    "eres2netv2_speaker",
+                ]
+            );
+            assert!(!ids.iter().any(|id| id.contains("speakrs")));
+        }
+
+        #[cfg(feature = "diarization-speakrs")]
+        {
+            // Appended last, after the four embedding models, so the default
+            // stays first in the picker.
+            assert_eq!(ids.len(), 5);
+            assert_eq!(ids[0], "ecapa_tdnn_speaker");
+            assert_eq!(ids[4], download::SPEAKRS_MODEL_ID);
+        }
+    }
+
+    /// Copy rule (STYLE.md §6): the label says what it is and that it is
+    /// experimental; the description makes no accuracy claim, because
+    /// Plainsong has published no DER for either backend.
+    #[cfg(feature = "diarization-speakrs")]
+    #[test]
+    fn speakrs_option_is_labelled_experimental_and_claims_no_accuracy() {
+        let models = list_diarization_models();
+        let speakrs = models
+            .iter()
+            .find(|model| model.id == download::SPEAKRS_MODEL_ID)
+            .expect("speakrs option present when the backend is compiled in");
+
+        assert!(speakrs.label.contains("experimental"));
+        assert!(speakrs.label.contains("community-1"));
+        for claim in [
+            "most accurate",
+            "best accuracy",
+            "highest accuracy",
+            "recommended",
+        ] {
+            assert!(
+                !speakrs.description.to_lowercase().contains(claim),
+                "description must not claim {claim:?} without a measurement"
+            );
+        }
+        // It costs a ten-file download; say so where the user chooses.
+        assert!(speakrs.description.contains("ten files"));
+    }
+
+    /// Availability is per model: asking about speakrs must not be answered by
+    /// the ECAPA-TDNN `.onnx` check, and an unknown id is never "available".
+    #[test]
+    fn availability_is_answered_per_model_id() {
+        assert!(!is_diarization_model_available(Some(
+            "not_a_real_model".to_string()
+        )));
+
+        #[cfg(feature = "diarization-speakrs")]
+        assert_eq!(
+            is_diarization_model_available(Some(download::SPEAKRS_MODEL_ID.to_string())),
+            is_speakrs_bundle_installed()
+        );
     }
 }

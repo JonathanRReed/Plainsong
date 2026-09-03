@@ -75,6 +75,135 @@ fn diarization_model_info(model_id: &str) -> Option<DiarizationModelInfo> {
     }
 }
 
+/// Model id for the experimental speakrs (pyannote community-1) diarizer.
+///
+/// Not a `DiarizationModelInfo` entry because speakrs needs a *bundle* of ten
+/// files (segmentation ONNX, embedding ONNX + external weights, and six PLDA
+/// parameter arrays), not one `.onnx`. Only defined when the backend is
+/// compiled in, so a default build cannot offer, download, or select a model
+/// it has no code to run.
+#[cfg(feature = "diarization-speakrs")]
+pub(crate) const SPEAKRS_MODEL_ID: &str = "speakrs_community1";
+
+/// Sub-directory of `models/diarization/` holding the speakrs bundle.
+/// speakrs resolves every file of the bundle by name inside one directory
+/// (`ModelBundle::from_dir`), so the layout is fixed by the crate.
+#[cfg(feature = "diarization-speakrs")]
+pub(crate) const SPEAKRS_BUNDLE_DIR: &str = "speakrs";
+
+#[cfg(feature = "diarization-speakrs")]
+#[derive(Clone, Copy)]
+pub(crate) struct SpeakrsBundleFile {
+    pub(crate) url: &'static str,
+    pub(crate) file_name: &'static str,
+    pub(crate) sha256: &'static str,
+    pub(crate) max_bytes: u64,
+}
+
+/// The ten files speakrs 0.5's `ExecutionMode::Cpu` pipeline needs, pinned to
+/// one immutable `avencera/speakrs-models` revision (never `/resolve/main/`).
+/// Every SHA-256 below was verified by downloading the file at this revision
+/// and hashing it locally; they also match the LFS object ids the Hugging Face
+/// tree API reports for the same revision.
+///
+/// Licensing (recorded here because the app redistributes nothing but does
+/// fetch these at runtime): the `avencera/speakrs-models` card declares NO
+/// license of its own and says users are responsible for the upstream terms.
+/// Upstream is `pyannote/speaker-diarization-community-1`, which is CC-BY-4.0
+/// and gated on Hugging Face; its segmentation component
+/// (`pyannote/segmentation-3.0`) is MIT and the embedder
+/// (`pyannote/wespeaker-voxceleb-resnet34-LM`) is CC-BY-4.0. See
+/// artifacts/qa/diarization-speakrs-spike-2026-09-02.md.
+#[cfg(feature = "diarization-speakrs")]
+pub(crate) const SPEAKRS_BUNDLE: &[SpeakrsBundleFile] = &[
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/segmentation-3.0.onnx",
+        file_name: "segmentation-3.0.onnx",
+        sha256: "038b971741ed623af9773ecafdefa4b7bc523520099c2a68f8568b24189e8ad9",
+        max_bytes: 32 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.onnx",
+        file_name: "wespeaker-voxceleb-resnet34.onnx",
+        sha256: "203a4c67112167580ab1fcb62f4568c633499fb283805890aebe1c48564fcc0f",
+        max_bytes: 128 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.onnx.data",
+        file_name: "wespeaker-voxceleb-resnet34.onnx.data",
+        sha256: "dc105e7857156611381b95cc961b277d8e1e098e7af1c919a77c68c7257ce956",
+        max_bytes: 128 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_lda.npy",
+        file_name: "plda_lda.npy",
+        sha256: "e20c9b012bebd1aabda5a38a127e63a43cf35debdc502715fc143e2fb6bc3c4b",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_tr.npy",
+        file_name: "plda_tr.npy",
+        sha256: "e700b68cb319de3fafb5fa093eb9222c23c447084741f8d3a533640d425510ee",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mu.npy",
+        file_name: "plda_mu.npy",
+        sha256: "d286d48acf99bbc1ed1502fed0a3e361ae5626ce1870c8be9f7397c5e47886c6",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_psi.npy",
+        file_name: "plda_psi.npy",
+        sha256: "d7128c9ed2f28a9781971805131129f077c04f948e2df12e52dcdb99f2b4e5f5",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mean1.npy",
+        file_name: "plda_mean1.npy",
+        sha256: "e424c0c352182aa8e0f555dec1f3b30e29a20b9ed6b25d339f112af92e51e36f",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mean2.npy",
+        file_name: "plda_mean2.npy",
+        sha256: "6f6fb708a2037197b5b84ffeaa8f140cb878088fbecd6ab042ad26a7691bd2cf",
+        max_bytes: 4 * 1024 * 1024,
+    },
+    SpeakrsBundleFile {
+        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.min_num_samples.txt",
+        file_name: "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+        sha256: "e4df891c484d7abb985dadf539fa1883a646dab6337af5cae4159c587b7050cc",
+        max_bytes: 4 * 1024,
+    },
+];
+
+/// All-or-nothing readiness for a multi-file model bundle: every named file
+/// must exist in `bundle_dir` and carry an integrity receipt matching the
+/// expected hash beside it. Generic over the file list so the rule can be
+/// tested with fixtures instead of the real multi-megabyte weights.
+#[cfg(feature = "diarization-speakrs")]
+fn is_bundle_trusted<'a>(
+    bundle_dir: &Path,
+    files: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    files.into_iter().all(|(file_name, sha256)| {
+        is_model_artifact_trusted(&bundle_dir.join(file_name), Some(sha256))
+    })
+}
+
+/// Every file of the speakrs bundle carries a receipt whose hash matches its
+/// pin. Bundle-wide, because a partial bundle loads no pipeline at all.
+#[cfg(feature = "diarization-speakrs")]
+pub(crate) fn is_speakrs_bundle_trusted(bundle_dir: &Path) -> bool {
+    is_bundle_trusted(
+        bundle_dir,
+        SPEAKRS_BUNDLE
+            .iter()
+            .map(|file| (file.file_name, file.sha256)),
+    )
+}
+
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
@@ -478,6 +607,17 @@ pub(crate) fn managed_model_integrity_artifacts(models_root: &Path) -> Vec<(Path
                 model.sha256.to_string(),
             ));
         }
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    for file in SPEAKRS_BUNDLE {
+        artifacts.push((
+            models_root
+                .join("diarization")
+                .join(SPEAKRS_BUNDLE_DIR)
+                .join(file.file_name),
+            file.sha256.to_string(),
+        ));
     }
 
     artifacts.push((
@@ -1160,6 +1300,53 @@ impl DownloadManager {
         );
 
         Ok(destination)
+    }
+
+    /// Directory the speakrs (pyannote community-1) bundle lives in.
+    #[cfg(feature = "diarization-speakrs")]
+    pub fn speakrs_bundle_dir(&self) -> PathBuf {
+        self.models_dir.join("diarization").join(SPEAKRS_BUNDLE_DIR)
+    }
+
+    /// Download every file of the speakrs bundle, each pinned by SHA-256 and
+    /// size-bounded like the single-file diarization models. Files already
+    /// present with a valid integrity receipt are left alone, so a retry after
+    /// a dropped connection only fetches what is missing.
+    #[cfg(feature = "diarization-speakrs")]
+    pub async fn download_speakrs_bundle(
+        &self,
+        progress_callback: impl Fn(DownloadProgress) + Send + Sync + Clone + 'static,
+    ) -> Result<PathBuf> {
+        let bundle_dir = self.speakrs_bundle_dir();
+        tokio::fs::create_dir_all(&bundle_dir).await?;
+
+        for file in SPEAKRS_BUNDLE {
+            let destination = bundle_dir.join(file.file_name);
+            if destination.exists()
+                && verify_or_record_model_integrity(&destination, Some(file.sha256)).await?
+            {
+                continue;
+            }
+            if destination.exists() {
+                tracing::warn!(
+                    "speakrs bundle file {} failed integrity verification. Re-downloading.",
+                    file.file_name
+                );
+                remove_model_artifact(&destination).await;
+            }
+
+            self.download_file_verified(
+                file.url,
+                &destination,
+                Some(file.sha256),
+                file.max_bytes,
+                progress_callback.clone(),
+            )
+            .await?;
+        }
+
+        tracing::info!("speakrs diarization bundle ready at {:?}", bundle_dir);
+        Ok(bundle_dir)
     }
 
     /// Check if diarization model is downloaded
@@ -1934,6 +2121,123 @@ mod tests {
         assert!(SILERO_VAD_ONNX_SHA256
             .chars()
             .all(|character| character.is_ascii_hexdigit()));
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    #[test]
+    fn speakrs_bundle_is_pinned_by_revision_hash_and_size() {
+        // The bundle is only useful whole: speakrs's CPU pipeline loads the
+        // segmentation ONNX, the embedding ONNX with its external weights, and
+        // six PLDA arrays plus the min-samples marker.
+        assert_eq!(SPEAKRS_BUNDLE.len(), 10);
+
+        let mut names: Vec<&str> = SPEAKRS_BUNDLE.iter().map(|f| f.file_name).collect();
+        names.sort_unstable();
+        let mut unique = names.clone();
+        unique.dedup();
+        assert_eq!(names, unique, "bundle file names must be unique");
+        assert!(names.contains(&"segmentation-3.0.onnx"));
+        assert!(names.contains(&"wespeaker-voxceleb-resnet34.onnx"));
+        assert!(names.contains(&"wespeaker-voxceleb-resnet34.onnx.data"));
+
+        for file in SPEAKRS_BUNDLE {
+            // Pinned to one immutable revision: `/resolve/main/` would let the
+            // upstream repo swap weights under a hash we verified once.
+            assert!(
+                !file.url.contains("/resolve/main/"),
+                "{} must not track a branch",
+                file.file_name
+            );
+            assert!(
+                file.url
+                    .starts_with("https://huggingface.co/avencera/speakrs-models/resolve/"),
+                "{} must come from the pinned model repo",
+                file.file_name
+            );
+            assert!(
+                file.url.ends_with(file.file_name),
+                "{} URL and destination name must agree",
+                file.file_name
+            );
+            assert_eq!(file.sha256.len(), 64, "{}", file.file_name);
+            assert!(file
+                .sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit()));
+            assert!(file.max_bytes > 0, "{}", file.file_name);
+        }
+
+        // One revision for the whole bundle, or the PLDA arrays could come
+        // from a different export than the embedder they transform.
+        let revisions: std::collections::BTreeSet<&str> = SPEAKRS_BUNDLE
+            .iter()
+            .filter_map(|file| file.url.split("/resolve/").nth(1))
+            .filter_map(|rest| rest.split('/').next())
+            .collect();
+        assert_eq!(revisions.len(), 1, "bundle must pin a single revision");
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    #[tokio::test]
+    async fn a_model_bundle_is_trusted_only_when_every_file_is() {
+        use sha2::Digest as _;
+
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-speakrs-bundle")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("temp dir");
+
+        // Fixture stand-ins for the real weights: the rule under test is
+        // "every file, with a receipt, matching its pin", which does not
+        // depend on the bytes being 26 MB of ONNX.
+        let names = ["segmentation.onnx", "weights.data", "plda.npy"];
+        let mut expected: Vec<(String, String)> = Vec::new();
+        for name in names {
+            let contents = format!("speakrs-fixture-{name}");
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(contents.as_bytes());
+            expected.push((name.to_string(), hex::encode(hasher.finalize())));
+            tokio::fs::write(test_dir.join(name), contents)
+                .await
+                .expect("write fixture");
+        }
+        let pins = || {
+            expected
+                .iter()
+                .map(|(name, sha)| (name.as_str(), sha.as_str()))
+        };
+
+        // Bytes alone are not enough: readiness follows the receipt.
+        assert!(!is_bundle_trusted(&test_dir, pins()));
+
+        for (index, (name, sha)) in expected.iter().enumerate() {
+            record_model_integrity_receipt_for_tests(&test_dir.join(name), sha)
+                .await
+                .expect("receipt");
+            let complete = index + 1 == expected.len();
+            assert_eq!(
+                is_bundle_trusted(&test_dir, pins()),
+                complete,
+                "bundle with {} of {} receipts",
+                index + 1,
+                expected.len()
+            );
+        }
+
+        // One file swapped after verification invalidates the whole bundle,
+        // not just that file.
+        tokio::fs::write(test_dir.join(names[1]), "tampered")
+            .await
+            .expect("tamper");
+        assert!(!is_bundle_trusted(&test_dir, pins()));
+
+        // And the real table is wired to the same rule: nothing is downloaded
+        // here, so the shipped bundle must read as not installed.
+        assert!(!is_speakrs_bundle_trusted(&test_dir));
+
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
     }
 
     #[tokio::test]

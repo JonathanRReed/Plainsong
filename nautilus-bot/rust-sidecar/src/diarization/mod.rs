@@ -9,6 +9,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 mod embedder;
+/// EXPERIMENTAL alternative backend; see the module docs. Off by default.
+#[cfg(feature = "diarization-speakrs")]
+mod speakrs_backend;
 
 pub use embedder::{generate_segments, EmbeddingClusterer};
 
@@ -324,9 +327,20 @@ impl Default for DiarizationEngine {
     }
 }
 
-/// Run diarization with strict real-model requirement.
-pub async fn run_diarization(audio_path: &Path) -> Result<DiarizationResult> {
-    run_diarization_with_model(audio_path, "ecapa_tdnn_speaker").await
+/// Whether the diarization model the user selected can actually run right now.
+///
+/// Per-model because the backends have different readiness conditions: the
+/// embedding backend needs one verified `.onnx`, the experimental speakrs
+/// backend needs a ten-file bundle. Callers that gate an automatic pass on
+/// "is diarization available" must ask about the model they are about to run,
+/// not about the default one.
+pub fn is_model_available(model_id: &str) -> bool {
+    #[cfg(feature = "diarization-speakrs")]
+    if model_id == crate::download::SPEAKRS_MODEL_ID {
+        return speakrs_backend::is_available();
+    }
+    let _ = model_id;
+    DiarizationEngine::is_real_available()
 }
 
 /// Run diarization with a specific speaker embedding model.
@@ -334,6 +348,12 @@ pub async fn run_diarization_with_model(
     audio_path: &Path,
     model_id: &str,
 ) -> Result<DiarizationResult> {
+    #[cfg(feature = "diarization-speakrs")]
+    if model_id == crate::download::SPEAKRS_MODEL_ID {
+        let duration = get_audio_duration(audio_path).await?;
+        return speakrs_backend::run(audio_path, duration).await;
+    }
+
     if !DiarizationEngine::is_real_available() {
         return Err(anyhow::anyhow!(
             "Real diarization model is not available. Install/configure diarization models first."
@@ -368,7 +388,8 @@ mod tests {
             return;
         }
 
-        let result = run_diarization(&PathBuf::from("test.wav")).await;
+        let result =
+            run_diarization_with_model(&PathBuf::from("test.wav"), "ecapa_tdnn_speaker").await;
         assert!(result.is_err());
         let message = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(message.contains("Real diarization model is not available"));
@@ -640,5 +661,112 @@ mod tests {
         assert_eq!(transcript[1].start_time, 6.0);
         assert_eq!(transcript[1].end_time, 8.0);
         assert_eq!(transcript[2].speaker_id.as_deref(), Some("S1"));
+    }
+}
+
+/// Evaluation harness for comparing diarization backends on a fixture with
+/// known turns. Ignored by default: each test downloads model weights and runs
+/// real inference, which is neither hermetic nor fast enough for `bun run
+/// test:rust`. One backend per test, run in separate processes, because peak
+/// RSS is a process high-water mark and would otherwise be reported as the max
+/// of both.
+///
+///   PLAINSONG_DATA_DIR=<scratch> PLAINSONG_DIAR_EVAL_AUDIO=<wav> \
+///     cargo test --features diarization-speakrs --lib \
+///     diarization::eval_tests::eval_embedding_backend -- --ignored --nocapture
+///
+/// Each test prints one JSON line prefixed `DIAR-EVAL ` so a scorer can pick
+/// it out of cargo's output; `scripts/score-diarization-eval.mjs` compares
+/// those turns against the fixture's ground truth.
+#[cfg(test)]
+mod eval_tests {
+    use super::*;
+
+    fn eval_audio_path() -> std::path::PathBuf {
+        let raw = std::env::var("PLAINSONG_DIAR_EVAL_AUDIO")
+            .expect("set PLAINSONG_DIAR_EVAL_AUDIO to the fixture WAV");
+        std::path::PathBuf::from(raw)
+    }
+
+    /// Peak resident set size of this process so far, in bytes. macOS reports
+    /// `ru_maxrss` in bytes (Linux uses kilobytes), and this harness only ever
+    /// runs on the macOS dev machine, so no unit conversion is applied.
+    fn peak_rss_bytes() -> u64 {
+        // SAFETY: `getrusage` only writes into the provided `rusage`, which is
+        // zeroed and lives for the whole call.
+        unsafe {
+            let mut usage: libc::rusage = std::mem::zeroed();
+            if libc::getrusage(libc::RUSAGE_SELF, &mut usage) != 0 {
+                return 0;
+            }
+            usage.ru_maxrss as u64
+        }
+    }
+
+    fn report(
+        backend: &str,
+        audio: &std::path::Path,
+        elapsed: std::time::Duration,
+        result: &DiarizationResult,
+    ) {
+        let turns: Vec<serde_json::Value> = result
+            .segments
+            .iter()
+            .map(|segment| {
+                serde_json::json!({
+                    "start": segment.start_time,
+                    "end": segment.end_time,
+                    "speaker": segment.speaker_id,
+                })
+            })
+            .collect();
+        let line = serde_json::json!({
+            "backend": backend,
+            "audio": audio.to_string_lossy(),
+            "durationSeconds": result.duration,
+            "wallSeconds": elapsed.as_secs_f64(),
+            "peakRssBytes": peak_rss_bytes(),
+            "speakerCount": result.speakers.len(),
+            "turns": turns,
+        });
+        println!("DIAR-EVAL {line}");
+    }
+
+    #[tokio::test]
+    #[ignore = "evaluation harness: downloads models and runs real inference"]
+    async fn eval_embedding_backend() {
+        let audio = eval_audio_path();
+        let manager = crate::download::DownloadManager::new().expect("download manager");
+        manager
+            .download_diarization_model_by_id(
+                "ecapa_tdnn_speaker",
+                |_: crate::download::DownloadProgress| {},
+            )
+            .await
+            .expect("ECAPA-TDNN model");
+
+        let started = std::time::Instant::now();
+        let result = run_diarization_with_model(&audio, "ecapa_tdnn_speaker")
+            .await
+            .expect("embedding diarization");
+        report("embedding-ecapa_tdnn", &audio, started.elapsed(), &result);
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    #[tokio::test]
+    #[ignore = "evaluation harness: downloads models and runs real inference"]
+    async fn eval_speakrs_backend() {
+        let audio = eval_audio_path();
+        let manager = crate::download::DownloadManager::new().expect("download manager");
+        manager
+            .download_speakrs_bundle(|_: crate::download::DownloadProgress| {})
+            .await
+            .expect("speakrs bundle");
+
+        let started = std::time::Instant::now();
+        let result = run_diarization_with_model(&audio, crate::download::SPEAKRS_MODEL_ID)
+            .await
+            .expect("speakrs diarization");
+        report("speakrs-community1", &audio, started.elapsed(), &result);
     }
 }

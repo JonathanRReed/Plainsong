@@ -232,6 +232,10 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The diarization model chosen in Settings is now the one the automatic
+  post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
+  matter what the picker said; only the explicit "identify speakers" action
+  honoured the setting.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some

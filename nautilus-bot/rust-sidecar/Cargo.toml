@@ -103,6 +103,13 @@ hostname = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 walkdir = "2.5"
 
+# Speaker diarization via pyannote community-1 (spike, OFF by default).
+# Optional and gated behind the `diarization-speakrs` Cargo feature; see the
+# feature comment below for the build status on this platform. `online` is
+# deliberately disabled: it pulls hf-hub, which would fetch model weights
+# outside the pinned-hash download manager.
+speakrs = { version = "0.5.0", optional = true, default-features = false, features = ["default-linalg"] }
+
 # Optional progress bars
 indicatif = { version = "0.18", optional = true }
 
@@ -204,6 +211,9 @@ desktop-shell = []
 
 # Speaker diarization (requires ONNX runtime)
 diarization = ["ort", "ndarray", "rustfft"]
+# EXPERIMENTAL, OFF by default and NOT shipped: swap the embedding+AHC
+# diarizer for speakrs (pyannote community-1 in Rust on ONNX Runtime).
+diarization-speakrs = ["diarization", "dep:speakrs"]
 
 [patch.crates-io]
 # CPAL 0.18.1's macOS loopback implementation links the macOS 14.2 process-tap
