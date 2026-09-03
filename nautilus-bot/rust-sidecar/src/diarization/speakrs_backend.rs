@@ -124,13 +124,36 @@ pub(crate) fn normalize_turns(turns: &[RawTurn], duration: f64) -> Vec<SpeakerSe
             .then_with(|| left.speaker.cmp(&right.speaker))
     });
 
-    // Merge on speakrs's own label. Only into the most recently emitted turn:
-    // merging across an interleaved speaker would swallow their turn.
+    // Merge on speakrs's own label, against the most recent turn of that
+    // speaker wherever it sits -- not only the last turn emitted. pyannote's
+    // powerset decoding reports overlapping speech, so A-B-A with A's two turns
+    // overlapping is ordinary output; considering only the last turn left two
+    // overlapping A segments, and `merge_with_transcript` assigns text by
+    // maximum overlap, so a word could land in either of two spans that claim
+    // the same speaker at the same time.
+    //
+    // What is merged across an interleaved speaker is narrower than what is
+    // merged against the immediately preceding turn: a breath gap closes only
+    // when nothing was emitted in between, because bridging one across another
+    // speaker would swallow their turn. Turns that overlap or exactly touch are
+    // merged wherever they sit -- the span that closes was already inside the
+    // earlier turn, so nothing new is claimed.
     let mut merged: Vec<RawTurn> = Vec::new();
     for turn in clamped {
-        if let Some(last) = merged.last_mut() {
-            if last.speaker == turn.speaker && turn.start - last.end <= TURN_MERGE_GAP_SECONDS {
-                last.end = last.end.max(turn.end);
+        if let Some(index) = merged
+            .iter()
+            .rposition(|existing| existing.speaker == turn.speaker)
+        {
+            // `clamped` is sorted by start, so `turn` never begins earlier.
+            let gap = turn.start - merged[index].end;
+            let is_previous_turn = index + 1 == merged.len();
+            let limit = if is_previous_turn {
+                TURN_MERGE_GAP_SECONDS
+            } else {
+                0.0
+            };
+            if gap <= limit {
+                merged[index].end = merged[index].end.max(turn.end);
                 continue;
             }
         }
@@ -346,6 +369,73 @@ mod tests {
             segments
                 .iter()
                 .map(|s| s.speaker_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["S1", "S2", "S1"]
+        );
+    }
+
+    /// pyannote reports overlapping speech, so A-B-A where A's two turns
+    /// overlap is ordinary output. Merging only into the last emitted turn left
+    /// two A segments claiming the same speaker over the same seconds, and
+    /// `merge_with_transcript` assigns text by maximum overlap -- so a word in
+    /// the shared span could land in either.
+    #[test]
+    fn merges_overlapping_turns_of_one_speaker_across_an_interleaved_speaker() {
+        let turns = vec![
+            turn(0.0, 5.0, "SPEAKER_00"),
+            turn(2.0, 3.0, "SPEAKER_01"),
+            turn(4.0, 8.0, "SPEAKER_00"),
+        ];
+        let segments = normalize_turns(&turns, 10.0);
+
+        let speaker_00: Vec<&SpeakerSegment> = segments
+            .iter()
+            .filter(|segment| segment.speaker_id == "S1")
+            .collect();
+        assert_eq!(speaker_00.len(), 1, "one turn, not two overlapping: {segments:?}");
+        assert_eq!(speaker_00[0].start_time, 0.0);
+        assert_eq!(speaker_00[0].end_time, 8.0);
+        // The interleaved speaker is still there; the merge covers their span
+        // only because the earlier turn already did.
+        assert_eq!(segments.len(), 2);
+        assert!(segments.iter().any(|segment| segment.speaker_id == "S2"));
+    }
+
+    /// Turns that end exactly where the next begins are one turn, whatever was
+    /// emitted between them.
+    #[test]
+    fn merges_touching_turns_of_one_speaker_across_an_interleaved_speaker() {
+        let turns = vec![
+            turn(0.0, 4.0, "SPEAKER_00"),
+            turn(1.0, 2.0, "SPEAKER_01"),
+            turn(4.0, 6.0, "SPEAKER_00"),
+        ];
+        let segments = normalize_turns(&turns, 10.0);
+        assert_eq!(segments.len(), 2);
+        let merged = segments
+            .iter()
+            .find(|segment| segment.speaker_id == "S1")
+            .expect("the first speaker");
+        assert_eq!((merged.start_time, merged.end_time), (0.0, 6.0));
+    }
+
+    /// The narrower half of the rule: a breath gap is not bridged across
+    /// another speaker's turn, because doing so would swallow it.
+    #[test]
+    fn a_breath_gap_does_not_bridge_an_interleaved_speaker() {
+        let turns = vec![
+            turn(0.0, 1.0, "SPEAKER_00"),
+            turn(1.05, 1.3, "SPEAKER_01"),
+            // 0.05s after the interleaved turn, well inside the breath-gap
+            // threshold -- but merging would cover SPEAKER_01 entirely.
+            turn(1.35, 3.0, "SPEAKER_00"),
+        ];
+        let segments = normalize_turns(&turns, 5.0);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|segment| segment.speaker_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["S1", "S2", "S1"]
         );
