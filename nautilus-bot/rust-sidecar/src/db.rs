@@ -2568,7 +2568,27 @@ impl Database {
             .map_err(|e| e.into())
     }
 
+    /// Every recording, newest first (optionally in one project).
     pub fn get_recordings(&self, project_id: Option<&str>) -> Result<Vec<Recording>> {
+        self.query_recordings(project_id, None)
+    }
+
+    /// The `limit` newest recordings, across every project.
+    ///
+    /// The cap belongs in SQL. A caller that only wants the recent few used to
+    /// call `get_recordings(None)` and `.take(n)` the result, which deserializes
+    /// every row in the library -- action items, provenance JSON, attendee JSON,
+    /// pause spans -- to throw all but `n` away. On a Mac with years of
+    /// meetings that is the whole library read for a handful of rows.
+    pub fn get_recent_recordings(&self, limit: usize) -> Result<Vec<Recording>> {
+        self.query_recordings(None, Some(limit))
+    }
+
+    fn query_recordings(
+        &self,
+        project_id: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Recording>> {
         let mut stmt = self.conn.prepare(
             "SELECT recordings.id,
                     COALESCE(meeting_artifacts.title, recordings.title),
@@ -2605,12 +2625,19 @@ impl Database {
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
-             ORDER BY recordings.created_at DESC",
+             ORDER BY recordings.created_at DESC
+             LIMIT ?2",
         )?;
 
         let pid_param: Option<&str> = project_id;
+        // SQLite reads a negative LIMIT as no limit, which is how the
+        // unlimited call shares one prepared statement with the capped one.
+        let limit_param: i64 = match limit {
+            Some(limit) => i64::try_from(limit).unwrap_or(i64::MAX),
+            None => -1,
+        };
 
-        let recordings = stmt.query_map(params![pid_param], |row| {
+        let recordings = stmt.query_map(params![pid_param, limit_param], |row| {
             let summary: Option<String> = row.get(9)?;
             let action_items_json: Option<String> = row.get(10)?;
             let action_items: Option<Vec<String>> =
@@ -6452,6 +6479,48 @@ mod tests {
             after, before,
             "a read-only open must not create journal, WAL or shm files"
         );
+    }
+
+    /// The pre-meeting brief only ever looks at the newest few hundred
+    /// meetings. It used to get them by loading the whole library and calling
+    /// `.take()`, so the cap bounded the ranking and nothing else. The cap is
+    /// in SQL now, and this pins both halves: the right rows, and only those.
+    #[test]
+    fn get_recent_recordings_caps_in_sql_and_returns_the_newest_first() {
+        let dir = crate::test_fs::TempDir::new("recent-recordings");
+        let path = dir.path().join("plainsong.db");
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        for index in 0..8 {
+            let mut recording = sample_recording(&format!("r{index}"), "inbox");
+            recording.created_at = chrono::TimeZone::with_ymd_and_hms(
+                &Utc,
+                2026,
+                8,
+                1 + index,
+                12,
+                0,
+                0,
+            )
+            .single()
+            .expect("valid fixture timestamp");
+            db.create_recording(&recording).unwrap();
+        }
+
+        let recent = db.get_recent_recordings(3).unwrap();
+        assert_eq!(
+            recent.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["r7", "r6", "r5"],
+            "the newest three, newest first"
+        );
+
+        // The rows never left SQLite: the statement itself is capped, so the
+        // count that comes back is the cap and not a slice of a larger read.
+        assert_eq!(db.get_recent_recordings(1).unwrap().len(), 1);
+        assert_eq!(db.get_recent_recordings(0).unwrap().len(), 0);
+        // A cap larger than the library is not an error, and the unlimited
+        // call still returns everything.
+        assert_eq!(db.get_recent_recordings(500).unwrap().len(), 8);
+        assert_eq!(db.get_recordings(None).unwrap().len(), 8);
     }
 
     #[test]

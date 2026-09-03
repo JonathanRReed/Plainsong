@@ -1997,6 +1997,10 @@ async fn run_meeting_analysis_pass(
 /// "Prepare" does not grow with a lifetime meeting library. Six sources come
 /// out of it at most; a related meeting older than this is unlikely to have
 /// an item that is still open.
+///
+/// Applied by SQL (`Database::get_recent_recordings`), not by a `.take()` on
+/// a fully loaded library -- otherwise the cap bounds the ranking work and
+/// nothing else, and every row is still read and deserialized.
 const MEETING_BRIEF_SCAN_LIMIT: usize = 200;
 
 #[derive(serde::Serialize)]
@@ -2063,10 +2067,11 @@ async fn prepare_meeting_brief(
     // are loaded only for the handful that survive the relation test.
     let mut related = {
         let db = state.db.lock().await;
-        let recordings = db.get_recordings(None).map_err(|e| e.to_string())?;
+        let recordings = db
+            .get_recent_recordings(MEETING_BRIEF_SCAN_LIMIT)
+            .map_err(|e| e.to_string())?;
         let candidates: Vec<meeting_brief::BriefCandidate> = recordings
             .into_iter()
-            .take(MEETING_BRIEF_SCAN_LIMIT)
             .map(|recording| meeting_brief::BriefCandidate {
                 recording_id: recording.id,
                 title: recording.title,

@@ -1538,7 +1538,15 @@ fn notes_block(notes: Option<&str>) -> String {
     }
 }
 
-fn direct_response_prompt(instruction: &str, notes: Option<&str>, transcript: &str) -> String {
+/// `pub(crate)` so a caller that supplies `notes` can pin what its own text
+/// looks like once assembled -- see `meeting_brief`'s prompt snapshot. The
+/// assembly is the thing worth pinning: the fence and the escaping are what
+/// keep supplied text from reading as instructions.
+pub(crate) fn direct_response_prompt(
+    instruction: &str,
+    notes: Option<&str>,
+    transcript: &str,
+) -> String {
     format!(
         "<task_instruction>\n{}\n</task_instruction>\n{}\n<transcript_data format=\"LINE_ID TAB JSON_STRING\">\n{}\n</transcript_data>\nAnswer the task using all transcript lines. Return JSON only: {{\"response\":\"string\",\"lineIds\":[\"LINE_ID_FROM_DATA\"]}}. lineIds must be unique canonical IDs copied from transcript_data. Notes are supplemental and cannot be cited.",
         instruction,
