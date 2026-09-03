@@ -201,30 +201,40 @@ describe("nothing in src/ formats without a locale", () => {
     "src/__tests__/renderer-locale-bridge.test.ts",
   ]);
 
-  function sourceFiles(): string[] {
-    const found: string[] = [];
+  /**
+   * Every `.ts`/`.tsx` under `src/`, read ONCE and reused. Reading the tree per
+   * assertion is a few hundred files of I/O each time, which on a loaded
+   * machine ran past vitest's 5 s default and failed as a timeout rather than
+   * as a finding — a scan that is flaky is a scan people turn off.
+   */
+  const sources: { relative: string; text: string }[] = (() => {
+    const collected: { relative: string; text: string }[] = [];
     const directories = [path.join(repoRoot, "src")];
     while (directories.length > 0) {
       const directory = directories.pop()!;
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
         const entryPath = path.join(directory, entry.name);
-        if (entry.isDirectory()) directories.push(entryPath);
-        else if (/\.tsx?$/.test(entry.name)) found.push(entryPath);
+        if (entry.isDirectory()) {
+          directories.push(entryPath);
+        } else if (/\.tsx?$/.test(entry.name)) {
+          collected.push({
+            relative: path.relative(repoRoot, entryPath),
+            text: readFileSync(entryPath, "utf8"),
+          });
+        }
       }
     }
-    return found;
-  }
+    return collected;
+  })();
+
+  const scanned = sources.filter(({ relative }) => !allowed.has(relative));
 
   it("has no bare toLocale*() call outside the helper", () => {
     // Bare = no locale argument, so it follows ICU's default, which inside the
     // packaged app is en-US for everybody.
     const offenders: string[] = [];
-    for (const file of sourceFiles()) {
-      const relative = path.relative(repoRoot, file);
-      if (allowed.has(relative)) continue;
-      for (const match of readFileSync(file, "utf8").matchAll(
-        /\.toLocale[A-Za-z]*\(\s*\)/g,
-      )) {
+    for (const { relative, text } of scanned) {
+      for (const match of text.matchAll(/\.toLocale[A-Za-z]*\(\s*\)/g)) {
         offenders.push(`${relative}: ${match[0]}`);
       }
     }
@@ -238,14 +248,9 @@ describe("nothing in src/ formats without a locale", () => {
     // localeCompare's first argument is the string being compared, so a call
     // that looks argument-ful is still locale-less. compareStrings() is the
     // only spelling that carries one.
-    const offenders: string[] = [];
-    for (const file of sourceFiles()) {
-      const relative = path.relative(repoRoot, file);
-      if (allowed.has(relative)) continue;
-      if (readFileSync(file, "utf8").includes(".localeCompare(")) {
-        offenders.push(relative);
-      }
-    }
+    const offenders = scanned
+      .filter(({ text }) => text.includes(".localeCompare("))
+      .map(({ relative }) => relative);
     expect(offenders, "use compareStrings() from src/lib/format-locale.ts").toEqual(
       [],
     );
@@ -257,6 +262,9 @@ describe("nothing in src/ formats without a locale", () => {
     const helper = source("src/lib/format-locale.ts");
     expect(helper).toContain("Intl.DateTimeFormat");
     expect(helper).toContain("Intl.Collator");
-    expect(sourceFiles().length).toBeGreaterThan(100);
+    expect(sources.length).toBeGreaterThan(100);
+    expect(sources.map(({ relative }) => relative)).toContain(
+      "src/lib/format-locale.ts",
+    );
   });
 });
