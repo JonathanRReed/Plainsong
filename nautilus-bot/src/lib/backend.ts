@@ -1298,6 +1298,12 @@ export interface BundledCleanupModelStatus {
    * a 6 s budget — "downloaded" and "usable here" are different questions.
    */
   backendMeetsBudget: boolean;
+  /**
+   * Whether there is a backend at all. False only in a build compiled without
+   * the local runtime, where "this build cannot run it" is a different
+   * sentence from "this Mac is slow".
+   */
+  backendPresent: boolean;
   /** Roughly what the model holds in memory while it is loaded. */
   residentBytes: number;
 }

@@ -598,11 +598,13 @@ mod tests {
     fn the_stdout_limit_leaves_room_for_any_real_answer() {
         // One JSON line holding at most a 4,096-token answer. Even at four
         // bytes per token plus escaping, the ceiling is an order of magnitude
-        // clear of anything the helper can legitimately produce.
-        assert!(HELPER_STDOUT_LIMIT > MAX_PROMPT_CHARS * 8);
+        // clear of anything the helper can legitimately produce. Asserted in a
+        // `const` block so shrinking the ceiling below that fails the build
+        // rather than a test run.
+        const { assert!(HELPER_STDOUT_LIMIT > MAX_PROMPT_CHARS * 8) };
         // And it is a bound, not a fig leaf: not so large that reaching it
         // would already have cost the sidecar its memory.
-        assert!(HELPER_STDOUT_LIMIT <= 1024 * 1024);
+        const { assert!(HELPER_STDOUT_LIMIT <= 1024 * 1024) };
     }
 
     #[test]

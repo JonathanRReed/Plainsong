@@ -44,14 +44,14 @@ function describeBackend(status: BundledCleanupModelStatus): {
       slow: false,
     };
   }
-  if (status.backend === "cpu") {
+  if (!status.backendPresent) {
     return {
-      text: "This Mac runs it on the CPU, not the GPU. A short dictation still finishes in about five seconds, but a 200-word one takes 11 to 13 — past the six-second limit, so long dictations arrive as spoken with a “took too long” warning. Ollama or a cloud provider is the better choice here.",
+      text: "This build has no runtime for the built-in model, so cleanup here is skipped and your words are inserted unchanged. Choose Ollama or a cloud provider.",
       slow: true,
     };
   }
   return {
-    text: "This build has no runtime for the built-in model, so cleanup here is skipped and your words are inserted unchanged. Choose Ollama or a cloud provider.",
+    text: "This Mac runs it on the CPU, not the GPU. A short dictation still finishes in about five seconds, but a 200-word one takes 11 to 13 — past the six-second limit, so long dictations arrive as spoken with a “took too long” warning. Ollama or a cloud provider is the better choice here.",
     slow: true,
   };
 }

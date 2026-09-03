@@ -14368,6 +14368,7 @@ fn bundled_cleanup_model_status() -> serde_json::Value {
         // rather than let the user discover it as a recurring warning.
         "backend": backend,
         "backendMeetsBudget": llm::bundled_local::backend_meets_dictation_budget(backend),
+        "backendPresent": llm::bundled_local::backend_is_present(backend),
         "residentBytes": llm::bundled_local::RESIDENT_BYTES,
     })
 }

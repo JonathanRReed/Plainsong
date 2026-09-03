@@ -24,6 +24,7 @@ function statusFixture(
     path: "/models/bundled_cleanup",
     backend: "metal",
     backendMeetsBudget: true,
+    backendPresent: true,
     residentBytes: 484_219_808,
     ...overrides,
   };
@@ -154,6 +155,7 @@ describe("the built-in cleanup model row", () => {
           missingFiles: [],
           backend: "cpu",
           backendMeetsBudget: false,
+          backendPresent: true,
         })}
         busy={false}
         progressPercent={null}
@@ -190,6 +192,32 @@ describe("the built-in cleanup model row", () => {
       name: "Built-in dictation cleanup model",
     });
     expect(region.textContent).toContain("GPU");
+    expect(region.textContent).not.toContain("11 to 13");
+  });
+
+  it("says a build with no runtime cannot clean up at all", () => {
+    // Different sentence from the CPU one: "this build cannot run it" is not
+    // "this Mac is slow", and only one of them is fixed by a faster Mac.
+    render(
+      <BundledCleanupModelRow
+        status={statusFixture({
+          ready: true,
+          missingFiles: [],
+          backend: "unavailable",
+          backendMeetsBudget: false,
+          backendPresent: false,
+        })}
+        busy={false}
+        progressPercent={null}
+        error={null}
+        onDownload={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    const region = screen.getByRole("region", {
+      name: "Built-in dictation cleanup model",
+    });
+    expect(region.textContent).toContain("no runtime");
     expect(region.textContent).not.toContain("11 to 13");
   });
 

@@ -301,6 +301,15 @@ pub fn backend_meets_dictation_budget(backend: &str) -> bool {
     backend == BACKEND_METAL
 }
 
+/// Whether there is a backend at all.
+///
+/// False only in a build compiled without `local-llm`, where the provider
+/// cannot run and the honest thing for a status surface to say is that this
+/// build has no runtime for it -- not that the machine is slow.
+pub fn backend_is_present(backend: &str) -> bool {
+    backend != BACKEND_UNAVAILABLE
+}
+
 // ---------------------------------------------------------------------------
 // Cancellation
 // ---------------------------------------------------------------------------
@@ -1732,6 +1741,11 @@ mod tests {
             [BACKEND_METAL, BACKEND_CPU, BACKEND_UNAVAILABLE].contains(&backend),
             "unexpected backend {backend:?}"
         );
+        // "no runtime in this build" and "this machine is slow" are different
+        // sentences on the Models screen, so they are different answers here.
+        assert!(backend_is_present(BACKEND_METAL));
+        assert!(backend_is_present(BACKEND_CPU));
+        assert!(!backend_is_present(BACKEND_UNAVAILABLE));
     }
 
     #[test]

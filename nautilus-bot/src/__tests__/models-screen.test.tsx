@@ -64,6 +64,7 @@ const BUNDLED_STATUS = {
   path: "/models/bundled_cleanup",
   backend: "metal",
   backendMeetsBudget: true,
+  backendPresent: true,
   residentBytes: 484_219_808,
 };
 
