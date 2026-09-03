@@ -85,6 +85,22 @@ evidence is stale and must be recaptured before this becomes a candidate.
   sends back", turns it off. Because a provider numbers speakers per request,
   its labels are only used when the whole recording went out in one request;
   otherwise Plainsong's own diarizer runs and the header says so.
+- Your dictation dictionary now reaches Apple Speech too. The spellings
+  Plainsong already sends to whisper and to the cloud recognizers as a
+  vocabulary hint — the replacement forms in your personal dictionary and
+  your plain-word snippet triggers, scoped to the app you are dictating into
+  — are now sent to Apple's recognizer as well, so a name it keeps splitting
+  in two can be corrected before the words are typed rather than after.
+  Measured on this Mac, the older `SFSpeechRecognizer` engine acts on them:
+  a three-term hint took the repo's 44 s fixture from 5.9% to 3.0% word
+  error rate by hearing "Plainsong" instead of "Plain song". macOS 26's
+  SpeechAnalyzer accepts the same terms and, on this OS build, does not
+  change its answer for them; Plainsong sends them anyway, since nothing
+  else in the app has to change if a later macOS starts using them. The
+  terms are written to a private file the recognizer helper reads and are
+  never passed as command-line arguments, and the audit log records how many
+  terms the recognizer was actually given rather than how many were built.
+  See `artifacts/qa/speechanalyzer-vocab-2026-09-02.md`.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,
@@ -528,6 +544,18 @@ evidence is stale and must be recaptured before this becomes a candidate.
   audio to Apple; Plainsong runs both Apple engines with server recognition
   off, so the row now says it records your consent to on-device processing
   rather than only that it is "required for transcription".
+- Every other place Plainsong asks for Speech Recognition now says the same
+  thing. The setup line the Models screen shows when the permission is
+  undecided or denied, the Speech recognition tile in Settings, and the
+  first-run permission step all now say that macOS transcribes on this Mac and
+  that the permission is Plainsong's record of your consent to that, not
+  permission to use a server. Only the one row said it before, so the reader
+  who met the request anywhere else still met the old meaning. The permission
+  gate itself is unchanged and deliberately so: on macOS 26 or newer,
+  SpeechAnalyzer will transcribe with the permission still undecided, and
+  Plainsong refuses anyway — in the app and in the helper process that does the
+  recognizing — because that grant is the only consent record this route has.
+  `docs/beta/KNOWN-LIMITATIONS.md` says so too.
 - "Installing language…" has a Cancel beside it, and stops on its own if
   macOS goes quiet. The Apple language install waited on the OS with no
   deadline and no way out: an install that never finished held the button,

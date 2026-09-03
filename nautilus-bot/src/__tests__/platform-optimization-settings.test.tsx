@@ -478,6 +478,10 @@ describe("Platform optimization settings", () => {
     const detail = await screen.findByText(/records your consent to on-device processing/i);
     expect(detail).toBeInTheDocument();
     expect(detail.textContent).toMatch(/not permission to use a server/i);
+    // It is a sentence, not a label, so it sits on the text-sm body floor
+    // (STYLE.md section 2 and section 7).
+    expect(detail.className).toContain("text-sm");
+    expect(detail.className).not.toContain("text-xs");
     // The claim it replaced said nothing about where the audio goes.
     expect(
       screen.queryByText("Required for Apple Speech transcription."),

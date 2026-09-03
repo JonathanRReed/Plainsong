@@ -3203,6 +3203,16 @@ export function SettingsView() {
                   ))}
                 </div>
               )}
+              {permissionDiagnostics && (
+                <p className="text-sm text-muted-foreground">
+                  Speech recognition is the permission macOS asks for before
+                  it will transcribe on this Mac. It is Plainsong&apos;s record
+                  of your consent to on-device processing, not permission to
+                  use a server: the Apple Speech route runs with Apple&apos;s
+                  server fallback off, and every other route ignores this
+                  permission entirely.
+                </p>
+              )}
               {permissionDiagnostics?.notes?.length ? (
                 <div className="space-y-1 text-sm text-muted-foreground">
                   {permissionDiagnostics.notes.map((note) => (

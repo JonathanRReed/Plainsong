@@ -92,6 +92,12 @@ const rustBridgePath = path.join(
   "platform",
   "macos_speech.rs",
 );
+const dictationParityPath = path.join(
+  repoRoot,
+  "rust-sidecar",
+  "src",
+  "dictation_parity.rs",
+);
 
 for (const [filePath, label] of [
   [sourcePath, "Swift helper source"],
@@ -103,6 +109,7 @@ for (const [filePath, label] of [
   [signScriptPath, "macOS signing adapter"],
   [sidecarEnvPath, "Electron sidecar environment allowlist"],
   [rustBridgePath, "Rust macOS Speech bridge"],
+  [dictationParityPath, "Rust dictation parity rules"],
 ]) {
   requireFile(filePath, label);
 }
@@ -117,6 +124,7 @@ const builder = fs.readFileSync(builderPath, "utf8");
 const signScript = fs.readFileSync(signScriptPath, "utf8");
 const sidecarEnv = fs.readFileSync(sidecarEnvPath, "utf8");
 const rustBridge = fs.readFileSync(rustBridgePath, "utf8");
+const dictationParity = fs.readFileSync(dictationParityPath, "utf8");
 
 requireMatch(
   buildScript,
@@ -243,6 +251,66 @@ for (const [entryPoint, label] of [
     fail(`${label} must check Speech authorization before it can reach SpeechAnalyzer`);
   }
 }
+// Vocabulary hints (contextual strings). The terms are the user's own
+// dictionary entries, so the contract has two halves: they must reach both
+// engines, and they must never travel as command-line arguments, where every
+// process on the machine can read them out of the argument list.
+requireMatch(
+  source,
+  /--contextual-strings-file/,
+  "the helper must accept vocabulary terms through a file, not inline arguments",
+);
+requireMatch(
+  source,
+  /private func loadContextualStrings\(path: String\?\) -> \[String\][\s\S]{0,400}Data\(contentsOf: url\)/,
+  "the helper must read vocabulary terms from the file it was pointed at",
+);
+requireMatch(
+  source,
+  /context\.contextualStrings\[\.general\] = contextualStrings/,
+  "SpeechAnalyzer must receive the vocabulary terms through AnalysisContext",
+);
+const sfContextualAssignments =
+  source.match(/request\.contextualStrings = contextualStrings/g) ?? [];
+if (sfContextualAssignments.length < 2) {
+  fail(
+    "both SFSpeechRecognizer requests (file and live) must receive the vocabulary terms",
+  );
+}
+// The caps are the whisper prompt's, and they live in Rust. The helper repeats
+// them because it is a separate binary; the two copies must stay equal.
+const rustTermCap = dictationParity.match(
+  /VOCABULARY_HINT_MAX_TERMS:\s*usize\s*=\s*(\d+)/,
+);
+const rustCharCap = dictationParity.match(
+  /VOCABULARY_HINT_MAX_CHARS:\s*usize\s*=\s*(\d+)/,
+);
+if (!rustTermCap || !rustCharCap) {
+  fail("could not read the Rust vocabulary hint caps from dictation_parity.rs");
+}
+const helperTermCap = source.match(/contextualStringsMaxTerms\s*=\s*(\d+)/);
+const helperCharCap = source.match(/contextualStringsMaxCharacters\s*=\s*(\d+)/);
+if (!helperTermCap || !helperCharCap) {
+  fail("the helper must declare its own vocabulary term and character caps");
+}
+if (helperTermCap[1] !== rustTermCap[1] || helperCharCap[1] !== rustCharCap[1]) {
+  fail(
+    `helper vocabulary caps (${helperTermCap[1]} terms / ${helperCharCap[1]} chars) must match the Rust caps (${rustTermCap[1]} / ${rustCharCap[1]})`,
+  );
+}
+// The count the app reports has to be the helper's own answer, not the number
+// of terms the app sent, or the audit log would claim the dictionary reached a
+// recognizer that never saw it.
+requireMatch(
+  rustBridge,
+  /vocabulary_hint_terms_applied:\s*payload\.contextual_strings_applied/,
+  "the Rust bridge must report the applied term count the helper returned",
+);
+requireMatch(
+  rustBridge,
+  /options\.mode\(0o600\)/,
+  "the staged vocabulary file must be created private to the user",
+);
 forbidMatch(
   sidecarEnv,
   /PLAINSONG_MACOS_SPEECH_HELPER_PATH/,
@@ -559,6 +627,45 @@ if (!sourceOnly) {
   const badEnginePayload = parseLastJsonLine(badEngine.stdout, "unknown --engine request");
   if (badEnginePayload.type !== "error" || badEnginePayload.code !== "malformed_request") {
     fail(`unknown --engine did not return its typed error: ${JSON.stringify(badEnginePayload)}`);
+  }
+
+  // Argument parsing runs before the authorization gate, so these are the
+  // only vocabulary-hint checks that give the same answer on a machine whose
+  // Speech Recognition permission is still undecided.
+  for (const [label, commandArgs] of [
+    [
+      "--transcribe-file --contextual-strings-file with no path",
+      ["--transcribe-file", "/nonexistent.wav", "--contextual-strings-file"],
+    ],
+    [
+      "--transcribe-file --contextual-strings-file twice",
+      [
+        "--transcribe-file",
+        "/nonexistent.wav",
+        "--contextual-strings-file",
+        "/a.json",
+        "--contextual-strings-file",
+        "/b.json",
+      ],
+    ],
+    [
+      "--live --contextual-strings-file with no path",
+      [
+        "--live",
+        "--sample-rate",
+        "16000",
+        "--engine",
+        "speech_analyzer",
+        "--contextual-strings-file",
+      ],
+    ],
+  ]) {
+    const result = run(helperPath, commandArgs, { allowFailure: true });
+    if (result.status === 0) fail(`${label} must exit non-zero`);
+    const payload = parseLastJsonLine(result.stdout, label);
+    if (payload.type !== "error" || payload.code !== "malformed_request") {
+      fail(`${label} did not return its typed error: ${JSON.stringify(payload)}`);
+    }
   }
 
   // Live mode does not auto-select: the two engines emit different event

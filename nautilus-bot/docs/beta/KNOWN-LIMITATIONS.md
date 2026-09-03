@@ -55,6 +55,22 @@ using sensitive content.
   reported — and with Accessibility granted an ordinary field in another app
   still takes dictation while Terminal has secure entry on. And the check is
   macOS-only — Windows insertion has no equivalent probe yet.
+- The Apple Speech route asks for macOS's "Speech Recognition" permission, and
+  that name is older than what it now governs. Nothing on this route is sent to
+  Apple: both engines run on this Mac with Apple's server fallback switched off,
+  and on macOS 26 or newer the SpeechAnalyzer engine will transcribe even with
+  the permission still undecided. Plainsong asks for it anyway and refuses to
+  transcribe until it is granted — in the app and in the helper process that
+  does the recognizing — because it is the only record of your consent to
+  on-device processing this route has. Granting it does not permit a server, and
+  no other transcription route reads it.
+- Vocabulary hints from your dictation dictionary reach the Apple Speech route
+  but do not always change what it hears. Measured on macOS 27.0: the older
+  SFSpeechRecognizer engine acts on them (a three-term hint halved the word
+  error rate on the repo's speech fixture), while macOS 26's SpeechAnalyzer
+  accepts the same terms and returns exactly the same transcript. Plainsong
+  sends them to both and records how many terms the recognizer was given, not
+  whether it used them; see `artifacts/qa/speechanalyzer-vocab-2026-09-02.md`.
 - Some apps may reject direct insertion even after transcription succeeds.
   Plainsong preserves the recognized text and offers copy-based recovery rather
   than discarding it or claiming it was inserted.

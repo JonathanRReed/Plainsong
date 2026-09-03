@@ -261,11 +261,20 @@ pub struct TranscriptionResult {
     #[serde(default)]
     pub fallback_reason: Option<String>,
     /// How many vocabulary-hint terms the provider actually attached to the
-    /// request (whisper's initial prompt, a cloud `prompt`/`keyterms`
-    /// field). Zero for providers that ignore the hint and for a whisper
-    /// decode that withheld the prompt on near-silent audio. Compared with
-    /// the number of terms *built* in the audit log, so "the dictionary
-    /// reached the recognizer" is never claimed for a route it did not.
+    /// request (whisper's initial prompt, a cloud `prompt`/`keyterms` field,
+    /// Apple's `contextualStrings`). Zero for providers with no such field at
+    /// all and for a whisper decode that withheld the prompt on near-silent
+    /// audio. Compared with the number of terms *built* in the audit log, so
+    /// "the dictionary reached the recognizer" is never claimed for a route it
+    /// did not.
+    ///
+    /// Attached, not obeyed. Apple's SpeechAnalyzer takes the terms and, on
+    /// macOS 27.0, returns exactly the transcript it would have returned
+    /// without them (`artifacts/qa/speechanalyzer-vocab-2026-09-02.md`), while
+    /// SFSpeechRecognizer measurably acts on them. Reporting zero for the
+    /// former would mean hard-coding one OS version's behaviour into a runtime
+    /// count that would then go quietly stale; whether a recognizer used what
+    /// it was handed is a measurement, not a field.
     #[serde(default)]
     pub vocabulary_hint_terms_applied: usize,
 }

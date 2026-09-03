@@ -1,4 +1,6 @@
 use super::{EngineProbe, PlatformEngine};
+use crate::asr::VocabularyHint;
+use crate::dictation_parity::{VOCABULARY_HINT_MAX_CHARS, VOCABULARY_HINT_MAX_TERMS};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -448,6 +450,122 @@ pub fn is_valid_locale_argument(locale: &str) -> bool {
             .is_some_and(|c| c.is_ascii_alphanumeric())
 }
 
+/// The vocabulary terms to hand the Apple Speech helper for one request.
+///
+/// Both Apple engines take a bias list -- `SFSpeechRecognitionRequest`
+/// `contextualStrings` on the older one, `AnalysisContext.contextualStrings`
+/// on SpeechAnalyzer -- so the dictionary hint the whisper and cloud routes
+/// already receive reaches this route too. The caps mirror
+/// `dictation_parity`'s: the builder there already applies them, and applying
+/// them again here means a hint arriving from anywhere else cannot exceed what
+/// the helper is prepared to take. Terms are counted, not the framing, because
+/// there is no prompt frame on this path.
+pub fn contextual_strings_for_helper(hint: Option<&VocabularyHint>) -> Vec<String> {
+    let Some(hint) = hint else {
+        return Vec::new();
+    };
+    let mut accepted: Vec<String> = Vec::new();
+    let mut characters = 0usize;
+    for term in hint.terms() {
+        let term = term.split_whitespace().collect::<Vec<_>>().join(" ");
+        if term.is_empty() || term.chars().any(char::is_control) {
+            continue;
+        }
+        if accepted.len() >= VOCABULARY_HINT_MAX_TERMS {
+            break;
+        }
+        let length = term.chars().count();
+        if characters + length > VOCABULARY_HINT_MAX_CHARS {
+            break;
+        }
+        characters += length;
+        accepted.push(term);
+    }
+    accepted
+}
+
+/// The JSON body the helper reads from `--contextual-strings-file`.
+///
+/// Serialized rather than hand-built so the field names cannot drift from what
+/// the Swift side decodes.
+#[derive(Debug, Serialize)]
+struct ContextualStringsRequest<'a> {
+    protocol_version: u32,
+    contextual_strings: &'a [String],
+}
+
+/// A private temp file holding one request's vocabulary terms, deleted when it
+/// goes out of scope.
+///
+/// The terms are the user's own dictionary entries, so they never travel as
+/// process arguments -- an argument list is readable by every process on the
+/// machine. The file is created `0600` and only its path is passed.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct ContextualStringsFile {
+    path: PathBuf,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl ContextualStringsFile {
+    /// `None` when there are no terms: an empty list is the same as no file,
+    /// and writing one anyway would put user text on disk for nothing.
+    fn write(terms: &[String]) -> Result<Option<Self>> {
+        use std::io::Write;
+
+        if terms.is_empty() {
+            return Ok(None);
+        }
+        let path = std::env::temp_dir().join(format!(
+            "nautilus-speech-vocabulary-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let body = serde_json::to_vec(&ContextualStringsRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            contextual_strings: terms,
+        })
+        .map_err(|error| {
+            typed_error(
+                "recognition_failed",
+                format!("Could not encode the dictation vocabulary hint: {error}"),
+                false,
+            )
+        })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(|error| {
+            typed_error(
+                "recognition_failed",
+                format!("Could not stage the dictation vocabulary hint: {error}"),
+                false,
+            )
+        })?;
+        file.write_all(&body).map_err(|error| {
+            typed_error(
+                "recognition_failed",
+                format!("Could not write the dictation vocabulary hint: {error}"),
+                false,
+            )
+        })?;
+        Ok(Some(Self { path }))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl Drop for ContextualStringsFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 /// One timed span of a SpeechAnalyzer transcript.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct MacosSpeechSegment {
@@ -469,6 +587,11 @@ pub struct MacosSpeechTranscript {
     pub confidence: f64,
     pub engine: Option<String>,
     pub segments: Vec<MacosSpeechSegment>,
+    /// Terms the helper reports it actually handed the recognizer. Read from
+    /// the helper's own reply rather than from what was sent, so a helper too
+    /// old to know the option reports zero and the audit log says the hint did
+    /// not reach the recognizer instead of assuming it did.
+    pub vocabulary_hint_terms_applied: usize,
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -580,6 +703,8 @@ struct HelperTranscriptPayload {
     is_final: bool,
     #[serde(default)]
     engine: Option<String>,
+    #[serde(default)]
+    contextual_strings_applied: usize,
     #[serde(default)]
     segments: Vec<MacosSpeechSegment>,
 }
@@ -882,12 +1007,18 @@ fn readiness_from_probe(payload: &HelperProbePayload) -> AppleSpeechReadiness {
         SpeechAuthorizationStatus::NotDetermined => (
             AppleSpeechReadinessStatus::AuthorizationNotDetermined,
             "Speech Recognition permission has not been decided.".to_string(),
-            Some("Request Speech Recognition permission from the installed Plainsong app.".to_string()),
+            Some(
+                "Request Speech Recognition permission from the installed Plainsong app. It records your consent to on-device processing; both Apple engines run on this Mac with Apple's server fallback off."
+                    .to_string(),
+            ),
         ),
         SpeechAuthorizationStatus::Denied => (
             AppleSpeechReadinessStatus::AuthorizationDenied,
             "Speech Recognition permission is denied.".to_string(),
-            Some("Enable Plainsong in System Settings > Privacy & Security > Speech Recognition.".to_string()),
+            Some(
+                "Enable Plainsong in System Settings > Privacy & Security > Speech Recognition. It records your consent to on-device processing; both Apple engines run on this Mac with Apple's server fallback off."
+                    .to_string(),
+            ),
         ),
         SpeechAuthorizationStatus::Restricted => (
             AppleSpeechReadinessStatus::AuthorizationRestricted,
@@ -1143,6 +1274,7 @@ pub fn probe_from_readiness(readiness: &AppleSpeechReadiness) -> EngineProbe {
 pub fn transcribe_file(
     audio_path: &Path,
     required_engine: Option<AppleSpeechEngine>,
+    contextual_strings: &[String],
 ) -> Result<MacosSpeechTranscript> {
     let probe = authorized_probe(false)?;
     // Named explicitly rather than left to the helper's own `auto`, so the
@@ -1160,6 +1292,13 @@ pub fn transcribe_file(
         OsString::from(engine.id()),
     ];
     append_configured_locale(&mut arguments);
+    // Held for the whole call: dropping it deletes the file, and the helper
+    // reads it after this function has already returned from `write`.
+    let vocabulary_file = ContextualStringsFile::write(contextual_strings)?;
+    if let Some(file) = vocabulary_file.as_ref() {
+        arguments.push(OsString::from("--contextual-strings-file"));
+        arguments.push(file.path().as_os_str().to_os_string());
+    }
     let output =
         run_helper_with_timeout(&helper, &arguments, helper_timeout_for_audio(audio_path))?;
     if !output.status.success() {
@@ -1192,6 +1331,7 @@ pub fn transcribe_file(
         confidence: payload.confidence,
         engine: payload.engine,
         segments: payload.segments,
+        vocabulary_hint_terms_applied: payload.contextual_strings_applied,
     })
 }
 
@@ -1199,6 +1339,7 @@ pub fn transcribe_file(
 pub fn transcribe_file(
     _audio_path: &Path,
     _required_engine: Option<AppleSpeechEngine>,
+    _contextual_strings: &[String],
 ) -> Result<MacosSpeechTranscript> {
     Err(typed_error(
         "helper_missing",
@@ -1219,6 +1360,7 @@ pub fn transcribe_file(
 pub async fn start_live_dictation_session(
     sample_rate: u32,
     engine: AppleSpeechEngine,
+    contextual_strings: &[String],
 ) -> Result<(
     LiveSpeechAudioSink,
     mpsc::UnboundedReceiver<LiveSpeechEvent>,
@@ -1236,6 +1378,15 @@ pub async fn start_live_dictation_session(
         .arg(engine.id());
     if let Some(locale) = configured_locale() {
         command.arg("--locale").arg(locale);
+    }
+    // A live session outlives this function, so the file has to as well: it is
+    // moved into the task that reaps the child and dropped when the session
+    // ends, which is the only point at which the helper can no longer read it.
+    let vocabulary_file = ContextualStringsFile::write(contextual_strings)?;
+    if let Some(file) = vocabulary_file.as_ref() {
+        command
+            .arg("--contextual-strings-file")
+            .arg(file.path().as_os_str());
     }
     let mut child = command
         .stdin(Stdio::piped())
@@ -1292,6 +1443,9 @@ pub async fn start_live_dictation_session(
     });
 
     tokio::spawn(async move {
+        // Moved in so the vocabulary file outlives the helper that reads it and
+        // is deleted when the session ends, whichever way it ends.
+        let _vocabulary_file = vocabulary_file;
         let stderr_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut stderr_text = String::new();
@@ -1448,6 +1602,7 @@ pub async fn start_live_dictation_session(
 pub async fn start_live_dictation_session(
     _sample_rate: u32,
     _engine: AppleSpeechEngine,
+    _contextual_strings: &[String],
 ) -> Result<(
     LiveSpeechAudioSink,
     mpsc::UnboundedReceiver<LiveSpeechEvent>,
@@ -2219,12 +2374,12 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_language_install, engine_mismatch_refusal, install_wait_expiry,
-        map_authorization_status_payload, parse_helper_error_line, parse_single_payload,
-        parse_speech_analyzer_live_line, readiness_from_probe, resolve_meeting_capability,
-        selected_engine, serialize_helper_error, supports_meetings, take_install_cancellation,
-        typed_error, AppleSpeechEngine, AppleSpeechMeetingCapability, AppleSpeechReadiness,
-        AppleSpeechReadinessStatus, HelperErrorPayload, HelperProbePayload,
+        cancel_language_install, contextual_strings_for_helper, engine_mismatch_refusal,
+        install_wait_expiry, map_authorization_status_payload, parse_helper_error_line,
+        parse_single_payload, parse_speech_analyzer_live_line, readiness_from_probe,
+        resolve_meeting_capability, selected_engine, serialize_helper_error, supports_meetings,
+        take_install_cancellation, typed_error, AppleSpeechEngine, AppleSpeechMeetingCapability,
+        AppleSpeechReadiness, AppleSpeechReadinessStatus, HelperErrorPayload, HelperProbePayload,
         HelperTranscriptPayload, InstallWaitExpiry, SpeechAnalyzerLiveEvent,
         SpeechAnalyzerPartialAccumulator, SpeechAuthorizationStatus, StreamingPartial,
         StreamingPartialSink, HELPER_PROTOCOL_VERSION, INSTALL_PROGRESS_IDLE, INSTALL_TOTAL_BUDGET,
@@ -2431,6 +2586,117 @@ mod tests {
             AppleSpeechMeetingCapability::Supported,
             || panic!("a probed capability must not probe again")
         ));
+    }
+
+    /// Two captures from the same three-term hint on the same synthesized
+    /// fixture, one per engine, taken on macOS 27.0 (26A5406e). They are kept
+    /// together because the pair is the finding: both engines report the same
+    /// three terms handed over, and only one of them changed its answer.
+    /// SFSpeechRecognizer heard "Play song" without the hint and "Plainsong"
+    /// with it; SpeechAnalyzer said "Plain song" either way.
+    const HELPER_HINTED_SF_CAPTURE: &[u8] = br#"{"confidence":0.8448888858159384,"contextual_strings_applied":3,"engine":"sf_speech_recognizer","is_final":true,"language":"en_US","protocol_version":1,"segments":[],"text":"Plainsong exports every new to Obsidian before the stand-up","type":"transcript"}"#;
+    const HELPER_HINTED_ANALYZER_CAPTURE: &[u8] = br#"{"confidence":0.8326,"contextual_strings_applied":3,"engine":"speech_analyzer","is_final":true,"language":"en_US","protocol_version":1,"segments":[{"confidence":0.8326,"end_seconds":3.5623125,"start_seconds":0,"text":"Plain song exports every new to obsidian before the stand-up."}],"text":"Plain song exports every new to obsidian before the stand-up.","type":"transcript"}"#;
+
+    fn vocabulary_hint(terms: &[&str]) -> Option<crate::asr::VocabularyHint> {
+        crate::asr::VocabularyHint::new(terms.iter().map(|term| term.to_string()).collect())
+    }
+
+    /// The hint the dictation route builds is already capped, but this route
+    /// caps again: the helper is a separate binary, and a list that outgrew the
+    /// cap should be trimmed on the way out rather than refused at the far end.
+    #[test]
+    fn vocabulary_terms_are_capped_the_way_the_whisper_prompt_is() {
+        assert!(contextual_strings_for_helper(None).is_empty());
+
+        let many: Vec<String> = (0..80).map(|index| format!("Term{index:02}")).collect();
+        let many_hint = crate::asr::VocabularyHint::new(many).expect("terms");
+        assert_eq!(
+            contextual_strings_for_helper(Some(&many_hint)).len(),
+            super::VOCABULARY_HINT_MAX_TERMS
+        );
+
+        // Twenty 50-character terms is 1000 characters, so the character cap
+        // stops at twelve of them, well before the term cap.
+        let long: Vec<String> = (0..20).map(|_| "x".repeat(50)).collect();
+        let long_hint = crate::asr::VocabularyHint::new(long).expect("terms");
+        let capped = contextual_strings_for_helper(Some(&long_hint));
+        assert_eq!(capped.len(), 12);
+        assert!(
+            capped
+                .iter()
+                .map(|term| term.chars().count())
+                .sum::<usize>()
+                <= super::VOCABULARY_HINT_MAX_CHARS
+        );
+
+        // Whitespace is collapsed and anything that is not a term is dropped
+        // rather than sent as an empty string the recognizer would ignore.
+        let messy =
+            vocabulary_hint(&["  ", "  Plain\tsong ", "Obsidian", "bad\u{7}term"]).expect("terms");
+        assert_eq!(
+            contextual_strings_for_helper(Some(&messy)),
+            vec!["Plain song".to_string(), "Obsidian".to_string()]
+        );
+    }
+
+    /// The count the app reports is the helper's own, so a helper too old to
+    /// know the option reports nothing rather than the app assuming the terms
+    /// arrived.
+    #[test]
+    fn the_applied_term_count_comes_from_the_helper_not_from_what_was_sent() {
+        let older: HelperTranscriptPayload =
+            parse_single_payload(HELPER_TRANSCRIPT_CAPTURE, "transcript")
+                .expect("a helper capture without the field still parses");
+        assert_eq!(older.contextual_strings_applied, 0);
+
+        let sf: HelperTranscriptPayload =
+            parse_single_payload(HELPER_HINTED_SF_CAPTURE, "transcript").expect("sf capture");
+        assert_eq!(sf.contextual_strings_applied, 3);
+        assert_eq!(sf.engine.as_deref(), Some("sf_speech_recognizer"));
+        assert!(sf.text.contains("Plainsong"), "{}", sf.text);
+
+        // The same three terms, the same fixture, the other engine: it took
+        // them and its answer did not change. "Applied" means handed to the
+        // recognizer, never that the recognizer acted on them, which is why
+        // the receipt records the effect separately.
+        let analyzer: HelperTranscriptPayload =
+            parse_single_payload(HELPER_HINTED_ANALYZER_CAPTURE, "transcript")
+                .expect("analyzer capture");
+        assert_eq!(analyzer.contextual_strings_applied, 3);
+        assert_eq!(analyzer.engine.as_deref(), Some("speech_analyzer"));
+        assert!(analyzer.text.contains("Plain song"), "{}", analyzer.text);
+    }
+
+    /// The Models screen asks for a permission macOS named in the era when
+    /// speech recognition meant sending audio to Apple. Neither engine does
+    /// that here -- SpeechAnalyzer transcribes with the permission still
+    /// undecided, and both run with server fallback off -- so the sentence
+    /// that asks for the grant has to say what the grant is for. Plainsong
+    /// keeps refusing until it is granted, in the app and in the helper: it is
+    /// the only record of consent to on-device processing this route has.
+    #[test]
+    fn asking_for_speech_recognition_says_it_is_consent_not_a_server_grant() {
+        let mut probe: HelperProbePayload = parse_single_payload(HELPER_PROBE_CAPTURE, "probe")
+            .expect("the real helper probe should match the Rust contract");
+
+        for (authorization, code) in [("not_determined", 0), ("denied", 1)] {
+            probe.authorization = authorization.to_string();
+            probe.authorization_code = code;
+            let readiness = readiness_from_probe(&probe);
+            assert!(!readiness.ready, "{authorization}");
+            let action = readiness
+                .setup_action
+                .as_deref()
+                .unwrap_or_else(|| panic!("{authorization} must offer a next action"));
+            assert!(
+                action.contains("consent to on-device processing"),
+                "{authorization}: {action}"
+            );
+            assert!(
+                action.contains("server fallback off"),
+                "{authorization}: {action}"
+            );
+        }
     }
 
     /// The meeting gate decides the engine from one probe and the route used
