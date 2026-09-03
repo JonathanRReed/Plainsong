@@ -245,7 +245,645 @@ pub trait AsrProvider: Send + Sync {
     async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()>;
 }
 
+// ---------------------------------------------------------------------------
+// Streaming recognition (live preview only)
+// ---------------------------------------------------------------------------
+
+/// Sample rate every streaming session accepts. The batch `AsrProvider`s each
+/// resample internally from whatever the caller hands them; a streaming
+/// session cannot, because it is fed a chunk at a time and a per-chunk
+/// resample would restart the interpolation at every boundary. So the contract
+/// is explicit: the caller resamples once, continuously, and feeds 16 kHz mono
+/// f32.
+pub const STREAMING_SAMPLE_RATE_HZ: u32 = 16_000;
+
+/// The chunk sizes a caller may pick from, smallest first.
+///
+/// Cache-aware streaming FastConformers (Nemotron 3.5 ASR Streaming, the only
+/// family Plainsong has measured — see
+/// `artifacts/qa/transcribe-cpp-spike-2026-09-02.md`) are trained for a small
+/// set of look-ahead sizes; upstream documents 80 ms, 160 ms, 560 ms and
+/// 1120 ms. 80 ms is left out because at that size the per-chunk call overhead
+/// dominates on a machine that is also running the app.
+///
+/// The tradeoff runs one way: a smaller chunk means the first partial arrives
+/// sooner and costs more encoder work per second of audio; a larger one means
+/// fewer, better-conditioned partials. 560 ms is the default because it is the
+/// largest chunk that still fits a ~600 ms end-to-end preview budget, and
+/// `artifacts/qa/streaming-partials-receipt-2026-09-02.md` measures all three.
+pub const STREAMING_CHUNK_MS_CHOICES: [u32; 3] = [160, 560, 1120];
+
+/// The chunk size a live preview opens with. Index 1 of the table above.
+pub const DEFAULT_STREAMING_CHUNK_MS: u32 = STREAMING_CHUNK_MS_CHOICES[1];
+
+/// Samples in one chunk of `chunk_ms` at [`STREAMING_SAMPLE_RATE_HZ`].
+pub fn streaming_chunk_samples(chunk_ms: u32) -> usize {
+    (u64::from(STREAMING_SAMPLE_RATE_HZ) * u64::from(chunk_ms.max(1)) / 1000).max(1) as usize
+}
+
+/// One live-preview update from a streaming recognizer.
+///
+/// `stable_prefix` is text the recognizer has committed to; `volatile_suffix`
+/// is the tail it may still rewrite. Splitting them is the whole point of a
+/// streaming display: the committed half can be rendered as settled text, the
+/// volatile half as something still being heard.
+///
+/// This is a *preview* type. Nothing in it may reach the inserted transcript —
+/// see `docs/streaming-dictation-plan.md` and the source-scan test
+/// `dictation_insertion_never_reads_a_streaming_partial` in `lib.rs`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Partial {
+    pub stable_prefix: String,
+    pub volatile_suffix: String,
+    /// Audio fed to the session so far, in seconds. Latency measurements
+    /// subtract this from wall clock; the UI does not read it.
+    pub elapsed_audio_s: f64,
+}
+
+impl Partial {
+    /// Everything the recognizer currently believes, committed half first.
+    pub fn display_text(&self) -> String {
+        let mut text = String::with_capacity(self.stable_prefix.len() + self.volatile_suffix.len());
+        text.push_str(&self.stable_prefix);
+        text.push_str(&self.volatile_suffix);
+        text
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stable_prefix.trim().is_empty() && self.volatile_suffix.trim().is_empty()
+    }
+}
+
+/// A mutable, single-utterance streaming recognition session.
+///
+/// Deliberately *not* the same shape as [`AsrProvider`]: that trait is
+/// `Send + Sync` and takes `&self` because a batch decode is a pure function of
+/// its audio. A streaming session is the opposite — a state machine that only
+/// makes sense fed in order, from one place — so it takes `&mut self` and is
+/// `Send` but not `Sync`.
+pub trait StreamingAsrSession: Send {
+    /// Feed the next chunk of 16 kHz mono PCM and return the current preview.
+    /// Chunks should be [`StreamingAsrSession::chunk_samples`] long; a shorter
+    /// or longer one is accepted, but the recognizer is not tuned for it.
+    fn feed(&mut self, pcm16k: &[f32]) -> Result<Partial>;
+
+    /// Signal end of input: flush whatever is buffered and return the last
+    /// preview. The session is finished afterwards; `reset` starts a new one.
+    ///
+    /// This is still a preview. The inserted text is the batch decode.
+    fn finalize(&mut self) -> Result<Partial>;
+
+    /// Abandon the current utterance and return to a fresh state, keeping the
+    /// loaded model. Used when a pause is long enough that continuing would
+    /// make the recognizer condition new speech on stale context.
+    fn reset(&mut self) -> Result<()>;
+
+    /// The chunk size this session was opened with, in samples.
+    fn chunk_samples(&self) -> usize {
+        streaming_chunk_samples(DEFAULT_STREAMING_CHUNK_MS)
+    }
+}
+
+/// Opens [`StreamingAsrSession`]s. Separate from [`AsrProvider`] because
+/// almost no ASR route can do this: it needs a model trained for cache-aware
+/// streaming and a runtime that exposes it.
+pub trait StreamingAsrProvider: Send + Sync {
+    /// Short engine name for logs and receipts, e.g. `transcribe.cpp Nemotron`.
+    fn streaming_engine_name(&self) -> &str;
+
+    /// The model id whose weights back this engine, for the Models screen.
+    fn streaming_model_id(&self) -> &str;
+
+    /// Whether the weights are on disk *and* carry a trusted integrity
+    /// receipt. A half-downloaded GGUF is not available.
+    fn is_streaming_available(&self) -> bool;
+
+    /// Whether this engine covers `language` (an ISO code, or `None` for
+    /// "let the recognizer decide").
+    fn supports_language(&self, language: Option<&str>) -> bool;
+
+    /// Load the model and begin a session. Blocking and slow (model load), so
+    /// callers run it off the async runtime.
+    fn open_session(&self, language_hint: Option<&str>) -> Result<Box<dyn StreamingAsrSession>>;
+}
+
+/// Cuts arbitrary-length PCM pushes into whole streaming chunks.
+///
+/// The capture callback hands over whatever the device gave it; the recognizer
+/// wants a fixed chunk. This holds the remainder between pushes so no sample is
+/// dropped or fed twice.
+#[derive(Debug)]
+pub struct PcmChunker {
+    chunk_samples: usize,
+    pending: Vec<f32>,
+}
+
+impl PcmChunker {
+    pub fn new(chunk_samples: usize) -> Self {
+        Self {
+            chunk_samples: chunk_samples.max(1),
+            pending: Vec::new(),
+        }
+    }
+
+    /// Append `samples` and return every whole chunk that is now available.
+    pub fn push(&mut self, samples: &[f32]) -> Vec<Vec<f32>> {
+        self.pending.extend_from_slice(samples);
+        let mut chunks = Vec::new();
+        while self.pending.len() >= self.chunk_samples {
+            chunks.push(self.pending.drain(..self.chunk_samples).collect());
+        }
+        chunks
+    }
+
+    /// Take the partial tail, for the last feed before `finalize`.
+    pub fn take_remainder(&mut self) -> Option<Vec<f32>> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.pending))
+        }
+    }
+
+    pub fn pending_samples(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.pending.clear();
+    }
+}
+
+/// The display state of one live preview.
+///
+/// Two jobs, both about not lying to the eye:
+///
+/// 1. The committed prefix is append-only within an utterance. A family that
+///    briefly reports a *shorter* committed prefix (the same words, fewer of
+///    them) would make settled text flicker away and back, so a strict prefix
+///    of what is already shown is ignored. Anything else replaces it: if the
+///    recognizer genuinely retracted words, continuing to show them would be
+///    the worse lie.
+/// 2. Repeated identical text is not re-emitted, so the popup does not
+///    re-animate on every chunk that changed nothing.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StreamingPartialTracker {
+    stable: String,
+    volatile: String,
+}
+
+impl StreamingPartialTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one partial in. Returns true when the rendered text changed.
+    pub fn accept(&mut self, partial: &Partial) -> bool {
+        let incoming_stable = partial.stable_prefix.as_str();
+        let keep_existing =
+            incoming_stable.len() < self.stable.len() && self.stable.starts_with(incoming_stable);
+        let next_stable = if keep_existing {
+            self.stable.clone()
+        } else {
+            incoming_stable.to_string()
+        };
+        let next_volatile = partial.volatile_suffix.clone();
+        if next_stable == self.stable && next_volatile == self.volatile {
+            return false;
+        }
+        self.stable = next_stable;
+        self.volatile = next_volatile;
+        true
+    }
+
+    /// Drop everything, for a new utterance after a pause.
+    pub fn reset(&mut self) {
+        self.stable.clear();
+        self.volatile.clear();
+    }
+
+    pub fn stable(&self) -> &str {
+        &self.stable
+    }
+
+    pub fn volatile(&self) -> &str {
+        &self.volatile
+    }
+
+    pub fn display(&self) -> String {
+        format!("{}{}", self.stable, self.volatile)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stable.trim().is_empty() && self.volatile.trim().is_empty()
+    }
+}
+
+/// Continuous linear resampler to [`STREAMING_SAMPLE_RATE_HZ`].
+///
+/// `audio/utils.rs` resamples a whole clip in one call; a streaming preview
+/// gets the audio a few hundred samples at a time, and calling that per chunk
+/// restarts the interpolation at every boundary — a discontinuity at every
+/// seam and a slow drift in total length. This carries the fractional read
+/// position and the last input sample across calls instead.
+#[derive(Debug)]
+pub struct StreamingResampler {
+    from_rate: u32,
+    /// Read position, in input samples, into `carry ++ input`.
+    position: f64,
+    step: f64,
+    carry: Option<f32>,
+}
+
+impl StreamingResampler {
+    pub fn new(from_rate: u32) -> Self {
+        let from_rate = from_rate.max(1);
+        Self {
+            from_rate,
+            position: 0.0,
+            step: f64::from(from_rate) / f64::from(STREAMING_SAMPLE_RATE_HZ),
+            carry: None,
+        }
+    }
+
+    pub fn is_passthrough(&self) -> bool {
+        self.from_rate == STREAMING_SAMPLE_RATE_HZ
+    }
+
+    /// Resample `input`, continuing where the previous call stopped.
+    pub fn push(&mut self, input: &[f32]) -> Vec<f32> {
+        if input.is_empty() {
+            return Vec::new();
+        }
+        if self.is_passthrough() {
+            return input.to_vec();
+        }
+        // One virtual buffer: the sample carried over from last time, then the
+        // new input. `position` indexes into it.
+        let carry = self.carry;
+        let carry_len = usize::from(carry.is_some());
+        let total = carry_len + input.len();
+        let sample_at = |index: usize| -> f32 {
+            if index < carry_len {
+                carry.unwrap_or(0.0)
+            } else {
+                input[index - carry_len]
+            }
+        };
+
+        let mut output = Vec::with_capacity((input.len() as f64 / self.step).ceil() as usize + 1);
+        while self.position + 1.0 < total as f64 {
+            let index = self.position as usize;
+            let frac = (self.position - index as f64) as f32;
+            let a = sample_at(index);
+            let b = sample_at(index + 1);
+            output.push(a * (1.0 - frac) + b * frac);
+            self.position += self.step;
+        }
+        // Keep the last input sample and rebase the position onto it, so the
+        // next call interpolates across the boundary rather than from zero.
+        self.carry = Some(input[input.len() - 1]);
+        self.position = (self.position - (total - 1) as f64).max(0.0);
+        output
+    }
+}
+
 pub struct AsrProviderFactory;
+
+/// The streaming seam, exercised without a GGUF.
+///
+/// Everything the dictation preview depends on that is not the recognizer
+/// itself lives here — chunking, stable/volatile bookkeeping, ordering, the
+/// continuous resampler — so a machine with no model on disk still fails when
+/// one of them regresses.
+#[cfg(test)]
+mod streaming_seam_tests {
+    use super::{
+        streaming_chunk_samples, Partial, PcmChunker, StreamingAsrSession, StreamingPartialTracker,
+        StreamingResampler, DEFAULT_STREAMING_CHUNK_MS, STREAMING_CHUNK_MS_CHOICES,
+        STREAMING_SAMPLE_RATE_HZ,
+    };
+    use anyhow::Result;
+
+    /// A session that replays a scripted transcript, one word per feed, and
+    /// records the calls it received. It commits every word but the last, the
+    /// way a stable-prefix policy does.
+    struct StubStreamingSession {
+        words: Vec<&'static str>,
+        fed_chunks: usize,
+        fed_samples: usize,
+        calls: Vec<&'static str>,
+        finalized: bool,
+        fail_after_finalize: bool,
+    }
+
+    impl StubStreamingSession {
+        fn new(words: &[&'static str]) -> Self {
+            Self {
+                words: words.to_vec(),
+                fed_chunks: 0,
+                fed_samples: 0,
+                calls: Vec::new(),
+                finalized: false,
+                fail_after_finalize: true,
+            }
+        }
+
+        fn partial(&self) -> Partial {
+            let shown = self.words.iter().take(self.fed_chunks).count();
+            let committed = shown.saturating_sub(1);
+            Partial {
+                stable_prefix: self.words[..committed].join(" "),
+                volatile_suffix: if shown > committed {
+                    let mut tail = String::new();
+                    if committed > 0 {
+                        tail.push(' ');
+                    }
+                    tail.push_str(self.words[committed..shown].join(" ").as_str());
+                    tail
+                } else {
+                    String::new()
+                },
+                elapsed_audio_s: self.fed_samples as f64 / f64::from(STREAMING_SAMPLE_RATE_HZ),
+            }
+        }
+    }
+
+    impl StreamingAsrSession for StubStreamingSession {
+        fn feed(&mut self, pcm16k: &[f32]) -> Result<Partial> {
+            self.calls.push("feed");
+            if self.finalized && self.fail_after_finalize {
+                anyhow::bail!("fed a finished stream");
+            }
+            self.fed_samples += pcm16k.len();
+            self.fed_chunks = (self.fed_chunks + 1).min(self.words.len());
+            Ok(self.partial())
+        }
+
+        fn finalize(&mut self) -> Result<Partial> {
+            self.calls.push("finalize");
+            self.finalized = true;
+            self.fed_chunks = self.words.len();
+            let mut partial = self.partial();
+            partial.stable_prefix = self.words.join(" ");
+            partial.volatile_suffix.clear();
+            Ok(partial)
+        }
+
+        fn reset(&mut self) -> Result<()> {
+            self.calls.push("reset");
+            self.finalized = false;
+            self.fed_chunks = 0;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_chunk_table_is_ordered_and_the_default_is_one_of_it() {
+        let mut sorted = STREAMING_CHUNK_MS_CHOICES;
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted, STREAMING_CHUNK_MS_CHOICES,
+            "the table must be ordered"
+        );
+        assert!(STREAMING_CHUNK_MS_CHOICES.contains(&DEFAULT_STREAMING_CHUNK_MS));
+        assert_eq!(streaming_chunk_samples(560), 8_960);
+        assert_eq!(streaming_chunk_samples(160), 2_560);
+        assert_eq!(streaming_chunk_samples(1120), 17_920);
+        // Never zero, whatever a caller does.
+        assert_eq!(streaming_chunk_samples(0), 16);
+    }
+
+    #[test]
+    fn the_chunker_never_drops_or_repeats_a_sample() {
+        let mut chunker = PcmChunker::new(4);
+        let mut seen: Vec<f32> = Vec::new();
+        // Deliberately ragged pushes, the way a capture callback arrives.
+        for push in [
+            vec![1.0, 2.0, 3.0],
+            vec![4.0],
+            vec![5.0, 6.0, 7.0, 8.0, 9.0],
+        ] {
+            for chunk in chunker.push(&push) {
+                assert_eq!(chunk.len(), 4);
+                seen.extend(chunk);
+            }
+        }
+        assert_eq!(seen, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(chunker.pending_samples(), 1);
+        assert_eq!(chunker.take_remainder(), Some(vec![9.0]));
+        assert_eq!(chunker.take_remainder(), None);
+    }
+
+    #[test]
+    fn a_session_is_fed_whole_chunks_in_order_and_finalized_once() {
+        let mut session = StubStreamingSession::new(&["ship", "the", "release"]);
+        let mut chunker = PcmChunker::new(streaming_chunk_samples(DEFAULT_STREAMING_CHUNK_MS));
+        let mut tracker = StreamingPartialTracker::new();
+
+        // 3 chunks' worth of audio, delivered in 100 ms slices.
+        let slice = vec![0.01f32; streaming_chunk_samples(100)];
+        let mut emitted: Vec<String> = Vec::new();
+        for _ in 0..17 {
+            for chunk in chunker.push(&slice) {
+                let partial = session.feed(&chunk).expect("feed");
+                if tracker.accept(&partial) {
+                    emitted.push(tracker.display());
+                }
+            }
+        }
+        let final_partial = session.finalize().expect("finalize");
+        assert!(tracker.accept(&final_partial));
+        emitted.push(tracker.display());
+
+        // 1700 ms of audio is three whole 560 ms chunks, and 20 ms is left
+        // pending rather than fed short.
+        assert_eq!(
+            session.calls,
+            vec!["feed", "feed", "feed", "finalize"],
+            "feeds must all precede the single finalize"
+        );
+        assert_eq!(
+            chunker.pending_samples(),
+            streaming_chunk_samples(100) * 17 % 8_960
+        );
+        assert_eq!(
+            emitted,
+            vec![
+                "ship".to_string(),
+                // The last emit renders the same words: finalize moves the
+                // tail from volatile to stable, which the popup shows
+                // differently even though the text is unchanged.
+                "ship the".to_string(),
+                "ship the release".to_string(),
+                "ship the release".to_string(),
+            ],
+            "identical text must not be re-emitted once the stub runs out of words"
+        );
+        assert_eq!(tracker.stable(), "ship the release");
+        assert_eq!(tracker.volatile(), "");
+    }
+
+    #[test]
+    fn feeding_a_finalized_session_is_an_error_until_it_is_reset() {
+        let mut session = StubStreamingSession::new(&["one", "two"]);
+        session.feed(&[0.0; 16]).expect("first feed");
+        session.finalize().expect("finalize");
+        assert!(
+            session.feed(&[0.0; 16]).is_err(),
+            "a finished stream must not silently accept more audio"
+        );
+        session.reset().expect("reset");
+        assert!(
+            session.feed(&[0.0; 16]).is_ok(),
+            "reset reopens the session"
+        );
+        assert_eq!(
+            session.calls,
+            vec!["feed", "finalize", "feed", "reset", "feed"]
+        );
+    }
+
+    #[test]
+    fn the_tracker_keeps_committed_text_from_flickering_away() {
+        let mut tracker = StreamingPartialTracker::new();
+        assert!(tracker.accept(&Partial {
+            stable_prefix: "ship the".to_string(),
+            volatile_suffix: " rel".to_string(),
+            elapsed_audio_s: 1.1,
+        }));
+        // A shorter committed prefix that is a prefix of what is shown is
+        // flicker, not a retraction: keep the longer one.
+        assert!(tracker.accept(&Partial {
+            stable_prefix: "ship".to_string(),
+            volatile_suffix: " the release".to_string(),
+            elapsed_audio_s: 1.7,
+        }));
+        assert_eq!(tracker.stable(), "ship the");
+        assert_eq!(tracker.volatile(), " the release");
+    }
+
+    #[test]
+    fn the_tracker_follows_a_real_retraction_rather_than_showing_dropped_words() {
+        let mut tracker = StreamingPartialTracker::new();
+        tracker.accept(&Partial {
+            stable_prefix: "ship the reelase".to_string(),
+            volatile_suffix: String::new(),
+            elapsed_audio_s: 1.1,
+        });
+        // Different words, not a prefix: the recognizer changed its mind and
+        // the display must follow it.
+        assert!(tracker.accept(&Partial {
+            stable_prefix: "ship the release".to_string(),
+            volatile_suffix: String::new(),
+            elapsed_audio_s: 1.7,
+        }));
+        assert_eq!(tracker.display(), "ship the release");
+    }
+
+    #[test]
+    fn an_unchanged_partial_is_not_re_emitted() {
+        let mut tracker = StreamingPartialTracker::new();
+        let partial = Partial {
+            stable_prefix: "ship".to_string(),
+            volatile_suffix: " the".to_string(),
+            elapsed_audio_s: 0.6,
+        };
+        assert!(tracker.accept(&partial));
+        assert!(!tracker.accept(&partial), "no change, no emit");
+        assert!(!tracker.accept(&Partial {
+            elapsed_audio_s: 1.2,
+            ..partial.clone()
+        }));
+    }
+
+    #[test]
+    fn resetting_on_silence_clears_the_display_and_starts_a_new_utterance() {
+        let mut tracker = StreamingPartialTracker::new();
+        tracker.accept(&Partial {
+            stable_prefix: "first sentence".to_string(),
+            volatile_suffix: String::new(),
+            elapsed_audio_s: 2.0,
+        });
+        tracker.reset();
+        assert!(tracker.is_empty());
+        assert_eq!(tracker.display(), "");
+        // The same text again after a reset counts as a change, so the popup
+        // is repopulated rather than left blank.
+        assert!(tracker.accept(&Partial {
+            stable_prefix: "first sentence".to_string(),
+            volatile_suffix: String::new(),
+            elapsed_audio_s: 0.6,
+        }));
+    }
+
+    #[test]
+    fn partial_display_text_joins_the_two_halves_in_order() {
+        let partial = Partial {
+            stable_prefix: "ship the".to_string(),
+            volatile_suffix: " release".to_string(),
+            elapsed_audio_s: 1.4,
+        };
+        assert_eq!(partial.display_text(), "ship the release");
+        assert!(!partial.is_empty());
+        assert!(Partial::default().is_empty());
+        assert!(Partial {
+            stable_prefix: "   ".to_string(),
+            volatile_suffix: "\n".to_string(),
+            elapsed_audio_s: 0.0,
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn the_resampler_is_a_passthrough_at_the_streaming_rate() {
+        let mut resampler = StreamingResampler::new(STREAMING_SAMPLE_RATE_HZ);
+        assert!(resampler.is_passthrough());
+        assert_eq!(resampler.push(&[0.25, -0.5]), vec![0.25, -0.5]);
+    }
+
+    #[test]
+    fn resampling_in_chunks_matches_resampling_the_whole_signal() {
+        // A ramp makes an interpolation restart at a chunk boundary obvious:
+        // the output would step backwards there.
+        let from_rate = 48_000;
+        let input: Vec<f32> = (0..48_000).map(|i| i as f32 / 48_000.0).collect();
+
+        let mut whole = StreamingResampler::new(from_rate);
+        let whole_out = whole.push(&input);
+
+        let mut chunked = StreamingResampler::new(from_rate);
+        let mut chunked_out = Vec::new();
+        for slice in input.chunks(517) {
+            chunked_out.extend(chunked.push(slice));
+        }
+
+        // One second of 48 kHz becomes one second of 16 kHz, within a sample.
+        assert!(
+            (whole_out.len() as i64 - 16_000).abs() <= 2,
+            "whole: {} samples",
+            whole_out.len()
+        );
+        assert!(
+            (chunked_out.len() as i64 - whole_out.len() as i64).abs() <= 2,
+            "chunked {} vs whole {}",
+            chunked_out.len(),
+            whole_out.len()
+        );
+        for (index, value) in chunked_out.iter().enumerate().take(whole_out.len()) {
+            assert!(
+                (value - whole_out[index]).abs() < 1e-4,
+                "sample {index} drifted: {} vs {}",
+                value,
+                whole_out[index]
+            );
+        }
+        // And it never steps backwards across a seam.
+        for pair in chunked_out.windows(2) {
+            assert!(pair[1] >= pair[0] - 1e-6, "ramp went backwards: {pair:?}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod cloud_response_security_tests {
