@@ -10,6 +10,24 @@ use std::time::Instant;
 /// staged file, so this is subtracted before they are reported.
 const PREPENDED_SILENCE_MS: u32 = 750;
 
+/// The frames of silence to prepend at one sample rate, and the seconds that
+/// many frames actually last.
+///
+/// Both come from here so they cannot disagree. They used to be computed
+/// separately: the frame count floored to at least one frame, while the
+/// reported offset was always `PREPENDED_SILENCE_MS`, so below about 1334 Hz
+/// the staged file held a single frame and every segment was shifted back by
+/// three quarters of a second that was never there.
+fn prepended_silence(sample_rate: u32) -> (usize, f64) {
+    let frames = ((sample_rate as u64 * PREPENDED_SILENCE_MS as u64) / 1000).max(1) as usize;
+    let seconds = if sample_rate == 0 {
+        0.0
+    } else {
+        frames as f64 / sample_rate as f64
+    };
+    (frames, seconds)
+}
+
 #[derive(Debug, Clone)]
 pub struct PlatformTranscription {
     pub text: String,
@@ -211,8 +229,7 @@ fn stage_macos_speech_input_at(
         )
     })?;
 
-    let prepended_frames =
-        ((spec.sample_rate as u64 * PREPENDED_SILENCE_MS as u64) / 1000).max(1) as usize;
+    let (prepended_frames, prepended_seconds) = prepended_silence(spec.sample_rate);
     let prepended_samples = prepended_frames * spec.channels as usize;
 
     match (spec.sample_format, spec.bits_per_sample) {
@@ -270,7 +287,7 @@ fn stage_macos_speech_input_at(
         )
     })?;
 
-    Ok(staged_audio.with_prepended_silence(PREPENDED_SILENCE_MS as f64 / 1000.0))
+    Ok(staged_audio.with_prepended_silence(prepended_seconds))
 }
 
 fn resolve_audio_path(
@@ -318,8 +335,8 @@ fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::{
-        stage_macos_speech_input, stage_macos_speech_input_at, transcribe_with_engine_in_temp_dir,
-        PlatformTranscriptionOptions, PREPENDED_SILENCE_MS,
+        prepended_silence, stage_macos_speech_input, stage_macos_speech_input_at,
+        transcribe_with_engine_in_temp_dir, PlatformTranscriptionOptions, PREPENDED_SILENCE_MS,
     };
     use crate::asr::platform::PlatformEngine;
 
@@ -361,6 +378,51 @@ mod tests {
         assert_eq!(borrowed.prepended_silence_seconds, 0.0);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The frames written and the offset reported have to describe the same
+    /// silence.
+    ///
+    /// They were computed apart: the frame count floored the integer division
+    /// `sample_rate * 750 / 1000` up to at least one frame, while the reported
+    /// offset was always the nominal 750 ms. Wherever that division is not
+    /// exact -- any rate that is not a multiple of 4, and the floor at the
+    /// bottom of the range -- the transcript was shifted by silence the staged
+    /// file did not contain.
+    #[test]
+    fn prepended_silence_frames_and_seconds_describe_the_same_gap() {
+        for sample_rate in [1_u32, 100, 1_333, 8_000, 11_025, 22_050, 44_100, 48_000] {
+            let (frames, seconds) = prepended_silence(sample_rate);
+
+            // The single invariant: the offset is the duration of the frames
+            // actually written, at every rate.
+            assert!(
+                (seconds - frames as f64 / sample_rate as f64).abs() < 1e-12,
+                "{sample_rate} Hz wrote {frames} frames but reported {seconds}s"
+            );
+            assert_eq!(
+                frames,
+                ((sample_rate as usize * 750) / 1000).max(1),
+                "{sample_rate} Hz frame count"
+            );
+            assert!(frames >= 1, "{sample_rate} Hz must prepend some silence");
+        }
+
+        // Where the division is exact, the offset is still the nominal window.
+        for sample_rate in [8_000_u32, 16_000, 44_100, 48_000] {
+            let (_, seconds) = prepended_silence(sample_rate);
+            assert!((seconds - PREPENDED_SILENCE_MS as f64 / 1000.0).abs() < 1e-9);
+        }
+
+        // Where it is not, the offset follows the file rather than the
+        // nominal window. 22_050 truncates a half frame; at 1 Hz the floor
+        // writes a whole second of silence and has to say so.
+        assert!(prepended_silence(22_050).1 < PREPENDED_SILENCE_MS as f64 / 1000.0);
+        assert_eq!(prepended_silence(1), (1, 1.0));
+
+        // A malformed spec never reaches the writer, but the arithmetic must
+        // not divide by zero on the way to finding that out.
+        assert_eq!(prepended_silence(0), (1, 0.0));
     }
 
     #[test]

@@ -1121,7 +1121,13 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       ready: permissionDiagnostics?.speechRecognitionReady ?? false,
       action: "Open Speech Settings",
       onClick: () => void openPermissionSettings("speech"),
-      detail: "Required for Apple Speech transcription.",
+      // macOS named this permission in the era when speech recognition meant
+      // sending audio to Apple. It does not mean that here: Plainsong runs
+      // both Apple engines with server recognition off, so granting it lets
+      // macOS transcribe on this Mac and nothing else. Saying only "required
+      // for transcription" left the reader to assume the older meaning.
+      detail:
+        "macOS asks for this before it will transcribe. It records your consent to on-device processing; it is not permission to use a server, and Plainsong keeps Apple's server fallback off.",
     },
     {
       key: "accessibility",

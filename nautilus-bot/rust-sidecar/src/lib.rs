@@ -13289,6 +13289,45 @@ mod tests {
         );
     }
 
+    /// SpeechAnalyzer's live stream reports two kinds of text: finalized spans
+    /// that will not change, and a volatile tail that is the model's current
+    /// guess and is routinely replaced by different words. The streaming
+    /// partial type in `asr::platform::macos_speech` carries both, and its
+    /// combining accessor deliberately joins them for a *preview*.
+    ///
+    /// Nothing may feed that into the insertion path. Text typed into someone
+    /// else's app cannot be taken back, so a guess inserted and then revised
+    /// leaves the wrong words in a message, a commit, or a patient note. The
+    /// finished transcript arrives separately, on the `final` event.
+    ///
+    /// Asserted against the source because the live session has no consumer
+    /// yet: this is the guard the eventual one has to get past, and getting
+    /// past it means deciding explicitly which of the two texts is delivered.
+    #[test]
+    fn no_volatile_streaming_text_reaches_the_insertion_path() {
+        const SOURCE: &str = include_str!("lib.rs");
+
+        // Split so this guard's own text is not what it finds: `include_str!`
+        // includes this function, and `concat!` joins at compile time while
+        // the source holds the halves apart.
+        for volatile in [
+            concat!("Streaming", "Partial"),
+            concat!("volatile_", "suffix"),
+            concat!("combined_", "text"),
+            concat!("SpeechAnalyzer", "PartialAccumulator"),
+            // The seam itself: wiring it is what forces the choice.
+            concat!("start_live_", "dictation_session"),
+        ] {
+            assert!(
+                !SOURCE.contains(volatile),
+                "'{volatile}' carries SpeechAnalyzer's volatile guess; it must not reach the \
+                 sidecar's delivery path. If live dictation is being wired, deliver \
+                 `finalized_text()` (or the closing `final` event) and update this guard to name \
+                 what may cross."
+            );
+        }
+    }
+
     #[test]
     fn missing_command_context_never_fails_the_stop() {
         // A selection-scoped command spoken with nothing selected is a soft

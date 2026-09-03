@@ -374,6 +374,11 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The Speech Recognition permission row says what granting it actually
+  permits. macOS named that permission when speech recognition meant sending
+  audio to Apple; Plainsong runs both Apple engines with server recognition
+  off, so the row now says it records your consent to on-device processing
+  rather than only that it is "required for transcription".
 - "Installing language…" has a Cancel beside it, and stops on its own if
   macOS goes quiet. The Apple language install waited on the OS with no
   deadline and no way out: an install that never finished held the button,
