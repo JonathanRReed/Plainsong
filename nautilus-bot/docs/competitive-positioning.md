@@ -70,12 +70,25 @@ Read from the GitHub releases API, exact bytes, not vendor marketing. Ours is
 | Muesli `v0.8.0` | 90 MB | does both surfaces, as we do |
 | **Plainsong `0.9.0-beta.1` candidate** | **136 MB** | 352 MB installed, ~493 MB once `base.en` lands |
 
+Installed size has grown since. `bun run gate:size` on an unsigned local pack
+of `parity-waves` at `a84d2abb` (2026-09-03) reports **383.92 MB** installed
+for the `.app`, against the gate's 450 MB ceiling — 32 MB above the July
+figure. No DMG was produced, so there is no new download number to compare
+against the 136 MB above, and the growth is not yet attributed to a
+directory. See `artifacts/qa/receipts-2026-09-02.md`.
+
 There is no architecture defence: 275 MB of our 352 MB installed is the Electron
 framework. Every competitor above also ships a small-model option (Handy's
 Moonshine V2 Tiny is ~31 MB against our 148 MB `base.en`), so their realistic
-floor is far below ours. We are large on disk and small in memory — 1.9 MB idle
-RSS on the sidecar, 0.45% average idle CPU — but nobody else publishes idle RSS,
-so that is a number we have rather than a comparison we win.
+floor is far below ours.
+
+We have also said we are small in memory — 1.9 MB idle RSS on the sidecar,
+0.45% average idle CPU. Those two figures are **carried over from an older
+measurement and have not been re-taken**. A quiet-machine re-measurement was
+attempted on 2026-09-02 and abandoned: the machine never dropped below load 25
+(`artifacts/qa/receipts-2026-09-02.md`). Treat both as unverified until that
+re-run happens. Even once verified, nobody else publishes idle RSS, so it is a
+number we have rather than a comparison we win.
 
 **Do not publish a comparison table.** On these figures we lose most rows, and
 the table invites exactly the diff that embarrasses us.
