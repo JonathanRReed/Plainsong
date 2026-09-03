@@ -997,10 +997,22 @@ mod tests {
 /// Not a gate test and not run by `cargo test`: it needs the four speaker
 /// embedding ONNX models on disk and a directory of fixture WAVs, and it
 /// exists to produce the numbers in
-/// `artifacts/qa/voiceprint-calibration-2026-09-02.md`. It is kept in the tree
-/// rather than in a scratch script so the thresholds shipped in
-/// `voiceprints.rs` can be re-derived by anyone, with the app's own embedder
-/// rather than a re-implementation of it.
+/// `artifacts/qa/voiceprint-recalibration-2026-09-03.md` (which supersedes
+/// `artifacts/qa/voiceprint-calibration-2026-09-02.md`, measured before the
+/// CAM++ ONNX Runtime fix). It is kept in the tree rather than in a scratch
+/// script so the thresholds shipped in `voiceprints.rs` can be re-derived by
+/// anyone, with the app's own embedder rather than a re-implementation of it.
+///
+/// Environment:
+///
+/// - `PLAINSONG_VOICEPRINT_CALIBRATION=1` — required, or both tests skip.
+/// - `PLAINSONG_DATA_DIR` — where the four models are staged.
+/// - `PLAINSONG_VOICEPRINT_FIXTURES` — a directory of `<voice>_<n>.wav`.
+/// - `PLAINSONG_TWO_SPEAKER_FIXTURE` — the cluster eval's fixture directory.
+/// - `PLAINSONG_VOICEPRINT_DUMP` — optional; write each fixture's pooled
+///   signature out as little-endian `f32` so two builds of this crate can be
+///   compared vector by vector. That is how the 2026-09-03 receipt showed that
+///   a voiceprint stored by a pre-fix build still matches a post-fix one.
 #[cfg(all(test, feature = "diarization"))]
 mod calibration {
     use super::*;
@@ -1053,10 +1065,22 @@ mod calibration {
             "{model_id}: staged model did not pass integrity verification"
         );
 
+        // Optional: write each fixture's signature out as little-endian f32 so
+        // two builds of this crate can be compared against each other. Used by
+        // `artifacts/qa/voiceprint-recalibration-2026-09-03.md` to check that a
+        // voiceprint stored by a pre-fix build still matches embeddings from a
+        // post-fix one. Unset in every normal run.
+        let dump_dir = std::env::var("PLAINSONG_VOICEPRINT_DUMP")
+            .ok()
+            .map(PathBuf::from);
+        if let Some(dir) = dump_dir.as_ref() {
+            std::fs::create_dir_all(dir.join(model_id)).expect("dump directory");
+        }
+
         let mut by_voice: BTreeMap<String, Vec<Vec<f32>>> = BTreeMap::new();
         for fixture in fixtures {
-            let voice = voice_of(&fixture.file_name().unwrap().to_string_lossy())
-                .expect("fixture names are <voice>_<index>.wav");
+            let file_name = fixture.file_name().unwrap().to_string_lossy().to_string();
+            let voice = voice_of(&file_name).expect("fixture names are <voice>_<index>.wav");
             let duration = super::get_audio_duration(fixture)
                 .await
                 .expect("fixture duration");
@@ -1071,6 +1095,15 @@ mod calibration {
                 .collect();
             let centroid = voiceprints::centroid_of(&samples)
                 .expect("a fixture utterance must produce a usable embedding");
+            if let Some(dir) = dump_dir.as_ref() {
+                let stem = file_name.strip_suffix(".wav").unwrap();
+                let mut bytes = Vec::with_capacity(centroid.len() * 4);
+                for value in &centroid {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                std::fs::write(dir.join(model_id).join(format!("{stem}.f32")), &bytes)
+                    .expect("dump signature");
+            }
             by_voice.entry(voice).or_default().push(centroid);
         }
         by_voice

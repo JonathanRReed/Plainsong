@@ -89,9 +89,18 @@ pub struct VoiceprintThresholds {
 
 // ── Calibrated thresholds ────────────────────────────────────────────────
 //
-// Receipt: `artifacts/qa/voiceprint-calibration-2026-09-02.md`, produced by
+// Receipt: `artifacts/qa/voiceprint-recalibration-2026-09-03.md`, produced by
 // the opt-in `voiceprint_threshold_calibration` harness in
-// `diarization/mod.rs`. Fixtures are 6 macOS `say` voices x 6 utterances,
+// `diarization/mod.rs`. It re-derives all four models on the ONNX Runtime fix
+// from `artifacts/qa/campplus-divergence-2026-09-02.md` and supersedes the
+// first run, `artifacts/qa/voiceprint-calibration-2026-09-02.md`, whose CAM++
+// numbers were measured through the corrupted graph. Re-running the old code
+// path on the same fixtures reproduced that receipt exactly, so the two are
+// directly comparable: no threshold moved, and the three models that do not
+// contain the affected `Pad`/`AveragePool` blocks produced bit-identical
+// embeddings (cosine 1.000000 at all 36 fixtures) across the two builds.
+//
+// Fixtures are 6 macOS `say` voices x 6 utterances,
 // 16 kHz mono WAV, embedded through this crate's own extractor
 // (`diarization/embedder.rs`) at the same 2-second/1-second-overlap
 // segmentation `diarize_real` uses, pooled with the same `centroid_of`. That
@@ -125,21 +134,31 @@ pub struct VoiceprintThresholds {
 // upper bound on accuracy, not a promise. `docs/beta/KNOWN-LIMITATIONS.md`
 // says so where users can read it.
 
-/// Shared runner-up margin. See the note above on why this is not per-model.
+/// Shared runner-up margin. See the note above on why this is not per-model:
+/// it is a design rule, deliberately not calibrated, and
+/// `artifacts/qa/voiceprint-recalibration-2026-09-03.md` records it as one.
 const VOICEPRINT_MATCH_MARGIN: f32 = 0.05;
 
 /// ECAPA-TDNN 512, the default embedder. Zero false accepts from 0.61 (3/540
 /// at 0.60), 100% true accepts there. Same-speaker minimum 0.8115 against a
 /// different-speaker maximum of 0.6096 — a 0.202 gap, the narrowest measured.
+/// Unchanged by the CAM++ fix: bit-identical embeddings before and after.
+/// Receipt: `artifacts/qa/voiceprint-recalibration-2026-09-03.md`.
 const ECAPA_TDNN_THRESHOLDS: VoiceprintThresholds = VoiceprintThresholds {
     accept: 0.61,
     margin: VOICEPRINT_MATCH_MARGIN,
     auto_apply: 0.66,
 };
 
-/// CAM++. Zero false accepts from 0.57 (2/540 at 0.56), 100% true accepts
-/// there. Same-speaker minimum 0.8219 against a different-speaker maximum of
-/// 0.5642 — a 0.258 gap.
+/// CAM++. Zero false accepts from 0.57 (1/540 at 0.56), 100% true accepts
+/// there. Same-speaker minimum 0.8226 against a different-speaker maximum of
+/// 0.5673 — a 0.255 gap.
+///
+/// Re-measured on the fixed ONNX Runtime session
+/// (`embedding_window::graph_optimization_level_for`); the pre-fix run had
+/// 0.8219 / 0.5642 and the same 0.57 threshold, so the corrupted graph did not
+/// move the operating point. Receipt:
+/// `artifacts/qa/voiceprint-recalibration-2026-09-03.md`.
 const CAMPPLUS_THRESHOLDS: VoiceprintThresholds = VoiceprintThresholds {
     accept: 0.57,
     margin: VOICEPRINT_MATCH_MARGIN,
@@ -150,6 +169,8 @@ const CAMPPLUS_THRESHOLDS: VoiceprintThresholds = VoiceprintThresholds {
 /// there. Same-speaker minimum 0.8545 against a different-speaker maximum of
 /// 0.6471 — a 0.207 gap. Its different-speaker tail is the fattest of the
 /// four, which is why its accept threshold is the highest.
+/// Unchanged by the CAM++ fix: bit-identical embeddings before and after.
+/// Receipt: `artifacts/qa/voiceprint-recalibration-2026-09-03.md`.
 const RESNET34_THRESHOLDS: VoiceprintThresholds = VoiceprintThresholds {
     accept: 0.65,
     margin: VOICEPRINT_MATCH_MARGIN,
@@ -159,6 +180,8 @@ const RESNET34_THRESHOLDS: VoiceprintThresholds = VoiceprintThresholds {
 /// ERes2NetV2 (int8). Zero false accepts from 0.63 (1/540 at 0.62), 100% true
 /// accepts there. Same-speaker minimum 0.9146 against a different-speaker
 /// maximum of 0.6201 — the widest gap measured, 0.295.
+/// Unchanged by the CAM++ fix: bit-identical embeddings before and after.
+/// Receipt: `artifacts/qa/voiceprint-recalibration-2026-09-03.md`.
 const ERES2NETV2_THRESHOLDS: VoiceprintThresholds = VoiceprintThresholds {
     accept: 0.63,
     margin: VOICEPRINT_MATCH_MARGIN,
@@ -745,6 +768,97 @@ mod tests {
             match_cluster(&[1.0, 0.0, 0.0], "resnet34_speaker", &profiles, &[]).is_some(),
             "the same embedder must still match"
         );
+    }
+
+    /// The exact numbers, pinned. `every_matchable_embedder_has_calibrated_
+    /// thresholds` only checks the shape of these constants, so an edit that
+    /// moved one by 0.05 would sail through it. These are the operating points
+    /// re-derived on the fixed ONNX Runtime session in
+    /// `artifacts/qa/voiceprint-recalibration-2026-09-03.md`: the smallest
+    /// 0.01 step with zero false accepts over 540 different-speaker pairs, and
+    /// that step plus 0.05. Changing one means re-running the harness, not
+    /// editing this list.
+    #[test]
+    fn the_shipped_thresholds_are_the_ones_that_were_measured() {
+        for (model_id, accept, auto_apply) in [
+            ("ecapa_tdnn_speaker", 0.61f32, 0.66f32),
+            ("campplus_speaker", 0.57, 0.62),
+            ("resnet34_speaker", 0.65, 0.70),
+            ("eres2netv2_speaker", 0.63, 0.68),
+        ] {
+            let thresholds = thresholds_for_model(model_id).expect("calibrated");
+            assert!(
+                (thresholds.accept - accept).abs() < 1e-6,
+                "{model_id} accept is {} but the receipt measured {accept}",
+                thresholds.accept
+            );
+            assert!(
+                (thresholds.auto_apply - auto_apply).abs() < 1e-6,
+                "{model_id} auto_apply is {} but the receipt measured {auto_apply}",
+                thresholds.auto_apply
+            );
+            assert!(
+                (thresholds.margin - 0.05).abs() < 1e-6,
+                "{model_id} margin is {} but the design rule is 0.05",
+                thresholds.margin
+            );
+        }
+    }
+
+    /// Every shipped threshold number must name, in its own comment, the
+    /// measurement receipt it came from.
+    ///
+    /// A constant with no citation is indistinguishable from a number somebody
+    /// guessed, and this file has already carried one set of thresholds that
+    /// were measured through a corrupted ONNX graph. The receipts are pulled in
+    /// with `include_str!`, so a citation that names a file which has been
+    /// deleted or renamed fails the build rather than rotting quietly.
+    #[test]
+    fn every_shipped_threshold_constant_cites_its_receipt() {
+        const SOURCE: &str = include_str!("voiceprints.rs");
+        const RECEIPTS: [(&str, &str); 2] = [
+            (
+                "artifacts/qa/voiceprint-recalibration-2026-09-03.md",
+                include_str!("../../../artifacts/qa/voiceprint-recalibration-2026-09-03.md"),
+            ),
+            (
+                "artifacts/qa/voiceprint-calibration-2026-09-02.md",
+                include_str!("../../../artifacts/qa/voiceprint-calibration-2026-09-02.md"),
+            ),
+        ];
+        for (path, body) in RECEIPTS {
+            assert!(!body.is_empty(), "{path} is empty");
+        }
+
+        for name in [
+            "VOICEPRINT_MATCH_MARGIN",
+            "ECAPA_TDNN_THRESHOLDS",
+            "CAMPPLUS_THRESHOLDS",
+            "RESNET34_THRESHOLDS",
+            "ERES2NETV2_THRESHOLDS",
+        ] {
+            let declaration = format!("const {name}: ");
+            let position = SOURCE
+                .find(&declaration)
+                .unwrap_or_else(|| panic!("{name} is not declared in this file"));
+            // The `///` block immediately above the declaration, and nothing
+            // else: a citation three constants further up does not count.
+            let mut comment: Vec<&str> = SOURCE[..position]
+                .lines()
+                .rev()
+                .take_while(|line| line.trim_start().starts_with("///"))
+                .collect();
+            comment.reverse();
+            assert!(
+                !comment.is_empty(),
+                "{name} has no doc comment, so nothing says where its number came from"
+            );
+            let comment = comment.join("\n");
+            assert!(
+                RECEIPTS.iter().any(|(path, _)| comment.contains(path)),
+                "{name}'s comment names no measurement receipt:\n{comment}"
+            );
+        }
     }
 
     /// The four embedders are calibrated separately and their thresholds

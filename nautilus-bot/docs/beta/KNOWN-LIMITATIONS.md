@@ -181,7 +181,7 @@ using sensitive content.
   The thresholds that decide whether two voices match were calibrated on
   synthetic speech — six macOS `say` voices, six utterances each, no room, no
   microphone, no crosstalk (the numbers are in
-  `artifacts/qa/voiceprint-calibration-2026-09-02.md`). Real meetings are
+  `artifacts/qa/voiceprint-recalibration-2026-09-03.md`). Real meetings are
   harder than that in every direction, so the measured accuracy is an upper
   bound, not a promise about your Mac. Matching also assumes one voice per
   speaker turn: where two people share a microphone, or talk over each other,

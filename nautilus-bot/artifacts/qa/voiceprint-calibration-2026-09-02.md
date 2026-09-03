@@ -1,5 +1,17 @@
 # Voiceprint threshold calibration — measurement receipt
 
+> **Superseded by
+> [`voiceprint-recalibration-2026-09-03.md`](voiceprint-recalibration-2026-09-03.md).**
+> Every CAM++ number below was measured through the corrupted ONNX Runtime
+> graph that `campplus-divergence-2026-09-02.md` diagnosed and fixed. The
+> harness was re-run for all four embedders on the fixed code path — on these
+> same 36 fixtures — and the 2026-09-03 receipt carries the numbers the app
+> actually ships. Everything here is kept as the record of what was measured
+> before the fix, and is still the origin of the method (fixtures, pairing,
+> the zero-false-accept rule, the `auto_apply` and `margin` design rules).
+> The CAM++ rows in the distribution, operating-point and frame-error tables
+> below are marked where the re-run moved them.
+
 **Date:** 2026-09-02
 **Machine:** Apple M4 Pro, macOS 27.0 (Darwin 27.0.0)
 **Harness:** the opt-in `voiceprint_threshold_calibration` test
@@ -74,12 +86,19 @@ Cosine similarity; higher is more similar.
 | Model | dim | same min | same p05 | same p50 | same p95 | diff p50 | diff p95 | diff p99 | diff max | gap (same min − diff max) |
 |---|---|---|---|---|---|---|---|---|---|---|
 | ECAPA-TDNN 512 | 192 | 0.8115 | 0.8648 | 0.9165 | 0.9439 | 0.2031 | 0.5073 | 0.5816 | 0.6096 | **+0.202** |
-| CAM++ | 512 | 0.8219 | 0.8373 | 0.8908 | 0.9314 | 0.2116 | 0.4720 | 0.5373 | 0.5642 | **+0.258** |
+| CAM++ *(superseded)* | 512 | 0.8219 | 0.8373 | 0.8908 | 0.9314 | 0.2116 | 0.4720 | 0.5373 | 0.5642 | **+0.258** |
 | ResNet34 | 256 | 0.8545 | 0.8751 | 0.9123 | 0.9395 | 0.1716 | 0.4966 | 0.6034 | 0.6471 | **+0.207** |
 | ERes2NetV2 (int8) | 192 | 0.9146 | 0.9294 | 0.9535 | 0.9699 | 0.3972 | 0.5639 | 0.6014 | 0.6201 | **+0.295** |
 
 All four separate cleanly: no different-speaker pair scores as high as the
 weakest same-speaker pair, on any model.
+
+> **CAM++ row superseded.** Those figures come from the corrupted ONNX Runtime
+> graph. On the fixed path the same fixtures give 0.8226 / 0.8404 / 0.8999 /
+> 0.9402 same-speaker and 0.2057 / 0.4575 / 0.5259 / 0.5673 different-speaker,
+> a +0.255 gap — see `voiceprint-recalibration-2026-09-03.md` §1. The other
+> three rows were re-measured on the fixed build and are unchanged to the last
+> digit.
 
 ## Operating points
 
@@ -94,6 +113,10 @@ weakest same-speaker pair, on any model.
 | **0.66** | **0/540** | **0.00%** | **90/90** | **100.0%** |
 
 ### CAM++ — shipped `accept` 0.57, `auto_apply` 0.62
+
+*Superseded: measured on the corrupted graph. Re-measured on the fixed path the
+thresholds are the same and the approach is strictly cleaner (2/540 at 0.55,
+1/540 at 0.56) — `voiceprint-recalibration-2026-09-03.md` §2.*
 
 | threshold | false accepts | FAR | true accepts | TAR |
 |---|---|---|---|---|
@@ -141,6 +164,11 @@ that favours the model.
 | ResNet34 | 2 | 4.2% |
 | ERes2NetV2 (int8) | 2 | 4.2% |
 
+> **Re-run on the fixed CAM++ session: every figure in this table is
+> unchanged**, CAM++ included
+> (`voiceprint-recalibration-2026-09-03.md` §4). The CAM++ number was measured
+> here on corrupted embeddings and so was not yet earned; it now is.
+
 ## A methodology correction worth recording
 
 The first version of this harness embedded each fixture as **one long
@@ -154,7 +182,10 @@ That conclusion was wrong, and the reason is worth keeping:
 
 - Re-measured at the pipeline's own 2 s segmentation, CAM++ separates cleanly
   (gap +0.258, the second widest of the four) and scores the **best** frame
-  error in the two-speaker diarization eval.
+  error in the two-speaker diarization eval. *(Both halves of that sentence
+  were measured on the corrupted graph. Re-run after the ONNX Runtime fix the
+  gap is +0.255 and the frame error is still 2.2%, still the best of the four:
+  `voiceprint-recalibration-2026-09-03.md`.)*
 - The divergence is real but length-dependent and lives in the runtime, not the
   features. **Reported, not reproduced here.** Feeding an identical 300-frame
   input tensor to `campplus.onnx` through the Rust `ort` 2.0.0-rc.13 crate and

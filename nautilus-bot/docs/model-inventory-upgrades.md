@@ -219,6 +219,18 @@ has landed, delete the `Disable` special case.
 `ort_parity::campplus_matches_the_agreeing_runtime` guards the regression either
 way. Full measurement: `artifacts/qa/campplus-divergence-2026-09-02.md`.
 
+**Recommendation after recalibration (2026-09-03): unchanged.** The voiceprint
+threshold harness was re-run for all four embedders on the fixed session
+(`artifacts/qa/voiceprint-recalibration-2026-09-03.md`). No `accept` or
+`auto_apply` constant moved; CAM++ keeps 0.57 / 0.62. ECAPA-TDNN, ResNet34 and
+ERes2NetV2 produced bit-identical embeddings before and after, so the fix is
+genuinely scoped to the one model. CAM++'s two-speaker frame error is still
+2.2%, the best of the four, and that comparison now rests on correct
+embeddings; ECAPA-TDNN remains the default anyway, on one 59 s fixture being
+too little evidence to move it. Voiceprints stored by a pre-fix build keep
+matching (worst measured 0.8930 against a 0.57 threshold), so
+`embedding_model_id` keeps its existing namespace and no migration is needed.
+
 ### ReCasePunct / ML punctuation (item 9)
 ReCasePunct 1 Flash (`MihaiPopa-1/ReCasePunct-1-Flash`) has no ONNX
 export — only Safetensors with a custom ALBERT architecture. An

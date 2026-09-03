@@ -30,6 +30,8 @@ evidence is stale and must be recaptured before this becomes a candidate.
   speaker-separation models, and refuses when two remembered voices are too
   close to tell apart. Thresholds are per model and calibrated against
   synthetic fixtures at a zero-false-accept operating point —
+  `artifacts/qa/voiceprint-recalibration-2026-09-03.md`, which re-derives all
+  four on the corrected CAM++ embeddings and supersedes
   `artifacts/qa/voiceprint-calibration-2026-09-02.md`.
 - The dictation live preview can be drawn by a real streaming recognizer
   instead of by re-transcribing. Until now the popup's live text was a batch
@@ -493,8 +495,13 @@ evidence is stale and must be recaptured before this becomes a candidate.
   published against exactly, at every length tested, for about 5% more time per
   embedding on that one model. The other three speaker models were never
   affected and are unchanged. Speaker profiles you already saved with CAM++
-  still match. Measured in
-  `artifacts/qa/campplus-divergence-2026-09-02.md`.
+  still match — checked against every fixture rather than assumed, in
+  `artifacts/qa/voiceprint-recalibration-2026-09-03.md`. The voice-matching
+  thresholds were re-derived for all four speaker models on the corrected
+  embeddings and none of them moved, so nothing about when Plainsong offers or
+  applies a remembered name has changed. Measured in
+  `artifacts/qa/campplus-divergence-2026-09-02.md` and
+  `artifacts/qa/voiceprint-recalibration-2026-09-03.md`.
 - The Speech Recognition permission row says what granting it actually
   permits. macOS named that permission when speech recognition meant sending
   audio to Apple; Plainsong runs both Apple engines with server recognition
