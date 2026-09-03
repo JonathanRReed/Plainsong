@@ -32,8 +32,8 @@
 use super::{
     cloud_asr_status_error,
     openai_cloud::{build_cloud_asr_client, CloudAsrHttpTimeouts},
-    read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, SpeakerTurn,
-    TranscriptSegment, TranscriptionOptions, TranscriptionResult,
+    provider_speaker_id, read_cloud_asr_json, AsrProvider, AsrProviderType, DownloadStatus,
+    ModelInfo, SpeakerTurn, TranscriptSegment, TranscriptionOptions, TranscriptionResult,
 };
 use crate::secrets;
 use anyhow::{Context, Result};
@@ -297,18 +297,52 @@ fn parse_offset_seconds(value: Option<&Value>) -> Option<f64> {
     }
 }
 
-/// `"spk_1"` → `"S1"`. Gemini labels speakers from one; Plainsong's own
-/// diarizer, alias flow and transcript viewer all use `S1`, `S2`, … so the
-/// label is translated at the boundary rather than leaking a second speaker
-/// vocabulary into the transcript.
+/// Gemini's speaker labels, translated into Plainsong's own `S1`, `S2`, … ids
+/// in the order they first appear in the response.
 ///
-/// A label with no digits in it is kept verbatim: it is still a stable speaker
-/// key, and inventing an index for it would merge two speakers.
-pub(crate) fn gemini_speaker_id(label: &str) -> String {
-    let digits: String = label.chars().filter(char::is_ascii_digit).collect();
-    match digits.parse::<u32>() {
-        Ok(index) => format!("S{}", index.max(1)),
-        Err(_) => label.trim().to_string(),
+/// Plainsong's diarizer, alias flow and transcript viewer are all built on the
+/// `S`-form, so the provider's vocabulary is translated at the boundary rather
+/// than leaked into the transcript.
+///
+/// Order of first appearance rather than arithmetic on the label's digits, for
+/// three reasons:
+///
+/// 1. **It cannot collapse two speakers.** The digit arithmetic was
+///    `S{index.max(1)}`, which mapped both `spk_0` and `spk_1` to `S1` --
+///    silently merging the first two speakers of any response numbered from
+///    zero, with nothing downstream able to tell.
+/// 2. **It does not have to guess the base.** Google's own example numbers
+///    from one (`spk_1`); a response numbered from zero would still come out
+///    `S1`, `S2`, … here. A fixed `+1` offset would be correct for one base
+///    and produce a meeting whose first speaker is labelled "S2" for the other.
+/// 3. **A label with no digits works the same way.** `moderator` used to be
+///    passed through verbatim, which put a second speaker vocabulary into the
+///    transcript; it now gets an `S` id like any other distinct speaker.
+///
+/// An absent or empty label is not a speaker and gets no id: `push_run` drops
+/// the turn entirely rather than attributing it to `S1`.
+#[derive(Default)]
+struct GeminiSpeakerIds {
+    /// Distinct provider labels, in first-appearance order. Gemini caps
+    /// diarization at eight speakers, so this stays short and a linear scan is
+    /// the right lookup.
+    seen: Vec<String>,
+}
+
+impl GeminiSpeakerIds {
+    fn id_for(&mut self, label: &str) -> String {
+        let label = label.trim();
+        if label.is_empty() {
+            return String::new();
+        }
+        let index = match self.seen.iter().position(|seen| seen == label) {
+            Some(index) => index,
+            None => {
+                self.seen.push(label.to_string());
+                self.seen.len() - 1
+            }
+        };
+        provider_speaker_id(index as u32)
     }
 }
 
@@ -370,6 +404,7 @@ fn parse_gemini_value(root: &Value) -> ParsedGeminiTranscript {
     // the transcript viewer groups by and the unit the diarization merge
     // wants.
     let mut current: Option<(String, f64, f64, String)> = None;
+    let mut speaker_ids = GeminiSpeakerIds::default();
     for annotation in collect_word_annotations(root) {
         let text = annotation
             .get("text")
@@ -384,11 +419,12 @@ fn parse_gemini_value(root: &Value) -> ParsedGeminiTranscript {
         let (Some(start), Some(end)) = (start, end) else {
             continue;
         };
-        let speaker = annotation
-            .get("speaker")
-            .and_then(Value::as_str)
-            .map(gemini_speaker_id)
-            .unwrap_or_default();
+        let speaker = speaker_ids.id_for(
+            annotation
+                .get("speaker")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
 
         match current.as_mut() {
             Some((run_speaker, _, run_end, run_text)) if *run_speaker == speaker => {
@@ -831,8 +867,8 @@ impl AsrProvider for GeminiTranscribeProvider {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_gemini_transcription_request, gemini_custom_vocabulary, gemini_speaker_id,
-        parse_gemini_transcript, sanitize_gemini_asr_model_id, GeminiTranscribeProvider,
+        build_gemini_transcription_request, gemini_custom_vocabulary, parse_gemini_transcript,
+        sanitize_gemini_asr_model_id, GeminiSpeakerIds, GeminiTranscribeProvider,
         GEMINI_HTTP_TIMEOUTS, GEMINI_WHOLE_FILE_HTTP_TIMEOUTS,
     };
     use crate::asr::AsrProvider;
@@ -915,14 +951,43 @@ mod tests {
         );
     }
 
+    /// Two distinct provider labels must never become one Plainsong speaker.
+    ///
+    /// The old mapping was `S{digits.max(1)}`, so `spk_0` and `spk_1` both
+    /// became `S1` -- two people merged into one, invisibly, in every response
+    /// numbered from zero.
     #[test]
     fn speaker_labels_translate_into_plainsongs_own_ids() {
-        assert_eq!(gemini_speaker_id("spk_1"), "S1");
-        assert_eq!(gemini_speaker_id("spk_2"), "S2");
-        assert_eq!(gemini_speaker_id("spk_0"), "S1");
-        // A label with no index is a stable key in its own right; inventing an
-        // index for it would merge two speakers into one.
-        assert_eq!(gemini_speaker_id("moderator"), "moderator");
+        // Google's documented numbering, from one.
+        let mut ids = GeminiSpeakerIds::default();
+        assert_eq!(ids.id_for("spk_1"), "S1");
+        assert_eq!(ids.id_for("spk_2"), "S2");
+        assert_eq!(
+            ids.id_for("spk_1"),
+            "S1",
+            "a label keeps the id it was given"
+        );
+
+        // The same response numbered from zero: still S1 and S2, and still two
+        // distinct speakers.
+        let mut ids = GeminiSpeakerIds::default();
+        assert_eq!(ids.id_for("spk_0"), "S1");
+        assert_eq!(ids.id_for("spk_1"), "S2");
+        assert_ne!(ids.id_for("spk_0"), ids.id_for("spk_1"));
+
+        // Labels that are not numbered at all are speakers too, and get ids
+        // rather than leaking the provider's vocabulary into the transcript.
+        let mut ids = GeminiSpeakerIds::default();
+        assert_eq!(ids.id_for("moderator"), "S1");
+        assert_eq!(ids.id_for("guest"), "S2");
+        assert_eq!(ids.id_for("  moderator  "), "S1");
+
+        // An absent speaker is not a speaker: no id, and `push_run` drops the
+        // turn rather than attributing it to S1.
+        let mut ids = GeminiSpeakerIds::default();
+        assert_eq!(ids.id_for(""), "");
+        assert_eq!(ids.id_for("   "), "");
+        assert_eq!(ids.id_for("spk_4"), "S1");
     }
 
     // Response shape from https://ai.google.dev/gemini-api/docs/transcribe

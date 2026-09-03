@@ -378,6 +378,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Two speakers in a Gemini meeting are no longer merged into one. The
+  provider's speaker labels were converted with arithmetic that mapped both
+  "speaker 0" and "speaker 1" onto Plainsong's first speaker, so any response
+  numbered from zero silently attributed two people to one badge. Labels are
+  now assigned in the order they first appear, which cannot merge two of them
+  and does not depend on where the provider starts counting.
 - Audio uploaded to Google for a Gemini transcription is now deleted on every
   path out, and you are told when it cannot be. Two exits skipped the delete
   entirely: an upload that succeeded but answered with something Plainsong
