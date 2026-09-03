@@ -1193,6 +1193,10 @@ impl<'a> GroundedOrchestrator<'a> {
                 temperature: Some(0.1),
                 json_schema: Some(json_schema),
                 requested_context_tokens: execution.requested_context_tokens,
+                // Meeting orchestration never runs on a dictation-only
+                // provider (see `enforce_meeting_lane_provider_policy`), so
+                // there is no register to carry here.
+                dictation_style: None,
             },
         };
         for attempt in 0..=MAX_TRANSIENT_RETRIES {

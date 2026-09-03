@@ -17,6 +17,13 @@ const ANALYSIS_PROVIDER_DESTINATIONS: Record<
   string,
   { label: string; remote: boolean }
 > = {
+  // The license on the bundled model requires this exact name wherever it is
+  // used: "S1-mini" by "Superwhisper". Do not shorten it.
+  bundled_local: { label: "S1-mini by Superwhisper, on this Mac", remote: false },
+  apple_language_model: {
+    label: "Apple's on-device model on this Mac",
+    remote: false,
+  },
   ollama: { label: "Ollama on this machine", remote: false },
   openai: { label: "OpenAI", remote: true },
   anthropic: { label: "Anthropic", remote: true },
@@ -29,6 +36,8 @@ export const ANALYSIS_PROVIDER_OPTIONS: ReadonlyArray<{
   value: string;
   label: string;
 }> = [
+  { value: "bundled_local", label: "Built-in (no setup)" },
+  { value: "apple_language_model", label: "Apple on-device model" },
   { value: "ollama", label: "Ollama (on this Mac)" },
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic" },
@@ -36,6 +45,51 @@ export const ANALYSIS_PROVIDER_OPTIONS: ReadonlyArray<{
   { value: "deepseek", label: "DeepSeek" },
   { value: "ollama-cloud", label: "Ollama Cloud" },
 ];
+
+/**
+ * Providers that can only clean up dictation.
+ *
+ * The bundled model is a text normalizer -- its own model card says it "is not
+ * a chat model and will not follow general instructions" -- and Apple's
+ * on-device model shares a 4,096-token window between the prompt and the
+ * response, which is smaller than one chunk of a meeting transcript plus its
+ * summary. Both refuse meeting work in the sidecar, so offering them in the
+ * meetings picker would only be a way to choose a guaranteed failure. Mirrors
+ * `Provider::supports_meeting_analysis` in rust-sidecar/src/llm/transport.rs.
+ */
+const DICTATION_ONLY_ANALYSIS_PROVIDERS = new Set([
+  "bundled_local",
+  "apple_language_model",
+]);
+
+export function isDictationOnlyAnalysisProvider(
+  provider: string | undefined,
+): boolean {
+  return DICTATION_ONLY_ANALYSIS_PROVIDERS.has(provider ?? "");
+}
+
+/**
+ * Providers that run with nothing installed and no key pasted. Ollama is local
+ * but is still a service the user has to install and keep running, so it is
+ * not in this set.
+ */
+export function isZeroSetupAnalysisProvider(
+  provider: string | undefined,
+): boolean {
+  return DICTATION_ONLY_ANALYSIS_PROVIDERS.has(provider ?? "");
+}
+
+/** The provider choices a lane may offer. */
+export function analysisProviderOptionsForLane(
+  lane: AiLaneKey,
+): ReadonlyArray<{ value: string; label: string }> {
+  if (lane === "meetingsAi") {
+    return ANALYSIS_PROVIDER_OPTIONS.filter(
+      (option) => !isDictationOnlyAnalysisProvider(option.value),
+    );
+  }
+  return ANALYSIS_PROVIDER_OPTIONS;
+}
 
 /**
  * Whether analysis with this provider would leave the machine. Remote
@@ -51,6 +105,18 @@ export const ANALYSIS_PROVIDER_OPTIONS: ReadonlyArray<{
  */
 export function isRemoteAnalysisProvider(provider: string | undefined): boolean {
   return ANALYSIS_PROVIDER_DESTINATIONS[provider ?? ""]?.remote ?? false;
+}
+
+/**
+ * Whether this is a provider we can make any claim about at all.
+ *
+ * Callers that assert a privacy property ("nothing leaves this machine") need
+ * the three-way answer, not the two-way one: an unrecognized provider is not
+ * local *and* not remote, it is a settings shape we do not understand, and
+ * saying either would be a claim we cannot verify.
+ */
+export function isKnownAnalysisProvider(provider: string | undefined): boolean {
+  return (provider ?? "") in ANALYSIS_PROVIDER_DESTINATIONS;
 }
 
 export function describeAnalysisDestination(provider: string | undefined): string {
@@ -93,6 +159,12 @@ export function analysisModelChoices(
   models: string[],
 ): string[] {
   switch (providerName) {
+    // Both on-device providers serve exactly one model, and neither has a
+    // catalogue endpoint to list it from. Returning nothing here is what tells
+    // the lane row to render the fixed-model card instead of a picker.
+    case "bundled_local":
+    case "apple_language_model":
+      return [];
     case "openai":
       return models
         .filter(

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <!-- The Apple Foundation Models helper reads text on stdin and runs the
+       on-device system model. It needs no TCC-guarded resource, no network
+       client, no Apple Events, and no JIT, so it carries no entitlement at
+       all rather than inheriting the app's broad child-process set. The
+       packaged-helper gate asserts this dictionary stays empty. -->
+  <dict/>
+</plist>

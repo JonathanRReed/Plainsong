@@ -56,6 +56,22 @@ using sensitive content.
   has already removed cannot be found, and dictations saved before this
   version were indexed on their delivered text only, so for them a search
   cannot distinguish what was heard from what was delivered.
+- The built-in cleanup model (S1-mini by Superwhisper) is a text normalizer,
+  not an assistant. It fixes fillers, punctuation, capitalization and spoken
+  numbers/dates, in English only. It cannot write meeting notes, and while it
+  is the selected dictation route, custom modes and dictation commands fall
+  back to Plainsong's own deterministic text transforms instead of running
+  their prompt. Pick Ollama or a cloud provider for those.
+- The built-in cleanup model needs the GPU to fit inside the pre-insert
+  budget. Measured on an M4 Pro, a 200-word dictation takes 1.8 s on Metal and
+  11-13 s on CPU against a 6 s budget, so on a Mac where Metal does not
+  initialize a long dictation is inserted unformatted with a warning. The
+  shipped macOS build always compiles the Metal backend.
+- Apple's on-device cleanup route needs macOS 26 or newer, an
+  Apple-Intelligence-eligible Mac, and the feature switched on with its model
+  downloaded. Models says which of those is missing. This route has not been
+  run end to end in qualification: on the machine that built it, Apple
+  Intelligence had not finished downloading its model.
 
 ## Meetings
 

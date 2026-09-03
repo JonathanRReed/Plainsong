@@ -1,6 +1,8 @@
 //! LLM provider abstraction for multiple backends
 //!
 //! Supports:
+//! - Bundled local (S1-mini by Superwhisper, in-process via Candle)
+//! - Apple Foundation Models (on-device, macOS 26+)
 //! - Ollama (local)
 //! - Ollama Cloud
 //! - OpenAI
@@ -10,6 +12,8 @@
 use serde::{Deserialize, Serialize};
 
 mod anthropic;
+pub mod apple_language_model;
+pub mod bundled_local;
 mod cloud;
 mod deepseek;
 pub mod embeddings;
@@ -20,6 +24,7 @@ mod openai;
 pub mod transport;
 
 pub use anthropic::AnthropicClient;
+pub use bundled_local::StyleControl;
 pub use cloud::OllamaCloudClient;
 pub use deepseek::DeepSeekClient;
 pub use embeddings::{cosine_similarity, OllamaEmbedder};

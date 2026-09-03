@@ -183,6 +183,30 @@ evidence is stale and must be recaptured before this becomes a candidate.
   own copy says so. Audio longer than 60 s is decoded in pause-aligned
   chunks, and a decode that would come back truncated is refused.
 
+- **Dictation cleanup now works out of the box.** Smart Format used to need
+  Ollama installed or a cloud key pasted, so on a fresh install it simply
+  never ran. A new "Built-in (no setup)" route downloads S1-mini by
+  Superwhisper once (473 MiB, verified against a checksum pinned in the app)
+  and then runs it inside Plainsong with no server, no account and no
+  network. It removes fillers, resolves false starts, punctuates, and writes
+  spoken numbers, dates and email addresses in written form — English only.
+  It is the default for the dictation lane on new installs; anyone who
+  already chose Ollama or a cloud provider keeps that choice. Models shows
+  its size and a Delete action.
+  It is deliberately not offered for meeting notes: it is a text normalizer,
+  not an assistant, and its own model card says it will not follow general
+  instructions. Custom modes and dictation commands fall back to
+  Plainsong's built-in text transforms while this route is selected, and
+  the picker says so.
+- **Apple's on-device model is selectable for dictation cleanup on macOS 26
+  and newer.** Nothing to download: it uses the model Apple Intelligence
+  already ships, through a small Plainsong helper with no network client and
+  no entitlements. Availability is probed at launch and the Models screen
+  says which of "this Mac can't", "Apple Intelligence is off" and "it is
+  still downloading" applies, rather than only "not available". Also
+  dictation-only — its 4,096-token window is shared between the prompt and
+  the answer.
+
 ### Changed
 - Searching dictation history no longer writes an audit-log row. It is a read
   that changes nothing, and the search field re-runs on a debounce and again
@@ -292,6 +316,45 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
+  Plainsong can download — repository, pinned revision, files and license —
+  including the terms that differ from the code's: Parakeet's CC-BY-4.0
+  attribution and S1-mini's naming clause. The section is generated from a
+  manifest and covered by the release license gate, and it records honestly
+  the one artifact whose upstream declares no license.
+- The built-in cleanup model's 473 MiB now appears in the sidecar's list of
+  downloaded models, where it was missing entirely. The Models screen's
+  "Speech models on this Mac" total still counts only speech models, since
+  that is what it says.
+- "Keep the model warm: off" now actually releases the built-in cleanup
+  model. It used to skip only the warm-up — the first dictation loaded the
+  model anyway and it stayed in memory for the rest of the session — so the
+  switch saved nothing after your first capture. With it off, the model is
+  unloaded a minute after the last dictation, and switching the dictation
+  lane to Ollama or a cloud provider releases it immediately. The Models
+  screen states what it holds while loaded.
+- The Models screen now says which processor the built-in cleanup model runs
+  on, and Plainsong no longer starts a new install on that route where it
+  would be too slow. On a Mac that falls back to the CPU a 200-word dictation
+  takes 11 to 13 seconds against a six-second limit, so the row says so and
+  the dictation lane starts on Ollama instead; choosing the built-in model
+  there is still yours to make.
+- The Apple on-device model row says "Still downloading" while Apple
+  Intelligence is fetching its model, instead of "Not available" — a wait,
+  not a verdict about this Mac.
+- A dictation cleanup that runs past its time limit now stops within a
+  token instead of running to the end of its budget. The built-in model
+  (S1-mini by Superwhisper) is held behind one lock, so an abandoned cleanup
+  used to leave every later dictation of the session waiting on it with the
+  GPU still busy; the first slow cleanup no longer breaks the rest.
+- The built-in cleanup model can no longer put its own markup into your
+  document. A reasoning block or a stray chat-turn marker in the model's
+  output is removed, and a result that is nothing but reasoning falls back
+  to the text the local pipeline already produced.
+- Chat-turn markers in a transcript — reachable through a dictionary
+  replacement you wrote yourself — are rewritten as plain text before the
+  built-in model sees them, so a dictation cannot open a second turn and
+  address the model as its instructions.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some

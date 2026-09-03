@@ -278,6 +278,79 @@ describe("Sidebar collapsed layout", () => {
     ).toBeInTheDocument();
   });
 
+  it("does not call the built-in cleanup model cloud when remote AI is on", () => {
+    // Regression guard: the chip used to test `provider !== "ollama"`, which
+    // reported "Cloud Enabled · dictation cleanup uses 'bundled_local'" for a
+    // model that runs in the sidecar process and opens no socket.
+    const previous = readinessContext.settings.privacy;
+    readinessContext.settings.privacy = {
+      ...previous,
+      dictationAi: { provider: "bundled_local", modelId: null },
+      remoteProcessingEnabled: true,
+    };
+    try {
+      render(
+        <Sidebar
+          activeView="dashboard"
+          onToggleCollapse={vi.fn()}
+          onViewChange={vi.fn()}
+        />,
+      );
+      const chip = screen.getByRole("button", { name: /Local only/ });
+      expect(chip.getAttribute("aria-label")).toContain("S1-mini");
+      expect(chip.getAttribute("aria-label")).not.toContain("Cloud");
+    } finally {
+      readinessContext.settings.privacy = previous;
+    }
+  });
+
+  it("still says Cloud Enabled when a lane really does leave the machine", () => {
+    const previous = readinessContext.settings.privacy;
+    readinessContext.settings.privacy = {
+      ...previous,
+      dictationAi: { provider: "bundled_local", modelId: null },
+      meetingsAi: { provider: "anthropic", modelId: null },
+      remoteProcessingEnabled: true,
+    };
+    try {
+      render(
+        <Sidebar
+          activeView="dashboard"
+          onToggleCollapse={vi.fn()}
+          onViewChange={vi.fn()}
+        />,
+      );
+      const chip = screen.getByRole("button", { name: /Cloud Enabled/ });
+      expect(chip.getAttribute("aria-label")).toContain("meeting summaries");
+      expect(chip.getAttribute("aria-label")).not.toContain("dictation cleanup");
+    } finally {
+      readinessContext.settings.privacy = previous;
+    }
+  });
+
+  it("refuses to make a claim about a provider it does not recognize", () => {
+    const previous = readinessContext.settings.privacy;
+    readinessContext.settings.privacy = {
+      ...previous,
+      dictationAi: { provider: "some-future-provider", modelId: null },
+      remoteProcessingEnabled: true,
+    };
+    try {
+      render(
+        <Sidebar
+          activeView="dashboard"
+          onToggleCollapse={vi.fn()}
+          onViewChange={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: /Status unavailable/ }),
+      ).toBeInTheDocument();
+    } finally {
+      readinessContext.settings.privacy = previous;
+    }
+  });
+
   it("does not raise the sitewide Setup needed badge for a missing AI route", () => {
     // "Setup needed" means the product cannot do its jobs. Meeting notes being
     // unconfigured is reported by Meetings itself; it is not a setup fault, and

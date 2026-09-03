@@ -85,6 +85,101 @@ CPU cost is stated in the route's tradeoff copy. Language list: the 30
 languages the model card names, mirrored in `settings.rs`
 (`QWEN3_ASR_LANGUAGES`) and `asr-capabilities.ts`.
 
+### Bundled zero-setup dictation cleanup: S1-mini (item 11)
+
+New LLM provider `bundled_local`, and the first route that makes Smart
+Format work on a fresh install with nothing installed and no key pasted.
+
+**Model.** `superwhisper/s1-mini-GGUF` at `Q4_K_M` (462 MiB), a 0.6B
+fine-tune of `Qwen/Qwen3-0.6B` trained for exactly one transformation:
+raw ASR transcript in, clean written text out. Apache-2.0 plus a naming
+clause requiring the exact strings "S1-mini" and "Superwhisper" wherever
+the model is used; `LICENSE` and `NOTICE` are downloaded alongside the
+weights so the retention obligation is met on disk. Four pinned files
+(GGUF, `tokenizer.json`, `LICENSE`, `NOTICE`), 473 MiB total, each with a
+SHA-256 in `llm/bundled_local.rs` and an immutable commit revision in the
+URL. Readiness is "every file carries a trusted MAC'd integrity receipt",
+not "the files exist": `artifacts_trusted` gates the load, and the
+startup migration re-verifies them with the ASR weights.
+
+**Runtime.** Candle, not llama.cpp.
+`candle_transformers::models::quantized_qwen3::ModelWeights` reads the
+GGUF and runs it with a KV cache; `candle-core`/`-nn`/`-transformers`
+0.10 and `tokenizers` were already dependencies (`asr-canary`), and
+`candle-metal` already ships on macOS. llama.cpp would have added a C++
+toolchain to build, sign and audit for a model the existing crates run
+unmodified. One resident model behind a `Mutex`, warmed at startup when
+the lane selects it and keep-warm is on. Metal with CPU fallback.
+
+**Prompt.** The literal ChatML the card documents, including the empty
+`<think>\n\n</think>` block (omitting it is the documented way to get
+blank output). Greedy, temperature 0. The system prompt is a fixed
+literal and the only steering is a three-axis control line drawn from a
+closed set, mapped from the destination-app category the pipeline already
+resolves. The consequence worth naming: the captured-context blob and the
+dictionary vocabulary hint have *no* path into this model, because its
+input format has no slot for them.
+
+**What it deliberately does not do.** The card is explicit that S1-mini
+"is not a chat model and will not follow general instructions", so the
+provider refuses `CompletionPurpose` other than `Generic`, is filtered
+out of the meetings picker, and refuses free-text custom-mode and
+dictation-command transforms (those fall back to Plainsong's own
+deterministic transforms). Offering it for meeting summaries would have
+produced normalized instructions presented as a summary.
+
+**Measured** on an Apple M4 Pro, 5 runs per fixture after a warmup
+generation, on a machine under load average 34-45 (provisional; a
+quiet-machine re-run is owed). Full receipt with raw output:
+`artifacts/qa/bundled-cleanup-receipt-2026-09-02.md`.
+
+| Fixture | Metal p50 / p95 | CPU p50 / p95 |
+|---|---|---|
+| 59 words | 414 ms / 430 ms | 4.85 s / 5.08 s |
+| 199 words | 1.82 s / 1.92 s | 11.26 s / 13.42 s |
+
+Two findings worth carrying forward:
+
+1. **Metal is load-bearing, not an optimization.** On CPU a 200-word
+   dictation takes 11-13 s against a 6 s pre-insert budget, so every long
+   capture would time out and insert unformatted text. The macOS release
+   binary always compiles `candle-metal`; CPU is only reached when
+   `Device::new_metal(0)` fails, and that is logged.
+2. **The warmup has to generate, not just load.** Candle defers the Metal
+   shader compile to the first matmul, so a loaded-but-never-run model
+   still spent 7.5 s on its first real cleanup (and 0.44 s on every one
+   after) — blowing the budget once per launch, on the user's first
+   dictation. `prewarm()` runs a two-token throwaway generation.
+
+### Apple Foundation Models on macOS 26+ (item 12)
+
+New LLM provider `apple_language_model`, dictation lane only. A Swift
+helper (`scripts/native-macos-language-model-helper.swift`, built by
+`language-model-helper:build` into
+`dist-native/plainsong-native-language-model-helper`) reads one JSON
+request on stdin, checks `SystemLanguageModel.default.availability`, runs
+a `LanguageModelSession` with greedy sampling, and prints one JSON line.
+Guarded with `#if canImport(FoundationModels)` and
+`@available(macOS 26.0, *)` so it compiles and runs on the macOS 13
+support floor, answering `available: false` there. Built against SDK 26.2
+(`xcrun --sdk macosx --show-sdk-version`) with an
+`arm64-apple-macosx13.0` deployment target; signed with an empty
+entitlement set, packaged into
+`Contents/Resources/language-model-helper/`, and checked by
+`verify-packaged-native-helpers.mjs`.
+
+Availability is probed once at sidecar startup and cached; the Models
+screen can force a re-probe. The instructions string is ours and the
+transcript is passed as the prompt, never concatenated into it. Dictation
+lane only: the session's 4,096-token window is shared between prompt and
+response, which is smaller than one meeting chunk plus its summary.
+
+**Not validated end to end on this machine.** The probe, the protocol and
+the error paths were exercised against the real helper on macOS 27.0, but
+Apple Intelligence had not finished downloading its model
+(`model_not_ready`), so no generation has run. That step needs a Mac with
+Apple Intelligence enabled and its model downloaded.
+
 ### ERes2NetV2 speaker embeddings (item 8)
 Added `eres2netv2_speaker` model — int8 quantized, 28 MB, 192-dim
 embeddings from `phoenix124/kept-models` (Apache-2.0, derived from

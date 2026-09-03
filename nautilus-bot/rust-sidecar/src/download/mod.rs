@@ -1508,6 +1508,55 @@ impl DownloadManager {
             }
         }
 
+        // Check the bundled dictation-cleanup model. Four flat files directly
+        // under `models/bundled_cleanup` (see llm/bundled_local.rs), summed
+        // into one entry like the Qwen3-ASR bundle above.
+        //
+        // Without this branch the largest single thing the app downloads --
+        // 473 MiB -- was invisible in the models list and missing from the
+        // storage total, so a user looking for what to delete could neither
+        // see it nor account for the disk it had used.
+        let bundled_cleanup_dir = self
+            .models_dir
+            .join(crate::llm::bundled_local::MODEL_DIR_NAME);
+        if bundled_cleanup_dir.exists() {
+            let mut total_size = 0u64;
+            let mut files = 0usize;
+            let mut modified: Option<std::time::SystemTime> = None;
+            let mut entries = tokio::fs::read_dir(&bundled_cleanup_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if !path.is_file() || is_internal_model_metadata_file(&path) {
+                    continue;
+                }
+                if let Ok(metadata) = entry.metadata().await {
+                    total_size += metadata.len();
+                    files += 1;
+                    if let Ok(entry_modified) = metadata.modified() {
+                        modified = Some(match modified {
+                            Some(existing) if existing >= entry_modified => existing,
+                            _ => entry_modified,
+                        });
+                    }
+                }
+            }
+            if files > 0 {
+                models.push(DownloadedModel {
+                    // The license requires this exact name wherever the model
+                    // is named: "S1-mini" by "Superwhisper".
+                    name: format!(
+                        "{} by {}",
+                        crate::llm::bundled_local::MODEL_DISPLAY_NAME,
+                        crate::llm::bundled_local::MODEL_VENDOR
+                    ),
+                    provider: crate::llm::bundled_local::PROVIDER_SETTINGS_VALUE.to_string(),
+                    path: bundled_cleanup_dir.clone(),
+                    size_bytes: total_size,
+                    downloaded_at: modified.unwrap_or_else(std::time::SystemTime::now),
+                });
+            }
+        }
+
         Ok(models)
     }
 
@@ -2267,6 +2316,52 @@ mod tests {
             qwen3[0].size_bytes,
             1000 + 500 + 2,
             "the flat files are the footprint; the receipt is not"
+        );
+
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// 473 MiB of dictation-cleanup weights were invisible here: the listing
+    /// had no branch for `models/bundled_cleanup`, so the Models screen could
+    /// not show them and the storage total did not count them.
+    #[tokio::test]
+    async fn downloaded_model_listing_sums_the_bundled_cleanup_model() {
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-bundled-cleanup-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        let bundled_dir = models_dir.join(crate::llm::bundled_local::MODEL_DIR_NAME);
+        std::fs::create_dir_all(&bundled_dir).expect("create bundled cleanup dir");
+        std::fs::write(bundled_dir.join("s1-mini-q4_k_m.gguf"), vec![0u8; 4_000]).expect("weights");
+        std::fs::write(bundled_dir.join("tokenizer.json"), vec![0u8; 900]).expect("tokenizer");
+        std::fs::write(bundled_dir.join("LICENSE"), vec![0u8; 80]).expect("license");
+        std::fs::write(bundled_dir.join("NOTICE"), vec![0u8; 20]).expect("notice");
+        std::fs::write(
+            model_integrity_receipt_path(&bundled_dir.join("LICENSE")),
+            b"receipt",
+        )
+        .expect("receipt is metadata, not model footprint");
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager
+            .list_downloaded_models()
+            .await
+            .expect("listing should succeed");
+
+        let bundled: Vec<&DownloadedModel> = listed
+            .iter()
+            .filter(|model| model.provider == crate::llm::bundled_local::PROVIDER_SETTINGS_VALUE)
+            .collect();
+        assert_eq!(bundled.len(), 1, "one bundle entry, got {bundled:?}");
+        // Apache-2.0 + naming clause: this exact capitalization, wherever used.
+        assert_eq!(bundled[0].name, "S1-mini by Superwhisper");
+        assert_eq!(bundled[0].path, bundled_dir);
+        assert_eq!(
+            bundled[0].size_bytes,
+            4_000 + 900 + 80 + 20,
+            "every pinned file counts toward the footprint; the receipt does not"
         );
 
         std::fs::remove_dir_all(&models_dir).ok();

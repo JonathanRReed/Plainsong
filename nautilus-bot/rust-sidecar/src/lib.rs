@@ -75,7 +75,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::Condvar;
-#[cfg(not(test))]
 use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -251,10 +250,10 @@ const DICTATION_FORMAT_TIMEOUT_LOCAL: Duration = Duration::from_millis(6_000);
 /// Picks the pre-insert LLM formatting budget for `provider`, following the
 /// same local-vs-remote split as `analysis_timeouts`.
 fn dictation_format_timeout(provider: AnalysisProvider) -> Duration {
-    if provider == AnalysisProvider::Ollama {
-        DICTATION_FORMAT_TIMEOUT_LOCAL
-    } else {
+    if provider.is_remote() {
         DICTATION_FORMAT_TIMEOUT_REMOTE
+    } else {
+        DICTATION_FORMAT_TIMEOUT_LOCAL
     }
 }
 const MAX_BENCHMARK_AUDIO_BYTES: usize = 6 * 1024 * 1024;
@@ -314,6 +313,93 @@ mod dictation_format_timeout_tests {
                 DICTATION_FORMAT_TIMEOUT_REMOTE,
                 "{remote:?} is a remote provider and must get the shorter budget"
             );
+        }
+        // The two on-device providers pay a cold-load cost of their own -- a
+        // 484 MB GGUF and a Metal shader compile for one, an OS model load
+        // for the other -- and neither touches a network. They belong on the
+        // local side of this split, which is why the dispatch now asks
+        // `is_remote()` instead of comparing against Ollama.
+        for local in [
+            AnalysisProvider::BundledLocal,
+            AnalysisProvider::AppleLanguageModel,
+        ] {
+            assert_eq!(
+                dictation_format_timeout(local),
+                DICTATION_FORMAT_TIMEOUT_LOCAL,
+                "{local:?} runs on this Mac and must get the local budget"
+            );
+        }
+    }
+
+    #[test]
+    fn analysis_timeouts_follow_the_same_local_split_as_the_format_budget() {
+        for local in [
+            AnalysisProvider::Ollama,
+            AnalysisProvider::BundledLocal,
+            AnalysisProvider::AppleLanguageModel,
+        ] {
+            assert_eq!(
+                analysis_timeouts(local).request,
+                ANALYSIS_LOCAL_REQUEST_TIMEOUT,
+                "{local:?}"
+            );
+        }
+        assert_eq!(
+            analysis_timeouts(AnalysisProvider::OpenAi).request,
+            ANALYSIS_REMOTE_REQUEST_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn the_meetings_lane_refuses_a_dictation_only_provider_by_name() {
+        for dictation_only in [
+            AnalysisProvider::BundledLocal,
+            AnalysisProvider::AppleLanguageModel,
+        ] {
+            let error = enforce_meeting_lane_provider_policy(dictation_only)
+                .expect_err("a dictation-only provider must not serve meetings");
+            assert!(
+                error.contains(dictation_only.as_settings_value()),
+                "the refusal must name the provider: {error}"
+            );
+            assert!(
+                error.contains("Ollama") && error.contains("Models"),
+                "the refusal must name the alternative and where to change it: {error}"
+            );
+        }
+        for allowed in [
+            AnalysisProvider::Ollama,
+            AnalysisProvider::OpenAi,
+            AnalysisProvider::Anthropic,
+            AnalysisProvider::Gemini,
+            AnalysisProvider::DeepSeek,
+            AnalysisProvider::OllamaCloud,
+        ] {
+            assert!(
+                enforce_meeting_lane_provider_policy(allowed).is_ok(),
+                "{allowed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_custom_transform_refusal_names_the_provider_and_the_alternative() {
+        // Both call sites fall back to a deterministic local transform when
+        // this fires, so the message only reaches the log -- but it is the
+        // log line someone will read when a custom mode stops using AI.
+        for provider in [
+            AnalysisProvider::BundledLocal,
+            AnalysisProvider::AppleLanguageModel,
+        ] {
+            let error = custom_transform_unsupported_error(provider);
+            assert!(error.contains(provider.as_settings_value()), "{error}");
+            assert!(error.contains("custom transform prompt"), "{error}");
+            assert!(error.contains("Ollama"), "{error}");
+        }
+        // The refusal is keyed on the same predicate the dispatch uses, so a
+        // provider that can follow a prompt never lands here.
+        for allowed in [AnalysisProvider::Ollama, AnalysisProvider::Anthropic] {
+            assert!(!allowed.is_zero_setup_local(), "{allowed:?}");
         }
     }
 
@@ -1609,7 +1695,10 @@ struct AnalysisTimeouts {
 }
 
 fn analysis_timeouts(provider: AnalysisProvider) -> AnalysisTimeouts {
-    if provider == AnalysisProvider::Ollama {
+    // `is_remote()` rather than `== Ollama`: the bundled model and Apple's
+    // on-device model also pay a local cold-load cost and also never touch a
+    // network, so they belong on the local side of this split.
+    if !provider.is_remote() {
         AnalysisTimeouts {
             request: ANALYSIS_LOCAL_REQUEST_TIMEOUT,
             job: ANALYSIS_LOCAL_JOB_TIMEOUT,
@@ -4985,6 +5074,33 @@ where
     }
 }
 
+/// Why a provider cannot run a free-text dictation transform.
+///
+/// Named rather than inlined so the two call sites that fall back to a local
+/// transform log the same sentence, and so a test can assert it names the
+/// provider and the alternative.
+fn custom_transform_unsupported_error(provider: AnalysisProvider) -> String {
+    format!(
+        "'{}' can only clean up dictation; it cannot run a custom transform prompt. Choose Ollama or a cloud provider for custom modes and dictation commands.",
+        provider.as_settings_value()
+    )
+}
+
+/// Whether the meetings lane may be pointed at `provider`.
+///
+/// The two on-device providers refuse meeting work at request time; this is
+/// the check that keeps a settings file from selecting one in the first place
+/// and then failing every summary.
+fn enforce_meeting_lane_provider_policy(provider: AnalysisProvider) -> Result<(), String> {
+    if provider.supports_meeting_analysis() {
+        return Ok(());
+    }
+    Err(format!(
+        "'{}' only cleans up dictation and cannot write meeting summaries. Choose Ollama or a cloud provider for the meetings lane in Models.",
+        provider.as_settings_value()
+    ))
+}
+
 fn missing_provider_secret_error(provider: AnalysisProvider) -> String {
     format!(
         "Missing provider secret for '{}'. Add an API key in Settings > AI & Keys.",
@@ -5028,6 +5144,9 @@ async fn selected_analysis_runtime(
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state, lane).await?;
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+    if lane == settings::AiLane::Meetings {
+        enforce_meeting_lane_provider_policy(provider)?;
+    }
     let selected_model = model
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -5057,6 +5176,7 @@ async fn selected_analysis_runtime(
             remote_processing_gate: Arc::clone(&state.remote_processing_gate),
             api_key,
             timeout,
+            models_root: state.asr_manager.models_dir().clone(),
         },
         state.ollama_client.as_ref(),
     )
@@ -7065,6 +7185,15 @@ struct PreparedDictationFormatting {
     provider: AnalysisProvider,
     selected_model: String,
     system_prompt: String,
+    /// Closed-set register/structure/context, resolved from the same
+    /// destination-app category the system prompt's fragment came from.
+    ///
+    /// The two on-device providers cannot read the assembled `system_prompt`
+    /// -- S1-mini has no slot for it, and forwarding it to Apple's
+    /// instructions channel would elevate the fenced captured-context blob to
+    /// the model's highest-trust input. This carries the same steering as
+    /// app-authored data instead.
+    style: llm::StyleControl,
 }
 
 async fn prepare_dictation_formatting_request(
@@ -7166,6 +7295,7 @@ async fn prepare_dictation_formatting_request(
         provider,
         selected_model,
         system_prompt,
+        style: llm::bundled_local::style_control_for_category(app_category),
     })
 }
 
@@ -7198,6 +7328,7 @@ async fn execute_dictation_formatting_request(
                 temperature: Some(0.1),
                 json_schema: None,
                 requested_context_tokens: None,
+                dictation_style: Some(prepared.style),
             },
         )
         .await
@@ -7218,6 +7349,20 @@ async fn run_custom_dictation_transform_with_selected_provider(
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state, settings::AiLane::Dictation).await?;
     enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+    // Every caller of this function supplies a free-text transform prompt (a
+    // custom mode's own prompt, or a dictation command's), and neither
+    // on-device provider will act on one. The bundled model has no channel
+    // for a prompt at all -- its only steering is the three-axis control
+    // line. Apple's could follow one, but its client deliberately always
+    // sends *our* instructions and never the caller's assembled system
+    // prompt, because that string is also how the dictation path carries the
+    // fenced captured-context blob, and `instructions` is the higher-trust
+    // channel. Either way, running here would quietly do generic cleanup
+    // while reporting that the requested transform ran. Refusing sends the
+    // caller to its deterministic local transform instead.
+    if provider.is_zero_setup_local() {
+        return Err(custom_transform_unsupported_error(provider));
+    }
 
     let selected_model = settings_model
         .as_deref()
@@ -7245,6 +7390,7 @@ async fn run_custom_dictation_transform_with_selected_provider(
                 temperature: Some(0.1),
                 json_schema: None,
                 requested_context_tokens: None,
+                dictation_style: None,
             },
         )
         .await
@@ -10582,7 +10728,13 @@ mod tests {
             Some("preserved-salt")
         );
         assert!(!settings.privacy.remote_processing_enabled);
-        assert_eq!(settings.privacy.dictation_ai.provider, "ollama");
+        // A reset returns both lanes to their shipped defaults, which are no
+        // longer the same value: dictation goes back to the zero-setup
+        // bundled model, meetings to Ollama.
+        assert_eq!(
+            settings.privacy.dictation_ai.provider,
+            settings::DEFAULT_DICTATION_AI_PROVIDER
+        );
         assert_eq!(settings.privacy.meetings_ai.provider, "ollama");
         assert!(settings.transcription.dictation_custom_prompt.is_none());
 
@@ -12782,6 +12934,46 @@ mod tests {
         // Retired values from an older settings file.
         assert!(dictation_keep_warm_enabled("short"));
         assert!(dictation_keep_warm_enabled("long"));
+    }
+
+    /// Pointing the dictation lane somewhere else means nothing will ask the
+    /// bundled model for anything again, so its ~0.5 GB should not stay
+    /// resident for the rest of the session -- which is what happened while
+    /// `delete()` was the only thing that cleared the slot.
+    #[test]
+    fn leaving_the_bundled_lane_releases_the_resident_model() {
+        let bundled = llm::bundled_local::PROVIDER_SETTINGS_VALUE;
+        for destination in ["ollama", "openai", "anthropic", "apple_language_model"] {
+            assert!(
+                bundled_cleanup_runtime_should_unload(bundled, destination),
+                "leaving for {destination} must release the model"
+            );
+        }
+        // Staying put, and arriving from elsewhere, both keep it loaded: the
+        // next dictation is about to use it.
+        assert!(!bundled_cleanup_runtime_should_unload(bundled, bundled));
+        assert!(!bundled_cleanup_runtime_should_unload("ollama", bundled));
+        assert!(!bundled_cleanup_runtime_should_unload("ollama", "openai"));
+    }
+
+    /// The setting has to reach the provider, or "off" means nothing again.
+    #[test]
+    fn the_keep_warm_setting_reaches_the_bundled_provider() {
+        let _serialized = llm::bundled_local::KEEP_WARM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_keep_warm = "off".to_string();
+        apply_bundled_cleanup_keep_warm(&settings);
+        assert!(!llm::bundled_local::keep_warm_enabled());
+        assert!(llm::bundled_local::should_schedule_idle_unload(
+            llm::bundled_local::keep_warm_enabled()
+        ));
+
+        // Restore the default the rest of the suite expects.
+        settings.transcription.dictation_keep_warm = "on".to_string();
+        apply_bundled_cleanup_keep_warm(&settings);
+        assert!(llm::bundled_local::keep_warm_enabled());
     }
 
     #[tokio::test]
@@ -15574,6 +15766,166 @@ fn dictation_keep_warm_enabled(value: &str) -> bool {
     value.trim() != "off"
 }
 
+/// Last answer from the Apple Foundation Models availability probe.
+///
+/// Probed once at startup and cached: the answer only changes when the user
+/// changes a System Settings switch or finishes an OS-level model download,
+/// and spawning a helper process on every readiness render would be a
+/// per-frame process spawn. `refresh_apple_language_model_availability` is
+/// the escape hatch for a user who just turned Apple Intelligence on.
+static APPLE_LANGUAGE_MODEL_AVAILABILITY: LazyLock<
+    StdMutex<Option<llm::apple_language_model::AppleModelAvailability>>,
+> = LazyLock::new(|| StdMutex::new(None));
+
+fn cached_apple_language_model_availability(
+) -> Option<llm::apple_language_model::AppleModelAvailability> {
+    APPLE_LANGUAGE_MODEL_AVAILABILITY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn store_apple_language_model_availability(
+    availability: llm::apple_language_model::AppleModelAvailability,
+) {
+    *APPLE_LANGUAGE_MODEL_AVAILABILITY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(availability);
+}
+
+/// Re-probe and cache. Never prompts and never downloads anything.
+async fn refresh_apple_language_model_availability(
+) -> llm::apple_language_model::AppleModelAvailability {
+    let availability = llm::apple_language_model::probe().await;
+    store_apple_language_model_availability(availability.clone());
+    availability
+}
+
+#[cfg(test)]
+fn schedule_apple_language_model_probe() {
+    // Unit tests must not spawn the packaged helper: it is not built in a
+    // `cargo test` tree, and the answer would depend on whether the machine
+    // running the suite happens to have Apple Intelligence switched on.
+    // `parse_helper_line` and `availability_from_response` carry the
+    // behavior deterministically.
+}
+
+#[cfg(not(test))]
+fn schedule_apple_language_model_probe() {
+    tokio::spawn(async {
+        let availability = refresh_apple_language_model_availability().await;
+        if availability.available {
+            tracing::info!("Apple on-device language model is available for dictation cleanup");
+        } else {
+            tracing::info!(
+                "Apple on-device language model unavailable ({}): {}",
+                availability.reason.as_deref().unwrap_or("unknown"),
+                availability.detail.as_deref().unwrap_or("no detail")
+            );
+        }
+    });
+}
+
+#[cfg(test)]
+fn schedule_bundled_cleanup_prewarm(_settings: &settings::Settings) {
+    // Same reason as `schedule_dictation_model_prewarm`'s test stub: loading a
+    // 484 MB GGUF into the test process (against the user's real Application
+    // Support directory) would make the suite own native global state.
+}
+
+/// Load the bundled cleanup model in the background when it is the selected
+/// dictation route and keep-warm is on, so the first dictation of the session
+/// does not spend its 6 s budget on a cold load.
+#[cfg(not(test))]
+fn schedule_bundled_cleanup_prewarm(settings: &settings::Settings) {
+    if settings
+        .privacy
+        .ai_lane(settings::AiLane::Dictation)
+        .provider
+        != llm::bundled_local::PROVIDER_SETTINGS_VALUE
+    {
+        return;
+    }
+    if !dictation_keep_warm_enabled(&settings.transcription.dictation_keep_warm) {
+        return;
+    }
+    let Some(models_root) =
+        crate::paths::data_dir().map(|dir| dir.join("Plainsong").join("models"))
+    else {
+        return;
+    };
+    if !llm::bundled_local::artifacts_trusted(&llm::bundled_local::model_dir(&models_root)) {
+        // Not downloaded yet, or a receipt did not verify. The Models screen
+        // is where that gets fixed; a warmup is not the place to say so.
+        return;
+    }
+    tokio::task::spawn_blocking(move || match llm::bundled_local::prewarm(&models_root) {
+        Ok(backend) => tracing::info!(
+            "{} by {} warmed on {}",
+            llm::bundled_local::MODEL_DISPLAY_NAME,
+            llm::bundled_local::MODEL_VENDOR,
+            backend
+        ),
+        Err(error) => tracing::warn!("Bundled cleanup model warmup failed: {}", error),
+    });
+}
+
+/// Mirror the keep-warm setting into the bundled cleanup provider.
+///
+/// `keep_warm: "off"` used to mean only "skip the prewarm": the first real
+/// cleanup loaded the model anyway and nothing short of deleting it ever let
+/// go, so the switch saved memory exactly until the first dictation. The
+/// provider now unloads itself after an idle interval when this is off, and
+/// this is where the setting reaches it -- at startup and on every save, the
+/// same two places the prewarm is scheduled from.
+fn apply_bundled_cleanup_keep_warm(settings: &settings::Settings) {
+    llm::bundled_local::set_keep_warm(dictation_keep_warm_enabled(
+        &settings.transcription.dictation_keep_warm,
+    ));
+}
+
+/// Whether switching the dictation lane from `previous` to `next` should drop
+/// the resident bundled model.
+///
+/// Pointing the lane at Ollama or a cloud provider means nothing will ask the
+/// bundled model for anything again, but its ~0.5 GB stayed resident for the
+/// rest of the session because only `delete()` cleared the slot. Leaving the
+/// route is the moment to let go of it.
+fn bundled_cleanup_runtime_should_unload(previous: &str, next: &str) -> bool {
+    previous == llm::bundled_local::PROVIDER_SETTINGS_VALUE
+        && next != llm::bundled_local::PROVIDER_SETTINGS_VALUE
+}
+
+/// What the Models screen needs to render the bundled cleanup model's row.
+fn bundled_cleanup_model_status() -> serde_json::Value {
+    let models_root = crate::paths::data_dir()
+        .map(|dir| dir.join("Plainsong").join("models"))
+        .unwrap_or_default();
+    let dir = llm::bundled_local::model_dir(&models_root);
+    let missing = llm::bundled_local::untrusted_artifacts(&dir);
+    let backend = llm::bundled_local::available_backend();
+    serde_json::json!({
+        "provider": llm::bundled_local::PROVIDER_SETTINGS_VALUE,
+        "modelId": llm::bundled_local::MODEL_ID,
+        "displayName": llm::bundled_local::MODEL_DISPLAY_NAME,
+        "vendor": llm::bundled_local::MODEL_VENDOR,
+        "downloadBytes": llm::bundled_local::total_download_bytes(),
+        "bytesOnDisk": llm::bundled_local::bytes_on_disk(&models_root),
+        "ready": missing.is_empty(),
+        "missingFiles": missing,
+        "path": dir.to_string_lossy(),
+        // Which backend a cleanup would actually run on, and whether that
+        // backend can meet the pre-insert budget. "Downloaded" and "usable"
+        // are different questions here: on CPU a 200-word dictation takes
+        // 11-13 s against a 6 s budget, so the Models screen has to say so
+        // rather than let the user discover it as a recurring warning.
+        "backend": backend,
+        "backendMeetsBudget": llm::bundled_local::backend_meets_dictation_budget(backend),
+        "backendPresent": llm::bundled_local::backend_is_present(backend),
+        "residentBytes": llm::bundled_local::RESIDENT_BYTES,
+    })
+}
+
 fn dictation_provider_uses_local_model(provider: asr::AsrProviderType) -> bool {
     matches!(
         provider,
@@ -16777,6 +17129,7 @@ async fn generate_bounded_meeting_title(
                     "additionalProperties": false
                 })),
                 requested_context_tokens: None,
+                dictation_style: None,
             },
         )
         .await
@@ -22510,6 +22863,10 @@ pub async fn build_app_state() -> Result<AppState, String> {
         .join("models");
     let mut model_integrity_artifacts = download::managed_model_integrity_artifacts(&models_root);
     model_integrity_artifacts.extend(asr::model_integrity_artifacts(&models_root));
+    // The bundled cleanup model is loaded into an in-process inference
+    // runtime, so it has to be in the same fail-closed receipt set as the ASR
+    // weights rather than trusted because the file happens to be there.
+    model_integrity_artifacts.extend(llm::bundled_local::model_integrity_artifacts(&models_root));
     // This runs inline (fail-closed trust semantics are correct here), and
     // an artifact without a cached-and-trusted receipt yet is re-hashed in
     // full -- for many multi-gigabyte models on first launch after an
@@ -22563,6 +22920,9 @@ pub async fn build_app_state() -> Result<AppState, String> {
     )
     .await;
     schedule_dictation_model_prewarm(&settings_manager.settings().transcription);
+    apply_bundled_cleanup_keep_warm(settings_manager.settings());
+    schedule_bundled_cleanup_prewarm(settings_manager.settings());
+    schedule_apple_language_model_probe();
     let streaming_transcriber = Arc::new(streaming::StreamingTranscriber::new(Arc::clone(
         &asr_manager,
     )));
@@ -22766,11 +23126,12 @@ async fn save_settings_for_sidecar(
 
     apply_transcription_settings_to_asr_manager(&state.asr_manager, &settings.transcription).await;
 
-    let (previous_provider, previous_meeting_custom_prompt) = {
+    let (previous_provider, previous_meeting_custom_prompt, previous_dictation_ai_provider) = {
         let sm = state.settings_manager.lock().await;
         (
             sm.settings().transcription.default_provider.clone(),
             sm.settings().transcription.meeting_custom_prompt.clone(),
+            sm.settings().privacy.dictation_ai.provider.clone(),
         )
     };
     if settings.transcription.default_provider != previous_provider {
@@ -22867,6 +23228,8 @@ async fn save_settings_for_sidecar(
         normalize_optional_trimmed(settings.transcription.meeting_custom_prompt.clone())
             != normalize_optional_trimmed(previous_meeting_custom_prompt);
     let remote_processing_enabled = settings.privacy.remote_processing_enabled;
+    // Read before the settings move into the manager below.
+    let dictation_ai_provider_after_save = settings.privacy.dictation_ai.provider.clone();
     if !remote_processing_enabled {
         state.remote_processing_gate.set_allowed(false);
     }
@@ -22877,6 +23240,20 @@ async fn save_settings_for_sidecar(
         settings_manager.save().map_err(|e| e.to_string())?;
         emit_settings_changed(handle, settings_manager.settings());
         schedule_dictation_model_prewarm(&settings_manager.settings().transcription);
+        apply_bundled_cleanup_keep_warm(settings_manager.settings());
+        schedule_bundled_cleanup_prewarm(settings_manager.settings());
+    }
+
+    if bundled_cleanup_runtime_should_unload(
+        &previous_dictation_ai_provider,
+        &dictation_ai_provider_after_save,
+    ) {
+        // Synchronous and cheap: it drops one `Option` holding the weights.
+        llm::bundled_local::clear_cached_runtime();
+        tracing::info!(
+            "Dictation cleanup left {}; released the resident model",
+            llm::bundled_local::PROVIDER_SETTINGS_VALUE
+        );
     }
 
     if remote_processing_enabled {
@@ -31164,6 +31541,57 @@ pub async fn dispatch_command(
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
+        }
+        // ── Bundled cleanup model (S1-mini by Superwhisper) ────────────────
+        "get_bundled_cleanup_model_status" => Ok(bundled_cleanup_model_status()),
+        "download_bundled_cleanup_model" => {
+            let models_root = crate::paths::data_dir()
+                .ok_or("Could not find data directory")?
+                .join("Plainsong")
+                .join("models");
+            let progress_handle = handle.clone();
+            llm::bundled_local::download(&models_root, move |percentage| {
+                progress_handle.emit_event(
+                    "model-download-progress",
+                    serde_json::json!({
+                        "modelName": llm::bundled_local::MODEL_DIR_NAME,
+                        "percentage": percentage,
+                    }),
+                );
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            Ok(bundled_cleanup_model_status())
+        }
+        "delete_bundled_cleanup_model" => {
+            let models_root = crate::paths::data_dir()
+                .ok_or("Could not find data directory")?
+                .join("Plainsong")
+                .join("models");
+            llm::bundled_local::delete(&models_root).map_err(|e| e.to_string())?;
+            Ok(bundled_cleanup_model_status())
+        }
+        "get_apple_language_model_availability" => {
+            let refresh = params
+                .get("refresh")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let availability = match cached_apple_language_model_availability() {
+                Some(cached) if !refresh => cached,
+                _ => refresh_apple_language_model_availability().await,
+            };
+            let mut payload = serde_json::to_value(availability).map_err(|e| e.to_string())?;
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "provider".to_string(),
+                    llm::apple_language_model::PROVIDER_SETTINGS_VALUE.into(),
+                );
+                object.insert(
+                    "displayName".to_string(),
+                    llm::apple_language_model::DISPLAY_NAME.into(),
+                );
+            }
+            Ok(payload)
         }
         "is_silero_vad_model_downloaded" => {
             let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;

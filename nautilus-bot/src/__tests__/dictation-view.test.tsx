@@ -677,17 +677,21 @@ describe("DictationView modes", () => {
     ).toBeInTheDocument();
   });
 
-  it("describes keep warm as the speed choice it is, not a memory choice", async () => {
+  it("says which model keep warm frees and which it does not", async () => {
     render(<DictationView />);
 
     await openConfigTab("Capture");
 
-    // Off only skips the prewarm. The first transcription still loads the
-    // model into the process-global cache and nothing in the app evicts it,
-    // so "Off" costs latency once and saves no memory at all.
-    expect(
-      await screen.findByText(/stays in memory until you quit/i),
-    ).toBeInTheDocument();
+    // For the *speech* model this is still purely a latency choice: the first
+    // transcription loads it into the process-global cache and nothing evicts
+    // it. The built-in cleanup model is the one that now honors "off", so the
+    // copy has to separate them rather than make one claim about "the model".
+    const copy = await screen.findByText(/stays in memory until you quit/i);
+    expect(copy).toBeInTheDocument();
+    expect(copy.textContent).toMatch(/speech model stays in memory/i);
+    expect(copy.textContent).toMatch(
+      /built-in cleanup model is released a minute after your last dictation/i,
+    );
     expect(screen.queryByText(/frees the memory/i)).toBeNull();
   });
 

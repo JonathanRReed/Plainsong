@@ -14,6 +14,7 @@ import {
   AI_LANE_KEYS,
   describeAnalysisDestination,
   isRemoteAnalysisProvider,
+  isZeroSetupAnalysisProvider,
   type AiLaneKey,
 } from "@/components/models/ai-lanes";
 import { listen } from "@/lib/electron";
@@ -1322,6 +1323,13 @@ export function SettingsView() {
     ) {
       return [];
     }
+    // The two on-device providers serve exactly one model and have no
+    // catalogue endpoint. Returning early (rather than falling through the
+    // switch) keeps the "loading models…" spinner off a picker that will
+    // never populate.
+    if (isZeroSetupAnalysisProvider(providerName)) {
+      return [];
+    }
     setModelsLoading(true);
     try {
       switch (providerName) {
@@ -1611,10 +1619,13 @@ export function SettingsView() {
       }
 
       const cachedModels = getCachedModelsForProvider(providerName);
-      const initialModelId = coerceProviderModelId(
-        settings.privacy[lane].modelId,
-        cachedModels,
-      );
+      // A zero-setup provider takes no model id at all. Without this the
+      // previous provider's id (say `llama3.2`) rides along on the lane --
+      // the sidecar clears it on the next load, but the settings file and
+      // this screen would disagree until then.
+      const initialModelId = isZeroSetupAnalysisProvider(providerName)
+        ? null
+        : coerceProviderModelId(settings.privacy[lane].modelId, cachedModels);
       const initialSettings = {
         ...settings,
         privacy: {
