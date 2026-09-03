@@ -378,6 +378,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Audio uploaded to Google for a Gemini transcription is now deleted on every
+  path out, and you are told when it cannot be. Two exits skipped the delete
+  entirely: an upload that succeeded but answered with something Plainsong
+  could not read (the uploaded file's name was never captured, so there was
+  nothing to delete with), and a cancelled transcription (the delete ran after
+  the work finished, and cancelled work never finishes). In both cases the
+  recording stayed in Google's file store for its 48-hour lifetime with no
+  sign of it. A failed delete was also only a log line; it is now an audit
+  entry and, for a meeting, a note on the finished recording saying the audio
+  is still there and for how long.
 - A meeting sent to Gemini Transcribe is no longer loaded into memory whole.
   The recording is streamed to Google's Files API in 256 KB reads, the way
   the Deepgram route already did, so peak memory is one buffer instead of the

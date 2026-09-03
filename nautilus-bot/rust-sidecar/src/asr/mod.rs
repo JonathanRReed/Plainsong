@@ -55,6 +55,50 @@ pub(crate) fn cloud_asr_status_error(
     anyhow::anyhow!("{} API returned HTTP {}", provider_label, status.as_u16())
 }
 
+/// Warnings a provider raised about work it does *outside* the transcript.
+///
+/// Today there is exactly one producer: the Gemini route uploads audio to
+/// Google's Files API and then deletes it, and a delete that does not succeed
+/// leaves a user's meeting in a third-party store for the 48-hour default
+/// lifetime. That is worth an audit record and a word to the user, and it used
+/// to be a `tracing::warn!` nobody would ever read.
+///
+/// A process-wide sink rather than a field on [`TranscriptionResult`] because
+/// the delete outlives the result: it must also be reportable when the
+/// transcription itself failed, and when the request was cancelled and there is
+/// no result to attach anything to. Bounded, because nothing guarantees a
+/// drainer runs.
+const PROVIDER_CLEANUP_WARNING_LIMIT: usize = 32;
+
+fn provider_cleanup_warnings() -> &'static std::sync::Mutex<std::collections::VecDeque<String>> {
+    static WARNINGS: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<String>>> =
+        std::sync::OnceLock::new();
+    WARNINGS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// Record one cleanup warning. Oldest is dropped once the sink is full: a
+/// backlog nobody drained is not a reason to grow without bound.
+pub(crate) fn record_provider_cleanup_warning(warning: String) {
+    tracing::warn!("{}", warning);
+    let Ok(mut warnings) = provider_cleanup_warnings().lock() else {
+        return;
+    };
+    if warnings.len() >= PROVIDER_CLEANUP_WARNING_LIMIT {
+        warnings.pop_front();
+    }
+    warnings.push_back(warning);
+}
+
+/// Take everything recorded so far, leaving the sink empty. Called where a
+/// recording finishes, which is where the audit log and the user-visible
+/// notice both live.
+pub fn take_provider_cleanup_warnings() -> Vec<String> {
+    provider_cleanup_warnings()
+        .lock()
+        .map(|mut warnings| warnings.drain(..).collect())
+        .unwrap_or_default()
+}
+
 /// Read size for a streamed upload. Large enough that a long meeting is not
 /// thousands of tiny frames, small enough that peak memory is a constant.
 pub(crate) const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
@@ -342,6 +386,52 @@ pub trait AsrProvider: Send + Sync {
 }
 
 pub struct AsrProviderFactory;
+
+/// The sink exists so a failed cleanup reaches an audit record instead of a log
+/// line, so what is asserted is that it keeps what it is given and stays
+/// bounded when nobody drains it.
+///
+/// One test rather than two: the sink is process-wide, and two tests draining
+/// it in parallel would race each other rather than test anything.
+#[cfg(test)]
+mod provider_cleanup_warning_tests {
+    use super::{
+        record_provider_cleanup_warning, take_provider_cleanup_warnings,
+        PROVIDER_CLEANUP_WARNING_LIMIT,
+    };
+
+    #[test]
+    fn cleanup_warnings_are_kept_for_the_drainer_and_stay_bounded() {
+        let marker = "plainsong-cleanup-marker";
+        record_provider_cleanup_warning(format!("{marker}: the upload was not deleted"));
+        let drained = take_provider_cleanup_warnings();
+        assert!(
+            drained.iter().any(|warning| warning.contains(marker)),
+            "a recorded warning must survive to the drainer"
+        );
+        assert!(
+            take_provider_cleanup_warnings().is_empty(),
+            "draining must leave the sink empty, or a warning is reported twice"
+        );
+
+        for index in 0..(PROVIDER_CLEANUP_WARNING_LIMIT * 2) {
+            record_provider_cleanup_warning(format!("{marker}-flood-{index}"));
+        }
+        let flooded = take_provider_cleanup_warnings();
+        assert!(
+            flooded.len() <= PROVIDER_CLEANUP_WARNING_LIMIT,
+            "a backlog nobody drained must not grow without bound"
+        );
+        // The oldest are the ones dropped, so the most recent failure -- the
+        // one a user is most likely to still be able to act on -- survives.
+        assert!(flooded
+            .last()
+            .is_some_and(|warning| warning.ends_with(&format!(
+                "-flood-{}",
+                PROVIDER_CLEANUP_WARNING_LIMIT * 2 - 1
+            ))));
+    }
+}
 
 /// The upload path exists to keep a whole meeting out of memory, so that is
 /// what is asserted: bounded chunks, in order, adding up to the file, with the

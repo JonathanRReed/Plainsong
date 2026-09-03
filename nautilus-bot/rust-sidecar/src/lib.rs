@@ -19358,6 +19358,55 @@ async fn transcribe_recording_in_chunks(
     })
 }
 
+/// Turn any cleanup warnings a provider raised into a record the user can act
+/// on: an audit entry, and -- when there is a recording to attach it to -- a
+/// note on the finished recording.
+///
+/// Cleanup here means work a provider does outside the transcript. Today that
+/// is the Gemini route's delete of the audio it uploaded to Google's Files API:
+/// the transcript is fine either way, but "your meeting is still sitting in a
+/// third-party store" is not something to leave in a log line.
+async fn report_provider_cleanup_warnings(
+    state: &AppState,
+    app: Option<(&impl crate::sidecar_handle::AppEmitter, &str)>,
+) {
+    let warnings = asr::take_provider_cleanup_warnings();
+    if warnings.is_empty() {
+        return;
+    }
+    let mut db = state.db.lock().await;
+    for warning in &warnings {
+        if let Err(error) = db.log_audit_event(
+            "provider_cleanup_incomplete",
+            Some(serde_json::json!({
+                "recording_id": app.map(|(_, recording_id)| recording_id),
+                "detail": warning,
+            })),
+            "warning",
+        ) {
+            tracing::warn!("Failed to log a provider cleanup warning: {}", error);
+        }
+    }
+    drop(db);
+
+    if let Some((app, recording_id)) = app {
+        for warning in warnings {
+            // The completed event has already gone out, so this rides the same
+            // "a finished meeting can still carry a note" path the degraded
+            // transcript and the diarizer substitution use.
+            app.emit_event(
+                "recording-status-changed",
+                serde_json::json!({
+                    "recordingId": recording_id,
+                    "status": "completed",
+                    "message": warning,
+                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+        }
+    }
+}
+
 /// Whether speaker labels collected across `successful_chunks` provider
 /// requests can be trusted as one speaker space.
 ///
@@ -27679,6 +27728,12 @@ async fn stop_dictation_for_sidecar(
         let _ = db.log_audit_event("dictation_completed", Some(audit_details), "info");
     }
 
+    // A cloud dictation route may have left a file behind on the provider's
+    // side. There is no finished recording to hang a note on here, so this
+    // lands in the audit log only.
+    report_provider_cleanup_warnings(state, None::<(&crate::sidecar_handle::SidecarHandle, &str)>)
+        .await;
+
     {
         let mut recent_delivery_slot = state.recent_dictation_delivery.lock().await;
         if pasted || copied {
@@ -31162,6 +31217,12 @@ async fn run_meeting_transcription_pipeline(
                             );
                         }
                     }
+
+                    report_provider_cleanup_warnings(
+                        state_clone.as_ref(),
+                        Some((&handle_clone, recording_id_clone.as_str())),
+                    )
+                    .await;
 
                     if let Some(reason) = degraded_reason.as_deref() {
                         tracing::warn!(

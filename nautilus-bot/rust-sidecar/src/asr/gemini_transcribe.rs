@@ -67,6 +67,107 @@ const GEMINI_WHOLE_FILE_HTTP_TIMEOUTS: CloudAsrHttpTimeouts = CloudAsrHttpTimeou
 const FILE_ACTIVE_POLL_INTERVAL: Duration = Duration::from_millis(750);
 const FILE_ACTIVE_POLL_LIMIT: Duration = Duration::from_secs(5 * 60);
 
+/// The `file.name` an upload response carried, found without requiring the rest
+/// of the response to be the shape we expect.
+///
+/// This is what makes the delete unconditional. The typed parse used to run
+/// first, so an upload that succeeded but answered with an envelope we could
+/// not deserialise returned an error before any name was captured -- and the
+/// file then sat in Google's store until the 48-hour expiry. Both the
+/// documented `{ "file": { "name": ... } }` shape and a bare `{ "name": ... }`
+/// are accepted, because either one names a file that now exists.
+pub(crate) fn gemini_uploaded_file_name(envelope: &Value) -> Option<String> {
+    envelope
+        .get("file")
+        .and_then(|file| file.get("name"))
+        .or_else(|| envelope.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+/// What the user is told when the upload could not be removed. State, cause,
+/// next action -- and the retention period, because that is the part that
+/// actually matters to them.
+pub(crate) fn gemini_delete_failure_notice(http_status: Option<u16>) -> String {
+    let cause = match http_status {
+        Some(status) => format!("Google's API answered HTTP {status}"),
+        None => "the request to delete it did not complete".to_string(),
+    };
+    format!(
+        "The audio uploaded to Google for this transcription could not be deleted \
+         afterwards: {cause}. Google removes it automatically after 48 hours; you can \
+         delete it sooner from Google AI Studio."
+    )
+}
+
+/// What the user is told when there is not even a name to delete with.
+pub(crate) fn gemini_unknown_upload_notice() -> String {
+    "Audio was uploaded to Google for this transcription, but the response did not \
+     name the uploaded file, so Plainsong could not delete it. Google removes it \
+     automatically after 48 hours."
+        .to_string()
+}
+
+/// Deletes the upload on every exit path, including one that never returns.
+///
+/// The delete used to run after the transcription future finished, which
+/// covered errors but not two other exits: a successful upload whose response
+/// body did not parse (the name was never captured at all), and cancellation --
+/// if the meeting is cancelled or the request dropped mid-flight, the future
+/// never reaches the delete. `Drop` closes the second gap by spawning the
+/// delete; `delete_now` is the normal path, where awaiting it means a failure
+/// is recorded while the completion path is still there to report it.
+struct UploadedFileGuard {
+    client: reqwest::Client,
+    api_key: String,
+    name: Option<String>,
+}
+
+impl UploadedFileGuard {
+    fn new(client: &reqwest::Client, api_key: &str, name: Option<String>) -> Self {
+        if name.is_none() {
+            super::record_provider_cleanup_warning(gemini_unknown_upload_notice());
+        }
+        Self {
+            client: client.clone(),
+            api_key: api_key.to_string(),
+            name,
+        }
+    }
+
+    async fn delete_now(mut self) {
+        let Some(name) = self.name.take() else {
+            return;
+        };
+        GeminiTranscribeProvider::delete_file(&self.client, &self.api_key, &name).await;
+    }
+}
+
+impl Drop for UploadedFileGuard {
+    fn drop(&mut self) {
+        // Only reachable when the future was dropped before `delete_now` ran,
+        // i.e. cancellation. `take` means a normal completion drops a guard
+        // with nothing left to do.
+        let Some(name) = self.name.take() else {
+            return;
+        };
+        let client = self.client.clone();
+        let api_key = std::mem::take(&mut self.api_key);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    GeminiTranscribeProvider::delete_file(&client, &api_key, &name).await;
+                });
+            }
+            // No runtime to spawn on: say so rather than dropping the fact
+            // that a file was left behind.
+            Err(_) => super::record_provider_cleanup_warning(gemini_delete_failure_notice(None)),
+        }
+    }
+}
+
 /// The audio one request uploads.
 ///
 /// Two shapes because the two lanes arrive differently. Dictation already
@@ -417,7 +518,7 @@ impl GeminiTranscribeProvider {
         timeouts: CloudAsrHttpTimeouts,
         api_key: &str,
         audio: GeminiUploadSource,
-    ) -> Result<GeminiFile> {
+    ) -> Result<Value> {
         let (audio_body, byte_count) = audio.into_body().await?;
         let start = client
             .post(format!("{GEMINI_API_BASE}{GEMINI_FILES_UPLOAD_PATH}"))
@@ -469,10 +570,10 @@ impl GeminiTranscribeProvider {
             return Err(cloud_asr_status_error("Gemini Files", uploaded.status()));
         }
 
-        let envelope: GeminiFileEnvelope = read_cloud_asr_json(uploaded, "Gemini Files").await?;
-        envelope
-            .file
-            .context("Gemini Files API response carried no file")
+        // The raw envelope, not the typed one: the caller pulls the file name
+        // out of it before anything that can fail, so a body whose shape we do
+        // not recognise still leaves a name to delete.
+        read_cloud_asr_json::<Value>(uploaded, "Gemini Files").await
     }
 
     /// A freshly uploaded file is `PROCESSING` until Gemini has decoded it;
@@ -529,8 +630,11 @@ impl GeminiTranscribeProvider {
     /// Best-effort removal. Google expires uploads after 48 hours on its own,
     /// but leaving a user's meeting audio in a third-party file store for two
     /// days when one request removes it is not a defensible default. A failed
-    /// delete is logged, never surfaced as a transcription failure.
-    async fn delete_file(&self, client: &reqwest::Client, api_key: &str, name: &str) {
+    /// delete is never surfaced as a transcription failure -- the transcript is
+    /// fine -- but it is no longer only a log line either: it goes into the
+    /// cleanup-warning sink, which the completion path turns into an audit
+    /// record and a note on the finished recording.
+    async fn delete_file(client: &reqwest::Client, api_key: &str, name: &str) {
         let outcome = client
             .delete(format!("{GEMINI_API_BASE}/v1beta/{name}"))
             .header("x-goog-api-key", api_key)
@@ -539,12 +643,10 @@ impl GeminiTranscribeProvider {
             .await;
         match outcome {
             Ok(response) if response.status().is_success() => {}
-            Ok(response) => tracing::warn!(
-                "Gemini upload {} was not deleted (HTTP {})",
-                name,
-                response.status().as_u16()
-            ),
-            Err(_) => tracing::warn!("Gemini upload {} could not be deleted", name),
+            Ok(response) => super::record_provider_cleanup_warning(gemini_delete_failure_notice(
+                Some(response.status().as_u16()),
+            )),
+            Err(_) => super::record_provider_cleanup_warning(gemini_delete_failure_notice(None)),
         }
     }
 
@@ -560,12 +662,17 @@ impl GeminiTranscribeProvider {
         )?;
         let start = std::time::Instant::now();
 
-        let uploaded = self.upload_file(client, timeouts, &api_key, audio).await?;
-        let file_name = uploaded.name.clone();
-        let active = self.wait_for_active(client, &api_key, uploaded).await;
+        let envelope = self.upload_file(client, timeouts, &api_key, audio).await?;
+        // From this line on a file exists in Google's store, so the guard is
+        // created before anything else that can fail or be cancelled.
+        let guard = UploadedFileGuard::new(client, &api_key, gemini_uploaded_file_name(&envelope));
 
         let outcome = async {
-            let active = active?;
+            let uploaded = serde_json::from_value::<GeminiFileEnvelope>(envelope)
+                .context("Gemini Files API response could not be read")?
+                .file
+                .context("Gemini Files API response carried no file")?;
+            let active = self.wait_for_active(client, &api_key, uploaded).await?;
             let uri = active
                 .uri
                 .clone()
@@ -628,9 +735,7 @@ impl GeminiTranscribeProvider {
         }
         .await;
 
-        if let Some(name) = file_name.as_deref() {
-            self.delete_file(client, &api_key, name).await;
-        }
+        guard.delete_now().await;
 
         outcome
     }
@@ -896,6 +1001,65 @@ mod tests {
         let rendered = format!("{error:#}");
         assert!(rendered.contains("Gemini"));
         assert!(!rendered.contains("not json"));
+    }
+
+    /// The exact case that used to leak a file: an upload that succeeded and
+    /// answered with a body the typed parse rejects.
+    ///
+    /// Before this, the typed parse ran first and its `?` returned before any
+    /// name was captured, so `delete_file` was never called and the audio sat
+    /// in Google's store until the 48-hour expiry. The name is now read out of
+    /// the raw envelope first, which is what makes the delete unconditional.
+    #[test]
+    fn an_unparseable_upload_response_still_yields_a_file_to_delete() {
+        // `state` as a number is not the shape `GeminiFile` declares, so the
+        // typed parse fails -- but the file exists and is named.
+        let envelope = serde_json::json!({
+            "file": { "name": "files/abc123", "state": 7 }
+        });
+        assert!(
+            serde_json::from_value::<super::GeminiFileEnvelope>(envelope.clone()).is_err(),
+            "fixture must actually be unparseable, or this test proves nothing"
+        );
+        assert_eq!(
+            super::gemini_uploaded_file_name(&envelope).as_deref(),
+            Some("files/abc123")
+        );
+
+        // A bare `{ "name": ... }` names a file that exists just as much.
+        assert_eq!(
+            super::gemini_uploaded_file_name(&serde_json::json!({ "name": "files/bare" }))
+                .as_deref(),
+            Some("files/bare")
+        );
+        // Nothing to delete is None, not an empty name that would build a
+        // request against `/v1beta/`.
+        assert_eq!(
+            super::gemini_uploaded_file_name(&serde_json::json!({ "file": { "name": "  " } })),
+            None
+        );
+        assert_eq!(
+            super::gemini_uploaded_file_name(&serde_json::json!({ "error": "nope" })),
+            None
+        );
+    }
+
+    /// The warning is what the user actually reads, so it has to say the thing
+    /// that matters: the audio is still there, and for how long.
+    #[test]
+    fn a_failed_delete_tells_the_user_the_audio_is_still_on_googles_side() {
+        let with_status = super::gemini_delete_failure_notice(Some(503));
+        assert!(with_status.contains("could not be deleted"));
+        assert!(with_status.contains("503"));
+        assert!(with_status.contains("48 hours"));
+
+        let without_status = super::gemini_delete_failure_notice(None);
+        assert!(without_status.contains("48 hours"));
+        assert!(!without_status.contains("HTTP"));
+
+        let unknown = super::gemini_unknown_upload_notice();
+        assert!(unknown.contains("did not name the uploaded file"));
+        assert!(unknown.contains("48 hours"));
     }
 
     /// The resumable upload declares the total byte count in a header before
