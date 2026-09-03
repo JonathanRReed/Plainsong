@@ -8,6 +8,7 @@ import * as backend from "@/lib/backend";
 import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
 import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/navigation";
 import { publishCallCaptureRequest } from "@/lib/call-capture-request";
+import { formatDateTime } from "@/lib/format-locale";
 
 const speechSynthesisMock = {
   speak: vi.fn(),
@@ -2993,7 +2994,7 @@ describe("RecordingsView", () => {
     // and again in the header strip, so a bare date here is unreadable.
     expect(
       screen.getByText(
-        `ollama · llama3.2 · finished ${new Date("2026-07-25T12:00:00.000Z").toLocaleString()}`
+        `ollama · llama3.2 · finished ${formatDateTime("2026-07-25T12:00:00.000Z")}`
       )
     ).toBeInTheDocument();
   });

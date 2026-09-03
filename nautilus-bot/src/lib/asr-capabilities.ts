@@ -1,4 +1,5 @@
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
+import { compareStrings } from "@/lib/format-locale";
 
 export type DictationRoutePreference = "local" | "cloud";
 
@@ -800,7 +801,7 @@ export function asrLanguageOptions(
   }
   return [...boundary.codes]
     .map((code) => ({ value: code, label: asrLanguageName(code) }))
-    .sort((left, right) => left.label.localeCompare(right.label));
+    .sort((left, right) => compareStrings(left.label, right.label));
 }
 
 /**

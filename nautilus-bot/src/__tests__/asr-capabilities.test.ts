@@ -16,6 +16,7 @@ import {
   isSharedMeetingCompatible,
   resolveAsrLanguageBoundary,
 } from "@/lib/asr-capabilities";
+import { compareStrings } from "@/lib/format-locale";
 
 describe("ASR capability mappings", () => {
   it("recognises only the engines this build can still run", () => {
@@ -348,7 +349,7 @@ describe("language boundaries", () => {
     );
 
     expect(options).toHaveLength(25);
-    expect(options[0].label.localeCompare(options[1].label)).toBeLessThanOrEqual(0);
+    expect(compareStrings(options[0].label, options[1].label)).toBeLessThanOrEqual(0);
     expect(options).toContainEqual({ value: "uk", label: "Ukrainian" });
     expect(asrLanguageName("yue")).toBe("Cantonese");
     // An unnamed code degrades to itself rather than to a blank row.

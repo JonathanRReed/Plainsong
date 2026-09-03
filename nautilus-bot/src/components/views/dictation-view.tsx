@@ -188,6 +188,7 @@ import {
   type DictationModePreset,
   type DictationPhase,
 } from "@/features/dictation/runtime";
+import { compareStrings, formatDateTime } from "@/lib/format-locale";
 
 function getSafeLocalStorage(): Pick<Storage, "getItem" | "setItem"> | null {
   if (typeof window === "undefined") {
@@ -293,7 +294,7 @@ function CorrectionSuggestionRow({
                 } ${group.appTarget}`
               : "Seen anywhere"}
             {" · "}
-            {new Date(group.updatedAt).toLocaleString()}
+            {formatDateTime(group.updatedAt)}
             {group.suggestionIds.length > 1
               ? ` · ${group.suggestionIds.length} similar edits`
               : ""}
@@ -3327,7 +3328,7 @@ export function DictationView() {
         );
       }
       return [...prev, learnedEntry].sort((left, right) =>
-        left.spokenForm.localeCompare(right.spokenForm),
+        compareStrings(left.spokenForm, right.spokenForm),
       );
     });
   };
@@ -4293,7 +4294,7 @@ export function DictationView() {
                         )}
                       </p>
                       <p className="text-sm text-muted-foreground">
-                        {new Date(hit.createdAt).toLocaleString()} ·{" "}
+                        {formatDateTime(hit.createdAt)} ·{" "}
                         {hit.matchedField === "raw"
                           ? "Matched what Plainsong heard"
                           : "Matched the delivered text"}
@@ -4329,7 +4330,7 @@ export function DictationView() {
                     >
                       <p className="font-medium">{recording.title}</p>
                       <p className="text-sm text-muted-foreground">
-                        {new Date(recording.createdAt).toLocaleString()} ·{" "}
+                        {formatDateTime(recording.createdAt)} ·{" "}
                         {recording.status}
                       </p>
                     </button>
@@ -5903,7 +5904,7 @@ export function DictationView() {
                             </span>
                           </span>
                           <span className="shrink-0 text-muted-foreground">
-                            {new Date(entry.updatedAt).toLocaleString()}
+                            {formatDateTime(entry.updatedAt)}
                           </span>
                         </li>
                       ))}

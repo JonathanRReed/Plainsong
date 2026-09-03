@@ -144,6 +144,13 @@ export class LogicalSize {
 declare global {
   interface Window {
     electronAPI?: {
+      /**
+       * The locale the main process resolved from the Mac's own language
+       * preferences, for `src/lib/format-locale.ts`. A value, not a call: the
+       * packaged bundle ships one Chromium locale and ICU's default inside it
+       * is `en-US` whatever the Mac is set to, so every format site needs this.
+       */
+      appLocale?: string;
       invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown>;
       on(event: string, handler: (payload: unknown) => void): number;
       off(event: string, subscriptionId: number): void;

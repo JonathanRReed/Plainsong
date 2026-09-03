@@ -14,6 +14,7 @@ import type {
   AsrProviderInventory,
   AsrProviderType,
 } from "@/types";
+import { compareStrings } from "@/lib/format-locale";
 
 export type AsrRouteLane = "shared" | "dictation" | "meeting";
 type MeetingRoutePolicy = "prefer_local" | "best_available";
@@ -465,7 +466,7 @@ function sortRoutesForLane(
       return providerDelta;
     }
 
-    return left.label.localeCompare(right.label);
+    return compareStrings(left.label, right.label);
   });
 }
 

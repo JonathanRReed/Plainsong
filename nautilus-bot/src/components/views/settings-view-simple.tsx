@@ -168,6 +168,7 @@ import { UpdateStatusWidget, BetaChannelToggle } from "@/components/update";
 import { useToast } from "@/components/toast";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import type { ReadinessAssessment } from "@/features/readiness/product-readiness";
+import { formatDateTime } from "@/lib/format-locale";
 
 type TabId = SettingsTabId;
 type QueuedSettingsSave = {
@@ -5317,9 +5318,7 @@ export function SettingsView() {
                             </p>
                             <p className="mt-1 text-sm text-muted-foreground">
                               {latestSettingsSnapshot
-                                ? new Date(
-                                    latestSettingsSnapshot.timestamp,
-                                  ).toLocaleString()
+                                ? formatDateTime(latestSettingsSnapshot.timestamp)
                                 : "None yet."}{" "}
                               Settings and shortcuts only — no recordings or
                               transcripts.
@@ -5337,9 +5336,7 @@ export function SettingsView() {
                             </p>
                             <p className="mt-1 text-sm text-muted-foreground">
                               {latestFullBackup
-                                ? new Date(
-                                    latestFullBackup.timestamp,
-                                  ).toLocaleString()
+                                ? formatDateTime(latestFullBackup.timestamp)
                                 : "None yet."}{" "}
                               Everything, including recordings and
                               transcripts.

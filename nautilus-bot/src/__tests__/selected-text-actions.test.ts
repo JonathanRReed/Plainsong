@@ -494,7 +494,7 @@ describe("selected text actions", () => {
     expect(
       new Set(
         SELECTED_TEXT_ACTION_SEARCH_ALIASES.map((alias) =>
-          alias.toLocaleLowerCase(),
+          alias.toLocaleLowerCase("en-US"),
         ),
       ).size,
     ).toBe(SELECTED_TEXT_ACTION_SEARCH_ALIASES.length);
@@ -510,7 +510,7 @@ describe("selected text actions", () => {
       );
       expect(new Set(aliases).size).toBe(aliases.length);
       expect(
-        new Set(aliases.map((alias) => alias.toLocaleLowerCase())).size,
+        new Set(aliases.map((alias) => alias.toLocaleLowerCase("en-US"))).size,
       ).toBe(aliases.length);
       for (const alias of aliases) {
         aliasOwners.set(alias, [
