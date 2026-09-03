@@ -159,6 +159,76 @@ describe("PreMeetingBriefPanel", () => {
     expect(await screen.findByText("Sidecar is not running")).toBeTruthy();
   });
 
+  /**
+   * `L4` is the grounded runner's internal address for an evidence line. It
+   * means nothing on a surface that shows meetings, and the panel used to
+   * print it raw while ignoring `citations` entirely.
+   */
+  it("numbers the citations and links each one to the meeting it came from", async () => {
+    const onOpenMeeting = vi.fn();
+    backendMocks.invoke.mockResolvedValue(
+      result({
+        brief:
+          "You agreed to ship the importer L1. Alice still owes you numbers L2.",
+        citations: [
+          {
+            text: "Weekly sync (2026-08-26) — summary: Shipped the importer.",
+            lineId: "L1",
+            recordingId: "r1",
+            segmentId: "summary",
+            certainty: 0.9,
+          },
+          {
+            text: "Weekly sync (2026-08-26) — open item: Alice to send the revised numbers",
+            lineId: "L2",
+            recordingId: "r1",
+            segmentId: "action:0",
+            certainty: 0.8,
+          },
+        ],
+      }),
+    );
+    render(<PreMeetingBriefPanel event={EVENT} onOpenMeeting={onOpenMeeting} />);
+    fireEvent.click(screen.getByRole("button", { name: "Prepare" }));
+
+    expect(
+      await screen.findByText(
+        "You agreed to ship the importer [1]. Alice still owes you numbers [2].",
+      ),
+    ).toBeTruthy();
+    // The markers in the prose and the entries beneath it are one set.
+    expect(screen.getByText("[1]")).toBeTruthy();
+    expect(screen.getByText("[2]")).toBeTruthy();
+    expect(
+      screen.getByText(/summary: Shipped the importer/),
+    ).toBeTruthy();
+
+    // Each reference opens the meeting it came from, by title.
+    const links = screen.getAllByRole("button", { name: "Weekly sync" });
+    expect(links).toHaveLength(2);
+    fireEvent.click(links[0]);
+    expect(onOpenMeeting).toHaveBeenCalledWith("r1");
+  });
+
+  it("leaves an evidence ID the brief cites but the sidecar did not return", async () => {
+    // Numbering it would claim the brief cites something it does not. The
+    // grounded warning already says so out loud.
+    backendMocks.invoke.mockResolvedValue(
+      result({
+        brief: "Something happened L9.",
+        grounded: false,
+        citations: [],
+      }),
+    );
+    render(<PreMeetingBriefPanel event={EVENT} />);
+    fireEvent.click(screen.getByRole("button", { name: "Prepare" }));
+
+    expect(await screen.findByText("Something happened L9.")).toBeTruthy();
+    expect(
+      screen.getByText(/could not be traced back to a cited meeting/),
+    ).toBeTruthy();
+  });
+
   it("opens a cited meeting", async () => {
     backendMocks.invoke.mockResolvedValue(result());
     const onOpenMeeting = vi.fn();

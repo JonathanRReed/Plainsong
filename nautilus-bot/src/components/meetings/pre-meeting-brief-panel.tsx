@@ -7,6 +7,7 @@ import {
   type RelatedMeeting,
 } from "@/lib/backend/calendar";
 import { meetingAttendeesFromCalendar } from "@/lib/attendees";
+import { numberBriefCitations } from "@/lib/meeting-brief-citations";
 import type { CalendarEventSummary } from "@/lib/calendar-events";
 
 interface PreMeetingBriefPanelProps {
@@ -56,6 +57,13 @@ export function PreMeetingBriefPanel({
   const [result, setResult] = useState<MeetingBriefResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The model cites evidence by the grounded runner's own line IDs ("L4"),
+  // which mean nothing on a surface that shows meetings. Numbered here so the
+  // markers in the prose and the list beneath it are the same references.
+  const numbered = result?.brief
+    ? numberBriefCitations(result.brief, result.citations, result.related)
+    : null;
 
   const run = async (refresh: boolean) => {
     setLoading(true);
@@ -135,17 +143,41 @@ export function PreMeetingBriefPanel({
         </p>
       ) : null}
 
-      {result?.brief ? (
+      {numbered ? (
         <>
-          <p className="mt-2 whitespace-pre-wrap text-sm">{result.brief}</p>
+          <p className="mt-2 whitespace-pre-wrap text-sm">{numbered.text}</p>
+          {numbered.references.length > 0 ? (
+            <ol className="mt-2 space-y-1">
+              {numbered.references.map((reference) => (
+                <li
+                  key={`${reference.number}-${reference.lineId ?? "unattributed"}`}
+                  className="text-sm text-muted-foreground"
+                >
+                  <span className="time-spec mr-1.5">[{reference.number}]</span>
+                  {reference.recordingId && onOpenMeeting ? (
+                    <button
+                      type="button"
+                      className="underline underline-offset-2 hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      onClick={() => onOpenMeeting(reference.recordingId as string)}
+                    >
+                      {reference.title ?? "Open the cited meeting"}
+                    </button>
+                  ) : (
+                    <span>{reference.title ?? "A meeting on this Mac"}</span>
+                  )}
+                  <span className="ml-1.5 italic">&ldquo;{reference.text}&rdquo;</span>
+                </li>
+              ))}
+            </ol>
+          ) : null}
           <p className="mt-2 text-sm text-muted-foreground">
-            {`Written by ${result.actualProvider ?? "the analysis provider"}${
-              result.model ? ` (${result.model})` : ""
-            } from ${result.related.length} earlier ${
-              result.related.length === 1 ? "meeting" : "meetings"
-            } on this Mac${result.cached ? ", from cache" : ""}.`}
+            {`Written by ${result?.actualProvider ?? "the analysis provider"}${
+              result?.model ? ` (${result.model})` : ""
+            } from ${result?.related.length ?? 0} earlier ${
+              result?.related.length === 1 ? "meeting" : "meetings"
+            } on this Mac${result?.cached ? ", from cache" : ""}.`}
           </p>
-          {result.grounded === false ? (
+          {result?.grounded === false ? (
             <p className="mt-1 text-sm text-rust">
               Some of this brief could not be traced back to a cited meeting.
               Check it against the sources below.
