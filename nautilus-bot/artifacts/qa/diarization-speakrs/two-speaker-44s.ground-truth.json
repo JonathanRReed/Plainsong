@@ -1,0 +1,54 @@
+{
+  "audio": "artifacts/qa/diarization-speakrs/two-speaker-44s.wav",
+  "source": "scripts/fixtures/real-speech-44s.wav",
+  "sampleRate": 16000,
+  "durationSeconds": 44,
+  "turnSeconds": 6,
+  "pitchRatio": 0.82,
+  "speakers": [
+    "A",
+    "B"
+  ],
+  "turns": [
+    {
+      "start": 0,
+      "end": 6,
+      "speaker": "A"
+    },
+    {
+      "start": 6,
+      "end": 12,
+      "speaker": "B"
+    },
+    {
+      "start": 12,
+      "end": 18,
+      "speaker": "A"
+    },
+    {
+      "start": 18,
+      "end": 24,
+      "speaker": "B"
+    },
+    {
+      "start": 24,
+      "end": 30,
+      "speaker": "A"
+    },
+    {
+      "start": 30,
+      "end": 36,
+      "speaker": "B"
+    },
+    {
+      "start": 36,
+      "end": 42,
+      "speaker": "A"
+    },
+    {
+      "start": 42,
+      "end": 44,
+      "speaker": "B"
+    }
+  ]
+}
