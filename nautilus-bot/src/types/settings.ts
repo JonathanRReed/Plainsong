@@ -27,6 +27,56 @@ export interface Settings {
    */
   automation?: AutomationSettings;
   theme: "light" | "dark" | "system";
+  /**
+   * Optional on this side only. The Rust struct always serializes it, so a
+   * live app always receives it; declaring it optional keeps every existing
+   * `Settings` literal (tests, the settings screen's merge path) compiling
+   * without a mechanical edit, and matches how a settings.json written before
+   * this section existed loads: absent, then defaulted.
+   */
+  ai?: AiSettings;
+}
+
+/**
+ * Which chat surface a saved prompt is offered on.
+ *
+ * `meeting` is the per-meeting chat (one transcript in context), `memory` is
+ * the dashboard's "ask your meetings" (many). They are genuinely different
+ * questions — "draft a follow-up message" makes no sense against a whole
+ * library — so the picker filters rather than showing everything everywhere.
+ */
+export type SavedPromptScope = "meeting" | "memory" | "both";
+
+/**
+ * A reusable question the reader keeps around ("Recipes", in Granola's
+ * words). Mirrors `SavedPrompt` in rust-sidecar/src/settings.rs -- same
+ * shape, same sanitization discipline (dropped if malformed, capped in count
+ * and length), exactly like `MeetingCustomTemplate`.
+ *
+ * A stored entry whose `id` is one of the built-ins in
+ * `src/lib/saved-prompts.ts` is an OVERRIDE of that built-in, not a separate
+ * prompt: it is how an edited or hidden starter prompt is persisted. The
+ * sidecar recomputes `builtIn` from the id on every load and save, so the
+ * flag can be neither spoofed onto a user prompt nor stripped off a built-in.
+ */
+export interface SavedPrompt {
+  id: string;
+  name: string;
+  prompt: string;
+  scope: SavedPromptScope;
+  /** Derived from the id by the sidecar; never trusted from the wire. */
+  builtIn?: boolean;
+  /**
+   * Built-in starters can be hidden but not deleted -- deleting one would
+   * only mean it came back on the next release with a different id history.
+   * A hidden prompt is kept in settings so the choice survives, and skipped
+   * by the picker.
+   */
+  hidden?: boolean;
+}
+
+export interface AiSettings {
+  savedPrompts?: SavedPrompt[];
 }
 
 /**
@@ -90,6 +140,13 @@ export interface DictationCustomMode {
   routePreference?: "local" | "cloud" | null;
   languageOverride?: string | null;
   livePreviewEnabled?: boolean | null;
+  /**
+   * Inverse text normalization for this profile. `null`/absent inherits the
+   * base style's value, which is what a profile saved before this setting
+   * existed carries. Mirrors `numbers_as_digits` on `DictationCustomMode` in
+   * rust-sidecar/src/settings.rs.
+   */
+  numbersAsDigits?: boolean | null;
   insertionMode: "auto" | "clipboard_only";
   contextSource: "none" | "clipboard" | "selected_text" | "application_context";
   saveToInbox: boolean;
@@ -181,6 +238,14 @@ export interface TranscriptionSettings {
     | "notes"
     | "meeting_follow_up"
     | "custom";
+  /**
+   * Per-preset inverse-text-normalization overrides, sparse: an absent key
+   * means the preset default (see `defaultNumbersAsDigits` in
+   * `src/lib/dictation-numbers.ts`). Mirrors `dictation_numbers_as_digits` in
+   * rust-sidecar/src/settings.rs, which drops keys for unknown presets on
+   * load.
+   */
+  dictationNumbersAsDigits?: Partial<Record<DictationBaseModePreset, boolean>>;
   dictationSelectedCustomModeId?: string | null;
   dictationCustomModes?: DictationCustomMode[];
   dictationContextSource?: "none" | "clipboard" | "selected_text" | "application_context";

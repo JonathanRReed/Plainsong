@@ -8,9 +8,21 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
+/// The ONNX embedding + clustering backend. Gated because it is the only part
+/// of this module that needs `ndarray` and `ort`, both of which are optional
+/// dependencies pulled in by the `diarization` feature; the module's types,
+/// readiness rules and transcript merge are feature-independent and stay
+/// compiled in so every call site keeps one shape. Same pattern as
+/// `asr::whisper` / `asr::whisper_stub`.
+#[cfg(feature = "diarization")]
 mod embedder;
 pub mod voiceprints;
 
+/// EXPERIMENTAL alternative backend; see the module docs. Off by default.
+#[cfg(feature = "diarization-speakrs")]
+mod speakrs_backend;
+
+#[cfg(feature = "diarization")]
 pub use embedder::{generate_segments, EmbeddingClusterer};
 
 #[cfg(feature = "diarization")]
@@ -86,33 +98,28 @@ impl DiarizationEngine {
         }
     }
 
-    /// Check if real diarization is available
-    pub fn is_real_available() -> bool {
-        #[cfg(feature = "diarization")]
-        {
-            let extractor = embedder::SpeakerEmbeddingExtractor::new();
-            match &extractor {
-                Ok(e) => e.is_model_available(),
-                Err(err) => {
-                    tracing::warn!("Failed to create embedding extractor: {}", err);
-                    false
-                }
-            }
-        }
-        #[cfg(not(feature = "diarization"))]
-        {
-            tracing::warn!("Diarization feature not compiled in");
-            false
-        }
-    }
-
     /// Run diarization on audio file
     pub async fn diarize(&mut self, audio_path: &Path, duration: f64) -> Result<DiarizationResult> {
         tracing::info!("Running speaker diarization for {:.1}s audio", duration);
         self.diarize_real(audio_path, duration).await
     }
 
+    /// Without the `diarization` feature there is no ONNX runtime to embed with
+    /// and no clusterer compiled in. Say that, rather than running an empty
+    /// pipeline to the same conclusion by a longer route.
+    #[cfg(not(feature = "diarization"))]
+    async fn diarize_real(
+        &mut self,
+        _audio_path: &Path,
+        _duration: f64,
+    ) -> Result<DiarizationResult> {
+        Err(anyhow::anyhow!(
+            "Speaker diarization is not compiled into this build (the `diarization` feature is off)."
+        ))
+    }
+
     /// Real diarization using speaker embeddings and clustering
+    #[cfg(feature = "diarization")]
     async fn diarize_real(
         &mut self,
         audio_path: &Path,
@@ -132,12 +139,8 @@ impl DiarizationEngine {
         let extractor = embedder::SpeakerEmbeddingExtractor::with_model(&self.model_id)
             .context("Failed to create embedding extractor")?;
 
-        #[cfg(feature = "diarization")]
         let embeddings: Vec<(f64, f64, Array1<f32>)> =
             extractor.extract_embeddings(audio_path, &segments).await?;
-
-        #[cfg(not(feature = "diarization"))]
-        let embeddings = extractor.extract_embeddings(audio_path, &segments).await?;
 
         if embeddings.is_empty() {
             return Err(anyhow::anyhow!(
@@ -362,9 +365,141 @@ impl Default for DiarizationEngine {
     }
 }
 
-/// Run diarization with strict real-model requirement.
-pub async fn run_diarization(audio_path: &Path) -> Result<DiarizationResult> {
-    run_diarization_with_model(audio_path, "ecapa_tdnn_speaker").await
+/// The embedding model every install starts on and every fallback lands on.
+pub const DEFAULT_EMBEDDING_MODEL_ID: &str = "ecapa_tdnn_speaker";
+
+/// Label for a diarization model, as the picker names it.
+///
+/// One table so the picker, the readiness probe and the fallback notice cannot
+/// name the same model three different ways. An id this build does not know is
+/// returned as-is rather than given an invented name.
+pub fn model_label(model_id: &str) -> &str {
+    #[cfg(feature = "diarization-speakrs")]
+    if model_id == crate::download::SPEAKRS_MODEL_ID {
+        return "pyannote community-1 (experimental)";
+    }
+    match model_id {
+        "ecapa_tdnn_speaker" => "ECAPA-TDNN 512",
+        "resnet34_speaker" => "ResNet34",
+        "campplus_speaker" => "CAM++",
+        "eres2netv2_speaker" => "ERes2NetV2 (int8)",
+        other => other,
+    }
+}
+
+/// The `.onnx` artifact an embedding-model id actually loads.
+///
+/// Unknown ids resolve to [`DEFAULT_EMBEDDING_MODEL_ID`], which is what
+/// [`embedder::SpeakerEmbeddingExtractor::with_model`] has always done with a
+/// filename it does not recognise. Readiness has to agree with the file the run
+/// will open, or the picker promises a model the run cannot load.
+pub fn embedding_model_artifact_id(model_id: &str) -> &'static str {
+    match model_id {
+        "resnet34_speaker" => "resnet34_speaker",
+        "campplus_speaker" => "campplus_speaker",
+        "eres2netv2_speaker" => "eres2netv2_speaker",
+        _ => DEFAULT_EMBEDDING_MODEL_ID,
+    }
+}
+
+/// Directory the single-file embedding models are downloaded to.
+pub(crate) fn diarization_models_dir() -> std::path::PathBuf {
+    crate::paths::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Plainsong")
+        .join("models")
+        .join("diarization")
+}
+
+/// Readiness of one embedding model inside an explicit directory.
+///
+/// Takes the directory so the rule is testable against a fixture instead of the
+/// user's own data directory.
+pub(crate) fn is_embedding_model_available_in(models_dir: &Path, model_id: &str) -> bool {
+    let artifact_id = embedding_model_artifact_id(model_id);
+    crate::download::is_diarization_model_artifact_trusted(
+        artifact_id,
+        &models_dir.join(format!("{artifact_id}.onnx")),
+    )
+}
+
+/// Whether the diarization model the user selected can actually run right now.
+///
+/// Per-model because the backends have different readiness conditions: the
+/// embedding backend needs one verified `.onnx`, the experimental speakrs
+/// backend needs a ten-file bundle. Callers that gate an automatic pass on
+/// "is diarization available" must ask about the model they are about to run,
+/// not about the default one -- this used to probe ECAPA-TDNN whatever the
+/// argument said, so a user who picked CAM++ without downloading it passed the
+/// gate and then lost speaker labels on every meeting.
+pub fn is_model_available(model_id: &str) -> bool {
+    #[cfg(feature = "diarization-speakrs")]
+    if model_id == crate::download::SPEAKRS_MODEL_ID {
+        return speakrs_backend::is_available();
+    }
+    // `cfg!` rather than `#[cfg]`: a build without the feature has no ONNX
+    // runtime and no clusterer compiled in, so nothing it finds on disk can
+    // actually run and readiness has to be false -- but the rule itself stays
+    // compiled either way, so there is one function to test instead of two.
+    cfg!(feature = "diarization")
+        && is_embedding_model_available_in(&diarization_models_dir(), model_id)
+}
+
+/// The model a run will actually use, and what to tell the user when that is
+/// not the one they picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDiarizationModel {
+    /// The id to hand to [`run_diarization_with_model`].
+    pub model_id: String,
+    /// Copy for the meeting when the picked model was not on disk and the
+    /// default ran in its place. `None` when the picked model ran.
+    pub fallback_notice: Option<String>,
+}
+
+/// Copy for the one case where the picked model is not downloaded and the
+/// default runs instead: state, cause, and the next action, in that order.
+pub fn model_fallback_notice(requested_id: &str, ran_id: &str) -> String {
+    format!(
+        "Speaker labels used {} because {} is not downloaded. Download it under \
+         Settings, Speaker separation model, to use it.",
+        model_label(ran_id),
+        model_label(requested_id)
+    )
+}
+
+/// Pick the model a run should use given what is on disk.
+///
+/// `None` means nothing can run: neither the picked model nor the default is
+/// downloaded, so the caller must not claim speaker labels at all. Falling back
+/// is better than the previous behaviour (an error logged at warn level and a
+/// meeting with no speakers) only because the substitution is reported -- a
+/// silent swap would be a capability claim the user never agreed to.
+pub fn resolve_model_for_run(requested_id: &str) -> Option<ResolvedDiarizationModel> {
+    resolve_model_for_run_with(requested_id, is_model_available)
+}
+
+/// The rule behind [`resolve_model_for_run`], with readiness passed in so the
+/// policy is testable without a models directory or ONNX Runtime.
+fn resolve_model_for_run_with(
+    requested_id: &str,
+    is_available: impl Fn(&str) -> bool,
+) -> Option<ResolvedDiarizationModel> {
+    if is_available(requested_id) {
+        return Some(ResolvedDiarizationModel {
+            model_id: requested_id.to_string(),
+            fallback_notice: None,
+        });
+    }
+    if requested_id != DEFAULT_EMBEDDING_MODEL_ID && is_available(DEFAULT_EMBEDDING_MODEL_ID) {
+        return Some(ResolvedDiarizationModel {
+            model_id: DEFAULT_EMBEDDING_MODEL_ID.to_string(),
+            fallback_notice: Some(model_fallback_notice(
+                requested_id,
+                DEFAULT_EMBEDDING_MODEL_ID,
+            )),
+        });
+    }
+    None
 }
 
 /// Run diarization with a specific speaker embedding model.
@@ -372,9 +507,16 @@ pub async fn run_diarization_with_model(
     audio_path: &Path,
     model_id: &str,
 ) -> Result<DiarizationResult> {
-    if !DiarizationEngine::is_real_available() {
+    #[cfg(feature = "diarization-speakrs")]
+    if model_id == crate::download::SPEAKRS_MODEL_ID {
+        let duration = get_audio_duration(audio_path).await?;
+        return speakrs_backend::run(audio_path, duration).await;
+    }
+
+    if !is_model_available(model_id) {
         return Err(anyhow::anyhow!(
-            "Real diarization model is not available. Install/configure diarization models first."
+            "Real diarization model is not available: {} is not downloaded. Install/configure diarization models first.",
+            model_label(model_id)
         ));
     }
 
@@ -400,18 +542,169 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Install `model_id` into `models_dir` the way a completed download leaves
+    /// it: the artifact plus the integrity receipt keyed to its pinned digest.
+    /// The bytes are a stand-in -- the receipt records size and mtime against
+    /// the pin, so readiness is decided without re-hashing megabytes here.
+    async fn install_embedding_model(models_dir: &Path, model_id: &str) {
+        let sha256 = crate::download::diarization_model_expected_sha256(model_id)
+            .expect("a pinned diarization model");
+        let path = models_dir.join(format!("{model_id}.onnx"));
+        tokio::fs::create_dir_all(models_dir).await.expect("dir");
+        tokio::fs::write(&path, format!("fixture-{model_id}"))
+            .await
+            .expect("write model");
+        crate::download::record_model_integrity_receipt_for_tests(&path, sha256)
+            .await
+            .expect("receipt");
+    }
+
+    fn scratch_models_dir(name: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(name)
+            .join(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// The regression: readiness used to probe ECAPA-TDNN whatever it was asked
+    /// about, so a user who selected CAM++ without downloading it passed the
+    /// gate on the automatic pass and then got no speaker labels at all.
+    #[tokio::test]
+    async fn readiness_answers_about_the_selected_model_not_the_default() {
+        let models_dir = scratch_models_dir("plainsong-diarization-readiness");
+        tokio::fs::create_dir_all(&models_dir).await.expect("dir");
+
+        for model_id in [
+            "ecapa_tdnn_speaker",
+            "resnet34_speaker",
+            "campplus_speaker",
+            "eres2netv2_speaker",
+        ] {
+            assert!(
+                !is_embedding_model_available_in(&models_dir, model_id),
+                "{model_id} is not downloaded yet"
+            );
+        }
+
+        install_embedding_model(&models_dir, "ecapa_tdnn_speaker").await;
+        assert!(is_embedding_model_available_in(
+            &models_dir,
+            "ecapa_tdnn_speaker"
+        ));
+        for missing in ["resnet34_speaker", "campplus_speaker", "eres2netv2_speaker"] {
+            assert!(
+                !is_embedding_model_available_in(&models_dir, missing),
+                "{missing} must not be reported available because ECAPA-TDNN is"
+            );
+        }
+
+        install_embedding_model(&models_dir, "campplus_speaker").await;
+        assert!(is_embedding_model_available_in(
+            &models_dir,
+            "campplus_speaker"
+        ));
+        assert!(!is_embedding_model_available_in(
+            &models_dir,
+            "resnet34_speaker"
+        ));
+
+        tokio::fs::remove_dir_all(&models_dir).await.ok();
+    }
+
+    /// An id outside the four is what `SpeakerEmbeddingExtractor::with_model`
+    /// loads ECAPA-TDNN for, so readiness has to answer for ECAPA-TDNN too --
+    /// otherwise the probe and the run disagree about the same settings value.
+    #[tokio::test]
+    async fn an_unknown_model_id_reads_the_default_artifact() {
+        assert_eq!(
+            embedding_model_artifact_id("not_a_real_model"),
+            DEFAULT_EMBEDDING_MODEL_ID
+        );
+        assert_eq!(
+            embedding_model_artifact_id("campplus_speaker"),
+            "campplus_speaker"
+        );
+
+        let models_dir = scratch_models_dir("plainsong-diarization-unknown-id");
+        tokio::fs::create_dir_all(&models_dir).await.expect("dir");
+        assert!(!is_embedding_model_available_in(
+            &models_dir,
+            "not_a_real_model"
+        ));
+
+        install_embedding_model(&models_dir, "ecapa_tdnn_speaker").await;
+        assert!(is_embedding_model_available_in(
+            &models_dir,
+            "not_a_real_model"
+        ));
+
+        tokio::fs::remove_dir_all(&models_dir).await.ok();
+    }
+
+    #[test]
+    fn a_missing_selected_model_runs_the_default_and_says_so() {
+        let only_default = |id: &str| id == DEFAULT_EMBEDDING_MODEL_ID;
+
+        let resolved = resolve_model_for_run_with("campplus_speaker", only_default)
+            .expect("the default can still run");
+        assert_eq!(resolved.model_id, DEFAULT_EMBEDDING_MODEL_ID);
+        let notice = resolved
+            .fallback_notice
+            .expect("a substitution is reported");
+        assert!(notice.contains("CAM++"), "{notice}");
+        assert!(notice.contains("ECAPA-TDNN 512"), "{notice}");
+        assert!(notice.contains("not downloaded"), "{notice}");
+        assert!(notice.contains("Settings"), "{notice}");
+    }
+
+    #[test]
+    fn the_selected_model_runs_unannounced_when_it_is_downloaded() {
+        let resolved = resolve_model_for_run_with("campplus_speaker", |_| true)
+            .expect("the selected model can run");
+        assert_eq!(resolved.model_id, "campplus_speaker");
+        assert_eq!(resolved.fallback_notice, None);
+    }
+
+    /// Nothing downloaded means no speaker labels, not a quiet substitution of
+    /// a model that is not there either.
+    #[test]
+    fn nothing_runs_when_neither_the_selection_nor_the_default_is_downloaded() {
+        assert_eq!(
+            resolve_model_for_run_with("campplus_speaker", |_| false),
+            None
+        );
+        assert_eq!(
+            resolve_model_for_run_with(DEFAULT_EMBEDDING_MODEL_ID, |_| false),
+            None
+        );
+    }
+
+    /// The picker, the readiness probe and the fallback notice all read the
+    /// same table, so a meeting cannot be told a model ran under a name the
+    /// picker never showed.
+    #[test]
+    fn model_labels_match_the_picker() {
+        assert_eq!(model_label("ecapa_tdnn_speaker"), "ECAPA-TDNN 512");
+        assert_eq!(model_label("resnet34_speaker"), "ResNet34");
+        assert_eq!(model_label("campplus_speaker"), "CAM++");
+        assert_eq!(model_label("eres2netv2_speaker"), "ERes2NetV2 (int8)");
+        // No invented name for an id this build does not know.
+        assert_eq!(model_label("not_a_real_model"), "not_a_real_model");
+    }
+
     #[tokio::test]
     async fn test_diarization_requires_real_model() {
-        if DiarizationEngine::is_real_available() {
+        if is_model_available(DEFAULT_EMBEDDING_MODEL_ID) {
             return;
         }
 
-        let result = run_diarization(&PathBuf::from("test.wav")).await;
+        let result =
+            run_diarization_with_model(&PathBuf::from("test.wav"), "ecapa_tdnn_speaker").await;
         assert!(result.is_err());
         let message = result.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(message.contains("Real diarization model is not available"));
     }
 
+    #[cfg(feature = "diarization")]
     #[test]
     fn test_embedding_clusterer() {
         use ndarray::array;
@@ -432,6 +725,7 @@ mod tests {
         assert_ne!(labels[0], labels[2]);
     }
 
+    #[cfg(feature = "diarization")]
     #[test]
     fn test_ahc_centroid_linkage_prevents_transitive_merge() {
         use ndarray::array;
@@ -470,6 +764,7 @@ mod tests {
         assert_eq!(unique.len(), 3);
     }
 
+    #[cfg(feature = "diarization")]
     fn reference_ahc_centroid_linkage(
         embeddings: &[(f64, f64, ndarray::Array1<f32>)],
         threshold: f32,
@@ -565,6 +860,7 @@ mod tests {
         labels
     }
 
+    #[cfg(feature = "diarization")]
     #[test]
     fn ahc_clustering_matches_reference_and_is_deterministic() {
         use ndarray::array;
@@ -640,6 +936,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "diarization")]
     #[test]
     fn merge_keeps_short_runs_removed_by_smoothing_anonymous() {
         let clusterer = EmbeddingClusterer::new();
@@ -731,7 +1028,7 @@ mod calibration {
             .join("models")
             .join("diarization");
         let model_path = models_dir.join(format!("{model_id}.onnx"));
-        let sha = crate::download::diarization_model_sha256_for_tests(model_id)
+        let sha = crate::download::diarization_model_expected_sha256(model_id)
             .expect("every calibrated model must be a known diarization model");
         crate::download::record_model_integrity_receipt_for_tests(&model_path, sha)
             .await
@@ -819,7 +1116,7 @@ mod calibration {
                 .join("models")
                 .join("diarization");
             let model_path = models_dir.join(format!("{model_id}.onnx"));
-            let sha = crate::download::diarization_model_sha256_for_tests(model_id).unwrap();
+            let sha = crate::download::diarization_model_expected_sha256(model_id).unwrap();
             crate::download::record_model_integrity_receipt_for_tests(&model_path, sha)
                 .await
                 .expect("integrity receipt");
@@ -973,5 +1270,112 @@ mod calibration {
                 );
             }
         }
+    }
+}
+
+/// Evaluation harness for comparing diarization backends on a fixture with
+/// known turns. Ignored by default: each test downloads model weights and runs
+/// real inference, which is neither hermetic nor fast enough for `bun run
+/// test:rust`. One backend per test, run in separate processes, because peak
+/// RSS is a process high-water mark and would otherwise be reported as the max
+/// of both.
+///
+///   PLAINSONG_DATA_DIR=<scratch> PLAINSONG_DIAR_EVAL_AUDIO=<wav> \
+///     cargo test --features diarization-speakrs --lib \
+///     diarization::eval_tests::eval_embedding_backend -- --ignored --nocapture
+///
+/// Each test prints one JSON line prefixed `DIAR-EVAL ` so a scorer can pick
+/// it out of cargo's output; `scripts/score-diarization-eval.mjs` compares
+/// those turns against the fixture's ground truth.
+#[cfg(test)]
+mod eval_tests {
+    use super::*;
+
+    fn eval_audio_path() -> std::path::PathBuf {
+        let raw = std::env::var("PLAINSONG_DIAR_EVAL_AUDIO")
+            .expect("set PLAINSONG_DIAR_EVAL_AUDIO to the fixture WAV");
+        std::path::PathBuf::from(raw)
+    }
+
+    /// Peak resident set size of this process so far, in bytes. macOS reports
+    /// `ru_maxrss` in bytes (Linux uses kilobytes), and this harness only ever
+    /// runs on the macOS dev machine, so no unit conversion is applied.
+    fn peak_rss_bytes() -> u64 {
+        // SAFETY: `getrusage` only writes into the provided `rusage`, which is
+        // zeroed and lives for the whole call.
+        unsafe {
+            let mut usage: libc::rusage = std::mem::zeroed();
+            if libc::getrusage(libc::RUSAGE_SELF, &mut usage) != 0 {
+                return 0;
+            }
+            usage.ru_maxrss as u64
+        }
+    }
+
+    fn report(
+        backend: &str,
+        audio: &std::path::Path,
+        elapsed: std::time::Duration,
+        result: &DiarizationResult,
+    ) {
+        let turns: Vec<serde_json::Value> = result
+            .segments
+            .iter()
+            .map(|segment| {
+                serde_json::json!({
+                    "start": segment.start_time,
+                    "end": segment.end_time,
+                    "speaker": segment.speaker_id,
+                })
+            })
+            .collect();
+        let line = serde_json::json!({
+            "backend": backend,
+            "audio": audio.to_string_lossy(),
+            "durationSeconds": result.duration,
+            "wallSeconds": elapsed.as_secs_f64(),
+            "peakRssBytes": peak_rss_bytes(),
+            "speakerCount": result.speakers.len(),
+            "turns": turns,
+        });
+        println!("DIAR-EVAL {line}");
+    }
+
+    #[tokio::test]
+    #[ignore = "evaluation harness: downloads models and runs real inference"]
+    async fn eval_embedding_backend() {
+        let audio = eval_audio_path();
+        let manager = crate::download::DownloadManager::new().expect("download manager");
+        manager
+            .download_diarization_model_by_id(
+                "ecapa_tdnn_speaker",
+                |_: crate::download::DownloadProgress| {},
+            )
+            .await
+            .expect("ECAPA-TDNN model");
+
+        let started = std::time::Instant::now();
+        let result = run_diarization_with_model(&audio, "ecapa_tdnn_speaker")
+            .await
+            .expect("embedding diarization");
+        report("embedding-ecapa_tdnn", &audio, started.elapsed(), &result);
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    #[tokio::test]
+    #[ignore = "evaluation harness: downloads models and runs real inference"]
+    async fn eval_speakrs_backend() {
+        let audio = eval_audio_path();
+        let manager = crate::download::DownloadManager::new().expect("download manager");
+        manager
+            .download_speakrs_bundle(|_: crate::download::DownloadProgress| {})
+            .await
+            .expect("speakrs bundle");
+
+        let started = std::time::Instant::now();
+        let result = run_diarization_with_model(&audio, crate::download::SPEAKRS_MODEL_ID)
+            .await
+            .expect("speakrs diarization");
+        report("speakrs-community1", &audio, started.elapsed(), &result);
     }
 }

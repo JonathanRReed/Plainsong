@@ -72,6 +72,20 @@ using sensitive content.
   downloaded. Models says which of those is missing. This route has not been
   run end to end in qualification: on the machine that built it, Apple
   Intelligence had not finished downloading its model.
+- Numbers as digits (Dictation › Destinations) is English-only and
+  deliberately conservative: it converts what it can name a rule for and
+  leaves everything else as spoken. It will not turn "two thirty" into a
+  time without "at" or am/pm, will not read "twenty twenty six" as a year
+  outside a date, keeps a bare "one" and simple ordinals ("first" ..
+  "tenth") as words outside a date, and never abbreviates units
+  ("25 kilometers", not "25 km"). A month name that is also an ordinary word
+  needs a second signal before a day converts, so "on may fifth" is a date
+  and "i may second that motion" is not. A number phrase no single rule can
+  finish stays entirely as words rather than coming out half-written, so
+  "ten to one odds" and "point five" are left alone and a spoken digit run
+  is written whole or not at all. Thousands separators are written the way
+  the number would be typed — cardinals from 10,000 up, currency from 1,000
+  up, years never. Engines that already emit numerals pass through untouched.
 
 ## Meetings
 
@@ -81,6 +95,13 @@ using sensitive content.
 - Me + Them source labels distinguish microphone-side speech from captured
   system audio. They are not a promise of perfect person-by-person speaker
   identification.
+- Speaker identification ("who said what") has no published accuracy number.
+  It groups voices by embedding similarity; it cannot represent two people
+  talking at once, and audio it cannot attribute is left without a speaker
+  rather than guessed. A measured comparison against a full pyannote pipeline
+  is in `artifacts/qa/diarization-speakrs-spike-2026-09-02.md`; that
+  alternative backend is a build-time experiment and is not in any build you
+  can install.
 - Local meeting routes: Parakeet TDT 0.6B v3 (25 European languages) is the
   recommended route. For a language it does not cover, the multilingual
   whisper.cpp models small, medium, large-v3 and large-v3-turbo can run

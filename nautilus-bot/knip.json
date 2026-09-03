@@ -28,6 +28,7 @@
   ],
   "ignoreBinaries": [
     "ditto",
+    "ffmpeg",
     "hdiutil",
     "osascript",
     "pbcopy",

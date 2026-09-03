@@ -23,6 +23,15 @@
  *   (its merged graph is a single `If` node CoreML rejects), and the encoder is
  *   split into 75 partitions that run slower than plain CPU. Re-enable only
  *   with a new measurement and per-session opt-outs; see the receipt below.
+ * - `diarization-speakrs` (deliberately NOT shipped): the experimental
+ *   pyannote community-1 diarization backend. It builds, and on an
+ *   overlap-free two-speaker fixture it beats the shipped embedding pipeline
+ *   (7.5% vs 10.8% frame error over 5 minutes), but it is 10-14x slower, uses
+ *   ~2.1x the memory, adds 55 crates to Cargo.lock, and drags in a
+ *   built-from-source OpenBLAS that fails on any Mac whose Command Line Tools
+ *   left no pkgutil receipt. Enable it only for a spike:
+ *   `--features diarization-speakrs`. See
+ *   artifacts/qa/diarization-speakrs-spike-2026-09-02.md.
  *
  * The measurements behind this list are in
  * artifacts/qa/acceleration-receipt-2026-09-01.md.

@@ -19,10 +19,15 @@ import {
 
 describe("ASR capability mappings", () => {
   it("recognises only the engines this build can still run", () => {
-    expect(ASR_PROVIDER_TYPES).toHaveLength(12);
+    // 12 shipped engines plus `transcribe_cpp`, which only a sidecar built
+    // with `--features asr-transcribe-cpp` ever reports. The renderer keeps a
+    // name for it so a developer build's route renders instead of silently
+    // vanishing from the picker; nothing in a release build sends it.
+    expect(ASR_PROVIDER_TYPES).toHaveLength(13);
     expect(isKnownAsrProvider("whisper")).toBe(true);
     expect(isKnownAsrProvider("parakeet")).toBe(true);
     expect(isKnownAsrProvider("macos_apple_speech")).toBe(true);
+    expect(isKnownAsrProvider("transcribe_cpp")).toBe(true);
   });
 
   it("rejects the deleted Python-backed engines a stale settings file may still name", () => {

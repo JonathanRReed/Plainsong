@@ -76,7 +76,7 @@ const AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS au
 /// Every application-owned table whose rows Reset Everything must remove.
 /// The delete SQL lives beside the classification so the schema-coverage test
 /// cannot classify a table as reset-scoped without also wiring it into purge.
-const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 26] = [
+const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 27] = [
     // Samples before profiles: the foreign key points that way.
     (
         "speaker_profile_samples",
@@ -93,6 +93,9 @@ const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 26] = [
     ("transcript_embeddings", "DELETE FROM transcript_embeddings"),
     ("transcript_artifacts", "DELETE FROM transcript_artifacts"),
     ("meeting_artifacts", "DELETE FROM meeting_artifacts"),
+    // A cached brief is model-written text about the reader's meetings. It
+    // has to go with them.
+    ("meeting_briefs", "DELETE FROM meeting_briefs"),
     ("insertion_actions", "DELETE FROM insertion_actions"),
     ("transcripts", "DELETE FROM transcripts"),
     (
@@ -2172,6 +2175,14 @@ impl Database {
         // install pointed at an uninstalled Ollama produced no summary, no
         // action items, and no title, and the app said nothing at all.
         self.ensure_table_column("recordings", "analysis_failure", "TEXT")?;
+        // Who was in the meeting, as a JSON array of {name, email, isOrganizer}.
+        // A column rather than a table because the list is written once, read
+        // whole, and never queried across meetings by SQL -- the pre-meeting
+        // brief's attendee overlap is computed in Rust over recordings it has
+        // already loaded. NULL for every meeting recorded before this existed,
+        // which reads back as an empty list.
+        self.ensure_table_column("recordings", "attendees", "TEXT")?;
+
         // The pauses taken during capture, as a JSON list of spans. The audio
         // file skips them, so this is the only record of where the gaps are
         // and how long they were.
@@ -2180,6 +2191,22 @@ impl Database {
         // or the detected call it started from named one. A tag from a fixed
         // list, not free text -- see `models::known_video_service`.
         self.ensure_table_column("recordings", "video_service", "TEXT")?;
+        // Cached pre-meeting briefs, one row per calendar event.
+        //
+        // `cache_key` is a hash of everything that went into the answer (see
+        // `meeting_brief::brief_cache_key`), so a row whose key no longer
+        // matches the current inputs is simply not returned -- there is no
+        // expiry to tune and no way to hand back a brief written from
+        // evidence that has since changed.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS meeting_briefs (
+                event_id TEXT PRIMARY KEY,
+                cache_key TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
 
         // Chunked meeting transcription survives per-chunk ASR failures and
         // still returns a transcript, so "completed" alone never meant "the
@@ -2930,7 +2957,27 @@ impl Database {
             .map_err(|e| e.into())
     }
 
+    /// Every recording, newest first (optionally in one project).
     pub fn get_recordings(&self, project_id: Option<&str>) -> Result<Vec<Recording>> {
+        self.query_recordings(project_id, None)
+    }
+
+    /// The `limit` newest recordings, across every project.
+    ///
+    /// The cap belongs in SQL. A caller that only wants the recent few used to
+    /// call `get_recordings(None)` and `.take(n)` the result, which deserializes
+    /// every row in the library -- action items, provenance JSON, attendee JSON,
+    /// pause spans -- to throw all but `n` away. On a Mac with years of
+    /// meetings that is the whole library read for a handful of rows.
+    pub fn get_recent_recordings(&self, limit: usize) -> Result<Vec<Recording>> {
+        self.query_recordings(None, Some(limit))
+    }
+
+    fn query_recordings(
+        &self,
+        project_id: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<Recording>> {
         let mut stmt = self.conn.prepare(
             "SELECT recordings.id,
                     COALESCE(meeting_artifacts.title, recordings.title),
@@ -2963,16 +3010,24 @@ impl Database {
                     recordings.analysis_failure,
                     recordings.imported_source_name,
                     recordings.pause_spans,
-                    recordings.video_service
+                    recordings.video_service,
+                    recordings.attendees
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
-             ORDER BY recordings.created_at DESC",
+             ORDER BY recordings.created_at DESC
+             LIMIT ?2",
         )?;
 
         let pid_param: Option<&str> = project_id;
+        // SQLite reads a negative LIMIT as no limit, which is how the
+        // unlimited call shares one prepared statement with the capped one.
+        let limit_param: i64 = match limit {
+            Some(limit) => i64::try_from(limit).unwrap_or(i64::MAX),
+            None => -1,
+        };
 
-        let recordings = stmt.query_map(params![pid_param], |row| {
+        let recordings = stmt.query_map(params![pid_param, limit_param], |row| {
             let summary: Option<String> = row.get(9)?;
             let action_items_json: Option<String> = row.get(10)?;
             let action_items: Option<Vec<String>> =
@@ -3027,6 +3082,14 @@ impl Database {
                     .filter(|value| !value.is_empty()),
                 pause_spans: parse_pause_spans(row.get::<_, Option<String>>(24)?),
                 video_service: known_video_service(row.get::<_, Option<String>>(25)?.as_deref()),
+                // Sanitized on the way back out as well as on the way in: a
+                // hand-edited row is exactly as capable of holding 5000
+                // duplicates as a crafted command payload is.
+                attendees: crate::models::sanitize_meeting_attendees(
+                    row.get::<_, Option<String>>(26)?
+                        .and_then(|value| serde_json::from_str(&value).ok())
+                        .unwrap_or_default(),
+                ),
             })
         })?;
 
@@ -3068,7 +3131,8 @@ impl Database {
                     recordings.analysis_failure,
                     recordings.imported_source_name,
                     recordings.pause_spans,
-                    recordings.video_service
+                    recordings.video_service,
+                    recordings.attendees
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -3129,6 +3193,14 @@ impl Database {
                     .filter(|value| !value.is_empty()),
                 pause_spans: parse_pause_spans(row.get::<_, Option<String>>(24)?),
                 video_service: known_video_service(row.get::<_, Option<String>>(25)?.as_deref()),
+                // Sanitized on the way back out as well as on the way in: a
+                // hand-edited row is exactly as capable of holding 5000
+                // duplicates as a crafted command payload is.
+                attendees: crate::models::sanitize_meeting_attendees(
+                    row.get::<_, Option<String>>(26)?
+                        .and_then(|value| serde_json::from_str(&value).ok())
+                        .unwrap_or_default(),
+                ),
             })
         });
 
@@ -4753,6 +4825,61 @@ impl Database {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// The cached brief for an event, but only when it was written from the
+    /// same inputs. A key mismatch reads as "no cached brief".
+    pub fn get_meeting_brief(&self, event_id: &str, cache_key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload FROM meeting_briefs WHERE event_id = ?1 AND cache_key = ?2")?;
+        let result = stmt.query_row(params![event_id, cache_key], |row| row.get::<_, String>(0));
+        match result {
+            Ok(payload) => Ok(Some(payload)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn save_meeting_brief(
+        &mut self,
+        event_id: &str,
+        cache_key: &str,
+        payload: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meeting_briefs (event_id, cache_key, payload, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(event_id) DO UPDATE SET
+                 cache_key = excluded.cache_key,
+                 payload = excluded.payload,
+                 created_at = excluded.created_at",
+            params![event_id, cache_key, payload, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Replace a meeting's attendee list.
+    ///
+    /// Called once when a meeting starts from a calendar cue, and again for
+    /// every manual add or remove. Sanitized here rather than trusted from
+    /// the caller: this is the boundary the renderer writes through.
+    pub fn update_recording_attendees(
+        &mut self,
+        recording_id: &str,
+        attendees: Vec<crate::models::MeetingAttendee>,
+    ) -> Result<Vec<crate::models::MeetingAttendee>> {
+        let sanitized = crate::models::sanitize_meeting_attendees(attendees);
+        let encoded = serde_json::to_string(&sanitized)
+            .context("Failed to serialize the meeting attendee list")?;
+        let updated = self.conn.execute(
+            "UPDATE recordings SET attendees = ?1, updated_at = ?2 WHERE id = ?3",
+            params![encoded, Utc::now().to_rfc3339(), recording_id],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("Recording not found: {}", recording_id);
+        }
+        Ok(sanitized)
     }
 
     pub fn update_recording_meeting_chat(
@@ -7108,6 +7235,7 @@ mod tests {
             analysis_failure: None,
             pause_spans: Vec::new(),
             video_service: None,
+            attendees: Vec::new(),
         };
         let transcript = Transcript {
             id: format!("{id}-transcript"),
@@ -7502,6 +7630,41 @@ mod tests {
             after, before,
             "a read-only open must not create journal, WAL or shm files"
         );
+    }
+
+    /// The pre-meeting brief only ever looks at the newest few hundred
+    /// meetings. It used to get them by loading the whole library and calling
+    /// `.take()`, so the cap bounded the ranking and nothing else. The cap is
+    /// in SQL now, and this pins both halves: the right rows, and only those.
+    #[test]
+    fn get_recent_recordings_caps_in_sql_and_returns_the_newest_first() {
+        let dir = crate::test_fs::TempDir::new("recent-recordings");
+        let path = dir.path().join("plainsong.db");
+        let mut db = Database::open_at_path(&path, None).unwrap();
+        for index in 0..8 {
+            let mut recording = sample_recording(&format!("r{index}"), "inbox");
+            recording.created_at =
+                chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 1 + index, 12, 0, 0)
+                    .single()
+                    .expect("valid fixture timestamp");
+            db.create_recording(&recording).unwrap();
+        }
+
+        let recent = db.get_recent_recordings(3).unwrap();
+        assert_eq!(
+            recent.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["r7", "r6", "r5"],
+            "the newest three, newest first"
+        );
+
+        // The rows never left SQLite: the statement itself is capped, so the
+        // count that comes back is the cap and not a slice of a larger read.
+        assert_eq!(db.get_recent_recordings(1).unwrap().len(), 1);
+        assert_eq!(db.get_recent_recordings(0).unwrap().len(), 0);
+        // A cap larger than the library is not an error, and the unlimited
+        // call still returns everything.
+        assert_eq!(db.get_recent_recordings(500).unwrap().len(), 8);
+        assert_eq!(db.get_recordings(None).unwrap().len(), 8);
     }
 
     #[test]
@@ -8113,6 +8276,7 @@ mod tests {
             consent_notice_message: None,
             consent_notice_updated_at: None,
             analysis_failure: None,
+            attendees: Vec::new(),
             pause_spans: Vec::new(),
             video_service: None,
         }
@@ -10626,6 +10790,100 @@ mod tests {
         let reloaded = db.get_recording("r1").unwrap().unwrap();
         assert_eq!(reloaded.summary.as_deref(), Some("Summary only"));
         assert!(reloaded.action_items.is_none());
+    }
+
+    #[test]
+    fn attendees_round_trip_and_are_sanitized_on_the_way_in_and_out() {
+        use crate::models::MeetingAttendee;
+
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+
+        // A meeting recorded before the column existed reads back as nobody,
+        // not as a parse failure.
+        assert!(db
+            .get_recording("r1")
+            .unwrap()
+            .unwrap()
+            .attendees
+            .is_empty());
+
+        let stored = db
+            .update_recording_attendees(
+                "r1",
+                vec![
+                    MeetingAttendee {
+                        name: "  Alice   Brown ".to_string(),
+                        email: Some("Alice@Example.com".to_string()),
+                        is_organizer: true,
+                    },
+                    // Same address, different display name: one person.
+                    MeetingAttendee {
+                        name: "A. Brown".to_string(),
+                        email: Some("alice@example.com".to_string()),
+                        is_organizer: false,
+                    },
+                    MeetingAttendee {
+                        name: "   ".to_string(),
+                        email: None,
+                        is_organizer: false,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].name, "Alice Brown");
+        assert!(stored[0].is_organizer);
+
+        let reloaded = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(reloaded.attendees, stored);
+        let listed = db.get_recordings(None).unwrap();
+        assert_eq!(listed[0].attendees, stored);
+
+        // Removing the last attendee is an empty list, not a no-op.
+        assert!(db
+            .update_recording_attendees("r1", Vec::new())
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .get_recording("r1")
+            .unwrap()
+            .unwrap()
+            .attendees
+            .is_empty());
+    }
+
+    #[test]
+    fn a_cached_brief_only_comes_back_for_the_inputs_it_was_written_from() {
+        let mut db = in_memory_db();
+        assert!(db.get_meeting_brief("event-1", "key-a").unwrap().is_none());
+
+        db.save_meeting_brief("event-1", "key-a", "{\"brief\":\"first\"}")
+            .unwrap();
+        assert_eq!(
+            db.get_meeting_brief("event-1", "key-a").unwrap().as_deref(),
+            Some("{\"brief\":\"first\"}")
+        );
+        // A different input hash is a different brief, so the stored one is
+        // simply not offered -- there is no expiry to tune and no way to hand
+        // back an answer written from evidence that has since changed.
+        assert!(db.get_meeting_brief("event-1", "key-b").unwrap().is_none());
+
+        db.save_meeting_brief("event-1", "key-b", "{\"brief\":\"second\"}")
+            .unwrap();
+        assert_eq!(
+            db.get_meeting_brief("event-1", "key-b").unwrap().as_deref(),
+            Some("{\"brief\":\"second\"}"),
+            "one row per event; a refresh replaces rather than accumulates"
+        );
+        assert!(db.get_meeting_brief("event-1", "key-a").unwrap().is_none());
+    }
+
+    #[test]
+    fn updating_attendees_on_a_missing_recording_is_an_error() {
+        let mut db = in_memory_db();
+        assert!(db.update_recording_attendees("nope", Vec::new()).is_err());
     }
 
     #[test]

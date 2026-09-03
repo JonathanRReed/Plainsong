@@ -17,6 +17,8 @@ import {
   isZeroSetupAnalysisProvider,
   type AiLaneKey,
 } from "@/components/models/ai-lanes";
+import { SavedPromptManagerDialog } from "@/components/prompts/saved-prompt-manager-dialog";
+import { resolveSavedPrompts, type SavedPrompt } from "@/lib/saved-prompts";
 import { listen } from "@/lib/electron";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -518,6 +520,10 @@ export function SettingsView() {
   const { theme, setTheme } = useTheme();
   const { productReadiness } = useProductReadinessStatus();
   const [activeTab, setActiveTab] = useState<TabId>("general");
+  const [savedPromptsOpen, setSavedPromptsOpen] = useState(false);
+  const [savedPromptsSaveError, setSavedPromptsSaveError] = useState<
+    string | null
+  >(null);
   const [draftSettings, setDraftSettings] = useState<Settings | null>(null);
   const [persistedSettings, setPersistedSettings] = useState<Settings | null>(
     null,
@@ -1531,6 +1537,62 @@ export function SettingsView() {
       queueSettingsSave(next, options?.debounceMs ?? SETTINGS_SAVE_DEBOUNCE_MS);
     },
     [flushPendingSettingsSave, queueSettingsSave],
+  );
+
+  /**
+   * Write the saved-prompt library and report whether it landed.
+   *
+   * Everything else on this view goes through `updateSettings`, which hands
+   * the write to the debounced scheduler and returns immediately -- it has no
+   * way to say a save failed, because by design nothing is waiting. That is
+   * right for a switch, whose failure the view's own error banner covers.
+   *
+   * It is wrong for this dialog. It takes `onPersist`'s answer as the truth
+   * about the write, and a `return true` written before any I/O told it a
+   * save had succeeded when the settings file was read-only or the disk was
+   * full: the row closed, the list looked saved, and it was not. So this
+   * mirrors the picker's own path in `use-saved-prompts.ts`: optimistic
+   * state, an awaited write, and the failure shown inside the dialog the
+   * reader is looking at.
+   *
+   * Anything already queued is flushed first, so this write cannot land
+   * underneath an older one still waiting out its debounce.
+   */
+  const persistSavedPrompts = useCallback(
+    async (next: readonly SavedPrompt[]): Promise<boolean> => {
+      const current = latestSettingsRef.current;
+      if (!current) return false;
+      const updated: Settings = {
+        ...current,
+        ai: { ...(current.ai ?? {}), savedPrompts: [...next] },
+      };
+
+      setSavedPromptsSaveError(null);
+      latestSettingsRef.current = updated;
+      setDraftSettings(updated);
+      setError(null);
+
+      try {
+        await flushPendingSettingsSave(true);
+        await saveSettings(updated);
+        if (mountedRef.current) {
+          setPersistedSettings(updated);
+          applySecurityStatusFromSettings(updated);
+        }
+        return true;
+      } catch (e) {
+        const message =
+          e instanceof Error
+            ? e.message
+            : "Plainsong could not save your prompts.";
+        if (mountedRef.current) {
+          setSavedPromptsSaveError(message);
+          setError(message);
+        }
+        return false;
+      }
+    },
+    [applySecurityStatusFromSettings, flushPendingSettingsSave],
   );
 
   // Change one field of the newest settings, for writes the user did not ask
@@ -5672,6 +5734,33 @@ export function SettingsView() {
                         Open Models
                       </Button>
                     </div>
+
+                    {/* The prompt library the "/" picker offers in a
+                        meeting's chat and in "Ask your meetings". Managed
+                        here and from the picker's own footer -- same dialog,
+                        same settings key. */}
+                    <div className="flex flex-col gap-3 rounded-md border border-border/60 bg-muted/20 p-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="max-w-2xl space-y-0.5">
+                        <p className="section-heading">Saved prompts</p>
+                        <p className="text-sm leading-6 text-muted-foreground">
+                          {`${resolveSavedPrompts(settings.ai?.savedPrompts).filter((prompt) => !prompt.hidden).length} prompts you can pick with "/" in a meeting's chat or in "Ask your meetings". They are stored in your settings file on this Mac.`}
+                        </p>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        onClick={() => setSavedPromptsOpen(true)}
+                      >
+                        Manage prompts
+                      </Button>
+                    </div>
+
+                    <SavedPromptManagerDialog
+                      open={savedPromptsOpen}
+                      onOpenChange={setSavedPromptsOpen}
+                      prompts={resolveSavedPrompts(settings.ai?.savedPrompts)}
+                      onPersist={persistSavedPrompts}
+                      saveError={savedPromptsSaveError}
+                    />
 
                     <div className="flex items-center justify-between">
                       <div className="space-y-0.5">

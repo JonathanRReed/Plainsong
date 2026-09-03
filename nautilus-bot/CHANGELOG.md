@@ -63,6 +63,47 @@ evidence is stale and must be recaptured before this becomes a candidate.
   whisper.cpp never enters the meeting lane on its own: a `base.en` default
   still resolves meetings to Parakeet, and whisper runs a meeting only when
   one of those four models is picked for the meeting lane.
+- A local pre-meeting brief. "Prepare" on a calendar cue reads meetings
+  already on this Mac that share an attendee or a normalized meeting name with
+  the one you are about to join, and writes a short brief — what was last
+  agreed, what is still open, what you owe anyone — citing the meetings it
+  came from. Related meetings are found and ranked locally; the only thing
+  that leaves the Mac is the prompt, down whichever AI lane you already chose
+  for meetings. With no analysis provider configured it shows the related
+  meetings and their open items instead of an error. Cached per event and
+  input, with a "Refresh".
+- Meetings started from a calendar cue now record who was invited. The macOS
+  calendar helper reports each attendee's name (and the address the calendar
+  had for them, when it had one); the meeting header shows them as chips with
+  the address on hover, and any meeting can have attendees added or removed by
+  hand. Renaming a speaker offers those names. When a meeting has attendees,
+  its summary and chat prompts carry one `Attendees: ...` line of NAMES only,
+  inside the same fenced non-instruction block the notes use — addresses are
+  never sent to an AI provider. Locations and notes are still stripped inside
+  the helper exactly as before. See `docs/beta/PRIVACY-AND-CLOUD.md`.
+- Saved prompts for the two chat boxes. Type "/" in a meeting's chat or in
+  "Ask your meetings" to pick a question you keep asking; "Save as prompt" on
+  a message you already sent turns it into one. Six starters ship (decisions,
+  open questions, what you committed to, risks and blockers, a follow-up
+  draft, a catch-up explanation); they can be edited, reordered and hidden,
+  but not deleted, because they would only come back. Manage them from
+  Settings → AI or the picker's own footer. They live in your settings file
+  on this Mac and choosing one only fills the box.
+- A meeting export now says who was there. Markdown, Word, plain text and
+  JSON carry the attendee list with names and addresses — an export is your
+  own file — while the local `plainsong` CLI and MCP server return attendee
+  names only. Prompts are unchanged: still names, never addresses.
+- Dictation writes spoken numbers the way they read: "twelve dollars fifty"
+  becomes $12.50, "march third at three thirty pm" becomes March 3 at
+  3:30 pm, "one hundred twenty three" becomes 123, and a run of spoken
+  digits becomes a phone number. It runs locally, after voice commands and
+  before phrase expansions, and never rewrites inside a dictionary
+  correction, a phrase expansion, or a URL or email address. Anything
+  ambiguous is left as you said it — "one of them", "a couple of",
+  "two thirty" without a time, "give me a second". On by default for
+  Slack & Chat, Writing, Notes and Meeting Follow-up; off for the General
+  profile, which keeps your words as spoken. Per-profile switches in
+  Dictation › Destinations.
 - Plainsong now notices a live call and offers to record it. Every few
   seconds the sidecar checks, locally, which apps are running; when Zoom,
   Microsoft Teams, Webex, FaceTime, Slack, Discord, or a browser window
@@ -334,12 +375,38 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- The diarization model chosen in Settings is now the one the automatic
+  post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
+  matter what the picker said; only the explicit "identify speakers" action
+  honoured the setting.
+- Choosing a speaker model you have not downloaded no longer costs you speaker
+  labels. "Is this model ready" was answered by checking ECAPA-TDNN whatever
+  model was asked about, so picking CAM++ (or ResNet34, or ERes2NetV2) without
+  downloading it passed the check and then failed inside the run, silently, on
+  every meeting. Readiness now checks the model you picked; if it is missing,
+  the meeting is diarized with the downloaded default and says so — "Speaker
+  labels used ECAPA-TDNN 512 because CAM++ is not downloaded." With nothing
+  downloaded at all, no speaker labels are claimed.
+- The MODEL WEIGHTS section of THIRD-PARTY-NOTICES.txt now also accounts for
+  the pyannote community-1 bundle the experimental diarization backend fetches.
+  No shipped build enables that backend, but its pin lives in the sidecar
+  source, and the notices record what the mirror actually declares: nothing.
+  Upstream is CC-BY-4.0 and gated; that is stated as upstream's terms, not as
+  the mirror's, and the artifact is counted among those awaiting a human
+  answer.
 - THIRD-PARTY-NOTICES.txt now has a MODEL WEIGHTS section naming every model
   Plainsong can download — repository, pinned revision, files and license —
   including the terms that differ from the code's: Parakeet's CC-BY-4.0
   attribution and S1-mini's naming clause. The section is generated from a
   manifest and covered by the release license gate, and it records honestly
   the one artifact whose upstream declares no license.
+- Speaker models now appear in the list of downloaded models, and can be
+  deleted. The four speaker embedders and any experimental pyannote bundle were
+  downloaded into the models directory and then never enumerated, so they were
+  invisible in the Models screen and there was no path to delete them. Deleting
+  a multi-file model (a speaker bundle, Qwen3-ASR, the built-in cleanup model)
+  now removes the whole directory instead of failing; the managed models
+  directory itself is refused.
 - The built-in cleanup model's 473 MiB now appears in the sidecar's list of
   downloaded models, where it was missing entirely. The Models screen's
   "Speech models on this Mac" total still counts only speech models, since
@@ -373,6 +440,57 @@ evidence is stale and must be recaptured before this becomes a candidate.
   replacement you wrote yourself — are rewritten as plain text before the
   built-in model sees them, so a dictation cannot open a second turn and
   address the model as its instructions.
+- A question that starts with a path can be asked again. Any leading "/"
+  opened the saved-prompt picker, and both chat boxes refuse to send while it
+  is open, so "/Users/me/notes.txt is failing to import" could not be sent at
+  all. The picker now closes as soon as nothing matches what you typed, and
+  its footer says Esc closes it.
+- A pre-meeting brief's citations are numbered references you can click,
+  each naming the meeting it came from, instead of the raw "L1"/"L4" evidence
+  IDs the model wrote.
+- A saved-prompt change that fails to write now says so in the Manage prompts
+  dialog. Settings reported every such change as saved without waiting to
+  find out.
+- Attendee names arriving from a calendar invite are stripped of bidi
+  overrides and control characters before they are shown, exported or put in
+  a prompt.
+- "Prepare" on a calendar cue no longer reads the whole meeting library to
+  look at the newest few hundred.
+- Numbers as digits no longer reads an ordinary sentence as a date. "I may
+  second that motion", "we may first go" and "I march second in the parade"
+  keep their words; a month name that is also an ordinary word now needs a
+  year, a date word in front of it, an explicit "the", a clock time after
+  the day, or the head of a phrase before a day converts.
+- Numbers as digits no longer drops punctuation that sits inside a phrase it
+  rewrites: "ten per (cent", "the first of (May" and "twelve dollars and
+  fifty (cents" keep their parenthesis.
+- A one- or two-letter dictionary correction no longer splits a number it
+  merely appears inside — "twenty five servers" came out "20 five servers"
+  when a correction replaced text with "v".
+- A phrase expansion whose trigger contains a spoken number now still fires
+  with Numbers as digits on; "two factor auth" was being rewritten to
+  "2 factor auth" before the expansion could match.
+- Numbers as digits no longer runs over the result of a voice command, so
+  "replace two with three" can only change what it was asked to change and
+  leaves the rest of the previous insertion alone.
+- Numbers no longer come out half-written. "ten to one odds", "point five"
+  and a spoken digit run of a length with no phone shape stay as words, and
+  a run containing a spoken "oh" is written whole — "room two oh one"
+  becomes "room 201" rather than "room 2 oh one". A time preposition also
+  stays in scope across a list, so "at three fifteen, three thirty and three
+  forty five" is three times.
+- Large numbers are written with thousands separators the way they would be
+  typed: 75,000 for cardinals from ten thousand up, $1,200 for currency from
+  one thousand up. Years never get one.
+- "twenty-one" now converts like "twenty-first" already did, with either the
+  ASCII hyphen or the non-breaking hyphen some decoders emit.
+- The AI formatting pass is now told to keep numerals, currency, times and
+  dates exactly as written, so it cannot spell out what Numbers as digits
+  just wrote.
+- The model manager now lists the GGUF weights under
+  `models/transcribe_cpp`, and deleting one removes the file and its
+  integrity receipt. They were downloadable but invisible, so up to 1.42 GiB
+  could sit on disk with nothing in the app able to show or reclaim it.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some

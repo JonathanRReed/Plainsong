@@ -102,5 +102,249 @@
       "expectedOutput": "Please send the launch plan update after the launch plan review.",
       "expectedAppliedCount": 2
     }
+  ],
+  "numberCases": [
+    {
+      "id": "num-cardinal",
+      "label": "Composed cardinals become digits",
+      "inputText": "we shipped one hundred twenty three builds",
+      "expectedItnOutput": "we shipped 123 builds",
+      "modePreset": "voice",
+      "expectedOutput": "We shipped 123 builds"
+    },
+    {
+      "id": "num-year-composed",
+      "label": "A composed year becomes four digits",
+      "inputText": "the contract renews two thousand and twenty six",
+      "expectedItnOutput": "the contract renews 2026"
+    },
+    {
+      "id": "num-year-pair-without-date",
+      "label": "A spoken year pair alone stays words",
+      "inputText": "twenty twenty six is the target",
+      "expectedItnOutput": "twenty twenty six is the target"
+    },
+    {
+      "id": "num-year-pair-in-date",
+      "label": "A spoken year pair after a month is a year",
+      "inputText": "the release ships in march twenty twenty six",
+      "expectedItnOutput": "the release ships in March 2026"
+    },
+    {
+      "id": "num-time-without-context",
+      "label": "A bare hour and minute stay words",
+      "inputText": "three thirty",
+      "expectedItnOutput": "three thirty"
+    },
+    {
+      "id": "num-time-with-at",
+      "label": "An at-preposition makes it a clock time",
+      "inputText": "let us sync at three thirty",
+      "expectedItnOutput": "let us sync at 3:30"
+    },
+    {
+      "id": "num-time-with-meridiem",
+      "label": "A meridiem makes it a clock time",
+      "inputText": "march third at three thirty pm",
+      "expectedItnOutput": "March 3 at 3:30 pm"
+    },
+    {
+      "id": "num-currency-bare-cents",
+      "label": "Currency with bare cents",
+      "inputText": "twelve dollars fifty",
+      "expectedItnOutput": "$12.50"
+    },
+    {
+      "id": "num-currency-explicit-cents",
+      "label": "Currency with the word cents",
+      "inputText": "twelve dollars and fifty cents",
+      "expectedItnOutput": "$12.50"
+    },
+    {
+      "id": "num-currency-euro-pound",
+      "label": "Euro and pound amounts",
+      "inputText": "it costs three pounds fifty or five euros",
+      "expectedItnOutput": "it costs £3.50 or €5"
+    },
+    {
+      "id": "num-currency-weight-guard",
+      "label": "Pounds of flour is a weight",
+      "inputText": "three pounds of flour",
+      "expectedItnOutput": "3 pounds of flour"
+    },
+    {
+      "id": "num-decimal",
+      "label": "Point decimals after a number",
+      "inputText": "the load average is three point five",
+      "expectedItnOutput": "the load average is 3.5"
+    },
+    {
+      "id": "num-decimal-guard",
+      "label": "Point without a number is a word",
+      "inputText": "the point is simple",
+      "expectedItnOutput": "the point is simple"
+    },
+    {
+      "id": "num-percent",
+      "label": "Percentages lose the spoken word",
+      "inputText": "twenty percent off",
+      "expectedItnOutput": "20% off"
+    },
+    {
+      "id": "num-ordinal-in-date",
+      "label": "An ordinal before a month is a date",
+      "inputText": "the first of may",
+      "expectedItnOutput": "the 1st of May"
+    },
+    {
+      "id": "num-ordinal-guard",
+      "label": "A bare simple ordinal stays a word",
+      "inputText": "give me a second",
+      "expectedItnOutput": "give me a second"
+    },
+    {
+      "id": "num-one-of-them",
+      "label": "A bare one is never a digit",
+      "inputText": "one of them is broken",
+      "expectedItnOutput": "one of them is broken"
+    },
+    {
+      "id": "num-couple-of",
+      "label": "A couple of is untouched",
+      "inputText": "a couple of things",
+      "expectedItnOutput": "a couple of things"
+    },
+    {
+      "id": "num-for-four",
+      "label": "The homophone for is untouched",
+      "inputText": "this is for the team and for four people",
+      "expectedItnOutput": "this is for the team and for 4 people"
+    },
+    {
+      "id": "num-to-two",
+      "label": "The homophone to is untouched",
+      "inputText": "send it to the team in two places",
+      "expectedItnOutput": "send it to the team in 2 places"
+    },
+    {
+      "id": "num-phone",
+      "label": "A phone-shaped digit run",
+      "inputText": "call me at five five five one two three four five six seven",
+      "expectedItnOutput": "call me at 555-123-4567"
+    },
+    {
+      "id": "num-units-keep-the-word",
+      "label": "Units keep the word the user said",
+      "inputText": "twenty five kilometers",
+      "expectedItnOutput": "25 kilometers"
+    },
+    {
+      "id": "num-adjacent-non-composing",
+      "label": "Adjacent numbers that do not compose stay words",
+      "inputText": "seven eighty eight",
+      "expectedItnOutput": "seven eighty eight"
+    },
+    {
+      "id": "num-idempotent",
+      "label": "Already-numeric text is a no-op",
+      "inputText": "232 already numeric 3:30 pm $12.50 January 5, 2025",
+      "expectedItnOutput": "232 already numeric 3:30 pm $12.50 January 5, 2025"
+    },
+    {
+      "id": "num-url-untouched",
+      "label": "URLs and emails are never rewritten",
+      "inputText": "the file is at https://example.com/two/three",
+      "expectedItnOutput": "the file is at https://example.com/two/three"
+    },
+    {
+      "id": "num-month-word-ordinal-guard",
+      "label": "An ordinal after an ordinary-word month is not a date on its own",
+      "inputText": "i may second that motion",
+      "expectedItnOutput": "i may second that motion"
+    },
+    {
+      "id": "num-month-word-ordinal-guard-first",
+      "label": "A mid-sentence may plus first keeps its words",
+      "inputText": "we may first go",
+      "expectedItnOutput": "we may first go"
+    },
+    {
+      "id": "num-month-word-verb-guard",
+      "label": "March second after a subject is a marching order",
+      "inputText": "i march second in the parade",
+      "expectedItnOutput": "i march second in the parade"
+    },
+    {
+      "id": "num-month-word-with-date-word",
+      "label": "A date word in front of the month makes it a date",
+      "inputText": "let us ship on may first",
+      "expectedItnOutput": "let us ship on May 1"
+    },
+    {
+      "id": "num-span-punctuation-percent",
+      "label": "Punctuation inside a phrase stops the percent rule",
+      "inputText": "ten per (cent",
+      "expectedItnOutput": "10 per (cent"
+    },
+    {
+      "id": "num-span-punctuation-month",
+      "label": "Punctuation inside a phrase stops the ordinal-of-month rule",
+      "inputText": "the first of (May",
+      "expectedItnOutput": "the first of (May"
+    },
+    {
+      "id": "num-span-punctuation-cents",
+      "label": "Punctuation inside a phrase stops the cents rule",
+      "inputText": "twelve dollars and fifty (cents",
+      "expectedItnOutput": "$12.50 (cents"
+    },
+    {
+      "id": "num-all-or-nothing-ratio",
+      "label": "A ratio whose other half stays a word is left alone",
+      "inputText": "ten to one odds",
+      "expectedItnOutput": "ten to one odds"
+    },
+    {
+      "id": "num-all-or-nothing-decimal-tail",
+      "label": "A decimal with no integer half stays words",
+      "inputText": "point five",
+      "expectedItnOutput": "point five"
+    },
+    {
+      "id": "num-digit-run-with-oh",
+      "label": "A spoken oh is a zero inside a digit run",
+      "inputText": "room two oh one",
+      "expectedItnOutput": "room 201"
+    },
+    {
+      "id": "num-digit-run-unshaped-length",
+      "label": "A digit run with no phone shape stays words",
+      "inputText": "code five five five one two three four five",
+      "expectedItnOutput": "code five five five one two three four five"
+    },
+    {
+      "id": "num-thousands-separator",
+      "label": "Large cardinals carry thousands separators",
+      "inputText": "we hired seventy five thousand people",
+      "expectedItnOutput": "we hired 75,000 people"
+    },
+    {
+      "id": "num-currency-separator",
+      "label": "Currency carries separators from one thousand up",
+      "inputText": "one thousand two hundred dollars",
+      "expectedItnOutput": "$1,200"
+    },
+    {
+      "id": "num-hyphenated-cardinal",
+      "label": "A hyphenated cardinal converts like the ordinal does",
+      "inputText": "twenty-one servers",
+      "expectedItnOutput": "21 servers"
+    },
+    {
+      "id": "num-time-list",
+      "label": "A time preposition stays in scope across a list",
+      "inputText": "the slots are at three fifteen, three thirty and three forty five",
+      "expectedItnOutput": "the slots are at 3:15, 3:30 and 3:45"
+    }
   ]
 }

@@ -273,6 +273,14 @@ pub struct MeetingDetail {
     pub template_id: Option<String>,
     pub capture_mode: Option<String>,
     pub analysis_failure: Option<String>,
+    /// Who was in the meeting, NAMES ONLY.
+    ///
+    /// Built through `models::attendee_names_for_context`, the same function
+    /// the prompt path uses, so an address cannot reach a CLI or MCP caller
+    /// through this field. Another process on this Mac being allowed to read
+    /// meeting notes is not the same as it being handed the reader's contact
+    /// book; a name is what "who was in this meeting" needs.
+    pub attendee_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -467,6 +475,7 @@ pub(crate) mod test_support {
             template_id: Some("general".to_string()),
             capture_mode: Some("mic".to_string()),
             analysis_failure: None,
+            attendee_names: vec!["Alice Brown".to_string(), "Bob Stone".to_string()],
         }
     }
 

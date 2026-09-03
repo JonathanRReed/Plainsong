@@ -12,6 +12,11 @@
  * refreshes rather than drifting with a cached string.
  */
 
+import {
+  meetingAttendeesFromCalendar,
+  type MeetingAttendee,
+} from "@/lib/attendees";
+
 export type CalendarAuthorization =
   | "not_determined"
   | "denied"
@@ -32,6 +37,14 @@ export type CalendarVideoService =
   | "bluejeans"
   | "jitsi";
 
+/** Mirrors `CalendarAttendee` in electron/macos-calendar.ts. */
+export interface CalendarAttendee {
+  name: string;
+  email: string | null;
+  isOrganizer: boolean;
+  isCurrentUser: boolean;
+}
+
 export interface CalendarEventSummary {
   id: string;
   title: string;
@@ -41,6 +54,8 @@ export interface CalendarEventSummary {
   calendarId: string;
   calendarName: string;
   videoService: CalendarVideoService | null;
+  /** Empty when the event has no invitees, or when the helper is protocol 1. */
+  attendees?: CalendarAttendee[];
 }
 
 export interface CalendarSourceSummary {
@@ -243,6 +258,13 @@ export interface CalendarCapturePrefill {
   /** Becomes the recording's title, so auto-naming leaves it alone. */
   title: string;
   videoService: CalendarVideoService | null;
+  /**
+   * Who was invited, stored on the recording so the meeting keeps its
+   * attendee list after the calendar entry has moved on. The current user is
+   * dropped: "who else was there" is the question a chip row answers, and
+   * seeing your own name in it tells you nothing.
+   */
+  attendees: MeetingAttendee[];
 }
 
 /**
@@ -267,6 +289,7 @@ export function buildCalendarCapturePrefill(
         ? title.slice(0, CALENDAR_PREFILL_TITLE_MAX_LENGTH).trimEnd()
         : title,
     videoService: event.videoService,
+    attendees: meetingAttendeesFromCalendar(event.attendees),
   };
 }
 

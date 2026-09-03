@@ -58,6 +58,10 @@ pub struct Settings {
     pub automation: AutomationSettings,
     /// Theme
     pub theme: String,
+    /// Reusable chat prompts. New section: a settings.json written before it
+    /// existed simply has no `ai` key, and `#[serde(default)]` on this struct
+    /// fills it in without a migration.
+    pub ai: AiSettings,
 }
 
 impl Default for Settings {
@@ -74,8 +78,38 @@ impl Default for Settings {
             notifications: NotificationsSettings::default(),
             automation: AutomationSettings::default(),
             theme: "system".to_string(),
+            ai: AiSettings::default(),
         }
     }
+}
+
+/// Settings for the chat surfaces that talk to an AI lane.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiSettings {
+    /// The reader's prompt library, offered by the "/" picker in both the
+    /// per-meeting chat and the dashboard's "ask your meetings".
+    pub saved_prompts: Vec<SavedPrompt>,
+}
+
+/// One reusable question. Mirrors `SavedPrompt` in `src/types/settings.ts`.
+///
+/// An entry whose `id` is in `BUILTIN_SAVED_PROMPT_IDS` is an *override* of
+/// that starter prompt rather than a separate prompt -- that is how an edited
+/// or hidden built-in is persisted. `built_in` is recomputed from the id on
+/// every load and save (see `sanitize_saved_prompts`), so the renderer can
+/// neither claim built-in status for a user prompt nor strip it from a real
+/// one.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SavedPrompt {
+    pub id: String,
+    pub name: String,
+    pub prompt: String,
+    /// "meeting", "memory" or "both"; anything else normalizes to "both".
+    pub scope: String,
+    pub built_in: bool,
+    pub hidden: bool,
 }
 
 /// Local automation surfaces: the `plainsong` command-line tool, the read-only
@@ -185,6 +219,13 @@ pub struct TranscriptionSettings {
     /// `base_mode_preset`, not as the top-level preset — see
     /// `normalize_dictation_mode_preset` in `lib.rs`.)
     pub dictation_mode_preset: String,
+    /// Dictation: inverse text normalization per mode preset ("voice",
+    /// "messages", "email", "notes", "meeting_follow_up"). Sparse: an absent
+    /// key means the preset default from
+    /// `default_dictation_numbers_as_digits`, so a settings file written
+    /// before this setting existed keeps behaving like a fresh install.
+    /// Unknown keys are dropped on load.
+    pub dictation_numbers_as_digits: HashMap<String, bool>,
     /// Selected saved custom dictation mode id, if any.
     pub dictation_selected_custom_mode_id: Option<String>,
     /// Saved reusable custom dictation modes.
@@ -314,6 +355,9 @@ pub struct DictationCustomMode {
     pub route_preference: Option<String>,
     pub language_override: Option<String>,
     pub live_preview_enabled: Option<bool>,
+    /// `None` inherits the base preset's `dictation_numbers_as_digits` value,
+    /// which is what a profile saved before this setting existed carries.
+    pub numbers_as_digits: Option<bool>,
     pub insertion_mode: String,
     pub context_source: String,
     pub save_to_inbox: bool,
@@ -385,6 +429,7 @@ impl Default for TranscriptionSettings {
             dictation_ai_formatting: false,
             dictation_translate_to_english: false,
             dictation_mode_preset: "voice".to_string(),
+            dictation_numbers_as_digits: HashMap::new(),
             dictation_selected_custom_mode_id: None,
             dictation_custom_modes: Vec::new(),
             dictation_context_source: "none".to_string(),
@@ -1216,6 +1261,11 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "groq" => "groq".to_string(),
         "cohere_transcribe" => "cohere_transcribe".to_string(),
         "qwen3_asr" => "qwen3_asr".to_string(),
+        // Only when the spike is compiled in. A default build has no engine
+        // that answers to this name, so it must land on `whisper` through the
+        // fallback below rather than become a ghost route in the settings file.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => "transcribe_cpp".to_string(),
         _ => "whisper".to_string(),
     }
 }
@@ -1267,6 +1317,15 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             "" | "qwen3-asr-0.6b" => "qwen3-asr-0.6b".to_string(),
             value => value.to_string(),
         },
+        // `route_spec_for`, not `spec_for`: the latter also resolves the
+        // Nemotron streaming GGUF that the benchmark loads to prove the runtime
+        // path and that `model_options()` deliberately never offers. Normalizing
+        // through it would let a saved settings file pin the route to a model
+        // the picker does not list and the app cannot download.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp" => crate::asr::transcribe_cpp::route_spec_for(model_id)
+            .model_id
+            .to_string(),
         _ => "base.en".to_string(),
     }
 }
@@ -1526,6 +1585,37 @@ fn raw_settings_carry_dead_whisper_meeting_slot(raw: &serde_json::Value) -> bool
             == Some("base.en")
 }
 
+/// Mode presets that may carry a `dictation_numbers_as_digits` override.
+/// Mirrors `DICTATION_NUMBER_MODE_IDS` in `src/lib/dictation-numbers.ts`.
+/// "custom" is absent on purpose: a custom profile stores its own
+/// `numbers_as_digits` and inherits its base preset's value when unset.
+pub(crate) const DICTATION_NUMBERS_AS_DIGITS_MODES: &[&str] =
+    &["voice", "messages", "email", "notes", "meeting_follow_up"];
+
+/// Whether a mode preset writes spoken numbers as digits when the user has
+/// not said otherwise.
+///
+/// On for the drafting presets, where "$12.50" and "3:30 pm" are what the
+/// text is going to have to say anyway. Off for the plain Voice preset,
+/// whose promise is that it keeps your words as spoken -- the Settings copy
+/// in `src/lib/dictation-numbers.ts` has to say the same thing.
+pub fn default_dictation_numbers_as_digits(mode_preset: &str) -> bool {
+    match mode_preset.trim() {
+        "messages" | "email" | "notes" | "meeting_follow_up" => true,
+        // "voice", "custom" and anything unrecognized take the conservative
+        // reading.
+        _ => false,
+    }
+}
+
+/// Drops overrides keyed by a mode preset that does not exist -- otherwise
+/// one would sit in the settings file forever. Applied on both load and save
+/// (`update_settings` in `lib.rs`), like every other sanitizer here: a save is
+/// just as capable of carrying a stale key as a hand-edited settings.json is.
+pub(crate) fn sanitize_dictation_numbers_as_digits(map: &mut HashMap<String, bool>) {
+    map.retain(|mode, _| DICTATION_NUMBERS_AS_DIGITS_MODES.contains(&mode.as_str()));
+}
+
 fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSettings) {
     transcription.default_provider =
         normalize_transcription_provider_value(&transcription.default_provider);
@@ -1615,6 +1705,8 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
             }
         });
     }
+
+    sanitize_dictation_numbers_as_digits(&mut transcription.dictation_numbers_as_digits);
 
     transcription.dictation_insertion_mode =
         normalize_dictation_insertion_mode(&transcription.dictation_insertion_mode);
@@ -1722,6 +1814,93 @@ pub(crate) fn sanitize_meeting_custom_templates(
 
         sanitized.push(template);
         if sanitized.len() >= MAX_MEETING_CUSTOM_TEMPLATES {
+            break;
+        }
+    }
+
+    sanitized
+}
+
+/// Ids of the starter prompts declared in `src/lib/saved-prompts.ts`.
+///
+/// A stored entry carrying one of these ids is an override of that starter,
+/// which is what makes "editable and hideable but not deletable" a single
+/// storage shape rather than two. Kept in sync by hand with the renderer, the
+/// same arrangement `BUILTIN_MEETING_TEMPLATE_IDS` has.
+pub(crate) const BUILTIN_SAVED_PROMPT_IDS: &[&str] = &[
+    "builtin_decisions",
+    "builtin_open_questions",
+    "builtin_my_commitments",
+    "builtin_risks_blockers",
+    "builtin_follow_up_message",
+    "builtin_catch_me_up",
+];
+
+/// Beyond this a prompt library is a sync loop or a corrupted file, not a
+/// reader with 40 genuine questions they reuse.
+const MAX_SAVED_PROMPTS: usize = 40;
+/// A prompt name reads as a short label in a picker row.
+const MAX_SAVED_PROMPT_NAME_LEN: usize = 80;
+/// The prompt text is handed to the grounded chat path as the instruction, so
+/// it gets a ceiling of its own rather than the 4000 a summary playbook gets:
+/// a question is not a playbook, and a shorter cap keeps a pasted transcript
+/// from becoming a "prompt".
+const MAX_SAVED_PROMPT_TEXT_LEN: usize = 2000;
+
+fn normalize_saved_prompt_scope(scope: &str) -> String {
+    match scope.trim() {
+        "meeting" => "meeting".to_string(),
+        "memory" => "memory".to_string(),
+        // Includes the empty string: a prompt with no stated scope is
+        // offered everywhere rather than nowhere, which is the failure a
+        // reader can see and fix.
+        _ => "both".to_string(),
+    }
+}
+
+/// Sanitize a saved (or about-to-be-saved) prompt library.
+///
+/// Same discipline as `sanitize_meeting_custom_templates`: trim and cap every
+/// free-text field, drop anything unresolvable, and run on both load and save
+/// so a dropped entry stays dropped rather than round-tripping back in from
+/// whichever path didn't just sanitize it.
+///
+/// `built_in` is not read from the input at all -- it is recomputed from the
+/// id. That is the whole protection for the starter prompts: the renderer
+/// decides what a built-in row can do (hide, not delete) from this flag, so
+/// letting the wire set it would let a crafted settings.json turn a user
+/// prompt into an undeletable one.
+pub(crate) fn sanitize_saved_prompts(prompts: Vec<SavedPrompt>) -> Vec<SavedPrompt> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for mut prompt in prompts {
+        prompt.id = prompt.id.trim().to_string();
+        prompt.name = prompt.name.trim().to_string();
+        prompt.prompt = prompt.prompt.trim().to_string();
+
+        // No identity, no label, or no question: all three make the row
+        // unusable in the picker, so it is dropped rather than repaired. For
+        // an override of a starter prompt, dropping it restores the starter's
+        // shipped text, which is the better of the two failures.
+        if prompt.id.is_empty() || prompt.name.is_empty() || prompt.prompt.is_empty() {
+            continue;
+        }
+        if !seen_ids.insert(prompt.id.clone()) {
+            continue;
+        }
+
+        prompt
+            .name
+            .truncate_to_char_count(MAX_SAVED_PROMPT_NAME_LEN);
+        prompt
+            .prompt
+            .truncate_to_char_count(MAX_SAVED_PROMPT_TEXT_LEN);
+        prompt.scope = normalize_saved_prompt_scope(&prompt.scope);
+        prompt.built_in = BUILTIN_SAVED_PROMPT_IDS.contains(&prompt.id.as_str());
+
+        sanitized.push(prompt);
+        if sanitized.len() >= MAX_SAVED_PROMPTS {
             break;
         }
     }
@@ -2332,6 +2511,10 @@ impl SettingsManager {
         normalize_keyboard_shortcuts(&mut settings.shortcuts);
         normalize_loaded_transcription_settings(&mut settings.transcription);
         normalize_loaded_privacy_settings(&mut settings.privacy);
+        // Loaded straight from disk, so a hand-edited or pre-upgrade file gets
+        // the same treatment `update_settings` gives a fresh write.
+        settings.ai.saved_prompts =
+            sanitize_saved_prompts(std::mem::take(&mut settings.ai.saved_prompts));
         normalize_loaded_meetings_settings(&mut settings.meetings);
         apply_zero_setup_dictation_default(
             &mut settings.privacy,
@@ -2441,23 +2624,26 @@ impl Default for SettingsManager {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_zero_setup_dictation_default, dictation_app_category_from_key,
-        dictation_app_category_to_key, dictation_supported_languages,
-        migrate_legacy_ai_lane_settings, normalize_audio_input_device_preference,
-        validate_dictation_active_languages, AutomationSettings, DEFAULT_DICTATION_AI_PROVIDER,
+        apply_zero_setup_dictation_default, default_dictation_numbers_as_digits,
+        dictation_app_category_from_key, dictation_app_category_to_key,
+        dictation_supported_languages, migrate_legacy_ai_lane_settings,
+        normalize_audio_input_device_preference, validate_dictation_active_languages,
+        AutomationSettings, DEFAULT_DICTATION_AI_PROVIDER,
         DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION, ENGLISH_ONLY_LANGUAGES, PARAKEET_V3_LANGUAGES,
         WHISPER_MULTILINGUAL_LANGUAGES,
     };
     use super::{
         normalize_dictation_active_languages, normalize_loaded_privacy_settings,
         normalize_loaded_transcription_settings, normalize_transcription_model_id,
-        resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates, AiLane,
-        AiLaneSettings, AudioInputDevicePreference, DictationAppCategoryOverride,
-        DictationCustomMode, MeetingCustomTemplate, MeetingsSettings, PlatformOptimizationSettings,
-        PrivacySettings, Settings, SettingsManager, TranscriptionSettings,
-        MAX_MEETING_CUSTOM_TEMPLATES, MAX_MEETING_TEMPLATE_NAME_LEN,
-        MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS, MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN,
-        MAX_MEETING_TEMPLATE_PROMPT_LEN, MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
+        resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates,
+        sanitize_saved_prompts, AiLane, AiLaneSettings, AudioInputDevicePreference,
+        DictationAppCategoryOverride, DictationCustomMode, MeetingCustomTemplate, MeetingsSettings,
+        PlatformOptimizationSettings, PrivacySettings, SavedPrompt, Settings, SettingsManager,
+        TranscriptionSettings, BUILTIN_SAVED_PROMPT_IDS, MAX_MEETING_CUSTOM_TEMPLATES,
+        MAX_MEETING_TEMPLATE_NAME_LEN, MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS,
+        MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN, MAX_MEETING_TEMPLATE_PROMPT_LEN,
+        MAX_SAVED_PROMPTS, MAX_SAVED_PROMPT_NAME_LEN, MAX_SAVED_PROMPT_TEXT_LEN,
+        MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
@@ -2526,6 +2712,92 @@ mod tests {
             &["uk".to_string()]
         )
         .is_err());
+    }
+
+    /// A settings file that names the transcribe.cpp spike must survive a
+    /// reload on a build that has it, and must NOT resurrect a route on a
+    /// build that does not -- the same rule that keeps `mlx_audio` from
+    /// coming back as a ghost.
+    #[test]
+    fn transcribe_cpp_is_kept_only_by_a_build_that_can_run_it() {
+        let mut settings = TranscriptionSettings {
+            default_provider: "transcribe_cpp".to_string(),
+            dictation_provider: "transcribe_cpp".to_string(),
+            meeting_provider: "transcribe_cpp".to_string(),
+            selected_model_id: "parakeet-tdt-0.6b-v3-q8_0".to_string(),
+            dictation_model_id: "parakeet-tdt-0.6b-v3-q8_0".to_string(),
+            meeting_model_id: "totally-unknown".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut settings);
+
+        #[cfg(feature = "asr-transcribe-cpp")]
+        {
+            assert_eq!(settings.default_provider, "transcribe_cpp");
+            assert_eq!(settings.dictation_provider, "transcribe_cpp");
+            assert_eq!(settings.meeting_provider, "transcribe_cpp");
+            assert_eq!(settings.selected_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+            assert_eq!(settings.dictation_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+            // An unknown model id falls back to the one offered route rather
+            // than being persisted verbatim.
+            assert_eq!(settings.meeting_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+        }
+        #[cfg(not(feature = "asr-transcribe-cpp"))]
+        {
+            assert_eq!(settings.default_provider, "whisper");
+            assert_eq!(settings.dictation_provider, "whisper");
+            assert_eq!(settings.selected_model_id, "base.en");
+            assert_eq!(settings.dictation_model_id, "base.en");
+            // The meeting slot lands on the shipped meeting route rather than
+            // whisper/base.en, through the existing dead-slot migration --
+            // exactly what any other unrunnable provider name gets.
+            assert_eq!(settings.meeting_provider, "parakeet");
+            assert_eq!(settings.meeting_model_id, "parakeet-tdt-0.6b-v3");
+        }
+    }
+
+    /// The Nemotron streaming GGUF is loadable (the benchmark proves the
+    /// runtime path with it) but is not a route: `model_options()` never offers
+    /// it, so normalization must not persist it either.
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn a_settings_file_cannot_pin_the_route_to_a_model_the_picker_never_offers() {
+        let mut settings = TranscriptionSettings {
+            default_provider: "transcribe_cpp".to_string(),
+            dictation_provider: "transcribe_cpp".to_string(),
+            meeting_provider: "transcribe_cpp".to_string(),
+            selected_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            dictation_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            meeting_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut settings);
+
+        for model_id in [
+            &settings.selected_model_id,
+            &settings.dictation_model_id,
+            &settings.meeting_model_id,
+        ] {
+            assert_eq!(
+                model_id, "parakeet-tdt-0.6b-v3-q8_0",
+                "the streaming GGUF must not survive normalization"
+            );
+            assert!(
+                crate::asr::AsrProviderType::TranscribeCpp
+                    .model_options()
+                    .iter()
+                    .any(|option| &option.id == model_id),
+                "normalization must land on a model the picker offers"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shipped_default_provider_is_never_the_transcribe_cpp_spike() {
+        let settings = TranscriptionSettings::default();
+        assert_ne!(settings.default_provider, "transcribe_cpp");
+        assert_ne!(settings.dictation_provider, "transcribe_cpp");
+        assert_ne!(settings.meeting_provider, "transcribe_cpp");
     }
 
     #[test]
@@ -3042,6 +3314,113 @@ mod tests {
         assert!(!parsed.automation.local_tools_enabled);
         assert_eq!(parsed.theme, "dark");
         assert_eq!(parsed.automation, AutomationSettings::default());
+    }
+
+    /// A settings file written before `numbersAsDigits` existed has to load,
+    /// keep every other value, and behave like a fresh install for the new
+    /// one (empty map, `None` on any saved custom profile).
+    #[test]
+    fn settings_without_numbers_as_digits_still_load() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "audio": {},
+                "transcription": {
+                    "dictationModePreset": "email",
+                    "dictationCustomModes": [
+                        { "id": "gmail", "name": "Gmail", "baseModePreset": "email" }
+                    ]
+                },
+                "ui": {},
+                "export": {},
+                "privacy": {},
+                "shortcuts": {},
+                "updates": {}
+            }"#,
+        )
+        .expect("pre-ITN settings should deserialize");
+
+        assert!(parsed.transcription.dictation_numbers_as_digits.is_empty());
+        assert_eq!(parsed.transcription.dictation_mode_preset, "email");
+        assert_eq!(
+            parsed.transcription.dictation_custom_modes[0].numbers_as_digits, None,
+            "a profile saved before the setting inherits its base style"
+        );
+    }
+
+    #[test]
+    fn numbers_as_digits_round_trips_in_camel_case() {
+        let mut settings = Settings::default();
+        settings
+            .transcription
+            .dictation_numbers_as_digits
+            .insert("voice".to_string(), true);
+        settings
+            .transcription
+            .dictation_custom_modes
+            .push(DictationCustomMode {
+                id: "gmail".to_string(),
+                name: "Gmail".to_string(),
+                numbers_as_digits: Some(false),
+                ..Default::default()
+            });
+
+        let json = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(
+            json["transcription"]["dictationNumbersAsDigits"]["voice"],
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(
+            json["transcription"]["dictationCustomModes"][0]["numbersAsDigits"],
+            serde_json::Value::Bool(false)
+        );
+
+        let parsed: Settings = serde_json::from_value(json).expect("round trip");
+        assert_eq!(
+            parsed
+                .transcription
+                .dictation_numbers_as_digits
+                .get("voice"),
+            Some(&true)
+        );
+        assert_eq!(
+            parsed.transcription.dictation_custom_modes[0].numbers_as_digits,
+            Some(false)
+        );
+    }
+
+    /// The map is keyed by mode preset, so a key for a preset that does not
+    /// exist would sit in the file forever. Load drops it; known keys stay.
+    #[test]
+    fn unknown_numbers_as_digits_mode_keys_are_dropped_on_load() {
+        let mut transcription = TranscriptionSettings {
+            dictation_numbers_as_digits: [
+                ("voice".to_string(), true),
+                ("translate_english".to_string(), true),
+                ("custom".to_string(), false),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        assert_eq!(transcription.dictation_numbers_as_digits.len(), 1);
+        assert_eq!(
+            transcription.dictation_numbers_as_digits.get("voice"),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn numbers_as_digits_defaults_are_off_only_for_voice() {
+        assert!(!default_dictation_numbers_as_digits("voice"));
+        assert!(default_dictation_numbers_as_digits("messages"));
+        assert!(default_dictation_numbers_as_digits("email"));
+        assert!(default_dictation_numbers_as_digits("notes"));
+        assert!(default_dictation_numbers_as_digits("meeting_follow_up"));
+        // Unrecognized presets take the conservative reading.
+        assert!(!default_dictation_numbers_as_digits("who_knows"));
     }
 
     #[test]
@@ -3730,6 +4109,194 @@ mod tests {
             "Summarize board sentiment, asks, and follow-ups."
         );
         assert_eq!(template.notes_outline, vec!["Sentiment", "Asks"]);
+    }
+
+    fn saved_prompt(id: &str, name: &str, prompt: &str, scope: &str) -> SavedPrompt {
+        SavedPrompt {
+            id: id.to_string(),
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            scope: scope.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn saved_prompts_round_trip_and_normalize_scope() {
+        let sanitized = sanitize_saved_prompts(vec![
+            saved_prompt("p1", "  Decisions  ", "  What was decided?  ", "meeting"),
+            saved_prompt("p2", "Across", "What is still open?", "memory"),
+            // Unknown scope: offered everywhere rather than nowhere.
+            saved_prompt("p3", "Anywhere", "Anything?", "somewhere-else"),
+            saved_prompt("p4", "No scope", "Anything?", ""),
+        ]);
+
+        assert_eq!(sanitized.len(), 4);
+        assert_eq!(sanitized[0].name, "Decisions");
+        assert_eq!(sanitized[0].prompt, "What was decided?");
+        assert_eq!(sanitized[0].scope, "meeting");
+        assert_eq!(sanitized[1].scope, "memory");
+        assert_eq!(sanitized[2].scope, "both");
+        assert_eq!(sanitized[3].scope, "both");
+        assert!(
+            sanitized.iter().all(|prompt| !prompt.built_in),
+            "no user id is a built-in id"
+        );
+    }
+
+    #[test]
+    fn saved_prompts_drop_malformed_and_duplicate_entries() {
+        let sanitized = sanitize_saved_prompts(vec![
+            saved_prompt("", "No id", "Body", "both"),
+            saved_prompt("p1", "", "Body", "both"),
+            saved_prompt("p2", "No body", "   ", "both"),
+            saved_prompt("p3", "Keeper", "Body", "both"),
+            saved_prompt("p3", "Duplicate id", "Different body", "both"),
+        ]);
+
+        assert_eq!(sanitized.len(), 1);
+        assert_eq!(sanitized[0].id, "p3");
+        assert_eq!(
+            sanitized[0].name, "Keeper",
+            "first occurrence of an id wins, like a custom template"
+        );
+    }
+
+    #[test]
+    fn saved_prompts_cap_lengths_and_count() {
+        let sanitized = sanitize_saved_prompts(vec![saved_prompt(
+            "p1",
+            &"n".repeat(MAX_SAVED_PROMPT_NAME_LEN + 40),
+            &"b".repeat(MAX_SAVED_PROMPT_TEXT_LEN + 500),
+            "both",
+        )]);
+        assert_eq!(sanitized[0].name.chars().count(), MAX_SAVED_PROMPT_NAME_LEN);
+        assert_eq!(
+            sanitized[0].prompt.chars().count(),
+            MAX_SAVED_PROMPT_TEXT_LEN
+        );
+
+        let too_many: Vec<SavedPrompt> = (0..(MAX_SAVED_PROMPTS + 10))
+            .map(|index| saved_prompt(&format!("p{index}"), "Name", "Body", "both"))
+            .collect();
+        assert_eq!(sanitize_saved_prompts(too_many).len(), MAX_SAVED_PROMPTS);
+    }
+
+    /// `built_in` decides what the manage dialog will let the reader do with a
+    /// row (hide, never delete). Reading it from the wire would let a crafted
+    /// settings.json mint an undeletable prompt, or strip the flag off a real
+    /// starter so "delete" appeared on it.
+    #[test]
+    fn saved_prompts_recompute_the_built_in_flag_from_the_id() {
+        let builtin_id = BUILTIN_SAVED_PROMPT_IDS[0];
+        let sanitized = sanitize_saved_prompts(vec![
+            SavedPrompt {
+                id: "not-a-builtin".to_string(),
+                name: "Impostor".to_string(),
+                prompt: "Body".to_string(),
+                scope: "both".to_string(),
+                built_in: true,
+                hidden: false,
+            },
+            SavedPrompt {
+                id: builtin_id.to_string(),
+                name: "Edited starter".to_string(),
+                prompt: "My own wording".to_string(),
+                scope: "both".to_string(),
+                built_in: false,
+                hidden: true,
+            },
+        ]);
+
+        assert!(!sanitized[0].built_in, "a user id can never claim built-in");
+        assert!(sanitized[1].built_in, "a built-in id always carries it");
+        assert!(
+            sanitized[1].hidden,
+            "hiding a starter is the reader's decision and must survive"
+        );
+    }
+
+    /// The `ai` section did not exist before saved prompts. A settings.json
+    /// written by any earlier build has no such key at all, and must load.
+    #[test]
+    fn settings_file_without_the_ai_section_loads_with_an_empty_prompt_library() {
+        let legacy = serde_json::json!({
+            "theme": "dark",
+            "shortcuts": { "toggleDictation": "Cmd+Shift+Space" }
+        });
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-no-ai-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&legacy).expect("serialize"),
+        )
+        .expect("write legacy settings");
+
+        let manager = SettingsManager::load_from_path(settings_path.clone())
+            .expect("a file predating the ai section must still load");
+        assert!(manager.settings().ai.saved_prompts.is_empty());
+        assert_eq!(manager.settings().theme, "dark");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A prompt library that a previous save already sanitized must survive
+    /// the load path unchanged, including a hidden starter override.
+    #[test]
+    fn saved_prompts_survive_a_settings_file_round_trip() {
+        let builtin_id = BUILTIN_SAVED_PROMPT_IDS[1];
+        let stored = serde_json::json!({
+            "ai": {
+                "savedPrompts": [
+                    {
+                        "id": builtin_id,
+                        "name": "Open questions",
+                        "prompt": "List every question left unanswered.",
+                        "scope": "both",
+                        "builtIn": true,
+                        "hidden": true
+                    },
+                    {
+                        "id": "mine-1",
+                        "name": "Budget asks",
+                        "prompt": "What did anyone ask for money for?",
+                        "scope": "memory"
+                    }
+                ]
+            }
+        });
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("nautilus-settings-prompts-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&stored).expect("serialize"),
+        )
+        .expect("write settings");
+
+        let manager =
+            SettingsManager::load_from_path(settings_path.clone()).expect("load saved prompts");
+        let prompts = &manager.settings().ai.saved_prompts;
+        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts[0].id, builtin_id);
+        assert!(prompts[0].built_in);
+        assert!(prompts[0].hidden);
+        assert_eq!(prompts[1].id, "mine-1");
+        assert_eq!(prompts[1].scope, "memory");
+        assert!(!prompts[1].built_in);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

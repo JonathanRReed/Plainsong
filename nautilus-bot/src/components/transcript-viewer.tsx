@@ -67,6 +67,8 @@ export interface TranscriptViewerProps {
   /** Skip the meeting audio; bound to ← → over the transcript. */
   onSeekBy?: (deltaSeconds: number) => void;
   speakerNames?: Record<string, string>;
+  /** Offered while renaming a speaker. See `SpeakerBadgeProps`. */
+  speakerNameSuggestions?: readonly string[];
   /** Provenance of the transcript; reported as unknown when omitted. */
   provenance?: TranscriptProvenance;
   /**
@@ -148,6 +150,14 @@ interface SpeakerBadgeProps {
   isAutoNamed?: boolean;
   /** Names to suggest while typing, already in the order to offer them. */
   nameOptions?: string[];
+  /**
+   * Names to offer while renaming: the meeting's attendees, when it started
+   * from a calendar event. A suggestion list, not a constraint -- diarization
+   * finds voices, not invitations, and the reader can always type something
+   * that was never on the invite. Offered after `nameOptions`, which is
+   * already ranked.
+   */
+  nameSuggestions?: readonly string[];
 }
 
 /** How long the reader's own scroll holds off the playhead's auto-scroll. */
@@ -179,7 +189,7 @@ function defaultSpeakerLabel(speakerId: string | null | undefined) {
   return normalized;
 }
 
-const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, isActive, isFirstMention, onRename, canRememberVoice, isAutoNamed, nameOptions }: SpeakerBadgeProps) {
+const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEditing, isActive, isFirstMention, onRename, canRememberVoice, isAutoNamed, nameOptions, nameSuggestions }: SpeakerBadgeProps) {
   const [isEditMode, setIsEditMode] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [editValue, setEditValue] = useState(speakerName || defaultSpeakerLabel(speakerId));
@@ -215,6 +225,21 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
     }
   };
 
+  // One list, two sources: the ranked voiceprint/attendee options this
+  // meeting produced, then any remaining calendar attendees. Order is the
+  // offer order, and a name never appears twice.
+  const offeredNames = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: string[] = [];
+    for (const name of [...(nameOptions ?? []), ...(nameSuggestions ?? [])]) {
+      const trimmed = name.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      merged.push(trimmed);
+    }
+    return merged;
+  }, [nameOptions, nameSuggestions]);
+
   if (isEditMode) {
     return (
       <div className="flex flex-col gap-2">
@@ -224,7 +249,7 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditValue(e.target.value)}
             className="h-6 w-24 text-xs"
             aria-label="Speaker name"
-            list={nameOptions && nameOptions.length > 0 ? nameListId : undefined}
+            list={offeredNames.length > 0 ? nameListId : undefined}
             autoFocus
             disabled={isSaving}
             onKeyDown={(e) => {
@@ -243,9 +268,9 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
             <Check className="h-3 w-3" />
           </Button>
         </div>
-        {nameOptions && nameOptions.length > 0 && (
+        {offeredNames.length > 0 && (
           <datalist id={nameListId} data-testid="speaker-name-options">
-            {nameOptions.map((name) => (
+            {offeredNames.map((name) => (
               <option key={name} value={name} />
             ))}
           </datalist>
@@ -428,6 +453,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
   onTogglePlayback,
   onSeekBy,
   speakerNames: externalSpeakerNames,
+  speakerNameSuggestions,
   provenance,
   highlightQuery,
   activeMatchIndex = 0,
@@ -965,6 +991,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
                       canRememberVoice={Boolean(rememberVoicesEnabled && speakerId)}
                       isAutoNamed={voiceState?.matchState === "auto"}
                       nameOptions={speakerNameOptions}
+                      nameSuggestions={speakerNameSuggestions}
                     />
                   </div>
 
