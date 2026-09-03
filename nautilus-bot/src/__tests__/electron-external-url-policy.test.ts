@@ -40,6 +40,29 @@ describe("external URL policy", () => {
     );
   });
 
+  it("does not carry key-setup hosts the renderer never links to", () => {
+    // Both appear in the Deepgram and Gemini setup copy, but that copy is a
+    // provider description and a runtime-diagnostics message, and both render
+    // as plain text: the renderer's only external `href` is
+    // `provider.modelInfo.sourceUrl` and its only `window.open` is
+    // RELEASES_URL. An allowlist entry with no caller is extra egress surface,
+    // which is exactly why `mailto:` was removed.
+    expect(isAllowedExternalUrl("https://console.deepgram.com")).toBe(false);
+    expect(isAllowedExternalUrl("https://aistudio.google.com/apikey")).toBe(
+      false,
+    );
+    // The documentation hosts those two providers *do* link, through
+    // `sourceUrl`, are allowed.
+    expect(
+      isAllowedExternalUrl(
+        "https://developers.deepgram.com/docs/pre-recorded-audio",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedExternalUrl("https://ai.google.dev/gemini-api/docs/transcribe"),
+    ).toBe(true);
+  });
+
   it("matches the host exactly rather than by suffix", () => {
     expect(isAllowedExternalUrl("https://evil-github.com/x")).toBe(false);
     expect(isAllowedExternalUrl("https://github.com.evil.example/x")).toBe(false);
