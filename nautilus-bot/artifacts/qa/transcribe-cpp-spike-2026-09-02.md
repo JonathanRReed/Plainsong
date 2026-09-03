@@ -111,11 +111,21 @@ Runtime evidence, not just link evidence:
   build: `whisper_backend_init_gpu: using Metal backend`, 96 ms p50 / 99 ms p95
   on the 5.3 s fixture (55.4x real time), 681 ms p50 on the 44 s fixture,
   401 MiB peak RSS, normal transcript. No fallback warnings.
-- A unit test now calls into **both** native libraries from one process
-  (`asr::transcribe_cpp::tests::both_native_runtimes_are_callable_from_one_process`:
-  `transcribe_cpp::version()` plus `whisper_rs::get_lang_str`), so a future
-  upstream bump that reintroduces the collision fails in CI rather than in
-  somebody's dictation.
+- A unit test drives **both ggml copies** from one process
+  (`asr::transcribe_cpp::tests::both_ggml_copies_serve_their_own_library_in_one_process`),
+  so a future upstream bump that reintroduces the collision fails in CI rather
+  than in somebody's dictation. It calls
+  `transcribe_cpp::devices()`/`device_count()`/`backend_available(Backend::Cpu)`,
+  which walk transcribe.cpp's ggml device registry, and `whisper_rs::print_system_info()`
+  (which walks whisper.cpp's own `ggml_backend_reg_*` registry) plus
+  `whisper_rs::SystemInfo::default()` (`ggml_cpu_has_*`), then re-checks each
+  side after the other has run. It needs no model on disk.
+
+  **Correction to the first version of this receipt.** That test originally
+  called `transcribe_cpp::version()` and `whisper_rs::get_lang_str`. Neither
+  touches ggml, so it could not have detected interposition at all — the whole
+  failure mode is one library's ggml answering for the other's. The nm evidence
+  above always stood on its own; the test did not, until now.
 
 ## Models
 
@@ -277,13 +287,21 @@ is already a hard requirement for whisper-rs, so no new toolchain dependency.
 3. **Pre-1.0 upstream with a declared ABI break policy.** The crate is 0.2.3 and
    its own docs say the on-disk ABI may break between minor releases; the
    binding enforces a load-time base-version lock. `main` was already two
-   commits past the v0.2.3 tag when this was pinned. Tracking it is real
-   maintenance, and pinning a commit means missing fixes until someone bumps.
+   commits past the v0.2.3 release when this was pinned. Tracking it is real
+   maintenance, and pinning an exact version means missing fixes until someone
+   bumps.
 4. **One in-flight compute per model.** The 0.x C library serializes
    `run`/`stream` across every session of a model, and the binding enforces
    that with a per-model mutex. Plainsong transcribes dictation while a meeting
    is capturing; that would serialize, or need a second `Model` (and a second
-   copy of the weights in memory). Not measured here.
+   copy of the weights in memory). Not measured here. What the review *did*
+   fix is the shape of that serialization: the provider's own runtime lock is
+   no longer taken with an unbounded `lock()`, so a second request waits at
+   most its own decode budget and then reports transcribe.cpp's own `Busy`
+   ("already transcribing … wait for the current transcription to finish")
+   instead of blocking with nothing to show. A decode also carries a
+   `CancelToken` and a deadline, so an abandoned request releases the runtime
+   at the next decode step rather than at the end of the decode.
 5. **Adoption means a second download.** Users who already have the 640 MB ONNX
    Parakeet would need the 740 MB GGUF. A default change needs a migration
    story, not just a feature flip.
@@ -303,7 +321,7 @@ directory. Both feature sets:
 bun run lint:rust
   -> cargo fmt --check + clippy --locked --features candle-metal --all-targets -D warnings: clean
 bun run test:rust
-  -> 1168 passed; 0 failed; 7 ignored (lib)
+  -> 1197 passed; 0 failed; 7 ignored (lib)
      19 passed (benchmark-latency), 0 (plainsong-cli), 4 (sidecar)
 
 # With the spike feature added
@@ -311,19 +329,106 @@ cargo fmt --manifest-path rust-sidecar/Cargo.toml --check
 node scripts/cargo-sidecar.mjs clippy --locked --features asr-transcribe-cpp --all-targets -- -D warnings
   -> clean
 node scripts/cargo-sidecar.mjs test --locked --features asr-transcribe-cpp --lib --bins
-  -> 1181 passed; 0 failed; 7 ignored (lib)
+  -> 1224 passed; 0 failed; 7 ignored (lib)
      20 passed (benchmark-latency), 0 (plainsong-cli), 4 (sidecar)
 
 # Shared gates
 bun run typecheck        -> clean
-bun run test             -> 130 files, 1427 tests passed
+bun run test             -> 133 files, 1491 tests passed
 bun run gate:ipc-contract-> 185 renderer commands, 236 sidecar commands, all reachable
 bun run gate:dead-code   -> clean
+bun run licenses:generate-> 532 Rust packages, 79 npm; THIRD-PARTY-NOTICES.txt unchanged
 ```
+
+(Counts above are from the 2026-09-02 review pass, which added 15 tests to the
+lib across both feature sets.)
 
 `--locked` passes for both feature sets against the same `Cargo.lock`; the two
 `transcribe-cpp*` entries it gained are optional-dependency rows that the
 default build resolves but never compiles.
+
+### Offline resolution (added by the 2026-09-02 review)
+
+The first version of this spike took `transcribe-cpp` from a **git** source.
+Cargo resolves optional dependencies regardless of feature selection, and a git
+source is not resolvable from a cargo cache holding only registry crates — so
+`cargo metadata --locked --offline` failed for *every* feature set, including
+the default and release ones that compile none of it, taking `lint:rust`,
+`test:rust`, `licenses:generate` and `release:mac` with it on an offline box.
+
+The dependency is now the crates.io release. It is the same bytes: both
+`transcribe-cpp` 0.2.3 and `transcribe-cpp-sys` 0.2.3 record
+`63a44d9239d610b3908e8a66b384924cd4a77217` — the commit this used to pin — in
+their `.cargo_vcs_info.json`, and their `Cargo.toml.orig`, Rust sources,
+`include/`, `src/`, `cmake/` and vendored `ggml/` trees diff clean against that
+git checkout. The lockfile now also carries a SHA-256 for each, which a git
+source cannot.
+
+The probe, run against a `CARGO_HOME` that has the registry cache and **no**
+`git` directory (which is what makes it a fair test of the failure mode):
+
+```
+mkdir -p /tmp/fakecargo && ln -s ~/.cargo/registry /tmp/fakecargo/registry
+
+# release feature set
+CARGO_HOME=/tmp/fakecargo cargo metadata --locked --offline \
+  --manifest-path rust-sidecar/Cargo.toml --format-version 1 --features candle-metal
+# spike feature set
+CARGO_HOME=/tmp/fakecargo cargo metadata --locked --offline \
+  --manifest-path rust-sidecar/Cargo.toml --format-version 1 --features asr-transcribe-cpp
+# spike, no default features
+CARGO_HOME=/tmp/fakecargo cargo metadata --locked --offline \
+  --manifest-path rust-sidecar/Cargo.toml --format-version 1 \
+  --no-default-features --features asr-transcribe-cpp
+```
+
+Before: all three failed with `failed to load source for dependency
+transcribe-cpp` / `can't checkout from
+'https://github.com/handy-computer/transcribe.cpp': you are in the offline mode
+(--offline)`. After: all three exit 0.
+
+The backend stays named on the dependency line (`features = ["metal"]`). Moving
+it to a `whisper-gpu`-shaped `transcribe-cpp-gpu = ["transcribe-cpp?/metal"]` in
+`default` was tried and reverted: a `dep?/feature` reference from an *enabled*
+feature pulls the optional crate into the release resolve graph even though
+nothing compiles it, and `scripts/generate-third-party-notices.mjs` resolves
+that same graph — so the shipped `THIRD-PARTY-NOTICES.txt` grew from 532 to 534
+Rust packages, carrying notices for two crates the shipped binary does not
+contain. With the backend on the dependency line, `cargo metadata --features
+candle-metal` reports 533 nodes and no `transcribe*` package, and the notices
+file regenerates byte-identical. A vitest case
+(`sidecar cargo feature set > keeps the spike's crates out of the release
+build's third-party notices`) holds that.
+
+### Building the spike without whisper (added by the same review)
+
+The module's test block called `whisper_rs::` unconditionally, so a build with
+`asr-whisper` off had no such crate and could not compile. The one-process ggml
+test is now `#[cfg(feature = "asr-whisper")]` — there is no second ggml to
+conflict with in that build anyway — and everything else in the block is
+whisper-free. Receipt:
+
+```
+cargo check --locked --manifest-path rust-sidecar/Cargo.toml \
+  --no-default-features --features asr-transcribe-cpp,diarization --lib --tests
+  -> Finished in 1m 18s (dead-code warnings only)
+```
+
+`diarization` is in that list only because `src/diarization/` uses `ndarray`
+without gating on it; `--no-default-features --features asr-transcribe-cpp`
+alone still fails with 14 pre-existing errors, all in `src/diarization/`
+(`unresolved import ndarray`, and the type-inference failures that follow), none
+of them from this module. That gap is not the spike's and is left alone here.
+
+The dependency is deliberately **not** moved to
+`[target.'cfg(target_os = "macos")'.dependencies]`. Features are
+target-independent, so `#[cfg(feature = "asr-transcribe-cpp")]` on the module
+would still be true on Linux with no crate linked — turning a working
+CPU-backend build into a compile error. And it would be gating on a premise that
+does not hold: upstream's `bindings/rust/sys/build.rs` forwards
+`-DTRANSCRIBE_METAL` only when `CARGO_CFG_TARGET_OS` is `macos`/`ios`, and its
+manifest documents `metal` as a no-op off Apple, so `features = ["metal"]` does
+not make this dependency Apple-only.
 
 ## Reproducing
 
