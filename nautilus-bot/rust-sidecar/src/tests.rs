@@ -6,6 +6,16 @@
 use super::*;
 use std::path::PathBuf;
 
+/// The sidecar's handler source, across every module `lib.rs` was split into.
+///
+/// Several guards below read the source itself, because the shape of a path is
+/// the only thing assertable without a live `AppState`. Before the split they
+/// read one 38k-line file. A guard that asserts something appears *nowhere*
+/// must keep reading all of that code, or the split silently narrows it to
+/// whatever is left in `lib.rs`. Guards that bound a region by the item that
+/// follows it still name the single file that region lives in.
+const SIDECAR_SOURCE: &str = concat!(include_str!("lib.rs"), include_str!("dispatch.rs"));
+
 fn meeting_options_from_json(value: serde_json::Value) -> models::RecordingOptions {
     serde_json::from_value(value).expect("deserialize meeting options")
 }
@@ -3904,7 +3914,7 @@ fn a_failed_analysis_pass_is_persisted_and_announced() {
 fn retry_meeting_analysis_reuses_the_shared_pass() {
     // A retry must be the pass that failed, not a second implementation
     // that can drift away from it.
-    const SOURCE: &str = include_str!("lib.rs");
+    const SOURCE: &str = include_str!("dispatch.rs");
     let start = SOURCE
         .find("\"retry_meeting_analysis\" => {")
         .expect("the retry command must be dispatched");
@@ -4102,7 +4112,7 @@ fn dictation_result_is_durable_before_delivery_begins() {
 /// place it could do harm anyway.
 #[test]
 fn no_volatile_streaming_text_reaches_the_insertion_path() {
-    const SOURCE: &str = include_str!("lib.rs");
+    const SOURCE: &str = SIDECAR_SOURCE;
 
     /// Substring hits inside a longer identifier are a different name, not
     /// this one.
@@ -4122,9 +4132,10 @@ fn no_volatile_streaming_text_reaches_the_insertion_path() {
         false
     }
 
-    // Split so this guard's own text is not what it finds: `include_str!`
-    // includes this function, and `concat!` joins at compile time while
-    // the source holds the halves apart.
+    // Split so this guard's own text could never be what it finds:
+    // `concat!` joins at compile time while the source holds the halves
+    // apart, which keeps the guard honest if this file is ever added to
+    // `SIDECAR_SOURCE`.
     for volatile in [
         concat!("Streaming", "Partial"),
         concat!("combined_", "text"),
