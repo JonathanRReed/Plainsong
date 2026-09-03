@@ -50,7 +50,7 @@ const FORMATTING_CONTROLS =
  * would leave the override in, and stripping afterwards would leave a double
  * space behind. Mirrors `collapse_whitespace` in rust-sidecar/src/models.rs.
  */
-export function normalizeAttendeeText(value: string): string {
+function normalizeAttendeeText(value: string): string {
   return value.replace(FORMATTING_CONTROLS, "").replace(/\s+/g, " ").trim();
 }
 

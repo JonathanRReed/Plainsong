@@ -285,6 +285,22 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- A question that starts with a path can be asked again. Any leading "/"
+  opened the saved-prompt picker, and both chat boxes refuse to send while it
+  is open, so "/Users/me/notes.txt is failing to import" could not be sent at
+  all. The picker now closes as soon as nothing matches what you typed, and
+  its footer says Esc closes it.
+- A pre-meeting brief's citations are numbered references you can click,
+  each naming the meeting it came from, instead of the raw "L1"/"L4" evidence
+  IDs the model wrote.
+- A saved-prompt change that fails to write now says so in the Manage prompts
+  dialog. Settings reported every such change as saved without waiting to
+  find out.
+- Attendee names arriving from a calendar invite are stripped of bidi
+  overrides and control characters before they are shown, exported or put in
+  a prompt.
+- "Prepare" on a calendar cue no longer reads the whole meeting library to
+  look at the newest few hundred.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some

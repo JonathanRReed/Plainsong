@@ -6492,17 +6492,10 @@ mod tests {
         let mut db = Database::open_at_path(&path, None).unwrap();
         for index in 0..8 {
             let mut recording = sample_recording(&format!("r{index}"), "inbox");
-            recording.created_at = chrono::TimeZone::with_ymd_and_hms(
-                &Utc,
-                2026,
-                8,
-                1 + index,
-                12,
-                0,
-                0,
-            )
-            .single()
-            .expect("valid fixture timestamp");
+            recording.created_at =
+                chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 1 + index, 12, 0, 0)
+                    .single()
+                    .expect("valid fixture timestamp");
             db.create_recording(&recording).unwrap();
         }
 

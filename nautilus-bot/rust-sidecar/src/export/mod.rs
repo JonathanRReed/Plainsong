@@ -556,7 +556,9 @@ mod tests {
 
         let markdown = export_markdown(&recording, None, false).expect("markdown export");
         assert!(
-            markdown.contains("## Attendees\n\n- Dana Okafor (organizer) <dana@example.com>\n- Sam Ito\n"),
+            markdown.contains(
+                "## Attendees\n\n- Dana Okafor (organizer) <dana@example.com>\n- Sam Ito\n"
+            ),
             "markdown export should list attendees with their addresses: {markdown}"
         );
         // The .docx is built from exactly this text, so it carries them too.

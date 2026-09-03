@@ -279,7 +279,6 @@ pub fn attendee_names_for_context(attendees: &[MeetingAttendee]) -> Vec<String> 
         .collect()
 }
 
-
 /// The conferencing services a recording may be tagged with.
 ///
 /// The same keys the calendar reader and the call detector already produce, so

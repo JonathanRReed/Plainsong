@@ -2368,13 +2368,13 @@ mod tests {
         normalize_loaded_transcription_settings, normalize_transcription_model_id,
         resolve_dictation_app_category_with_overrides, sanitize_meeting_custom_templates,
         sanitize_saved_prompts, AiLane, AiLaneSettings, AudioInputDevicePreference,
-        DictationAppCategoryOverride, DictationCustomMode, MeetingCustomTemplate,
+        DictationAppCategoryOverride, DictationCustomMode, MeetingCustomTemplate, MeetingsSettings,
         PlatformOptimizationSettings, PrivacySettings, SavedPrompt, Settings, SettingsManager,
         TranscriptionSettings, BUILTIN_SAVED_PROMPT_IDS, MAX_MEETING_CUSTOM_TEMPLATES,
         MAX_MEETING_TEMPLATE_NAME_LEN, MAX_MEETING_TEMPLATE_OUTLINE_SECTIONS,
         MAX_MEETING_TEMPLATE_OUTLINE_SECTION_LEN, MAX_MEETING_TEMPLATE_PROMPT_LEN,
         MAX_SAVED_PROMPTS, MAX_SAVED_PROMPT_NAME_LEN, MAX_SAVED_PROMPT_TEXT_LEN,
-        MeetingsSettings, MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
+        MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
     };
     use crate::text::format::DictationAppCategory;
     use std::fs;
