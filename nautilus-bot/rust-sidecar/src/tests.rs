@@ -30,6 +30,10 @@ const SIDECAR_SOURCE: &str = concat!(
     include_str!("dictation_commands.rs"),
     include_str!("export_paths.rs"),
     include_str!("model_cache.rs"),
+    include_str!("dictation_session.rs"),
+    include_str!("recording_lifecycle.rs"),
+    include_str!("audio_import_runtime.rs"),
+    include_str!("meeting_pipeline.rs"),
 );
 
 /// The source of one top-level item, from its declaration to the next one.
@@ -452,16 +456,10 @@ fn ordinary_failures_are_not_mistaken_for_disk_full() {
 fn every_meeting_start_failure_carries_a_typed_code() {
     // Each `return Err(...)`/`?` on the start path must go through
     // `fail_meeting_start`, or the renderer is back to reading prose.
-    const SOURCE: &str = include_str!("lib.rs");
-    // Newline-anchored so this does not match its own string literal above.
-    let start = SOURCE
-        .find("\nasync fn start_recording_for_sidecar(")
-        .expect("the meeting start path must exist");
-    let body = &SOURCE[start + 1..];
-    let body = body
-        .split_once("\nasync fn ")
-        .map(|parts| parts.0)
-        .unwrap_or(body);
+    let body = top_level_item(
+        include_str!("recording_lifecycle.rs"),
+        "async fn start_recording_for_sidecar(",
+    );
 
     let failures = body.matches("return Err(").count();
     let typed = body.matches("fail_meeting_start(").count();
@@ -477,9 +475,9 @@ fn the_pause_path_persists_the_span_ledger_itself() {
     // The stop path used to be the only writer, so a crash mid-meeting
     // lost every marker. The pause path already holds the DB lock for its
     // audit event; this pins the write to it rather than to a comment.
-    const SOURCE: &str = include_str!("lib.rs");
+    const SOURCE: &str = include_str!("recording_lifecycle.rs");
     let start = SOURCE
-        .find("\nasync fn set_recording_paused_for_sidecar(")
+        .find("async fn set_recording_paused_for_sidecar(")
         .expect("the pause path must exist");
     let body = &SOURCE[start + 1..];
     let body = body
@@ -2581,7 +2579,7 @@ fn meeting_dictionary_correction_precedes_transcript_persistence() {
     // Ordering is the whole point: correcting after `save_transcript` would
     // leave the persisted transcript -- and every artifact derived from it --
     // carrying the mis-heard spelling.
-    const SOURCE: &str = include_str!("lib.rs");
+    const SOURCE: &str = include_str!("meeting_pipeline.rs");
     let start = SOURCE
         .find("let mut transcript = output.transcript;")
         .expect("meeting post-processing must take the transcript");
@@ -3574,12 +3572,12 @@ fn dictation_session_runtime_reset_returns_to_idle_from_every_state() {
 /// audio device, ASR manager) to run, so the invariants that keep it from
 /// wedging dictation are asserted against its shape instead.
 fn owned_stop_dictation_body() -> &'static str {
-    const SOURCE: &str = include_str!("lib.rs");
+    const SOURCE: &str = include_str!("dictation_session.rs");
     const ANCHOR: &str =
         "let mut dictation_options = state.dictation_start_options.lock().await.clone();";
 
     let start = SOURCE
-        .find("\nasync fn stop_dictation_for_sidecar(")
+        .find("async fn stop_dictation_for_sidecar(")
         .expect("stop_dictation_for_sidecar must exist");
     let end = start
         + SOURCE[start..]
