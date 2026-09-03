@@ -24,6 +24,9 @@ const SIDECAR_SOURCE: &str = concat!(
     include_str!("speakers.rs"),
     include_str!("retention.rs"),
     include_str!("streaming_partials.rs"),
+    include_str!("asr_routing.rs"),
+    include_str!("dictation_live_preview.rs"),
+    include_str!("meeting_transcribe.rs"),
 );
 
 /// The source of one top-level item, from its declaration to the next one.
@@ -1477,15 +1480,10 @@ fn the_live_preview_is_closed_before_the_final_transcription_starts() {
 /// The preview task itself must not be able to write a transcript.
 #[test]
 fn the_streaming_preview_task_only_ever_emits_a_preview_event() {
-    const SOURCE: &str = include_str!("lib.rs");
-    let start = SOURCE
-        .find("\nfn spawn_streaming_live_preview(")
-        .expect("the streaming preview task must exist");
-    let end = start
-        + SOURCE[start..]
-            .find("\n}\n")
-            .expect("the streaming preview task must be closed");
-    let body = &SOURCE[start..end];
+    let body = top_level_item(
+        include_str!("dictation_live_preview.rs"),
+        "fn spawn_streaming_live_preview(",
+    );
     for forbidden in [
         "insert_text",
         "paste_text_systemwide",
