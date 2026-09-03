@@ -51,6 +51,10 @@ pub struct AsrManager {
     /// Per-slot MLX flags, these are the authoritative source for routing.
     dictation_mlx_enabled: RwLock<bool>,
     meeting_mlx_enabled: RwLock<bool>,
+    /// `transcription.language` as the user set it, mirrored here so the
+    /// meeting lane -- which builds its own options and never sees the
+    /// settings -- can tell a cloud provider what to listen for.
+    transcription_language: RwLock<Option<String>>,
     silence_skip_enabled: RwLock<bool>,
     platform_optimization: RwLock<crate::settings::PlatformOptimizationSettings>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
@@ -98,6 +102,7 @@ impl AsrManager {
             mlx_accelerated_providers: RwLock::new(HashSet::new()),
             dictation_mlx_enabled: RwLock::new(false),
             meeting_mlx_enabled: RwLock::new(false),
+            transcription_language: RwLock::new(None),
             last_runtime_errors: RwLock::new(HashMap::new()),
             provider_inventory_cache: RwLock::new(None),
             provider_info_cache: RwLock::new(None),
@@ -235,6 +240,14 @@ impl AsrManager {
     pub async fn set_meeting_mlx_enabled(&self, enabled: bool) {
         *self.meeting_mlx_enabled.write().await = enabled;
         self.invalidate_provider_info_cache().await;
+    }
+
+    pub async fn set_transcription_language(&self, language: Option<String>) {
+        *self.transcription_language.write().await = language;
+    }
+
+    pub async fn transcription_language(&self) -> Option<String> {
+        self.transcription_language.read().await.clone()
     }
 
     pub async fn dictation_mlx_enabled(&self) -> bool {
@@ -750,6 +763,7 @@ impl AsrManager {
             optimization_applied: true,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         })
     }
 
@@ -770,7 +784,7 @@ impl AsrManager {
         let provider = Self::provider_with_model(actual_provider, Some(model_id));
         let request = async {
             match (file_path, audio_data) {
-                (Some(path), None) => provider.transcribe(path).await,
+                (Some(path), None) => provider.transcribe_path_with_options(path, options).await,
                 (None, Some(bytes)) => provider.transcribe_bytes_with_options(bytes, options).await,
                 _ => Err(anyhow::anyhow!("Invalid transcription input")),
             }
@@ -1018,7 +1032,7 @@ impl AsrManager {
         // Apple Speech reaches meetings only through SpeechAnalyzer, which is
         // the only one of its two engines that returns the per-segment
         // timestamps the meeting transcript is assembled from.
-        let mut options = TranscriptionOptions::default();
+        let mut options = meeting_transcription_options(self.transcription_language().await);
         if provider_type == AsrProviderType::MacosAppleSpeech {
             // `meetings_supported` can run a bounded probe when nothing has
             // looked yet, so it does not hold a runtime worker.
@@ -1057,6 +1071,40 @@ impl AsrManager {
             return Err(anyhow::anyhow!(refusal));
         }
         Ok(result)
+    }
+
+    /// Transcribe a whole recording from disk for the meeting route slot.
+    ///
+    /// Used only where a provider can take an entire meeting in one request:
+    /// a provider's speaker numbering is scoped to one request, so this is the
+    /// only shape in which its diarization covers the whole recording.
+    ///
+    /// The options below reach the provider whichever way the request is
+    /// served: path mode goes through `AsrProvider::transcribe_path_with_options`
+    /// and bytes mode through `transcribe_bytes_with_options`. They used to be
+    /// dropped on the path, which is why the two whole-file providers each
+    /// hard-coded `request_speaker_labels: true` inside their own `transcribe`.
+    pub async fn transcribe_path_for_meeting(
+        &self,
+        provider_type: AsrProviderType,
+        audio_path: &Path,
+        selected_model: Option<&str>,
+    ) -> Result<TranscriptionResult> {
+        if provider_type == AsrProviderType::MacosAppleSpeech {
+            return Err(anyhow::anyhow!(
+                "Apple Speech is dictation-only and cannot be routed through meeting transcription. Choose a meeting-capable provider."
+            ));
+        }
+        let mlx_enabled = *self.meeting_mlx_enabled.read().await;
+        self.transcribe_inner(
+            provider_type,
+            Some(audio_path),
+            None,
+            selected_model,
+            Some(mlx_enabled),
+            &meeting_transcription_options(self.transcription_language().await),
+        )
+        .await
     }
 
     /// Why an Apple Speech result cannot become a meeting transcript.
@@ -1827,6 +1875,74 @@ fn runtime_diagnostics_for_provider(
                 },
             }
         }
+        AsrProviderType::Deepgram => {
+            let has_key = has_provider_secret_or_env("deepgram", "DEEPGRAM_API_KEY");
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "Deepgram Nova cloud API ready. Returns speaker labels and word timestamps; \
+                     every request opts out of Deepgram's model improvement programme."
+                        .to_string()
+                } else {
+                    "Set DEEPGRAM_API_KEY to enable Deepgram Nova cloud.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["DEEPGRAM_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some(
+                            "Get an API key from https://console.deepgram.com and set it in Settings -> API Keys."
+                                .to_string(),
+                        )
+                    },
+                },
+            }
+        }
+        AsrProviderType::GeminiTranscribe => {
+            let has_key = has_provider_secret_or_env("gemini", "GEMINI_API_KEY");
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "Gemini 3.5 Transcribe cloud API ready. Google's paid tier does not train on \
+                     your prompts; the free tier does."
+                        .to_string()
+                } else {
+                    "Set GEMINI_API_KEY to enable Gemini 3.5 Transcribe cloud.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["GEMINI_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some(
+                            "Get an API key from https://aistudio.google.com/apikey and set it in Settings -> API Keys."
+                                .to_string(),
+                        )
+                    },
+                },
+            }
+        }
         AsrProviderType::Qwen3Asr => {
             let model_dir = models_root.join("qwen3_asr");
             let model_ready = is_valid_onnx_artifact(&model_dir.join("encoder.int4.onnx"))
@@ -1896,6 +2012,30 @@ fn runtime_diagnostics_for_provider(
                 last_error,
             )
         }
+    }
+}
+
+/// The per-request options every meeting transcription uses.
+///
+/// The meeting lane always asks for speaker labels, even for a ninety-second
+/// chunk whose labels it will then throw away. Gemini only returns word
+/// timestamps on a request that also asks for diarization or timestamps, and a
+/// meeting without timestamps has no timeline to seek, no diarization to merge
+/// and no playhead to follow -- so asking is what buys the timings. Whether
+/// the labels that come back are *usable* is decided afterwards by
+/// `provider_speaker_turns_survive_chunking`, because a provider numbers its
+/// speakers per request.
+///
+/// No vocabulary hint: the personal dictionary is a dictation feature, and
+/// Gemini's API refuses it on the same request as timestamps anyway.
+///
+/// The language is carried because a cloud provider has to be told one; see
+/// `TranscriptionOptions::language`.
+fn meeting_transcription_options(language: Option<String>) -> TranscriptionOptions {
+    TranscriptionOptions {
+        request_speaker_labels: true,
+        language,
+        ..TranscriptionOptions::default()
     }
 }
 
@@ -2191,12 +2331,56 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        migrate_legacy_local_artifacts, parakeet_model_dir_and_missing_files,
-        runtime_diagnostics_for_provider, AsrManager, AsrProviderType,
+        meeting_transcription_options, migrate_legacy_local_artifacts,
+        parakeet_model_dir_and_missing_files, runtime_diagnostics_for_provider, AsrManager,
+        AsrProviderType,
     };
     use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
     use std::path::PathBuf;
+
+    #[test]
+    fn every_meeting_request_asks_for_speaker_labels_because_that_is_what_buys_timestamps() {
+        // Gemini returns word timestamps only on a request that also asks for
+        // diarization or timestamps. A meeting chunk that stopped asking would
+        // come back as one untimed block, and the transcript would lose its
+        // timeline, its playhead and any chance of a diarization merge -- a
+        // regression that would look like "speakers stopped working" rather
+        // than "timestamps stopped arriving".
+        let options = meeting_transcription_options(None);
+        assert!(options.request_speaker_labels);
+        // And never the personal dictionary: it is a dictation feature, and
+        // Gemini's API refuses it alongside timestamps.
+        assert!(options.vocabulary_hint.is_none());
+        assert!(!options.translate_to_english);
+    }
+
+    /// A meeting's options have to reach the provider, on the path as well as
+    /// on the bytes route.
+    ///
+    /// They used to be dropped in path mode, so the whole-file providers
+    /// hard-coded `request_speaker_labels: true` inside their own `transcribe`
+    /// and nothing else -- a language, a keyterm list -- could ever arrive.
+    #[tokio::test]
+    async fn a_meeting_carries_the_selected_language_to_the_provider() {
+        assert_eq!(meeting_transcription_options(None).language, None);
+        assert_eq!(
+            meeting_transcription_options(Some("fr".to_string())).language,
+            Some("fr".to_string())
+        );
+
+        // And the manager is where the meeting lane learns it, because it
+        // builds its own options and never sees the settings.
+        let manager = AsrManager::new();
+        assert_eq!(manager.transcription_language().await, None);
+        manager
+            .set_transcription_language(Some("de".to_string()))
+            .await;
+        assert_eq!(
+            manager.transcription_language().await,
+            Some("de".to_string())
+        );
+    }
 
     #[test]
     fn no_provider_is_gated_out_of_transcription_in_this_build() {

@@ -217,7 +217,90 @@ const transcribeCppProvider: AsrProviderInfo = {
   runtimeDetails: {},
 };
 
+// The two diarizing cloud routes, as the sidecar reports them.
+const deepgramProvider: AsrProviderInfo = {
+  providerType: "deepgram",
+  name: "Deepgram Nova",
+  description: "Cloud speech-to-text via Deepgram's Nova-3 batch API",
+  isAvailable: true,
+  inferenceEnabled: true,
+  modelInfo: {
+    name: "Deepgram Nova-3",
+    version: "nova-3",
+    sizeMb: 0,
+    parameters: "cloud",
+    languages: ["en", "multilingual"],
+    license: "Commercial API",
+    sourceUrl: "https://developers.deepgram.com/docs/pre-recorded-audio",
+  },
+  selectedModelId: "nova-3",
+  modelOptions: [
+    { id: "nova-3", label: "Nova-3" },
+    { id: "nova-3-medical", label: "Nova-3 Medical" },
+  ],
+  downloadStatus: "Downloaded",
+  runtimeStatus: "ready",
+  runtimeDetails: {},
+};
+
+const geminiProvider: AsrProviderInfo = {
+  providerType: "gemini_transcribe",
+  name: "Google Gemini Transcribe",
+  description: "Cloud speech-to-text via Gemini 3.5 Transcribe",
+  isAvailable: true,
+  inferenceEnabled: true,
+  modelInfo: {
+    name: "Gemini 3.5 Transcribe",
+    version: "gemini-3.5-transcribe",
+    sizeMb: 0,
+    parameters: "cloud",
+    languages: ["en", "multilingual"],
+    license: "Commercial API",
+    sourceUrl: "https://ai.google.dev/gemini-api/docs/transcribe",
+  },
+  selectedModelId: "gemini-3.5-transcribe",
+  modelOptions: [
+    { id: "gemini-3.5-transcribe", label: "Gemini 3.5 Transcribe" },
+  ],
+  downloadStatus: "Downloaded",
+  runtimeStatus: "ready",
+  runtimeDetails: {},
+};
+
 describe("asr-route-catalog", () => {
+  it("puts what a cloud route costs per minute in the picker", () => {
+    // The rate used to live only in the model label the sidecar sends, which
+    // is not the line a user reads while choosing a route. A route that bills
+    // per minute has to say so where the choice is made.
+    const routes = buildAsrRouteCatalog(
+      [...providers, deepgramProvider, geminiProvider],
+      "best_available",
+    );
+
+    const deepgram = routes.filter(
+      (route) => route.providerType === "deepgram",
+    );
+    const nova = deepgram.find((route) => route.modelId === "nova-3");
+    expect(nova?.summary).toContain("$0.0043/min");
+    // The multilingual tier is a different price, and auto lands on it.
+    expect(nova?.summary).toContain("$0.0052/min");
+    expect(nova?.summary).toContain("auto");
+
+    const medical = deepgram.find(
+      (route) => route.modelId === "nova-3-medical",
+    );
+    expect(medical?.summary).toContain("$0.0043/min");
+    // English-only, so it never reaches the multilingual rate.
+    expect(medical?.summary).not.toContain("$0.0052/min");
+    expect(medical?.summary).toContain("English only");
+
+    const gemini = routes.find(
+      (route) => route.providerType === "gemini_transcribe",
+    );
+    expect(gemini?.summary).toContain("$0.005/min");
+  });
+
+
   it("offers the transcribe.cpp spike as an experimental route that never outranks the shipped Parakeet one", () => {
     const routes = buildAsrRouteCatalog(
       [...providers, transcribeCppProvider],

@@ -91,6 +91,8 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "openai_cloud",
   "elevenlabs_scribe",
   "groq",
+  "deepgram",
+  "gemini_transcribe",
   "cohere_transcribe",
 ];
 
@@ -112,12 +114,22 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     // measured on -- but ahead of every cloud route, because it needs no
     // account and never leaves the machine.
     "macos_apple_speech",
+    // Deepgram and Gemini lead the cloud group here for the same reason they
+    // lead it under `best_available`: they are the only routes that return
+    // speaker labels with the transcript.
+    "deepgram",
+    "gemini_transcribe",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
     "cohere_transcribe",
   ],
+  // Deepgram and Gemini lead the cloud order for meetings because they are the
+  // only two routes that return speaker labels with the transcript; every
+  // other cloud route still pays for a local diarization pass afterwards.
   best_available: [
+    "deepgram",
+    "gemini_transcribe",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
@@ -416,6 +428,16 @@ function routeSummary(
   }
   if (providerType === "cohere_transcribe") {
     return "Cloud route for meeting-grade transcription with a simple BYOK setup.";
+  }
+  if (providerType === "deepgram") {
+    // The per-minute rate belongs in the picker, not only in the model label
+    // the sidecar sends: this is the line a user reads while choosing.
+    return modelId === "nova-3-medical"
+      ? "Deepgram's clinical-vocabulary build, English only, with the same speaker labels and word timestamps as Nova-3. Billed to your Deepgram key at $0.0043/min."
+      : "Fastest cloud route here, and the cheapest with speaker labels: meetings keep Deepgram's own speakers instead of running a second pass on this Mac. Billed to your Deepgram key at $0.0043/min in English, $0.0052/min on any other language setting including auto.";
+  }
+  if (providerType === "gemini_transcribe") {
+    return "Lowest published word error rate of the cloud routes, with speaker labels and word timestamps. Its API refuses your dictionary on the same request, so meetings get speakers and dictation gets the dictionary. Billed to your Google key at $0.005/min.";
   }
   if (providerType === "macos_apple_speech") {
     return capabilityBadge === "Best for dictation"

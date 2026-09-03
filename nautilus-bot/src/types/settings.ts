@@ -101,6 +101,13 @@ export interface MeetingsSettings {
    * `rememberVoices` is off.
    */
   autoApplyConfidentVoices: boolean;
+  /**
+   * Keep the speaker labels a cloud provider returned with the transcript,
+   * instead of running Plainsong's own diarizer over the same audio again.
+   * Default on. No local route returns speaker labels, so this changes nothing
+   * for a local meeting.
+   */
+  preferProviderDiarization: boolean;
 }
 
 /** Which events may become an OS notification. Mirrors `NotificationsSettings` in settings.rs. */

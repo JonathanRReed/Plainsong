@@ -1273,6 +1273,8 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "groq" => "groq".to_string(),
         "cohere_transcribe" => "cohere_transcribe".to_string(),
         "qwen3_asr" => "qwen3_asr".to_string(),
+        "deepgram" => "deepgram".to_string(),
+        "gemini_transcribe" => "gemini_transcribe".to_string(),
         // Only when the spike is compiled in. A default build has no engine
         // that answers to this name, so it must land on `whisper` through the
         // fallback below rather than become a ghost route in the settings file.
@@ -1327,6 +1329,17 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         },
         "qwen3_asr" => match model_id.trim() {
             "" | "qwen3-asr-0.6b" => "qwen3-asr-0.6b".to_string(),
+            value => value.to_string(),
+        },
+        "deepgram" => match model_id.trim() {
+            "" => "nova-3".to_string(),
+            value => value.to_string(),
+        },
+        "gemini_transcribe" => match model_id.trim() {
+            // gemini-3.5-transcribe-live is the websocket model; the batch
+            // interactions endpoint cannot serve it (see
+            // gemini_transcribe.rs's sanitize_gemini_asr_model_id).
+            "" | "gemini-3.5-transcribe-live" => "gemini-3.5-transcribe".to_string(),
             value => value.to_string(),
         },
         // `route_spec_for`, not `spec_for`: the latter also resolves the
@@ -2131,6 +2144,16 @@ pub struct MeetingsSettings {
     /// marks such a name "auto" until a human confirms it. Meaningless while
     /// `remember_voices` is off, and the readers check both.
     pub auto_apply_confident_voices: bool,
+    /// When a meeting was transcribed by a cloud provider that returned
+    /// speaker labels, keep those labels instead of running Plainsong's own
+    /// diarizer over the same audio again.
+    ///
+    /// Default on, because at that point the audio has already been sent and
+    /// already been paid for, and re-deriving speakers locally is strictly
+    /// more work for a worse answer. It changes nothing for a local route: no
+    /// local model returns speaker labels, so those meetings always use
+    /// Plainsong's diarizer whatever this is set to.
+    pub prefer_provider_diarization: bool,
 }
 
 impl Default for MeetingsSettings {
@@ -2141,6 +2164,7 @@ impl Default for MeetingsSettings {
             auto_stop_after_silence_minutes: 15,
             remember_voices: false,
             auto_apply_confident_voices: false,
+            prefer_provider_diarization: true,
         }
     }
 }
@@ -3343,6 +3367,75 @@ mod tests {
         };
         super::normalize_loaded_meetings_settings(&mut enabled);
         assert!(enabled.auto_apply_confident_voices);
+    }
+
+    /// A settings.json written before provider diarization existed must load
+    /// with it on -- that is the default, and an old file is not a user who
+    /// opted out.
+    #[test]
+    fn settings_written_before_provider_diarization_default_to_preferring_it() {
+        let parsed: Settings = serde_json::from_str(
+            r#"{
+                "meetings": {
+                    "callDetectionEnabled": true,
+                    "autoStopWhenCallAppQuits": true,
+                    "autoStopAfterSilenceMinutes": 15
+                }
+            }"#,
+        )
+        .expect("pre-provider-diarization settings should deserialize");
+        assert!(parsed.meetings.prefer_provider_diarization);
+
+        // And an explicit opt-out survives the round trip.
+        let parsed: Settings =
+            serde_json::from_str(r#"{ "meetings": { "preferProviderDiarization": false } }"#)
+                .expect("explicit opt-out should deserialize");
+        assert!(!parsed.meetings.prefer_provider_diarization);
+        assert!(parsed.meetings.call_detection_enabled);
+    }
+
+    #[test]
+    fn deepgram_and_gemini_survive_settings_reload_with_their_model_slots() {
+        let mut transcription = TranscriptionSettings {
+            default_provider: "deepgram".to_string(),
+            meeting_provider: "gemini_transcribe".to_string(),
+            selected_model_id: "nova-3".to_string(),
+            meeting_model_id: "gemini-3.5-transcribe".to_string(),
+            ..Default::default()
+        };
+        transcription
+            .provider_model_ids
+            .insert("deepgram".to_string(), "nova-3-medical".to_string());
+        transcription.provider_model_ids.insert(
+            "gemini_transcribe".to_string(),
+            "gemini-3.5-transcribe".to_string(),
+        );
+
+        normalize_loaded_transcription_settings(&mut transcription);
+
+        assert_eq!(transcription.default_provider, "deepgram");
+        assert_eq!(transcription.meeting_provider, "gemini_transcribe");
+        assert_eq!(transcription.selected_model_id, "nova-3");
+        assert_eq!(
+            transcription.provider_model_ids.get("deepgram"),
+            Some(&"nova-3-medical".to_string())
+        );
+    }
+
+    #[test]
+    fn the_websocket_only_gemini_model_never_survives_a_reload() {
+        // gemini-3.5-transcribe-live is the streaming model; the batch
+        // interactions endpoint this provider posts to cannot serve it, so a
+        // hand-edited settings file must not be able to select it.
+        assert_eq!(
+            normalize_transcription_model_id("gemini_transcribe", "gemini-3.5-transcribe-live"),
+            "gemini-3.5-transcribe"
+        );
+        assert_eq!(
+            normalize_transcription_model_id("gemini_transcribe", ""),
+            "gemini-3.5-transcribe"
+        );
+        assert_eq!(normalize_transcription_model_id("deepgram", ""), "nova-3");
     }
 
     #[test]

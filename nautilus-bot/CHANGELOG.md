@@ -62,6 +62,27 @@ evidence is stale and must be recaptured before this becomes a candidate.
   5.3 s one, 1.26 s to transcribe 44 seconds of audio, and live results
   finalizing about 114 ms after the last audio arrives. See
   `artifacts/qa/speechanalyzer-receipt-2026-09-02.md`.
+- Two cloud speech-to-text providers that return speaker labels, both
+  bring-your-own-key and opt-in like the rest. **Deepgram Nova-3**
+  ($0.0043/min, the fastest route Plainsong offers) sends your personal
+  dictionary as keyterms, returns word timestamps and turn-level speakers, and
+  opts every request out of Deepgram's model improvement programme.
+  **Google Gemini 3.5 Transcribe** ($0.005/min, the lowest published word
+  error rate here) returns speakers and word timestamps for meetings and takes
+  your dictionary for dictation — its API refuses both on one request, so the
+  picker and the audit log say which one a request actually carried. Gemini
+  uploads audio to Google's Files API and Plainsong deletes it again after
+  each transcription. Google's paid tier does not train on your prompts; its
+  free tier does, and the route says so.
+- Meetings keep the speakers a cloud provider already found. When a meeting is
+  transcribed by a provider that returns speaker labels, Plainsong uses those
+  instead of separating the voices again on this Mac — the audio has already
+  been sent at that point. The meeting header names which diarizer produced the
+  badges ("Speakers by Deepgram" or "Speakers by Plainsong"), renaming works
+  the same either way, and a new setting, "Keep the speakers a cloud provider
+  sends back", turns it off. Because a provider numbers speakers per request,
+  its labels are only used when the whole recording went out in one request;
+  otherwise Plainsong's own diarizer runs and the header says so.
 - Dictation history is searchable, and a saved dictation can be run through
   the recognizer again. The search field over Recent dictations matches both
   what was delivered and (where it was kept) what the recognizer heard,
@@ -528,6 +549,81 @@ evidence is stale and must be recaptured before this becomes a candidate.
   build now checks the SDK and, when it is too old, compiles the helper
   without that section: the app then runs the older recognizer and says so,
   exactly as it does on macOS 13-15.
+- The route picker says what a cloud speech route costs and whose language
+  claim it is showing. The per-minute price only appeared in the model name
+  the sidecar sends, not in the line you read while choosing; and Deepgram and
+  Gemini had no language description at all, so the picker fell back to "the
+  selected model's languages". They now name the upstream claim -- Deepgram's
+  multilingual code-switching, Google's 85+ languages -- and mark it as
+  upstream's, without inventing a language list Plainsong has never tested.
+- Deepgram now transcribes the language you chose. Plainsong sent no language
+  at all, and Deepgram's default is English, so a French meeting came back as
+  English nonsense while the route advertised itself as multilingual. With the
+  transcription language set to English it asks for Deepgram's English model;
+  on anything else, including auto, it asks Nova-3 to code-switch. Deepgram
+  prices those differently ($0.0043/min against $0.0052/min) and the picker
+  now says so. Nova-3 Medical is English-only and is always asked for English.
+- A whole-meeting request now carries the options the caller built for it.
+  They were discarded on the from-disk path, which is the one a whole meeting
+  takes, so the language could not reach it and neither could keyterms.
+- The whole-meeting Deepgram limit says what it is. Plainsong claimed a
+  "Deepgram four-hour ceiling"; Deepgram documents no duration limit at all,
+  only a 2 GB request size and a ten-minute processing timeout. Four hours of
+  a meeting recorded at 48 kHz is 1.38 GB, past Plainsong's own 1 GiB request
+  cap, so the stated figure was unreachable anyway. The ceiling is now two
+  hours, described as Plainsong's own, with the arithmetic behind it in the
+  code and the docs.
+- Two speakers in a Gemini meeting are no longer merged into one. The
+  provider's speaker labels were converted with arithmetic that mapped both
+  "speaker 0" and "speaker 1" onto Plainsong's first speaker, so any response
+  numbered from zero silently attributed two people to one badge. Labels are
+  now assigned in the order they first appear, which cannot merge two of them
+  and does not depend on where the provider starts counting.
+- Audio uploaded to Google for a Gemini transcription is now deleted on every
+  path out, and you are told when it cannot be. Two exits skipped the delete
+  entirely: an upload that succeeded but answered with something Plainsong
+  could not read (the uploaded file's name was never captured, so there was
+  nothing to delete with), and a cancelled transcription (the delete ran after
+  the work finished, and cancelled work never finishes). In both cases the
+  recording stayed in Google's file store for its 48-hour lifetime with no
+  sign of it. A failed delete was also only a log line; it is now an audit
+  entry and, for a meeting, a note on the finished recording saying the audio
+  is still there and for how long.
+- A meeting sent to Gemini Transcribe is no longer loaded into memory whole.
+  The recording is streamed to Google's Files API in 256 KB reads, the way
+  the Deepgram route already did, so peak memory is one buffer instead of the
+  length of the meeting -- 172.8 MB for a thirty-minute recording captured at
+  48 kHz.
+- Turning speaker separation off now also stops the meeting being sent as one
+  diarized request. The whole-recording request exists only to get usable
+  speaker labels out of a cloud provider, but it was gated on "keep the
+  speakers a cloud provider sends back" alone: with speaker separation off,
+  the meeting still went out in one diarized request, was charged for the
+  speaker analysis, and the labels were discarded on arrival.
+- Deepgram and Gemini Transcribe can actually be chosen for meetings. The
+  sidecar's list of meeting-capable providers never gained either one, so
+  both counted as dictation-only: settings normalization rewrote a Deepgram
+  meeting selection back to Parakeet on the next save, and the whole-file
+  request and provider speaker labels those routes exist for could never run.
+  Both are meeting providers now, and the list is pinned against the picker's
+  own in both directions.
+- Deepgram and Gemini Transcribe are treated as the cloud routes they are.
+  The sidecar's one privacy classification -- the list that decides whether
+  audio leaves this Mac -- still named only the four cloud providers that
+  shipped before them, so both new routes counted as local: they ran without
+  the remote-processing gate (which also means without its cancellation), the
+  "remote processing is off" refusal did nothing for them, a dictation
+  preference set to local-only would still upload to Deepgram, and a meeting
+  set to prefer local routes admitted them. Both are now classified as remote
+  everywhere, and the classification is pinned against the picker's own list
+  in both directions so a future provider cannot be added on one side alone.
+- Settings -> API keys now offers the transcription services, not only the
+  language-model ones. Every cloud speech route's setup text said "Add a key
+  in Settings -> API Keys" and the picker there had no entry for ElevenLabs,
+  Groq or Cohere, so there was no way to add one: the packaged app strips API
+  keys out of the sidecar's environment, which left the keychain as the only
+  route and the keychain unreachable. Deepgram joins them; Google Gemini was
+  already listed.
 - The diarization model chosen in Settings is now the one the automatic
   post-meeting speaker pass uses. It previously always ran ECAPA-TDNN no
   matter what the picker said; only the explicit "identify speakers" action

@@ -353,3 +353,40 @@ runtime from anything this sidecar links today" is now one build flag away
 rather than an unknown. Moonshine v2 is still not implemented, and there is
 still no ONNX export; it now waits on the same adopt/replace decision as
 item 1 rather than on an export appearing.
+
+## Next (from the 2026-09-02 model inventory)
+
+Full research, with prices, licences, endpoints and sources:
+`docs/model-inventory-2026-09.md`. Ordered by value, highest first.
+
+1. **Cohere Transcribe 03-2026 as a local ONNX route.** 5.42% WER (better than
+   Parakeet TDT v3's 6.32%), 14 languages, Apache-2.0, community ONNX export at
+   `onnx-community/cohere-transcribe-03-2026-ONNX`, and ONNX Runtime is already
+   linked into this sidecar. Plainsong already calls the same model as a cloud
+   API. This is the highest-value local model work outstanding. Measure the 5 s
+   fixture before promoting it over Parakeet for dictation — it is 2B against
+   0.6B, so it may well win meetings and lose dictation.
+2. **Fix diarization segmentation before swapping embedders.** The pipeline uses
+   fixed 2 s windows hopped 1 s with no VAD and no overlap handling; that is the
+   dominant error source, and no better embedding model fixes a badly-placed
+   window. Needs no new model or download.
+3. **Mistral Voxtral (`voxtral-mini-transcribe`) as a cloud provider.**
+   $0.003/min, ~4% WER on FLEURS, speaker labels and timestamps, an
+   OpenAI-shaped `/v1/audio/transcriptions` endpoint, and the `mistral`
+   credential slot is already registered. Cheapest diarizing option after Soniox
+   and the least new code.
+4. **Soniox `stt-async-v5`.** ~$0.10/hr with diarization, language ID and smart
+   formatting bundled, 60+ languages. Verify its data-retention terms first —
+   the 2026-09-02 pass did not.
+5. **Provider diarization past the single-request ceiling.** A provider
+   numbers speakers per request, so its labels are only used when the whole
+   meeting went out in one — Deepgram to two hours, Gemini to thirty minutes.
+   A longer meeting falls back to Plainsong's own diarizer. Closing that gap
+   means matching speakers across requests (a voiceprint carried between
+   chunks), which is a real piece of work and not a config change.
+6. **Sortformer 4spk v2** (`nvidia/diar_streaming_sortformer_4spk-v2`,
+   CC-BY-4.0, 13.24 DER on DIHARD III) only if someone exports it to ONNX. Hard
+   cap of 4 speakers.
+7. **AssemblyAI Universal — do not add** until it ships a per-request
+   model-improvement opt-out. Today the opt-out is an account-level dashboard
+   toggle, paid tier only, with no API surface reporting its state.

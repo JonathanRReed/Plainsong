@@ -178,6 +178,8 @@ export type AsrProviderType =
   | "groq"
   | "cohere_transcribe"
   | "qwen3_asr"
+  | "deepgram"
+  | "gemini_transcribe"
   // The transcribe.cpp spike route. The sidecar only reports it when it was
   // built with `--features asr-transcribe-cpp` (off by default and absent from
   // the release feature list), so no shipped build ever sends it -- but the

@@ -136,6 +136,8 @@ const CLOUD_PROVIDER_LABELS: Record<string, string> = {
   groq: "Groq",
   elevenlabs_scribe: "ElevenLabs",
   cohere_transcribe: "Cohere",
+  deepgram: "Deepgram",
+  gemini_transcribe: "Gemini",
 };
 
 function formatRouteLabel(

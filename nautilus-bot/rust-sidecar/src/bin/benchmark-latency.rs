@@ -1222,6 +1222,9 @@ fn main() {
             // The benchmark measures whichever engine this Mac resolves, the
             // same as dictation does; it does not pin one.
             apple_speech_required_engine: None,
+            request_speaker_labels: false,
+            // The benchmark measures the shipped default, which is auto.
+            language: None,
         };
         let warmup_started = Instant::now();
         let warmup_result = provider

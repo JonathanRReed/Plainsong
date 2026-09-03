@@ -36,6 +36,9 @@ impl MacosAppleSpeechProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            // Neither Apple engine returns speaker labels; the meeting route
+            // diarizes this result locally.
+            speaker_turns: Vec::new(),
         }
     }
 }

@@ -17,6 +17,7 @@ const DEFAULT_MEETINGS_SETTINGS: MeetingsSettings = {
   autoStopAfterSilenceMinutes: 15,
   rememberVoices: false,
   autoApplyConfidentVoices: false,
+  preferProviderDiarization: true,
 };
 
 const DEFAULT_NOTIFICATIONS_SETTINGS: NotificationsSettings = {
@@ -48,6 +49,9 @@ export function resolveMeetingsSettings(
     // refines remembering, so it cannot be on while remembering is off.
     autoApplyConfidentVoices:
       rememberVoices && (meetings?.autoApplyConfidentVoices ?? false),
+    preferProviderDiarization:
+      meetings?.preferProviderDiarization ??
+      DEFAULT_MEETINGS_SETTINGS.preferProviderDiarization,
   };
 }
 

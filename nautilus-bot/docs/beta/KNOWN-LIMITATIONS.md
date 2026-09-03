@@ -143,6 +143,22 @@ using sensitive content.
   folder and never moves, changes or deletes your original. An imported
   meeting has no microphone and system-audio sides, so speaker separation is
   whatever diarization can infer from one mixed track.
+- Speaker labels from a cloud provider only cover a whole meeting when the
+  whole meeting fit in one request. Deepgram and Gemini are the only providers
+  here that return speakers, and each numbers them per request — "speaker 0" in
+  one request is not promised to be the same person as "speaker 0" in the next.
+  Plainsong sends the whole recording in one request where the provider allows
+  it (Deepgram up to two hours, Gemini up to thirty minutes). The Gemini
+  figure is Google's own cap for a diarized request; the Deepgram one is
+  Plainsong's, because Deepgram publishes no duration limit -- only a 2 GB
+  request size, which two hours of a meeting recording stays well inside. Past that, or when the single request fails,
+  the meeting is transcribed in ninety-second chunks and Plainsong's own
+  diarizer labels the speakers instead. The meeting header always names which
+  one ran; it is never inferred from the transcription provider.
+- Plainsong's own diarizer separates voices with fixed two-second windows and
+  no overlap handling, so simultaneous speech and rapid turn-taking are where
+  it loses. It is the only option for a locally transcribed meeting: no local
+  speech model returns speaker labels.
 - Never use the beta to record a confidential conversation without the consent
   required by your organization and location.
 - Plainsong does not post the consent notice into the meeting chat for you.

@@ -3242,6 +3242,17 @@ export function SettingsView() {
                   <option value="gemini">Google Gemini</option>
                   <option value="deepseek">DeepSeek</option>
                   <option value="ollama-cloud">Ollama Cloud</option>
+                  {/* Transcription-only services. They belong here because
+                      every cloud ASR route's setup copy says "Settings → API
+                      Keys", and because the packaged app strips API keys from
+                      the sidecar's environment (electron/ipc-bridge.ts's
+                      buildSidecarEnv), so the keychain is the only way a key
+                      can reach them. They have no model catalogue endpoint;
+                      the ASR model is chosen on the Models screen. */}
+                  <option value="deepgram">Deepgram (transcription)</option>
+                  <option value="elevenlabs">ElevenLabs (transcription)</option>
+                  <option value="groq">Groq (transcription)</option>
+                  <option value="cohere">Cohere (transcription)</option>
                 </select>
                 <Button
                   variant="outline"
@@ -4448,6 +4459,22 @@ export function SettingsView() {
                             meetings: {
                               ...meetingsSettings,
                               callDetectionEnabled: checked,
+                            },
+                          })
+                        }
+                      />
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Keep the speakers a cloud provider sends back"
+                        description="Deepgram and Gemini return speaker labels with the transcript. When one of them transcribes a meeting, Plainsong keeps its speakers instead of separating the voices again on this Mac. Turn this off to always use Plainsong's own diarizer. Local models return no speaker labels, so this changes nothing for a local meeting."
+                        checked={meetingsSettings.preferProviderDiarization}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            meetings: {
+                              ...meetingsSettings,
+                              preferProviderDiarization: checked,
                             },
                           })
                         }

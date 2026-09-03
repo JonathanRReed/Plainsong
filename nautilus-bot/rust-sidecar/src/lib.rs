@@ -578,9 +578,10 @@ const VAULT_UNLOCK_CHECK_PLAINTEXT: &[u8] = b"nautilus-vault-check";
 /// Canonical registry for every provider credential accepted by the sidecar.
 /// Reset and provider-name validation share it so adding a credential cannot
 /// leave a second cleanup list stale.
-const PROVIDER_SECRET_NAMES: [&str; 9] = [
+const PROVIDER_SECRET_NAMES: [&str; 10] = [
     "openai",
     "elevenlabs",
+    "deepgram",
     "anthropic",
     "groq",
     "gemini",
@@ -3650,6 +3651,7 @@ fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails)
 fn build_meeting_transcript_details(
     transcript: Option<&models::Transcript>,
     transcript_artifact: Option<&TranscriptArtifactRecord>,
+    diarizer: Option<String>,
 ) -> Option<models::MeetingTranscriptDetails> {
     if transcript.is_none() && transcript_artifact.is_none() {
         return None;
@@ -3697,6 +3699,13 @@ fn build_meeting_transcript_details(
         source_mode: source_mode.to_string(),
         has_source_aware_speakers,
         has_speaker_labels,
+        // A source-aware capture labelled itself; no diarizer was involved and
+        // none is named.
+        diarizer: if has_source_aware_speakers {
+            None
+        } else {
+            diarizer
+        },
     })
 }
 
@@ -4284,6 +4293,8 @@ async fn reprocess_dictation_impl(
         // Dictation is served correctly by either Apple engine; only the
         // meeting route depends on SpeechAnalyzer's timed segments.
         apple_speech_required_engine: None,
+        request_speaker_labels: false,
+        language: settings_snapshot.transcription.language.clone(),
     };
 
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
@@ -13204,7 +13215,12 @@ mod tests {
             created_at: now,
         };
 
-        let details = build_meeting_transcript_details(Some(&transcript), Some(&artifact)).unwrap();
+        let details = build_meeting_transcript_details(
+            Some(&transcript),
+            Some(&artifact),
+            Some("deepgram".to_string()),
+        )
+        .unwrap();
 
         assert_eq!(details.source_mode, "me_them");
         assert!(details.has_source_aware_speakers);
@@ -13237,13 +13253,494 @@ mod tests {
             created_at: now,
         };
 
-        let details = build_meeting_transcript_details(Some(&transcript), None).unwrap();
+        let details = build_meeting_transcript_details(Some(&transcript), None, None).unwrap();
 
         assert_eq!(details.source_mode, "single_source");
         assert!(!details.has_source_aware_speakers);
         assert!(!details.has_speaker_labels);
         assert_eq!(details.segment_count, 1);
         assert_eq!(details.actual_provider.as_deref(), Some("parakeet"));
+    }
+
+    #[test]
+    fn a_source_aware_capture_names_no_diarizer_even_if_one_is_recorded() {
+        // "Me" and "Them" come from which microphone heard the audio, not from
+        // a diarizer. Naming Deepgram there would credit it with speaker
+        // attribution it did not do.
+        let now = chrono::Utc::now();
+        let transcript = models::Transcript {
+            id: "t-src".to_string(),
+            recording_id: "r-src".to_string(),
+            segments: vec![models::TranscriptSegment {
+                id: "seg-1".to_string(),
+                start_time: 0.0,
+                end_time: 2.0,
+                text: "Hello".to_string(),
+                speaker_id: Some("me".to_string()),
+                confidence: 0.9,
+            }],
+            full_text: "Hello".to_string(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            model: "Deepgram".to_string(),
+            model_id: Some("nova-3".to_string()),
+            requested_provider: Some("deepgram".to_string()),
+            actual_provider: Some("deepgram".to_string()),
+            created_at: now,
+        };
+
+        let details =
+            build_meeting_transcript_details(Some(&transcript), None, Some("deepgram".to_string()))
+                .unwrap();
+        assert_eq!(details.source_mode, "me_them");
+        assert_eq!(details.diarizer, None);
+    }
+
+    #[test]
+    fn a_provider_diarized_meeting_reports_the_provider_that_labelled_it() {
+        let now = chrono::Utc::now();
+        let transcript = models::Transcript {
+            id: "t-dg".to_string(),
+            recording_id: "r-dg".to_string(),
+            segments: vec![models::TranscriptSegment {
+                id: "seg-1".to_string(),
+                start_time: 0.0,
+                end_time: 2.0,
+                text: "Hello".to_string(),
+                speaker_id: Some("S1".to_string()),
+                confidence: 0.9,
+            }],
+            full_text: "Hello".to_string(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            model: "Deepgram".to_string(),
+            model_id: Some("nova-3".to_string()),
+            requested_provider: Some("deepgram".to_string()),
+            actual_provider: Some("deepgram".to_string()),
+            created_at: now,
+        };
+
+        let details =
+            build_meeting_transcript_details(Some(&transcript), None, Some("deepgram".to_string()))
+                .unwrap();
+        assert_eq!(details.source_mode, "speaker_labels");
+        assert_eq!(details.diarizer.as_deref(), Some("deepgram"));
+    }
+
+    #[test]
+    fn provider_speaker_labels_are_only_trusted_from_a_single_request() {
+        // Every diarizing provider numbers speakers per request, so "speaker 0"
+        // in the fourth chunk is not promised to be "speaker 0" in the first.
+        assert!(provider_speaker_turns_survive_chunking(1));
+        assert!(!provider_speaker_turns_survive_chunking(0));
+        assert!(!provider_speaker_turns_survive_chunking(2));
+        assert!(!provider_speaker_turns_survive_chunking(40));
+    }
+
+    #[test]
+    fn only_diarizing_providers_get_a_whole_file_meeting_request() {
+        // A local route has nothing to gain from one request: it returns no
+        // speaker labels at any size, and chunking is what keeps its memory
+        // bounded.
+        for provider in [
+            asr::AsrProviderType::Parakeet,
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::Groq,
+            asr::AsrProviderType::OpenAiCloud,
+            asr::AsrProviderType::ElevenLabsScribe,
+            asr::AsrProviderType::CohereTranscribe,
+        ] {
+            assert!(
+                !should_request_whole_file_meeting(provider, true, true, 60.0, 1_000_000),
+                "{provider:?} must not take the whole-file route"
+            );
+        }
+        assert!(should_request_whole_file_meeting(
+            asr::AsrProviderType::Deepgram,
+            true,
+            true,
+            60.0,
+            1_000_000
+        ));
+        assert!(should_request_whole_file_meeting(
+            asr::AsrProviderType::GeminiTranscribe,
+            true,
+            true,
+            60.0,
+            1_000_000
+        ));
+    }
+
+    #[test]
+    fn the_whole_file_route_respects_each_providers_documented_ceiling() {
+        // Gemini caps a diarized request at thirty minutes; Deepgram is far
+        // above that. A recording past the ceiling falls back to chunking
+        // rather than being rejected by the provider.
+        let twenty_nine_minutes = 29.0 * 60.0;
+        let thirty_one_minutes = 31.0 * 60.0;
+        assert!(should_request_whole_file_meeting(
+            asr::AsrProviderType::GeminiTranscribe,
+            true,
+            true,
+            twenty_nine_minutes,
+            1_000_000
+        ));
+        assert!(!should_request_whole_file_meeting(
+            asr::AsrProviderType::GeminiTranscribe,
+            true,
+            true,
+            thirty_one_minutes,
+            1_000_000
+        ));
+        assert!(should_request_whole_file_meeting(
+            asr::AsrProviderType::Deepgram,
+            true,
+            true,
+            thirty_one_minutes,
+            1_000_000
+        ));
+
+        // Oversized or unmeasurable recordings stay on the chunked path.
+        assert!(!should_request_whole_file_meeting(
+            asr::AsrProviderType::Deepgram,
+            true,
+            true,
+            60.0,
+            8 * 1024 * 1024 * 1024
+        ));
+        assert!(!should_request_whole_file_meeting(
+            asr::AsrProviderType::Deepgram,
+            true,
+            true,
+            0.0,
+            1_000_000
+        ));
+        assert!(!should_request_whole_file_meeting(
+            asr::AsrProviderType::Deepgram,
+            true,
+            true,
+            60.0,
+            0
+        ));
+
+        // And the whole route exists to collect provider labels, so it is off
+        // when the user does not want them.
+        assert!(!should_request_whole_file_meeting(
+            asr::AsrProviderType::Deepgram,
+            true,
+            false,
+            60.0,
+            1_000_000
+        ));
+    }
+
+    /// The whole-file ceilings must be reachable at the format the app records
+    /// in, or they describe a request that never happens.
+    ///
+    /// The Deepgram ceiling used to be four hours, described as Deepgram's own.
+    /// Deepgram documents no duration cap; four hours of a 48 kHz meeting is
+    /// 1.38 GB, so the byte cap bound first and the stated figure was
+    /// unreachable on any normally-captured meeting.
+    #[test]
+    fn the_whole_file_ceilings_are_reachable_at_the_rate_meetings_are_recorded() {
+        // Mono 16-bit PCM: one second is 2 bytes per sample.
+        const BYTES_PER_SECOND_48K: u64 = 48_000 * 2;
+        const BYTES_PER_SECOND_16K: u64 = 16_000 * 2;
+
+        for provider in [
+            asr::AsrProviderType::Deepgram,
+            asr::AsrProviderType::GeminiTranscribe,
+        ] {
+            let limits =
+                whole_file_meeting_limits(provider).expect("a diarizing provider has limits");
+            for bytes_per_second in [BYTES_PER_SECOND_16K, BYTES_PER_SECOND_48K] {
+                let at_the_ceiling = (limits.max_seconds as u64) * bytes_per_second;
+                assert!(
+                    at_the_ceiling <= limits.max_bytes,
+                    "{provider:?}: a recording at the {}s ceiling is {} bytes, past the {} byte \
+                     cap, so the duration ceiling can never be the limit that applies",
+                    limits.max_seconds,
+                    at_the_ceiling,
+                    limits.max_bytes
+                );
+                // ...and it really is accepted, not merely arithmetically small
+                // enough.
+                assert!(should_request_whole_file_meeting(
+                    provider,
+                    true,
+                    true,
+                    limits.max_seconds,
+                    at_the_ceiling
+                ));
+            }
+        }
+
+        // The specific numbers, so a change to either has to be deliberate.
+        let deepgram = whole_file_meeting_limits(asr::AsrProviderType::Deepgram).expect("limits");
+        assert_eq!(deepgram.max_seconds, 2.0 * 60.0 * 60.0);
+        assert_eq!(deepgram.max_bytes, 1024 * 1024 * 1024);
+        // Two hours at 48 kHz is 691.2 MB: inside Plainsong's 1 GiB request cap
+        // and well inside Deepgram's documented 2 GB.
+        assert!(2 * 3600 * BYTES_PER_SECOND_48K < deepgram.max_bytes);
+        assert!(deepgram.max_bytes < 2 * 1000 * 1000 * 1000);
+    }
+
+    /// Speaker separation off must stop the request, not just the labels.
+    ///
+    /// `resolve_meeting_diarizer` already refused to use provider turns with
+    /// diarization off, but it runs after the response has arrived. Until this
+    /// gate moved up, a user with speaker separation turned off still had the
+    /// whole meeting uploaded as one diarized request -- speaker analysis they
+    /// had switched off, performed by a third party, paid for, and then
+    /// discarded.
+    #[test]
+    fn speaker_separation_off_keeps_the_meeting_off_the_whole_file_route() {
+        for provider in [
+            asr::AsrProviderType::Deepgram,
+            asr::AsrProviderType::GeminiTranscribe,
+        ] {
+            assert!(
+                should_request_whole_file_meeting(provider, true, true, 60.0, 1_000_000),
+                "{provider:?} takes the whole-file route with both switches on"
+            );
+            assert!(
+                !should_request_whole_file_meeting(provider, false, true, 60.0, 1_000_000),
+                "{provider:?} must not send one diarized request with speaker separation off"
+            );
+            // Both off is the same answer, and so is the master switch off
+            // while the provider preference is on -- the preference is a
+            // choice *between* diarizers, not a way to re-enable diarization.
+            assert!(!should_request_whole_file_meeting(
+                provider, false, false, 60.0, 1_000_000
+            ));
+
+            // And the downstream check still agrees, so neither gate is now
+            // carrying the rule alone.
+            assert_eq!(
+                resolve_meeting_diarizer(false, true, false, provider, 12, true),
+                MeetingDiarizer::None
+            );
+        }
+    }
+
+    #[test]
+    fn diarization_off_means_no_diarizer_runs_whatever_came_back() {
+        assert_eq!(
+            resolve_meeting_diarizer(false, true, false, asr::AsrProviderType::Deepgram, 12, true),
+            MeetingDiarizer::None
+        );
+    }
+
+    #[test]
+    fn a_dual_source_capture_is_never_overwritten_by_a_diarizer() {
+        // "Me" from the microphone and "Them" from the system tap is better
+        // evidence than any diarizer produces, so neither one runs.
+        assert_eq!(
+            resolve_meeting_diarizer(true, true, true, asr::AsrProviderType::Deepgram, 12, true),
+            MeetingDiarizer::None
+        );
+        assert_eq!(
+            resolve_meeting_diarizer(true, false, true, asr::AsrProviderType::Parakeet, 0, true),
+            MeetingDiarizer::None
+        );
+    }
+
+    #[test]
+    fn provider_labels_win_when_the_user_prefers_them_and_the_provider_sent_some() {
+        assert_eq!(
+            resolve_meeting_diarizer(true, true, false, asr::AsrProviderType::Deepgram, 12, true),
+            MeetingDiarizer::Provider(asr::AsrProviderType::Deepgram)
+        );
+        // Even when the local pipeline is unavailable -- the provider already
+        // did the work.
+        assert_eq!(
+            resolve_meeting_diarizer(
+                true,
+                true,
+                false,
+                asr::AsrProviderType::GeminiTranscribe,
+                3,
+                false
+            ),
+            MeetingDiarizer::Provider(asr::AsrProviderType::GeminiTranscribe)
+        );
+    }
+
+    #[test]
+    fn the_local_pipeline_runs_when_the_provider_sent_nothing_or_the_user_opted_out() {
+        // No labels came back (a local route, or a cloud route whose labels did
+        // not survive chunking).
+        assert_eq!(
+            resolve_meeting_diarizer(true, true, false, asr::AsrProviderType::Deepgram, 0, true),
+            MeetingDiarizer::Local
+        );
+        // Labels came back but the user prefers Plainsong's own diarizer.
+        assert_eq!(
+            resolve_meeting_diarizer(true, false, false, asr::AsrProviderType::Deepgram, 12, true),
+            MeetingDiarizer::Local
+        );
+        // Nothing available at all: no diarizer is named rather than one being
+        // claimed.
+        assert_eq!(
+            resolve_meeting_diarizer(true, true, false, asr::AsrProviderType::Parakeet, 0, false),
+            MeetingDiarizer::None
+        );
+    }
+
+    #[test]
+    fn the_recorded_diarizer_names_the_provider_or_the_local_embedding_model() {
+        assert_eq!(
+            MeetingDiarizer::Provider(asr::AsrProviderType::Deepgram)
+                .record_value("ecapa_tdnn_speaker")
+                .as_deref(),
+            Some("deepgram")
+        );
+        assert_eq!(
+            MeetingDiarizer::Provider(asr::AsrProviderType::GeminiTranscribe)
+                .record_value("ecapa_tdnn_speaker")
+                .as_deref(),
+            Some("gemini_transcribe")
+        );
+        assert_eq!(
+            MeetingDiarizer::Local
+                .record_value("campplus_speaker")
+                .as_deref(),
+            Some("plainsong:campplus_speaker")
+        );
+        assert_eq!(
+            MeetingDiarizer::None.record_value("ecapa_tdnn_speaker"),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_turns_become_the_same_diarization_result_shape_the_local_engine_produces() {
+        let turns = vec![
+            asr::SpeakerTurn {
+                start_time: 0.0,
+                end_time: 1.0,
+                speaker_id: "S1".to_string(),
+                confidence: 0.9,
+            },
+            asr::SpeakerTurn {
+                start_time: 1.0,
+                end_time: 2.0,
+                speaker_id: "S2".to_string(),
+                confidence: 0.8,
+            },
+            asr::SpeakerTurn {
+                start_time: 2.0,
+                end_time: 3.0,
+                speaker_id: "S1".to_string(),
+                confidence: 0.95,
+            },
+            // Degenerate turns are dropped rather than merged onto the
+            // transcript as zero-length speaker claims.
+            asr::SpeakerTurn {
+                start_time: 5.0,
+                end_time: 5.0,
+                speaker_id: "S3".to_string(),
+                confidence: 0.5,
+            },
+            asr::SpeakerTurn {
+                start_time: f64::NAN,
+                end_time: 9.0,
+                speaker_id: "S4".to_string(),
+                confidence: 0.5,
+            },
+        ];
+
+        let result = diarization_result_from_provider_turns(&turns, 3.0);
+
+        assert_eq!(result.method, diarization::DiarizationMethod::Provider);
+        assert_eq!(result.segments.len(), 3);
+        assert_eq!(result.duration, 3.0);
+        // Two distinct speakers, each counted once per turn, and coloured by
+        // the same palette the local engine uses.
+        assert_eq!(result.speakers.len(), 2);
+        assert_eq!(result.speakers[0].id, "S1");
+        assert_eq!(result.speakers[0].sample_count, 2);
+        assert_eq!(result.speakers[1].id, "S2");
+        assert_eq!(
+            result.speakers[0].color,
+            diarization::speaker_for_index("S1", 0).color
+        );
+    }
+
+    #[test]
+    fn provider_turns_merge_onto_a_transcript_exactly_as_local_turns_do() {
+        // The point of routing provider labels through the same merge is that
+        // nothing downstream can tell the two apart. Same turns, same
+        // transcript, same result.
+        let mut provider_segments = vec![
+            models::TranscriptSegment {
+                id: "seg-1".to_string(),
+                start_time: 0.0,
+                end_time: 1.0,
+                text: "hello there".to_string(),
+                speaker_id: None,
+                confidence: 0.9,
+            },
+            models::TranscriptSegment {
+                id: "seg-2".to_string(),
+                start_time: 1.0,
+                end_time: 2.0,
+                text: "good morning".to_string(),
+                speaker_id: None,
+                confidence: 0.9,
+            },
+        ];
+        let mut local_segments = provider_segments.clone();
+
+        let turns = vec![
+            asr::SpeakerTurn {
+                start_time: 0.0,
+                end_time: 1.0,
+                speaker_id: "S1".to_string(),
+                confidence: 0.9,
+            },
+            asr::SpeakerTurn {
+                start_time: 1.0,
+                end_time: 2.0,
+                speaker_id: "S2".to_string(),
+                confidence: 0.9,
+            },
+        ];
+        let provider_result = diarization_result_from_provider_turns(&turns, 2.0);
+        let local_result = diarization::DiarizationResult {
+            segments: turns
+                .iter()
+                .map(|turn| diarization::SpeakerSegment {
+                    start_time: turn.start_time,
+                    end_time: turn.end_time,
+                    speaker_id: turn.speaker_id.clone(),
+                    confidence: turn.confidence,
+                })
+                .collect(),
+            speakers: Vec::new(),
+            duration: 2.0,
+            method: diarization::DiarizationMethod::Embedding,
+            cluster_centroids: std::collections::HashMap::new(),
+        };
+
+        let engine = diarization::DiarizationEngine::new();
+        engine.merge_with_transcript(&provider_result, &mut provider_segments);
+        engine.merge_with_transcript(&local_result, &mut local_segments);
+
+        let speakers = |segments: &[models::TranscriptSegment]| {
+            segments
+                .iter()
+                .map(|segment| (segment.text.clone(), segment.speaker_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(speakers(&provider_segments), speakers(&local_segments));
+        assert_eq!(
+            provider_segments
+                .iter()
+                .filter_map(|segment| segment.speaker_id.clone())
+                .collect::<Vec<_>>(),
+            vec!["S1".to_string(), "S2".to_string()]
+        );
     }
 
     #[test]
@@ -15147,6 +15644,7 @@ mod tests {
             optimization_applied: true,
             fallback_reason: Some("fallback test".to_string()),
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
 
         let payload = build_dictation_text_ready_payload(
@@ -15245,6 +15743,7 @@ mod tests {
             optimization_applied: true,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
 
         let payload = build_dictation_text_ready_payload(
@@ -16689,6 +17188,7 @@ mod tests {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
         let them = asr::TranscriptionResult {
             text: "Let's ship this Friday".to_string(),
@@ -16710,6 +17210,7 @@ mod tests {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
 
         let transcript = build_source_aware_models_transcript(
@@ -16745,6 +17246,7 @@ mod tests {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
         let them = asr::TranscriptionResult {
             text: "Let's ship this Friday".to_string(),
@@ -16761,6 +17263,7 @@ mod tests {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
 
         let mut transcript = build_source_aware_models_transcript(
@@ -16797,6 +17300,7 @@ mod tests {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
 
         let reason = describe_dual_source_transcription_degradation(
@@ -16824,6 +17328,7 @@ mod tests {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
 
         let reason = describe_dual_source_transcription_degradation(
@@ -16854,6 +17359,7 @@ mod tests {
                 "2 of 10 transcription chunk(s) failed; transcript may be incomplete".to_string(),
             ),
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
         let clean = asr::TranscriptionResult {
             text: "system side".to_string(),
@@ -16870,6 +17376,7 @@ mod tests {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            speaker_turns: Vec::new(),
         };
 
         let reason = describe_dual_source_transcription_degradation(&Ok(degraded), &Ok(clean))
@@ -16880,15 +17387,73 @@ mod tests {
         ));
     }
 
+    /// The renderer's copy of `src/lib/asr-capabilities.ts`, read at compile
+    /// time so a rename of the file fails the build rather than the assertion.
+    const RENDERER_ASR_CAPABILITIES_TS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../src/lib/asr-capabilities.ts"
+    ));
+
+    /// The provider names inside one `new Set<AsrProviderType>([...])` literal
+    /// in the renderer's capability table.
+    ///
+    /// A source scan rather than a generated fixture on purpose: the renderer's
+    /// list is the one a reviewer reads and the one the picker actually uses,
+    /// and any copy that has to be regenerated by hand goes stale exactly the
+    /// way the two lists these tests pin already did. Comment lines are skipped
+    /// so a commented-out member is not read as a member.
+    fn renderer_provider_set(set_name: &str) -> std::collections::BTreeSet<String> {
+        let opening = format!("const {set_name} = new Set<AsrProviderType>([");
+        let start = RENDERER_ASR_CAPABILITIES_TS
+            .find(&opening)
+            .unwrap_or_else(|| panic!("{set_name} is no longer declared in asr-capabilities.ts"))
+            + opening.len();
+        let end = start
+            + RENDERER_ASR_CAPABILITIES_TS[start..]
+                .find("]);")
+                .unwrap_or_else(|| {
+                    panic!("{set_name} literal is not closed in asr-capabilities.ts")
+                });
+        RENDERER_ASR_CAPABILITIES_TS[start..end]
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//") && !line.starts_with('*'))
+            .filter_map(|line| line.split('"').nth(1).map(str::to_string))
+            .collect()
+    }
+
+    /// The one classification that decides whether audio leaves the machine, so
+    /// it is pinned across both languages in both directions.
+    ///
+    /// Deepgram and Gemini Transcribe shipped as cloud routes in the renderer
+    /// and as LOCAL ones in Rust, because `is_remote()` was a hand-written
+    /// `matches!` nobody updated. That silently skipped the remote-processing
+    /// gate, made `enforce_remote_asr_provider_policy` a no-op at all six call
+    /// sites, and let an install set to local-only dictation upload its audio.
+    /// Set equality, not "contains", is the point: a provider added to either
+    /// list alone fails here.
     #[test]
-    fn every_remote_asr_provider_is_cloud_and_never_matches_local_routing() {
-        let remote_providers = asr::AsrProviderType::all()
+    fn every_cloud_provider_is_remote_in_both_languages() {
+        let renderer = renderer_provider_set("CLOUD_PROVIDER_SET");
+        let sidecar = asr::AsrProviderType::all()
             .into_iter()
             .filter(|provider| provider.is_remote())
-            .collect::<Vec<_>>();
-        assert!(!remote_providers.is_empty());
+            .map(|provider| asr_provider_to_settings_value(provider).to_string())
+            .collect::<std::collections::BTreeSet<String>>();
 
-        for provider in remote_providers {
+        assert!(
+            !renderer.is_empty(),
+            "CLOUD_PROVIDER_SET parsed empty; the source scan is broken, not the code"
+        );
+        assert_eq!(
+            sidecar, renderer,
+            "AsrProviderType::is_remote() and CLOUD_PROVIDER_SET in \
+             src/lib/asr-capabilities.ts must name exactly the same providers"
+        );
+
+        for name in &sidecar {
+            let provider = asr_provider_from_settings_value(name)
+                .unwrap_or_else(|| panic!("{name} is not a provider this build can run"));
             let model_id = provider.default_model_id();
             assert!(
                 provider_hosting_environment(provider, model_id) == HostingEnvironment::Cloud,
@@ -16900,6 +17465,143 @@ mod tests {
                 provider,
                 model_id
             ));
+            assert!(
+                !provider_supports_generic_live_preview(provider),
+                "{:?} is a cloud route and cannot be offered a local live preview",
+                provider
+            );
+        }
+    }
+
+    /// The meeting lane's provider list, pinned across both languages.
+    ///
+    /// `provider_is_dictation_only` is the inverse of
+    /// `meeting_provider_is_supported`, and settings normalization rewrites a
+    /// meeting selection it calls dictation-only back to Parakeet. So a
+    /// provider the renderer offers for meetings but Rust does not is a
+    /// selection the user makes and the sidecar silently throws away -- which
+    /// is exactly what happened to Deepgram and Gemini Transcribe, taking the
+    /// whole-file and provider-diarization paths with it.
+    ///
+    /// whisper.cpp is the one deliberate asymmetry and is asserted as such:
+    /// its meeting support is per model, so it is meeting-grade in Rust
+    /// (`meeting_provider_is_supported`) while the renderer decides it through
+    /// `isWhisperMeetingModel` instead of the set.
+    #[test]
+    fn every_meeting_grade_provider_matches_in_both_languages() {
+        let renderer = renderer_provider_set("MEETING_GRADE_PROVIDER_SET");
+        let sidecar = asr::AsrProviderType::all()
+            .into_iter()
+            .filter(|provider| meeting_provider_is_supported(*provider))
+            .map(|provider| asr_provider_to_settings_value(provider).to_string())
+            .collect::<std::collections::BTreeSet<String>>();
+
+        assert!(
+            !renderer.is_empty(),
+            "MEETING_GRADE_PROVIDER_SET parsed empty; the source scan is broken, not the code"
+        );
+
+        // Names the renderer knows that this build did not compile in. Only
+        // `transcribe_cpp` is ever allowed here, and only when its feature is
+        // off: it is the one route gated behind a Cargo feature.
+        let not_in_this_build = renderer
+            .iter()
+            .filter(|name| asr_provider_from_settings_value(name).is_none())
+            .cloned()
+            .collect::<std::collections::BTreeSet<String>>();
+        let expected_missing: std::collections::BTreeSet<String> =
+            if cfg!(feature = "asr-transcribe-cpp") {
+                std::collections::BTreeSet::new()
+            } else {
+                ["transcribe_cpp".to_string()].into_iter().collect()
+            };
+        assert_eq!(
+            not_in_this_build, expected_missing,
+            "the only renderer meeting provider this build may not know is the \
+             feature-gated transcribe.cpp route"
+        );
+
+        let mut expected = renderer;
+        for name in &expected_missing {
+            expected.remove(name);
+        }
+        // whisper.cpp: meeting-grade as a provider in Rust, per model in the
+        // renderer. Asserted rather than tolerated so the exception cannot
+        // quietly grow a second member.
+        expected.insert("whisper".to_string());
+
+        assert_eq!(
+            sidecar, expected,
+            "meeting_provider_is_supported() and MEETING_GRADE_PROVIDER_SET in \
+             src/lib/asr-capabilities.ts must name the same providers"
+        );
+
+        for provider in [
+            asr::AsrProviderType::Deepgram,
+            asr::AsrProviderType::GeminiTranscribe,
+        ] {
+            assert!(
+                !provider_is_dictation_only(provider),
+                "{provider:?} must not be rewritten out of a meeting selection"
+            );
+            assert!(!meeting_route_is_dictation_only(
+                provider,
+                provider.default_model_id()
+            ));
+        }
+    }
+
+    /// The refusal a "local only" install depends on, asserted at every gate a
+    /// cloud route has to pass rather than only at the policy function.
+    #[test]
+    fn remote_processing_disabled_blocks_deepgram_and_gemini_from_every_route() {
+        for provider in [
+            asr::AsrProviderType::Deepgram,
+            asr::AsrProviderType::GeminiTranscribe,
+        ] {
+            let model_id = provider.default_model_id();
+
+            assert!(
+                enforce_remote_asr_provider_policy(provider, false).is_err(),
+                "{provider:?} must be refused while remote processing is off"
+            );
+            assert!(enforce_remote_asr_provider_policy(provider, true).is_ok());
+
+            assert!(
+                !route_matches_hosting(DictationRoutePreference::Local, provider, model_id),
+                "{provider:?} must never satisfy a local-only dictation preference"
+            );
+
+            // Even when the meeting slot names it outright, PreferLocal must
+            // not admit it: a stored key proves capability, not consent.
+            let candidates = preferred_meeting_provider_candidates(
+                MeetingRoutePolicy::PreferLocal,
+                provider,
+                provider,
+                Some(provider),
+                Some(model_id),
+            );
+            assert!(
+                !candidates.contains(&provider),
+                "{provider:?} must not be a PreferLocal meeting candidate"
+            );
+
+            // ...and selection re-checks it, so a candidate-ordering bug cannot
+            // widen the boundary on its own.
+            let ready = vec![provider_info_for_test(
+                provider,
+                model_id,
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            )];
+            assert_eq!(
+                select_ready_meeting_candidate(
+                    &ready,
+                    &[provider],
+                    MeetingRoutePolicy::PreferLocal
+                ),
+                None
+            );
         }
     }
 
@@ -19367,6 +20069,11 @@ async fn transcribe_recording_in_chunks(
     // which is after the event for that chunk has already gone out.
     let streamed_preview = Arc::new(tokio::sync::Mutex::new(String::new()));
     let mut merged_segments: Vec<asr::TranscriptSegment> = Vec::new();
+    // Provider speaker labels, offset onto the recording's timeline. Only
+    // usable when the whole recording went out in one request -- see
+    // `provider_speaker_turns_survive_chunking`.
+    let mut merged_speaker_turns: Vec<asr::SpeakerTurn> = Vec::new();
+    let mut successful_chunks = 0usize;
     let mut language = String::new();
     let mut model_name = String::new();
     let mut requested_provider = provider;
@@ -19534,6 +20241,12 @@ async fn transcribe_recording_in_chunks(
                     segment.end_time += offset_seconds;
                     merged_segments.push(segment);
                 }
+                for mut turn in result.speaker_turns {
+                    turn.start_time += offset_seconds;
+                    turn.end_time += offset_seconds;
+                    merged_speaker_turns.push(turn);
+                }
+                successful_chunks += 1;
                 if language.is_empty() {
                     language = result.language.clone();
                 }
@@ -19610,6 +20323,12 @@ async fn transcribe_recording_in_chunks(
                     segment.end_time += offset_seconds;
                     merged_segments.push(segment);
                 }
+                for mut turn in result.speaker_turns {
+                    turn.start_time += offset_seconds;
+                    turn.end_time += offset_seconds;
+                    merged_speaker_turns.push(turn);
+                }
+                successful_chunks += 1;
                 if language.is_empty() {
                     language = result.language.clone();
                 }
@@ -19659,6 +20378,12 @@ async fn transcribe_recording_in_chunks(
                     segment.end_time += offset_seconds;
                     merged_segments.push(segment);
                 }
+                for mut turn in result.speaker_turns {
+                    turn.start_time += offset_seconds;
+                    turn.end_time += offset_seconds;
+                    merged_speaker_turns.push(turn);
+                }
+                successful_chunks += 1;
                 if language.is_empty() {
                     language = result.language.clone();
                 }
@@ -19735,6 +20460,18 @@ async fn transcribe_recording_in_chunks(
         Some(1.0),
     );
 
+    if !merged_speaker_turns.is_empty()
+        && !provider_speaker_turns_survive_chunking(successful_chunks)
+    {
+        tracing::info!(
+            "Recording {}: discarding provider speaker labels from {} separate requests; \
+             speaker numbering is scoped to one request, so Plainsong's own diarizer runs instead",
+            recording_id,
+            successful_chunks
+        );
+        merged_speaker_turns.clear();
+    }
+
     Ok(asr::TranscriptionResult {
         text: merged_text,
         segments: merged_segments,
@@ -19762,7 +20499,274 @@ async fn transcribe_recording_in_chunks(
         optimization_applied,
         fallback_reason,
         vocabulary_hint_terms_applied: 0,
+        speaker_turns: merged_speaker_turns,
     })
+}
+
+/// Turn any cleanup warnings a provider raised into a record the user can act
+/// on: an audit entry, and -- when there is a recording to attach it to -- a
+/// note on the finished recording.
+///
+/// Cleanup here means work a provider does outside the transcript. Today that
+/// is the Gemini route's delete of the audio it uploaded to Google's Files API:
+/// the transcript is fine either way, but "your meeting is still sitting in a
+/// third-party store" is not something to leave in a log line.
+async fn report_provider_cleanup_warnings(
+    state: &AppState,
+    app: Option<(&impl crate::sidecar_handle::AppEmitter, &str)>,
+) {
+    let warnings = asr::take_provider_cleanup_warnings();
+    if warnings.is_empty() {
+        return;
+    }
+    let mut db = state.db.lock().await;
+    for warning in &warnings {
+        if let Err(error) = db.log_audit_event(
+            "provider_cleanup_incomplete",
+            Some(serde_json::json!({
+                "recording_id": app.map(|(_, recording_id)| recording_id),
+                "detail": warning,
+            })),
+            "warning",
+        ) {
+            tracing::warn!("Failed to log a provider cleanup warning: {}", error);
+        }
+    }
+    drop(db);
+
+    if let Some((app, recording_id)) = app {
+        for warning in warnings {
+            // The completed event has already gone out, so this rides the same
+            // "a finished meeting can still carry a note" path the degraded
+            // transcript and the diarizer substitution use.
+            app.emit_event(
+                "recording-status-changed",
+                serde_json::json!({
+                    "recordingId": recording_id,
+                    "status": "completed",
+                    "message": warning,
+                    "updatedAt": chrono::Utc::now().to_rfc3339(),
+                }),
+            );
+        }
+    }
+}
+
+/// Whether speaker labels collected across `successful_chunks` provider
+/// requests can be trusted as one speaker space.
+///
+/// They cannot, past one. Every diarizing provider numbers speakers per
+/// request: Deepgram's `speaker: 0` in the fourth ninety-second chunk is not
+/// promised to be the same person as `speaker: 0` in the first, and nothing in
+/// either response says whether it is. Stitching them anyway would silently
+/// merge strangers and split one speaker into a new person every ninety
+/// seconds -- worse than not diarizing at all, and invisible to the reader.
+///
+/// Zero is also false: no chunk succeeded, so there is nothing to trust.
+fn provider_speaker_turns_survive_chunking(successful_chunks: usize) -> bool {
+    successful_chunks == 1
+}
+
+/// The ceiling under which a provider will take a whole recording in one
+/// request, so its speaker numbering covers the entire meeting.
+///
+/// Each provider's own documented limits, pulled in on 2026-09-02 (see
+/// `docs/model-inventory-2026-09.md`), reduced where a documented limit is far
+/// above anything Plainsong should send in one go -- or, where a provider
+/// documents no limit of that shape at all, replaced by a Plainsong ceiling
+/// with the arithmetic behind it written down. Which is which is stated per
+/// provider below, because a self-imposed number described as the provider's
+/// is a claim about someone else's API that nobody can check.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WholeFileMeetingLimits {
+    max_seconds: f64,
+    max_bytes: u64,
+}
+
+fn whole_file_meeting_limits(provider: asr::AsrProviderType) -> Option<WholeFileMeetingLimits> {
+    match provider {
+        // Deepgram documents no duration cap at all. What it does document is
+        // a 2 GB request size and a ten-minute *processing* ceiling that
+        // answers 504. Both numbers are Deepgram's; the two below are
+        // Plainsong's, and here is the arithmetic behind them.
+        //
+        // A meeting is mono 16-bit PCM at the capture device's own rate, so
+        // one second is 32 kB at 16 kHz and 96 kB at 48 kHz.
+        //
+        // - 1 GiB is well inside Deepgram's 2 GB, and is the point past which
+        //   the upload itself is the risk rather than the transcription.
+        // - Two hours is 230 MB at 16 kHz and 691 MB at 48 kHz, so it stays
+        //   inside that byte cap at every rate a capture device offers.
+        //   Processing it costs about 12 seconds at the 607.7x real time
+        //   Artificial Analysis publishes for Nova-3, nowhere near the
+        //   ten-minute ceiling, and 691 MB fits the client's own fifteen-minute
+        //   whole-file timeout at about 6 Mbit/s of upload.
+        //
+        // The previous ceiling here was four hours, described as Deepgram's.
+        // It was neither: Deepgram documents no such limit, and four hours at
+        // 48 kHz is 1.38 GB, so the byte cap bound first and the stated figure
+        // was never reachable on a normally-captured meeting anyway.
+        asr::AsrProviderType::Deepgram => Some(WholeFileMeetingLimits {
+            max_seconds: 2.0 * 60.0 * 60.0,
+            max_bytes: 1024 * 1024 * 1024,
+        }),
+        // Gemini's own cap: one hour per request, dropping to thirty minutes
+        // when diarization or word timestamps are on -- which is exactly what
+        // the meeting lane asks for. Thirty minutes of the app's own meeting
+        // WAV (mono 16-bit PCM at the capture device's rate) is 57.6 MB at
+        // 16 kHz, 172.8 MB at 48 kHz and 345.6 MB at 96 kHz, so the duration
+        // ceiling binds first at every rate a capture device offers; the byte
+        // cap is a backstop against a file that is not what we think it is,
+        // well under the Files API's own 2 GB.
+        asr::AsrProviderType::GeminiTranscribe => Some(WholeFileMeetingLimits {
+            max_seconds: 30.0 * 60.0,
+            max_bytes: 512 * 1024 * 1024,
+        }),
+        _ => None,
+    }
+}
+
+/// Whether the meeting lane should send this recording to the provider in one
+/// request instead of ninety-second chunks.
+///
+/// The only reason to do so is to get one consistent speaker space out of a
+/// provider that diarizes -- see `provider_speaker_turns_survive_chunking` --
+/// so the answer is no whenever speaker separation is off at all, no when the
+/// user prefers Plainsong's own diarizer, and no for every provider that does
+/// not return speaker labels. A recording past the provider's documented
+/// ceiling also gets a no: chunked transcription with Plainsong's own diarizer
+/// is a worse answer than provider labels, but a far better one than a
+/// rejected request.
+///
+/// `enable_diarization` is the master switch and is checked here rather than
+/// only downstream. It used to be checked only by `resolve_meeting_diarizer`,
+/// after the request had already gone out: a user with speaker separation
+/// turned off still had the whole meeting uploaded as a single diarized
+/// request, paid for the speaker analysis they had declined, and then had the
+/// labels thrown away on arrival.
+fn should_request_whole_file_meeting(
+    provider: asr::AsrProviderType,
+    enable_diarization: bool,
+    prefer_provider_diarization: bool,
+    duration_seconds: f64,
+    byte_len: u64,
+) -> bool {
+    if !enable_diarization || !prefer_provider_diarization {
+        return false;
+    }
+    let Some(limits) = whole_file_meeting_limits(provider) else {
+        return false;
+    };
+    if byte_len == 0 || byte_len > limits.max_bytes {
+        return false;
+    }
+    // A duration we could not measure is not a duration under the limit.
+    duration_seconds > 0.0 && duration_seconds <= limits.max_seconds
+}
+
+/// Which diarizer, if any, should label the speakers on a finished meeting.
+#[derive(Debug, Clone, PartialEq)]
+enum MeetingDiarizer {
+    /// Nothing runs: diarization is off, the capture already knows who is
+    /// speaking, or no diarizer is available.
+    None,
+    /// Keep the labels the ASR provider returned with the transcript.
+    Provider(asr::AsrProviderType),
+    /// Run Plainsong's own embedding pipeline over the audio.
+    Local,
+}
+
+impl MeetingDiarizer {
+    /// The value written to `transcripts.diarizer` and to the audit log. Stable
+    /// and machine-readable; the UI turns it into a sentence.
+    fn record_value(&self, local_model_id: &str) -> Option<String> {
+        match self {
+            MeetingDiarizer::None => None,
+            MeetingDiarizer::Provider(provider) => {
+                Some(asr_provider_to_settings_value(*provider).to_string())
+            }
+            MeetingDiarizer::Local => Some(format!("plainsong:{local_model_id}")),
+        }
+    }
+}
+
+/// Pure decision so the policy is testable without audio, a key, or a model.
+///
+/// Order matters and is deliberate:
+///
+/// 1. Diarization off means nothing runs, whatever came back.
+/// 2. A dual-source capture already knows who is speaking -- the microphone is
+///    "Me" and the system tap is "Them" -- and that is better evidence than any
+///    diarizer, so nothing overwrites it.
+/// 3. Provider labels win over the local pipeline when the user prefers them
+///    and the provider actually returned some. The audio has already been sent
+///    and paid for at that point.
+/// 4. Otherwise the local pipeline runs, if it can.
+fn resolve_meeting_diarizer(
+    enable_diarization: bool,
+    prefer_provider_diarization: bool,
+    has_source_aware_speakers: bool,
+    actual_provider: asr::AsrProviderType,
+    provider_turn_count: usize,
+    local_diarizer_available: bool,
+) -> MeetingDiarizer {
+    if !enable_diarization || has_source_aware_speakers {
+        return MeetingDiarizer::None;
+    }
+    if prefer_provider_diarization && provider_turn_count > 0 {
+        return MeetingDiarizer::Provider(actual_provider);
+    }
+    if local_diarizer_available {
+        return MeetingDiarizer::Local;
+    }
+    MeetingDiarizer::None
+}
+
+/// Provider speaker turns as a `DiarizationResult`, so they go through exactly
+/// the same merge, speaker list and enrichment path as the local diarizer's
+/// output. Nothing downstream can tell the two apart, which is the point: the
+/// transcript contract does not fork.
+fn diarization_result_from_provider_turns(
+    turns: &[asr::SpeakerTurn],
+    duration: f64,
+) -> diarization::DiarizationResult {
+    let mut segments = Vec::with_capacity(turns.len());
+    let mut speakers: Vec<diarization::Speaker> = Vec::new();
+    for turn in turns {
+        if !turn.start_time.is_finite()
+            || !turn.end_time.is_finite()
+            || turn.end_time <= turn.start_time
+        {
+            continue;
+        }
+        segments.push(diarization::SpeakerSegment {
+            start_time: turn.start_time,
+            end_time: turn.end_time,
+            speaker_id: turn.speaker_id.clone(),
+            confidence: turn.confidence,
+        });
+        match speakers
+            .iter_mut()
+            .find(|speaker| speaker.id == turn.speaker_id)
+        {
+            Some(speaker) => speaker.sample_count += 1,
+            None => {
+                let index = speakers.len();
+                let mut speaker = diarization::speaker_for_index(&turn.speaker_id, index);
+                speaker.sample_count = 1;
+                speakers.push(speaker);
+            }
+        }
+    }
+    diarization::DiarizationResult {
+        segments,
+        speakers,
+        duration,
+        method: diarization::DiarizationMethod::Provider,
+        // A provider returns labels, not embeddings, so there is nothing to
+        // remember a voice by. Voiceprints are a local-diarizer feature.
+        cluster_centroids: std::collections::HashMap::new(),
+    }
 }
 
 fn default_source_speaker_name(speaker_id: &str) -> Option<&'static str> {
@@ -19864,6 +20868,8 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::Groq => "groq",
         asr::AsrProviderType::CohereTranscribe => "cohere_transcribe",
         asr::AsrProviderType::Qwen3Asr => "qwen3_asr",
+        asr::AsrProviderType::Deepgram => "deepgram",
+        asr::AsrProviderType::GeminiTranscribe => "gemini_transcribe",
         #[cfg(feature = "asr-transcribe-cpp")]
         asr::AsrProviderType::TranscribeCpp => "transcribe_cpp",
     }
@@ -19883,6 +20889,8 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "groq" => Some(asr::AsrProviderType::Groq),
         "cohere_transcribe" => Some(asr::AsrProviderType::CohereTranscribe),
         "qwen3_asr" => Some(asr::AsrProviderType::Qwen3Asr),
+        "deepgram" => Some(asr::AsrProviderType::Deepgram),
+        "gemini_transcribe" => Some(asr::AsrProviderType::GeminiTranscribe),
         #[cfg(feature = "asr-transcribe-cpp")]
         "transcribe_cpp" => Some(asr::AsrProviderType::TranscribeCpp),
         _ => None,
@@ -20653,6 +21661,14 @@ fn provider_allows_automatic_dictation_fallback(provider: asr::AsrProviderType) 
     provider != asr::AsrProviderType::MacosAppleSpeech
 }
 
+/// Whether a provider can serve the meeting lane at all.
+///
+/// Pinned against the renderer's `MEETING_GRADE_PROVIDER_SET` by
+/// `every_meeting_grade_provider_matches_in_both_languages`. The two lists
+/// diverging is not cosmetic: `provider_is_dictation_only` is its inverse, and
+/// settings normalization rewrites a meeting selection the sidecar calls
+/// dictation-only back to Parakeet, so a provider missing here is a meeting
+/// route the user chose and cannot keep.
 fn meeting_provider_is_supported(provider: asr::AsrProviderType) -> bool {
     meeting_provider_is_supported_with(
         provider,
@@ -20685,12 +21701,28 @@ fn meeting_provider_is_supported_with(
             | asr::AsrProviderType::Groq
             | asr::AsrProviderType::CohereTranscribe
             | asr::AsrProviderType::Qwen3Asr
+            | asr::AsrProviderType::Deepgram
+            | asr::AsrProviderType::GeminiTranscribe
             // whisper.cpp is meeting-capable per model, not per provider:
             // see `WHISPER_MEETING_MODEL_IDS`. It never enters the meeting
             // lane on its own (`preferred_meeting_provider_candidates`), only
             // when the meeting slot names one of those models outright.
             | asr::AsrProviderType::Whisper
-    )
+    ) || {
+        // Only exists when the spike is compiled in; a default build has no
+        // such variant to match. It returns the same segment rows with
+        // timestamps as the shipped local routes (see transcribe_cpp.rs's
+        // segment contract), which is what the meeting lane needs, and the
+        // renderer already lists it.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        {
+            provider == asr::AsrProviderType::TranscribeCpp
+        }
+        #[cfg(not(feature = "asr-transcribe-cpp"))]
+        {
+            false
+        }
+    }
 }
 
 /// The whisper.cpp ggml models allowed in the meeting lane.
@@ -21253,6 +22285,10 @@ fn build_models_transcript_from_asr_result(
 )]
 struct MeetingTranscriptionOutput {
     transcript: models::Transcript,
+    /// Speaker turns the ASR provider itself reported, already on the
+    /// recording's timeline. Empty for every local route and for any cloud
+    /// route whose labels could not survive chunking.
+    speaker_turns: Vec<asr::SpeakerTurn>,
     requested_provider: asr::AsrProviderType,
     actual_provider: asr::AsrProviderType,
     requested_engine: Option<String>,
@@ -21389,6 +22425,85 @@ fn describe_dual_source_transcription_degradation(
     }
 }
 
+/// One single-source meeting transcription, taking the whole recording in one
+/// provider request when that provider can carry it and the user prefers
+/// provider diarization, and falling back to the ninety-second chunked path
+/// otherwise.
+///
+/// A whole-file attempt that fails does not fail the meeting: the chunked path
+/// runs afterwards, the user gets a transcript, and the labels are Plainsong's
+/// own. Losing an hour of audio to get nicer speaker badges would be a bad
+/// trade.
+#[allow(clippy::too_many_arguments)]
+async fn transcribe_single_source_meeting(
+    app: &impl crate::sidecar_handle::AppEmitter,
+    asr_manager: Arc<asr::AsrManager>,
+    recording_id: &str,
+    audio_path: &Path,
+    provider: asr::AsrProviderType,
+    model_id: String,
+    enable_diarization: bool,
+    prefer_provider_diarization: bool,
+) -> Result<asr::TranscriptionResult, String> {
+    let byte_len = tokio::fs::metadata(audio_path)
+        .await
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let duration_seconds =
+        compute_wav_duration_seconds(audio_path.to_string_lossy().as_ref()).max(0) as f64;
+
+    if should_request_whole_file_meeting(
+        provider,
+        enable_diarization,
+        prefer_provider_diarization,
+        duration_seconds,
+        byte_len,
+    ) {
+        // No chunk-level progress is available on this route, so say the
+        // transcription started rather than leaving the meeting looking
+        // stalled for the length of one upload.
+        emit_recording_status(
+            app,
+            recording_id,
+            "processing",
+            Some("Processing transcript"),
+            Some(0.0),
+        );
+        match asr_manager
+            .transcribe_path_for_meeting(provider, audio_path, Some(model_id.as_str()))
+            .await
+        {
+            Ok(result) => {
+                emit_recording_status(
+                    app,
+                    recording_id,
+                    "processing",
+                    Some("Processing transcript"),
+                    Some(1.0),
+                );
+                return Ok(result);
+            }
+            Err(error) => tracing::warn!(
+                "Whole-recording {} transcription failed for {}; falling back to chunked \
+                 transcription and local diarization: {}",
+                provider.display_name(),
+                recording_id,
+                error
+            ),
+        }
+    }
+
+    transcribe_recording_in_chunks(
+        app,
+        asr_manager,
+        recording_id,
+        audio_path,
+        provider,
+        model_id,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn transcribe_meeting_recording(
     app: &impl crate::sidecar_handle::AppEmitter,
@@ -21399,18 +22514,22 @@ async fn transcribe_meeting_recording(
     system_audio_path: Option<&Path>,
     provider: asr::AsrProviderType,
     model_id: String,
+    enable_diarization: bool,
+    prefer_provider_diarization: bool,
 ) -> Result<MeetingTranscriptionOutput, String> {
     let mic_path = mic_audio_path.filter(|path| path.exists());
     let system_path = system_audio_path.filter(|path| path.exists());
 
     if mic_path.is_none() || system_path.is_none() {
-        let result = transcribe_recording_in_chunks(
+        let result = transcribe_single_source_meeting(
             app,
-            asr_manager,
+            Arc::clone(&asr_manager),
             recording_id,
             mixed_audio_path,
             provider,
             model_id,
+            enable_diarization,
+            prefer_provider_diarization,
         )
         .await?;
         let requested_provider = result.requested_provider;
@@ -21419,8 +22538,10 @@ async fn transcribe_meeting_recording(
         let actual_engine = result.actual_engine.clone();
         let optimization_applied = result.optimization_applied;
         let fallback_reason = result.fallback_reason.clone();
+        let speaker_turns = result.speaker_turns.clone();
         return Ok(MeetingTranscriptionOutput {
             transcript: build_models_transcript_from_asr_result(recording_id, result),
+            speaker_turns,
             requested_provider,
             actual_provider,
             requested_engine,
@@ -21477,13 +22598,15 @@ async fn transcribe_meeting_recording(
     }
 
     if source_results.is_empty() {
-        let result = transcribe_recording_in_chunks(
+        let result = transcribe_single_source_meeting(
             app,
             Arc::clone(&asr_manager),
             recording_id,
             mixed_audio_path,
             provider,
             model_id,
+            enable_diarization,
+            prefer_provider_diarization,
         )
         .await?;
         let requested_provider = result.requested_provider;
@@ -21492,8 +22615,10 @@ async fn transcribe_meeting_recording(
         let actual_engine = result.actual_engine.clone();
         let optimization_applied = result.optimization_applied;
         let fallback_reason = result.fallback_reason.clone();
+        let speaker_turns = result.speaker_turns.clone();
         return Ok(MeetingTranscriptionOutput {
             transcript: build_models_transcript_from_asr_result(recording_id, result),
+            speaker_turns,
             requested_provider,
             actual_provider,
             requested_engine,
@@ -21508,6 +22633,10 @@ async fn transcribe_meeting_recording(
 
     Ok(MeetingTranscriptionOutput {
         transcript,
+        // A dual-source capture labels its own speakers ("Me" from the
+        // microphone, "Them" from the system tap), which is better evidence
+        // than any diarizer -- provider labels are neither needed nor used.
+        speaker_turns: Vec::new(),
         requested_provider: provider,
         actual_provider: provider,
         requested_engine: None,
@@ -25303,6 +26432,9 @@ async fn apply_transcription_settings_to_asr_manager(
     asr_manager
         .set_meeting_mlx_enabled(transcription.meeting_mlx_enabled)
         .await;
+    asr_manager
+        .set_transcription_language(transcription.language.clone())
+        .await;
     asr_manager.set_default_provider(default_provider).await;
     asr_manager
         .set_silence_skip_enabled(transcription.silence_skip_enabled)
@@ -27365,6 +28497,8 @@ async fn stop_dictation_for_sidecar(
         // Dictation is served correctly by either Apple engine; only the
         // meeting route depends on SpeechAnalyzer's timed segments.
         apple_speech_required_engine: None,
+        request_speaker_labels: false,
+        language: settings_snapshot.transcription.language.clone(),
     };
     let vocabulary_hint_terms_built = transcription_options
         .vocabulary_hint
@@ -28505,6 +29639,12 @@ async fn stop_dictation_for_sidecar(
         }
         let _ = db.log_audit_event("dictation_completed", Some(audit_details), "info");
     }
+
+    // A cloud dictation route may have left a file behind on the provider's
+    // side. There is no finished recording to hang a note on here, so this
+    // lands in the audit log only.
+    report_provider_cleanup_warnings(state, None::<(&crate::sidecar_handle::SidecarHandle, &str)>)
+        .await;
 
     {
         let mut recent_delivery_slot = state.recent_dictation_delivery.lock().await;
@@ -31644,6 +32784,18 @@ async fn run_meeting_transcription_pipeline(
         tracing::warn!("{}", warning);
     }
 
+    // Both switches, read together: "keep the speakers a cloud provider sends
+    // back" only means anything while speaker separation is on at all, and the
+    // whole-file request exists solely to make those labels usable.
+    let (enable_diarization, prefer_provider_diarization) = {
+        let sm = state_clone.settings_manager.lock().await;
+        let settings = sm.settings();
+        (
+            settings.transcription.enable_diarization,
+            settings.meetings.prefer_provider_diarization,
+        )
+    };
+
     match transcribe_meeting_recording(
         &handle_clone,
         Arc::clone(&state_clone.asr_manager),
@@ -31653,6 +32805,8 @@ async fn run_meeting_transcription_pipeline(
         resolved_audio.system.as_deref(),
         meeting_provider,
         meeting_model_id.clone(),
+        enable_diarization,
+        prefer_provider_diarization,
     )
     .await
     {
@@ -31669,6 +32823,8 @@ async fn run_meeting_transcription_pipeline(
                 .map(str::trim)
                 .filter(|reason| !reason.is_empty())
                 .map(str::to_string);
+            let provider_speaker_turns = output.speaker_turns;
+            let transcribed_by_provider = output.actual_provider;
             let mut transcript = output.transcript;
             // Load the learned dictionary before enrichment: the correction has
             // to be in the transcript that gets persisted, because summary,
@@ -31796,13 +32952,6 @@ async fn run_meeting_transcription_pipeline(
             let mut diarization_updated = false;
             let mut diarization_fallback_notice: Option<String> = None;
             if transcript_persisted {
-                // The automatic pass runs the model the user picked, not
-                // always the default one: the picker previously only affected
-                // the explicit "run diarization" command, so a recording
-                // enriched on completion silently used ECAPA-TDNN whatever the
-                // setting said. Readiness is asked per model for the same
-                // reason (the experimental speakrs backend needs a bundle, not
-                // one .onnx).
                 let (enable_diarization, diarization_model_id) = {
                     let sm = state_clone.settings_manager.lock().await;
                     let transcription = &sm.settings().transcription;
@@ -31814,59 +32963,115 @@ async fn run_meeting_transcription_pipeline(
                             .unwrap_or_else(|| "ecapa_tdnn_speaker".to_string()),
                     )
                 };
-                let resolved_diarization_model = if enable_diarization
-                    && !transcript_has_source_aware_speakers(&transcript.segments)
-                {
-                    diarization::resolve_model_for_run(&diarization_model_id)
-                } else {
-                    None
+                // The automatic pass runs the model the user picked, not
+                // always the default one, and readiness is asked per model
+                // (the experimental speakrs backend needs a bundle, not one
+                // .onnx). `resolve_model_for_run` answers both questions at
+                // once: whether anything local can run at all, and which model
+                // it will be.
+                let resolved_local_model =
+                    diarization::resolve_model_for_run(&diarization_model_id);
+                let diarizer = resolve_meeting_diarizer(
+                    enable_diarization,
+                    prefer_provider_diarization,
+                    transcript_has_source_aware_speakers(&transcript.segments),
+                    transcribed_by_provider,
+                    provider_speaker_turns.len(),
+                    resolved_local_model.is_some(),
+                );
+                let local_diarization_model_id = resolved_local_model
+                    .as_ref()
+                    .map(|resolved| resolved.model_id.clone())
+                    .unwrap_or_else(|| diarization_model_id.clone());
+                let diarizer_record = diarizer.record_value(&local_diarization_model_id);
+
+                // Both branches produce a `DiarizationResult` and hand it to
+                // the same merge, so the transcript contract, the speaker ids
+                // and the rename/alias flow are identical whichever diarizer
+                // ran. The only difference the reader sees is the line naming
+                // it.
+                let diarization_result = match &diarizer {
+                    MeetingDiarizer::None => None,
+                    MeetingDiarizer::Provider(_) => {
+                        let duration = transcript
+                            .segments
+                            .last()
+                            .map(|segment| segment.end_time)
+                            .unwrap_or(0.0);
+                        Some(Ok(diarization_result_from_provider_turns(
+                            &provider_speaker_turns,
+                            duration,
+                        )))
+                    }
+                    MeetingDiarizer::Local => Some(
+                        diarization::run_diarization_with_model(&path, &local_diarization_model_id)
+                            .await,
+                    ),
                 };
-                if let Some(resolved) = resolved_diarization_model {
-                    match diarization::run_diarization_with_model(&path, &resolved.model_id).await {
-                        Ok(result) => {
-                            let engine = diarization::DiarizationEngine::new();
-                            let mut enriched_segments = transcript.segments.clone();
-                            engine.merge_with_transcript(&result, &mut enriched_segments);
-                            let update_result = {
-                                let mut db = state_clone.db.lock().await;
-                                db.apply_diarization_enrichment(
-                                    &recording_id_clone,
-                                    0,
-                                    &enriched_segments,
-                                    &[],
-                                )
-                            };
-                            match update_result {
-                                Ok(true) => {
-                                    transcript.segments = enriched_segments;
-                                    diarization_updated = true;
-                                    // Only once labels are actually stored: a
-                                    // notice about which model produced them
-                                    // is a lie if none were produced.
-                                    diarization_fallback_notice =
-                                        resolved.fallback_notice.clone();
+
+                match diarization_result {
+                    None => {}
+                    Some(Ok(result)) => {
+                        let engine = diarization::DiarizationEngine::new();
+                        let mut enriched_segments = transcript.segments.clone();
+                        engine.merge_with_transcript(&result, &mut enriched_segments);
+                        let update_result = {
+                            let mut db = state_clone.db.lock().await;
+                            // The audit entry goes in with the enrichment, not
+                            // after it: the `diarizer` column and the entry
+                            // record the same fact, and writing them under two
+                            // separate lock acquisitions left a window where
+                            // the column had changed and nothing said why.
+                            db.apply_diarization_enrichment(
+                                &recording_id_clone,
+                                0,
+                                &enriched_segments,
+                                &[],
+                                diarizer_record.as_deref(),
+                                Some(serde_json::json!({
+                                    "recording_id": &recording_id_clone,
+                                    "diarizer": diarizer_record.as_deref(),
+                                    "speaker_count": result.speakers.len(),
+                                    "speaker_segment_count": result.segments.len(),
+                                })),
+                            )
+                        };
+                        match update_result {
+                            Ok(true) => {
+                                transcript.segments = enriched_segments;
+                                diarization_updated = true;
+                                // Only once labels are actually stored: a
+                                // notice about which model produced them is a
+                                // lie if none were produced. Only the local
+                                // branch can substitute a model, so a provider
+                                // pass carries no notice.
+                                if diarizer == MeetingDiarizer::Local {
+                                    diarization_fallback_notice = resolved_local_model
+                                        .as_ref()
+                                        .and_then(|resolved| resolved.fallback_notice.clone());
                                     // Voiceprints, on the same terms as the
                                     // manual run: only when the switch is on,
-                                    // and best effort — a meeting is not
+                                    // and best effort -- a meeting is not
                                     // failed by a voice that could not be
                                     // remembered. The signature is recorded
                                     // under the model that actually ran
-                                    // (`resolved.model_id`, which may be the
-                                    // fallback, not the requested one): a
-                                    // centroid filed under the wrong embedder
-                                    // would be compared across embedding
-                                    // spaces, which is exactly what the
-                                    // matcher refuses to do.
+                                    // (`local_diarization_model_id`, which may
+                                    // be the fallback, not the requested one):
+                                    // a centroid filed under the wrong
+                                    // embedder would be compared across
+                                    // embedding spaces, which is exactly what
+                                    // the matcher refuses to do. Only this
+                                    // branch: a provider pass returns labels,
+                                    // not embeddings.
                                     let voice_settings = {
-                                        let sm =
-                                            state_clone.settings_manager.lock().await;
+                                        let sm = state_clone.settings_manager.lock().await;
                                         sm.settings().meetings.clone()
                                     };
                                     if voice_settings.remember_voices {
                                         if let Err(error) = store_and_match_cluster_voices(
                                             state_clone.as_ref(),
                                             &recording_id_clone,
-                                            &resolved.model_id,
+                                            &local_diarization_model_id,
                                             &result.cluster_centroids,
                                             voice_settings.auto_apply_confident_voices,
                                         )
@@ -31880,23 +33085,23 @@ async fn run_meeting_transcription_pipeline(
                                         }
                                     }
                                 }
-                                Ok(false) => tracing::warn!(
-                                    "Skipped diarization enrichment for {} because the transcript changed while diarization was running",
-                                    recording_id_clone
-                                ),
-                                Err(error) => tracing::warn!(
-                                    "Diarization completed for {} but enriched transcript persistence failed: {}",
-                                    recording_id_clone,
-                                    error
-                                ),
                             }
+                            Ok(false) => tracing::warn!(
+                                "Skipped diarization enrichment for {} because the transcript changed while diarization was running",
+                                recording_id_clone
+                            ),
+                            Err(error) => tracing::warn!(
+                                "Diarization completed for {} but enriched transcript persistence failed: {}",
+                                recording_id_clone,
+                                error
+                            ),
                         }
-                        Err(error) => tracing::warn!(
-                            "Best-effort diarization failed for {}: {}",
-                            recording_id_clone,
-                            error
-                        ),
                     }
+                    Some(Err(error)) => tracing::warn!(
+                        "Best-effort diarization failed for {}: {}",
+                        recording_id_clone,
+                        error
+                    ),
                 }
 
                 let db = state_clone.db.lock().await;
@@ -31953,6 +33158,12 @@ async fn run_meeting_transcription_pipeline(
                             );
                         }
                     }
+
+                    report_provider_cleanup_warnings(
+                        state_clone.as_ref(),
+                        Some((&handle_clone, recording_id_clone.as_str())),
+                    )
+                    .await;
 
                     if let Some(reason) = degraded_reason.as_deref() {
                         tracing::warn!(
@@ -32831,7 +34042,11 @@ pub async fn dispatch_command(
             let artifact = db
                 .get_latest_transcript_artifact(&recording_id)
                 .map_err(|e| e.to_string())?;
-            let result = build_meeting_transcript_details(transcript.as_ref(), artifact.as_ref());
+            let diarizer = db
+                .get_transcript_diarizer(&recording_id)
+                .map_err(|e| e.to_string())?;
+            let result =
+                build_meeting_transcript_details(transcript.as_ref(), artifact.as_ref(), diarizer);
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "get_waveform_data" => {
@@ -33741,6 +34956,10 @@ pub async fn dispatch_command(
                 .asr_manager
                 .set_meeting_mlx_enabled(transcription.meeting_mlx_enabled)
                 .await;
+            state
+                .asr_manager
+                .set_transcription_language(transcription.language.clone())
+                .await;
             Ok(serde_json::Value::Null)
         }
         "list_openai_asr_models" => {
@@ -34241,11 +35460,22 @@ pub async fn dispatch_command(
 
             let applied = {
                 let mut db = state.db.lock().await;
+                // The explicit "identify speakers" action writes the same
+                // `diarizer` column as the automatic pass, so it now leaves the
+                // same audit record -- previously the column could change here
+                // with nothing in the log saying it had.
                 db.apply_diarization_enrichment(
                     &recording_id,
                     transcript_revision,
                     &transcript.segments,
                     &alias_updates,
+                    Some(&format!("plainsong:{diarization_model_id}")),
+                    Some(serde_json::json!({
+                        "recording_id": &recording_id,
+                        "diarizer": format!("plainsong:{diarization_model_id}"),
+                        "speaker_count": diarization.speakers.len(),
+                        "speaker_segment_count": diarization.segments.len(),
+                    })),
                 )
                 .map_err(|e| e.to_string())?
             };

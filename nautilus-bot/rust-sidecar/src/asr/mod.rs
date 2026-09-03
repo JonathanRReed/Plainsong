@@ -1,6 +1,8 @@
 pub mod cohere;
+pub mod deepgram;
 pub mod distil_whisper;
 pub mod elevenlabs_scribe;
+pub mod gemini_transcribe;
 pub mod groq;
 pub mod macos_apple_speech_provider;
 pub mod manager;
@@ -53,6 +55,117 @@ pub(crate) fn cloud_asr_status_error(
     anyhow::anyhow!("{} API returned HTTP {}", provider_label, status.as_u16())
 }
 
+/// The error a non-2xx cloud ASR response becomes.
+///
+/// Takes the response **by value**, so from here on its body is unreachable
+/// rather than merely unread. A provider's error body can echo the audio's
+/// transcript, the prompt, or a keyterm list out of the user's personal
+/// dictionary, and none of that belongs in a message that ends up in a log or
+/// on screen. "Remember to pass only the status" is not a guarantee; consuming
+/// the response is.
+pub(crate) fn cloud_asr_response_error(
+    provider_label: &str,
+    response: reqwest::Response,
+) -> anyhow::Error {
+    cloud_asr_status_error(provider_label, response.status())
+}
+
+/// Warnings a provider raised about work it does *outside* the transcript.
+///
+/// Today there is exactly one producer: the Gemini route uploads audio to
+/// Google's Files API and then deletes it, and a delete that does not succeed
+/// leaves a user's meeting in a third-party store for the 48-hour default
+/// lifetime. That is worth an audit record and a word to the user, and it used
+/// to be a `tracing::warn!` nobody would ever read.
+///
+/// A process-wide sink rather than a field on [`TranscriptionResult`] because
+/// the delete outlives the result: it must also be reportable when the
+/// transcription itself failed, and when the request was cancelled and there is
+/// no result to attach anything to. Bounded, because nothing guarantees a
+/// drainer runs.
+const PROVIDER_CLEANUP_WARNING_LIMIT: usize = 32;
+
+fn provider_cleanup_warnings() -> &'static std::sync::Mutex<std::collections::VecDeque<String>> {
+    static WARNINGS: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<String>>> =
+        std::sync::OnceLock::new();
+    WARNINGS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// Record one cleanup warning. Oldest is dropped once the sink is full: a
+/// backlog nobody drained is not a reason to grow without bound.
+pub(crate) fn record_provider_cleanup_warning(warning: String) {
+    tracing::warn!("{}", warning);
+    let Ok(mut warnings) = provider_cleanup_warnings().lock() else {
+        return;
+    };
+    if warnings.len() >= PROVIDER_CLEANUP_WARNING_LIMIT {
+        warnings.pop_front();
+    }
+    warnings.push_back(warning);
+}
+
+/// Take everything recorded so far, leaving the sink empty. Called where a
+/// recording finishes, which is where the audit log and the user-visible
+/// notice both live.
+pub fn take_provider_cleanup_warnings() -> Vec<String> {
+    provider_cleanup_warnings()
+        .lock()
+        .map(|mut warnings| warnings.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// Read size for a streamed upload. Large enough that a long meeting is not
+/// thousands of tiny frames, small enough that peak memory is a constant.
+pub(crate) const UPLOAD_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Stream a WAV off disk as a request body, with its length.
+///
+/// The meeting lane sends whole recordings to the cloud providers, and a
+/// meeting is written as mono 16-bit PCM at the capture device's own sample
+/// rate: thirty minutes at 48 kHz is 172.8 MB, two hours is 691 MB. Reading
+/// that into a `Vec` to hand to `.body()` holds all of it in memory at once.
+/// A streamed body keeps peak usage at one [`UPLOAD_CHUNK_BYTES`] buffer
+/// regardless of meeting length.
+///
+/// The length comes from the already-open handle rather than a separate
+/// `metadata()` call on the path, so the number a caller declares in a header
+/// and the bytes this stream yields describe the same file.
+pub(crate) async fn streaming_wav_body(path: &Path) -> Result<(reqwest::Body, u64)> {
+    use anyhow::Context;
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("Failed to open {} for upload", path.display()))?;
+    let byte_len = file
+        .metadata()
+        .await
+        .with_context(|| format!("Failed to size {} for upload", path.display()))?
+        .len();
+    Ok((
+        reqwest::Body::wrap_stream(upload_chunk_stream(file)),
+        byte_len,
+    ))
+}
+
+/// The chunking behind [`streaming_wav_body`], separated so the memory bound
+/// it exists for can be asserted without a network client.
+pub(crate) fn upload_chunk_stream(
+    file: tokio::fs::File,
+) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> {
+    use tokio::io::AsyncReadExt;
+
+    futures_util::stream::try_unfold(file, |mut file| async move {
+        let mut buffer = vec![0u8; UPLOAD_CHUNK_BYTES];
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            Ok::<_, std::io::Error>(None)
+        } else {
+            buffer.truncate(read);
+            Ok(Some((buffer, file)))
+        }
+    })
+}
+
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let mut artifacts = Vec::new();
     artifacts.extend(distil_whisper::model_integrity_artifacts(models_root));
@@ -86,7 +199,7 @@ pub struct ModelOption {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSegment {
     pub start_time: f64,
@@ -95,11 +208,43 @@ pub struct TranscriptSegment {
     pub confidence: f64,
 }
 
+/// One speaker turn exactly as a *provider* reported it, on that request's own
+/// timeline.
+///
+/// These are deliberately kept beside the transcript rather than merged into
+/// `segments` by the provider. The meeting lane feeds them through the same
+/// `DiarizationEngine::merge_with_transcript` the local diarizer uses, so the
+/// two diarizers cannot drift into producing differently-shaped transcripts —
+/// swapping the diarizer is swapping which turns go into one merge, and
+/// nothing else.
+///
+/// `speaker_id` is already in Plainsong's own `S1`/`S2` form, not the
+/// provider's numbering, because that is what the rename/alias flow and the
+/// transcript viewer read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeakerTurn {
+    pub start_time: f64,
+    pub end_time: f64,
+    pub speaker_id: String,
+    pub confidence: f64,
+}
+
+/// Provider speaker numbering is per request and starts at zero; Plainsong's
+/// own diarizer emits `S1`, `S2`, … and the whole UI is built on that shape.
+pub(crate) fn provider_speaker_id(index: u32) -> String {
+    format!("S{}", index.saturating_add(1))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionResult {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
+    /// Speaker turns the provider itself reported, empty for every provider
+    /// that does not diarize (which is all of them except Deepgram and Gemini).
+    #[serde(default)]
+    pub speaker_turns: Vec<SpeakerTurn>,
     pub language: String,
     pub confidence: f64,
     pub processing_time_ms: u64,
@@ -219,6 +364,26 @@ pub struct TranscriptionOptions {
     /// caller leaves this `None` and either engine is a correct answer.
     /// Ignored by every provider but Apple Speech.
     pub apple_speech_required_engine: Option<platform::macos_speech::AppleSpeechEngine>,
+    /// Ask the provider for speaker labels on this request.
+    ///
+    /// Only the meeting lane sets it, and only providers that actually
+    /// diarize read it. It is a request option rather than a provider
+    /// setting because the same provider is used for both lanes and the
+    /// answer differs: Gemini's API refuses `custom_vocabulary` on a request
+    /// that asks for diarization or word timestamps (confirmed by Google on
+    /// 2026-09-01), so dictation gets the dictionary and meetings get the
+    /// speakers, and neither lane can silently take the other's shape.
+    pub request_speaker_labels: bool,
+    /// The transcription language the user selected, as they wrote it
+    /// (`"en"`, `"en-US"`, `"fr"`); `None` is the default, meaning auto.
+    ///
+    /// Local routes ignore it and auto-detect -- whisper.cpp deliberately
+    /// passes `None` to its decoder -- but a cloud API has to be *told*
+    /// something, and its default is rarely "detect". Deepgram's is English:
+    /// with no `language` parameter, a French meeting came back as English
+    /// nonsense while the route advertised itself as multilingual. Providers
+    /// that read this map it onto their own vocabulary.
+    pub language: Option<String>,
 }
 
 #[async_trait]
@@ -228,6 +393,23 @@ pub trait AsrProvider: Send + Sync {
     fn is_available(&self) -> bool;
     fn model_info(&self) -> ModelInfo;
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult>;
+    /// `transcribe` with per-request options, for the whole-file meeting route.
+    ///
+    /// The default drops them, exactly like `transcribe_bytes_with_options`, so
+    /// a provider with nothing to do with them needs no change. Providers with
+    /// a whole-file meeting route override it: without this the caller's
+    /// options were discarded on the path, and the two providers that have such
+    /// a route had to hard-code `request_speaker_labels: true` inside their own
+    /// `transcribe` -- a second copy of the caller's intent that nothing kept
+    /// in step, and a language or vocabulary hint that could never arrive.
+    async fn transcribe_path_with_options(
+        &self,
+        audio_path: &Path,
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        let _ = options;
+        self.transcribe(audio_path).await
+    }
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult>;
     /// `transcribe_bytes` with per-request options. The default drops the
     /// options on the floor, so a provider that has no use for them (no
@@ -974,19 +1156,192 @@ mod streaming_seam_tests {
     }
 }
 
+/// The sink exists so a failed cleanup reaches an audit record instead of a log
+/// line, so what is asserted is that it keeps what it is given and stays
+/// bounded when nobody drains it.
+///
+/// One test rather than two: the sink is process-wide, and two tests draining
+/// it in parallel would race each other rather than test anything.
 #[cfg(test)]
-mod cloud_response_security_tests {
-    use super::cloud_asr_status_error;
+mod provider_cleanup_warning_tests {
+    use super::{
+        record_provider_cleanup_warning, take_provider_cleanup_warnings,
+        PROVIDER_CLEANUP_WARNING_LIMIT,
+    };
 
     #[test]
-    fn provider_status_errors_never_include_response_body_content() {
-        let marker = "secret-transcript-marker";
-        let error = cloud_asr_status_error("Test ASR", reqwest::StatusCode::BAD_REQUEST);
-        let rendered = error.to_string();
+    fn cleanup_warnings_are_kept_for_the_drainer_and_stay_bounded() {
+        let marker = "plainsong-cleanup-marker";
+        record_provider_cleanup_warning(format!("{marker}: the upload was not deleted"));
+        let drained = take_provider_cleanup_warnings();
+        assert!(
+            drained.iter().any(|warning| warning.contains(marker)),
+            "a recorded warning must survive to the drainer"
+        );
+        assert!(
+            take_provider_cleanup_warnings().is_empty(),
+            "draining must leave the sink empty, or a warning is reported twice"
+        );
+
+        for index in 0..(PROVIDER_CLEANUP_WARNING_LIMIT * 2) {
+            record_provider_cleanup_warning(format!("{marker}-flood-{index}"));
+        }
+        let flooded = take_provider_cleanup_warnings();
+        assert!(
+            flooded.len() <= PROVIDER_CLEANUP_WARNING_LIMIT,
+            "a backlog nobody drained must not grow without bound"
+        );
+        // The oldest are the ones dropped, so the most recent failure -- the
+        // one a user is most likely to still be able to act on -- survives.
+        assert!(flooded
+            .last()
+            .is_some_and(|warning| warning.ends_with(&format!(
+                "-flood-{}",
+                PROVIDER_CLEANUP_WARNING_LIMIT * 2 - 1
+            ))));
+    }
+}
+
+/// The upload path exists to keep a whole meeting out of memory, so that is
+/// what is asserted: bounded chunks, in order, adding up to the file, with the
+/// declared length matching what will actually be sent.
+#[cfg(test)]
+mod upload_streaming_tests {
+    use super::{streaming_wav_body, upload_chunk_stream, UPLOAD_CHUNK_BYTES};
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn a_large_upload_is_read_in_bounded_chunks_not_all_at_once() {
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-upload-stream-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        // Two and a half read buffers: large enough that "read whole" and
+        // "read in chunks" are distinguishable, small enough to stay a unit
+        // test.
+        let payload: Vec<u8> = (0..UPLOAD_CHUNK_BYTES * 5 / 2)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        tokio::fs::write(&path, &payload)
+            .await
+            .expect("fixture write");
+
+        let (_body, declared) = streaming_wav_body(&path).await.expect("streaming body");
+        assert_eq!(
+            declared,
+            payload.len() as u64,
+            "the length a caller declares in a header must be the file's own"
+        );
+
+        let file = tokio::fs::File::open(&path).await.expect("reopen fixture");
+        let chunks: Vec<Vec<u8>> = upload_chunk_stream(file)
+            .map(|chunk| chunk.expect("chunk read"))
+            .collect()
+            .await;
+
+        assert!(
+            chunks.len() > 1,
+            "a file larger than one buffer must arrive in more than one chunk,              or it was read whole after all"
+        );
+        for chunk in &chunks {
+            assert!(
+                chunk.len() <= UPLOAD_CHUNK_BYTES,
+                "peak memory is one buffer, not the length of the meeting"
+            );
+        }
+        assert_eq!(
+            chunks.concat(),
+            payload,
+            "the streamed bytes must be the file's bytes, in order"
+        );
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+}
+
+/// A marker no provider error may ever carry, used by the body-leak tests in
+/// this module and in each provider.
+#[cfg(test)]
+pub(crate) const CLOUD_ASR_BODY_MARKER: &str = "secret-transcript-marker";
+
+/// A real `reqwest::Response` with the given status and a body containing
+/// [`CLOUD_ASR_BODY_MARKER`], served over a loopback socket.
+///
+/// The tests that assert "the body never reaches the message" used to build no
+/// response at all: they called `cloud_asr_status_error(label, status)`, which
+/// has no body in scope, and then asserted the marker was absent from the
+/// result. That could not have failed. Serving a real response is what makes
+/// the assertion mean something -- the marker is genuinely present in the
+/// response the code is handed.
+#[cfg(test)]
+pub(crate) async fn cloud_asr_error_response_fixture(
+    status: u16,
+    reason: &str,
+) -> reqwest::Response {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let body = format!(r#"{{"err_code":9,"err_msg":"{CLOUD_ASR_BODY_MARKER}"}}"#);
+    assert!(
+        body.contains(CLOUD_ASR_BODY_MARKER),
+        "the fixture body must actually carry the marker"
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a loopback port for the fixture");
+    let address = listener.local_addr().expect("fixture address");
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+
+    reqwest::Client::new()
+        .get(format!("http://{address}/"))
+        .send()
+        .await
+        .expect("fixture response")
+}
+
+#[cfg(test)]
+mod cloud_response_security_tests {
+    use super::{
+        cloud_asr_error_response_fixture, cloud_asr_response_error, CLOUD_ASR_BODY_MARKER,
+    };
+
+    #[tokio::test]
+    async fn provider_status_errors_never_include_response_body_content() {
+        // First, proof that the marker really does arrive over the wire, so
+        // the assertion below is about the code and not about an empty body.
+        let served = cloud_asr_error_response_fixture(400, "Bad Request").await;
+        assert_eq!(served.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert!(served
+            .text()
+            .await
+            .expect("fixture body")
+            .contains(CLOUD_ASR_BODY_MARKER));
+
+        let response = cloud_asr_error_response_fixture(400, "Bad Request").await;
+        let error = cloud_asr_response_error("Test ASR", response);
+        let rendered = format!("{error:#}");
 
         assert!(rendered.contains("Test ASR"));
         assert!(rendered.contains("400"));
-        assert!(!rendered.contains(marker));
+        assert!(
+            !rendered.contains(CLOUD_ASR_BODY_MARKER),
+            "a provider error body reached the message: {rendered}"
+        );
+        // Exact, not "does not contain the marker": the message may carry the
+        // provider and the status and nothing else, so a future addition of a
+        // URL, a key or a snippet fails here too.
+        assert_eq!(rendered, "Test ASR API returned HTTP 400");
     }
 }
 
@@ -1069,6 +1424,8 @@ pub enum AsrProviderType {
     Groq,
     CohereTranscribe,
     Qwen3Asr,
+    Deepgram,
+    GeminiTranscribe,
     /// The transcribe.cpp spike route (feature `asr-transcribe-cpp`, OFF by
     /// default). It exists in the enum only when the spike is compiled in, so
     /// a default build cannot name it, offer it, or persist it.
@@ -1091,6 +1448,8 @@ impl AsrProviderType {
             AsrProviderType::Groq,
             AsrProviderType::CohereTranscribe,
             AsrProviderType::Qwen3Asr,
+            AsrProviderType::Deepgram,
+            AsrProviderType::GeminiTranscribe,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp,
         ]
@@ -1110,6 +1469,8 @@ impl AsrProviderType {
             AsrProviderType::Groq => "Groq Whisper (Cloud)",
             AsrProviderType::CohereTranscribe => "Cohere Transcribe",
             AsrProviderType::Qwen3Asr => "Qwen3-ASR (Local)",
+            AsrProviderType::Deepgram => "Deepgram Nova",
+            AsrProviderType::GeminiTranscribe => "Google Gemini Transcribe",
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => "transcribe.cpp (experimental)",
         }
@@ -1136,6 +1497,18 @@ impl AsrProviderType {
             AsrProviderType::Groq => "whisper-large-v3-turbo",
             AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
             AsrProviderType::Qwen3Asr => "qwen3-asr-0.6b",
+            // Verified live against
+            // https://developers.deepgram.com/docs/pre-recorded-audio on
+            // 2026-09-02: nova-3 is Deepgram's current general model for the
+            // batch /v1/listen endpoint, and the only family that accepts
+            // keyterm prompting.
+            AsrProviderType::Deepgram => "nova-3",
+            // Verified live against
+            // https://ai.google.dev/gemini-api/docs/transcribe on 2026-09-02.
+            // gemini-3.5-transcribe-live is deliberately excluded: it is the
+            // websocket model, it cannot diarize, and this provider posts to
+            // the batch interactions endpoint.
+            AsrProviderType::GeminiTranscribe => "gemini-3.5-transcribe",
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
         }
@@ -1148,6 +1521,8 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud => Some("openai"),
             AsrProviderType::Groq => Some("groq"),
             AsrProviderType::CohereTranscribe => Some("cohere"),
+            AsrProviderType::Deepgram => Some("deepgram"),
+            AsrProviderType::GeminiTranscribe => Some("gemini"),
             AsrProviderType::Whisper
             | AsrProviderType::Parakeet
             | AsrProviderType::WhisperCandle
@@ -1293,6 +1668,21 @@ impl AsrProviderType {
                 id: "qwen3-asr-0.6b".to_string(),
                 label: "Qwen3-ASR 0.6B int4 (multilingual, fast)".to_string(),
             }],
+            AsrProviderType::Deepgram => vec![
+                ModelOption {
+                    id: "nova-3".to_string(),
+                    label: "Nova-3 (recommended, $0.0043/min English, $0.0052/min other languages)"
+                        .to_string(),
+                },
+                ModelOption {
+                    id: "nova-3-medical".to_string(),
+                    label: "Nova-3 Medical (clinical vocabulary)".to_string(),
+                },
+            ],
+            AsrProviderType::GeminiTranscribe => vec![ModelOption {
+                id: "gemini-3.5-transcribe".to_string(),
+                label: "Gemini 3.5 Transcribe ($0.005/min)".to_string(),
+            }],
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::route_model_options(),
         }
@@ -1341,6 +1731,12 @@ impl AsrProviderFactory {
             AsrProviderType::Qwen3Asr => {
                 Box::new(qwen3_asr::Qwen3AsrProvider::new(selected_model_id))
             }
+            AsrProviderType::Deepgram => {
+                Box::new(deepgram::DeepgramProvider::new(selected_model_id))
+            }
+            AsrProviderType::GeminiTranscribe => Box::new(
+                gemini_transcribe::GeminiTranscribeProvider::new(selected_model_id),
+            ),
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => Box::new(transcribe_cpp::TranscribeCppProvider::new(
                 selected_model_id,

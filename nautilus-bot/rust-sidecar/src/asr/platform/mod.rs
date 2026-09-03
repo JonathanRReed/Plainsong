@@ -107,6 +107,17 @@ impl FallbackPolicy {
 }
 
 impl AsrProviderType {
+    /// Whether running this provider sends the user's audio off the machine.
+    ///
+    /// This is the single privacy classification the rest of the sidecar reads:
+    /// the remote-processing gate and its cancellation (`asr/manager.rs`),
+    /// `enforce_remote_asr_provider_policy`, `provider_hosting_environment`,
+    /// `MeetingRoutePolicy::PreferLocal` and the live-preview decision all
+    /// derive from it. A cloud provider missing from this list is not a
+    /// cosmetic bug: it is audio uploaded from an install that asked for local
+    /// only. `every_cloud_provider_is_remote_in_both_languages` pins the list
+    /// against the renderer's `CLOUD_PROVIDER_SET` so a new provider cannot be
+    /// added on one side alone.
     pub fn is_remote(self) -> bool {
         matches!(
             self,
@@ -114,6 +125,8 @@ impl AsrProviderType {
                 | AsrProviderType::OpenAiCloud
                 | AsrProviderType::Groq
                 | AsrProviderType::CohereTranscribe
+                | AsrProviderType::Deepgram
+                | AsrProviderType::GeminiTranscribe
         )
     }
 

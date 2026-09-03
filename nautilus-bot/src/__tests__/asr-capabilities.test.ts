@@ -14,21 +14,62 @@ import {
   isMeetingEligibleModel,
   isMeetingEligibleProvider,
   isSharedMeetingCompatible,
+  providerReturnsSpeakerLabels,
   resolveAsrLanguageBoundary,
 } from "@/lib/asr-capabilities";
 import { compareStrings } from "@/lib/format-locale";
 
 describe("ASR capability mappings", () => {
   it("recognises only the engines this build can still run", () => {
-    // 12 shipped engines plus `transcribe_cpp`, which only a sidecar built
-    // with `--features asr-transcribe-cpp` ever reports. The renderer keeps a
-    // name for it so a developer build's route renders instead of silently
+    // 12 engines that shipped before September 2026, plus Deepgram and Gemini
+    // Transcribe, plus `transcribe_cpp`, which only a sidecar built with
+    // `--features asr-transcribe-cpp` ever reports. The renderer keeps a name
+    // for that one so a developer build's route renders instead of silently
     // vanishing from the picker; nothing in a release build sends it.
-    expect(ASR_PROVIDER_TYPES).toHaveLength(13);
+    expect(ASR_PROVIDER_TYPES).toHaveLength(15);
     expect(isKnownAsrProvider("whisper")).toBe(true);
     expect(isKnownAsrProvider("parakeet")).toBe(true);
     expect(isKnownAsrProvider("macos_apple_speech")).toBe(true);
+    expect(isKnownAsrProvider("deepgram")).toBe(true);
+    expect(isKnownAsrProvider("gemini_transcribe")).toBe(true);
     expect(isKnownAsrProvider("transcribe_cpp")).toBe(true);
+  });
+
+  it("names only the providers that actually return speaker labels", () => {
+    // This set is what decides whether a meeting keeps the provider's speakers
+    // or pays for a local diarization pass, so a provider must not appear here
+    // on the strength of being a cloud route. None of the four cloud providers
+    // that shipped before September 2026 returns labels at all.
+    expect(providerReturnsSpeakerLabels("deepgram")).toBe(true);
+    expect(providerReturnsSpeakerLabels("gemini_transcribe")).toBe(true);
+    for (const providerType of [
+      "openai_cloud",
+      "groq",
+      "elevenlabs_scribe",
+      "cohere_transcribe",
+      "parakeet",
+      "whisper",
+      "distil_whisper",
+      "qwen3_asr",
+      "macos_apple_speech",
+    ] as const) {
+      expect(
+        providerReturnsSpeakerLabels(providerType),
+        `${providerType} does not return speaker labels`,
+      ).toBe(false);
+    }
+  });
+
+  it("keeps the websocket-only Gemini model out of the meeting lane", () => {
+    // gemini-3.5-transcribe-live cannot diarize and is not served by the batch
+    // interactions endpoint the provider posts to.
+    expect(isMeetingEligibleModel("gemini_transcribe", "gemini-3.5-transcribe")).toBe(true);
+    expect(isMeetingEligibleModel("gemini_transcribe", "gemini-3.5-transcribe-live")).toBe(
+      false,
+    );
+    expect(isMeetingEligibleModel("deepgram", "nova-3")).toBe(true);
+    expect(isMeetingEligibleModel("deepgram", "nova-3-medical")).toBe(true);
+    expect(isMeetingEligibleModel("deepgram", "flux")).toBe(false);
   });
 
   it("rejects the deleted Python-backed engines a stale settings file may still name", () => {
@@ -280,6 +321,36 @@ describe("language boundaries", () => {
     ] as const) {
       const boundary = resolveAsrLanguageBoundary(provider, model);
       expect(boundary.kind).toBe("english_only");
+      expect(asrLanguageOptions(boundary)).toEqual([]);
+    }
+  });
+
+  it("says whose claim a diarizing cloud route's languages are", () => {
+    // Neither has a capability-table entry -- that table is about downloads,
+    // and a hosted route has none -- so both used to fall through to the
+    // generic "the selected model's languages", which tells a user nothing
+    // about a route they are paying per minute for.
+    expect(getAsrModelCapability("deepgram", "nova-3")).toBeNull();
+    expect(
+      getAsrModelCapability("gemini_transcribe", "gemini-3.5-transcribe"),
+    ).toBeNull();
+
+    for (const [provider, model, expected] of [
+      ["deepgram", "nova-3", "multilingual code-switching, listed by Deepgram"],
+      ["deepgram", "nova-3-medical", "English, listed by Deepgram"],
+      [
+        "gemini_transcribe",
+        "gemini-3.5-transcribe",
+        "85+ languages, listed by Google",
+      ],
+    ] as const) {
+      const boundary = resolveAsrLanguageBoundary(provider, model);
+      // Unenumerated, not enumerated: Plainsong has never exercised these
+      // sets, and a fabricated list in the session-language picker would be a
+      // capability claim the app cannot back.
+      expect(boundary.kind).toBe("unenumerated");
+      expect(boundary.label).toBe(expected);
+      expect(boundary.label).not.toBe("the selected model's languages");
       expect(asrLanguageOptions(boundary)).toEqual([]);
     }
   });
