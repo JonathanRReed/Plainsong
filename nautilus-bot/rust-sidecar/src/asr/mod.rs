@@ -1,4 +1,5 @@
 pub mod cohere;
+pub mod cohere_local;
 pub mod deepgram;
 pub mod distil_whisper;
 pub mod elevenlabs_scribe;
@@ -173,6 +174,7 @@ pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, Str
     artifacts.extend(parakeet::model_integrity_artifacts(models_root));
     artifacts.extend(whisper_candle::model_integrity_artifacts(models_root));
     artifacts.extend(qwen3_asr::model_integrity_artifacts(models_root));
+    artifacts.extend(cohere_local::model_integrity_artifacts(models_root));
     #[cfg(feature = "asr-transcribe-cpp")]
     artifacts.extend(transcribe_cpp::model_integrity_artifacts(models_root));
     artifacts
@@ -1432,6 +1434,10 @@ pub enum AsrProviderType {
     OpenAiCloud,
     Groq,
     CohereTranscribe,
+    /// The same Cohere Transcribe weights as `CohereTranscribe`, run locally
+    /// on ONNX Runtime instead of over Cohere's API. Experimental, and never
+    /// a default: see `asr/cohere_local.rs`.
+    CohereLocal,
     Qwen3Asr,
     Deepgram,
     GeminiTranscribe,
@@ -1456,6 +1462,7 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud,
             AsrProviderType::Groq,
             AsrProviderType::CohereTranscribe,
+            AsrProviderType::CohereLocal,
             AsrProviderType::Qwen3Asr,
             AsrProviderType::Deepgram,
             AsrProviderType::GeminiTranscribe,
@@ -1477,6 +1484,7 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud => "OpenAI Whisper (Cloud)",
             AsrProviderType::Groq => "Groq Whisper (Cloud)",
             AsrProviderType::CohereTranscribe => "Cohere Transcribe",
+            AsrProviderType::CohereLocal => "Cohere Transcribe (Local)",
             AsrProviderType::Qwen3Asr => "Qwen3-ASR (Local)",
             AsrProviderType::Deepgram => "Deepgram Nova",
             AsrProviderType::GeminiTranscribe => "Google Gemini Transcribe",
@@ -1505,6 +1513,7 @@ impl AsrProviderType {
             AsrProviderType::OpenAiCloud => "gpt-transcribe",
             AsrProviderType::Groq => "whisper-large-v3-turbo",
             AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
+            AsrProviderType::CohereLocal => cohere_local::COHERE_LOCAL_MODEL_ID,
             AsrProviderType::Qwen3Asr => "qwen3-asr-0.6b",
             // Verified live against
             // https://developers.deepgram.com/docs/pre-recorded-audio on
@@ -1539,6 +1548,7 @@ impl AsrProviderType {
             | AsrProviderType::MacosAppleSpeech
             | AsrProviderType::Moonshine
             | AsrProviderType::WindowsSdkDictation
+            | AsrProviderType::CohereLocal
             | AsrProviderType::Qwen3Asr => None,
             // Local weights on disk; no credential slot, like every other
             // local route.
@@ -1673,6 +1683,10 @@ impl AsrProviderType {
                 id: "cohere-transcribe-03-2026".to_string(),
                 label: "Cohere Transcribe (03-2026)".to_string(),
             }],
+            AsrProviderType::CohereLocal => vec![ModelOption {
+                id: cohere_local::COHERE_LOCAL_MODEL_ID.to_string(),
+                label: "Cohere Transcribe 03-2026 int4 (offline, 14 languages, slow)".to_string(),
+            }],
             AsrProviderType::Qwen3Asr => vec![ModelOption {
                 id: "qwen3-asr-0.6b".to_string(),
                 label: "Qwen3-ASR 0.6B int4 (multilingual, fast)".to_string(),
@@ -1736,6 +1750,9 @@ impl AsrProviderFactory {
             AsrProviderType::Groq => Box::new(groq::GroqProvider::new(selected_model_id)),
             AsrProviderType::CohereTranscribe => {
                 Box::new(cohere::CohereTranscribeProvider::new(selected_model_id))
+            }
+            AsrProviderType::CohereLocal => {
+                Box::new(cohere_local::CohereLocalProvider::new(selected_model_id))
             }
             AsrProviderType::Qwen3Asr => {
                 Box::new(qwen3_asr::Qwen3AsrProvider::new(selected_model_id))

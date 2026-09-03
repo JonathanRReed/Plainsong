@@ -843,6 +843,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return "Use the Download button to fetch the selected Moonshine bundle. Tiny is the smallest edge model; Base is the default stable option.";
       case "qwen3_asr":
         return "Use the Download button to fetch the Qwen3-ASR 0.6B model (~1.9 GiB, 7 files). Experimental: English is verified in Plainsong; 30 languages including Chinese, Japanese and Korean are listed upstream; it runs slower than real time on the CPU.";
+      case "cohere_local":
+        return "Use the Download button to fetch Cohere Transcribe 03-2026 as int4 ONNX (~2.0 GiB, 8 files). Experimental: it runs on the CPU with no Metal path, it cannot detect a language so you have to pick one of its 14, and its segment times are estimated rather than measured.";
       case "windows_sdk_dictation":
         return "Use a Windows x86_64 build with Windows speech recognition components available, or pick another ASR provider";
       case "elevenlabs_scribe":

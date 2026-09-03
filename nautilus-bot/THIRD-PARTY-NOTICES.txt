@@ -7,7 +7,7 @@ Regenerate from nautilus-bot/ with:
 Application package: plainsong@0.9.0-beta.3
 Rust dependency packages: 532
 npm production dependency packages: 79
-Downloadable model artifacts: 19
+Downloadable model artifacts: 20
 
 The dependency indexes retain declared license identifiers and repository URLs
 even when no license file is available in the installed package or Cargo cache.
@@ -233,7 +233,7 @@ pinned in the source, and stored in the user's own models directory. The
 terms are the upstream project's, not Plainsong's, and are reproduced here
 because several differ from the license of the code that runs them.
 
-Model artifacts: 19
+Model artifacts: 20
 Artifacts whose upstream declares no license: 2 (ERes2NetV2 speaker embedding (int8), pyannote community-1 bundle (speakrs export))
 
 S1-mini by Superwhisper (GGUF)
@@ -344,6 +344,15 @@ Qwen3-ASR 0.6B (ONNX int4 export)
   Files: encoder.int4.onnx, decoder_init.int4.onnx, decoder_step.int4.onnx, decoder_weights.int4.data, embed_tokens.bin, config.json, tokenizer.json
   Pinned in: rust-sidecar/src/asr/qwen3_asr.rs (QWEN3_ASR_HF_*)
   Note: This is the one model whose revision is a branch. Every file is verified against a pinned SHA-256 on download, so a republished branch is rejected rather than loaded; the digests live beside the URLs in the file below.
+
+Cohere Transcribe 03-2026 (ONNX int4 export)
+  Used for: Speech recognition on the experimental offline high-accuracy route.
+  License: Apache-2.0
+  Repository: https://huggingface.co/onnx-community/cohere-transcribe-03-2026-ONNX
+  Revision: 31b1c6211c9000d76b077ddd23b74c9090badeba
+  Files: onnx/encoder_model_q4.onnx, onnx/encoder_model_q4.onnx_data, onnx/decoder_model_merged_q4.onnx, onnx/decoder_model_merged_q4.onnx_data, tokenizer.json, config.json, generation_config.json, preprocessor_config.json
+  Pinned in: rust-sidecar/src/asr/cohere_local.rs (COHERE_LOCAL_HF_*)
+  Note: The export repository declares Apache-2.0 in its own right, not only by inheritance from CohereLabs/cohere-transcribe-03-2026, which it also declares Apache-2.0. Every file is additionally pinned by SHA-256 on download.
 
 Silero VAD
   Used for: Voice-activity detection: deciding when speech starts and stops.

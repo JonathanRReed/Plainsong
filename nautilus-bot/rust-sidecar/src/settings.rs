@@ -1272,6 +1272,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "openai_cloud" => "openai_cloud".to_string(),
         "groq" => "groq".to_string(),
         "cohere_transcribe" => "cohere_transcribe".to_string(),
+        "cohere_local" => "cohere_local".to_string(),
         "qwen3_asr" => "qwen3_asr".to_string(),
         "deepgram" => "deepgram".to_string(),
         "gemini_transcribe" => "gemini_transcribe".to_string(),
@@ -1325,6 +1326,14 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         },
         "cohere_transcribe" => match model_id.trim() {
             "" => "cohere-transcribe-03-2026".to_string(),
+            value => value.to_string(),
+        },
+        "cohere_local" => match model_id.trim() {
+            // The export publishes fp32/fp16/int8/int4 variants; only the
+            // int4 one is pinned, so an empty or legacy id resolves to it.
+            "" | "cohere-transcribe-03-2026" => {
+                crate::asr::cohere_local::COHERE_LOCAL_MODEL_ID.to_string()
+            }
             value => value.to_string(),
         },
         "qwen3_asr" => match model_id.trim() {
@@ -1428,6 +1437,14 @@ pub const QWEN3_ASR_LANGUAGES: &[&str] = &[
     "ja", "ko", "mk", "ms", "nl", "pl", "pt", "ro", "ru", "sv", "th", "tr", "vi", "yue", "zh",
 ];
 
+/// The 14 languages the Cohere Transcribe processor accepts. Mirrors
+/// `asr::cohere_local::COHERE_LOCAL_LANGUAGES` (a test keeps the two in step).
+/// Unlike every other local route this one cannot detect a language, so the
+/// list is also the set of choices the user must pick from.
+pub const COHERE_LOCAL_LANGUAGES: &[&str] = &[
+    "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
+];
+
 /// Which languages the *selected* dictation model can actually transcribe.
 ///
 /// `None` means the model imposes no set Plainsong can enumerate -- a cloud
@@ -1465,6 +1482,7 @@ pub fn dictation_supported_languages(
         }
         "moonshine" => Some(ENGLISH_ONLY_LANGUAGES),
         "qwen3_asr" => Some(QWEN3_ASR_LANGUAGES),
+        "cohere_local" => Some(COHERE_LOCAL_LANGUAGES),
         // Cloud and platform routes follow their own service/OS language list,
         // which Plainsong cannot enumerate locally.
         _ => None,

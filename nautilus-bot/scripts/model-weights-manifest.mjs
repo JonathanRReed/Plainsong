@@ -218,6 +218,28 @@ export const MODEL_WEIGHTS = [
     pinnedIn: "rust-sidecar/src/asr/qwen3_asr.rs (QWEN3_ASR_HF_*)",
   },
   {
+    name: "Cohere Transcribe 03-2026 (ONNX int4 export)",
+    usedFor:
+      "Speech recognition on the experimental offline high-accuracy route.",
+    repository:
+      "https://huggingface.co/onnx-community/cohere-transcribe-03-2026-ONNX",
+    revision: "31b1c6211c9000d76b077ddd23b74c9090badeba",
+    license: "Apache-2.0",
+    note:
+      "The export repository declares Apache-2.0 in its own right, not only by inheritance from CohereLabs/cohere-transcribe-03-2026, which it also declares Apache-2.0. Every file is additionally pinned by SHA-256 on download.",
+    files: [
+      "onnx/encoder_model_q4.onnx",
+      "onnx/encoder_model_q4.onnx_data",
+      "onnx/decoder_model_merged_q4.onnx",
+      "onnx/decoder_model_merged_q4.onnx_data",
+      "tokenizer.json",
+      "config.json",
+      "generation_config.json",
+      "preprocessor_config.json",
+    ],
+    pinnedIn: "rust-sidecar/src/asr/cohere_local.rs (COHERE_LOCAL_HF_*)",
+  },
+  {
     name: "Silero VAD",
     usedFor: "Voice-activity detection: deciding when speech starts and stops.",
     repository: "https://github.com/snakers4/silero-vad",

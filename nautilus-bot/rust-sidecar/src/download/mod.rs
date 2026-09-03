@@ -1788,6 +1788,45 @@ impl DownloadManager {
             }
         }
 
+        // Check the local Cohere Transcribe bundle: eight flat files under
+        // `models/cohere_local` (see asr/cohere_local.rs), summed into one
+        // entry. At 2.0 GiB it is the largest thing this app downloads, so a
+        // user looking for disk to reclaim has to be able to see it.
+        let cohere_local_dir = self
+            .models_dir
+            .join(crate::asr::cohere_local::COHERE_LOCAL_MODEL_DIR);
+        if cohere_local_dir.exists() {
+            let mut total_size = 0u64;
+            let mut files = 0usize;
+            let mut modified: Option<std::time::SystemTime> = None;
+            let mut entries = tokio::fs::read_dir(&cohere_local_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if !path.is_file() || is_internal_model_metadata_file(&path) {
+                    continue;
+                }
+                if let Ok(metadata) = entry.metadata().await {
+                    total_size += metadata.len();
+                    files += 1;
+                    if let Ok(entry_modified) = metadata.modified() {
+                        modified = Some(match modified {
+                            Some(existing) if existing >= entry_modified => existing,
+                            _ => entry_modified,
+                        });
+                    }
+                }
+            }
+            if files > 0 {
+                models.push(DownloadedModel {
+                    name: crate::asr::cohere_local::COHERE_LOCAL_MODEL_ID.to_string(),
+                    provider: "cohere_local".to_string(),
+                    path: cohere_local_dir.clone(),
+                    size_bytes: total_size,
+                    downloaded_at: modified.unwrap_or_else(std::time::SystemTime::now),
+                });
+            }
+        }
+
         // Check the bundled dictation-cleanup model. Four flat files directly
         // under `models/bundled_cleanup` (see llm/bundled_local.rs), summed
         // into one entry like the Qwen3-ASR bundle above.

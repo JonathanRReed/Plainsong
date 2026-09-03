@@ -27,6 +27,10 @@ mod speakrs_backend;
 #[cfg(feature = "diarization")]
 mod embedding_window;
 
+/// Where the embedding windows are cut. See
+/// `artifacts/qa/diarization-segmentation-2026-09-02.md`.
+pub mod segmentation;
+
 /// Test-only reproduction of the CAM++ Rust-vs-Python ONNX Runtime divergence.
 /// See `artifacts/qa/campplus-divergence-2026-09-02.md`.
 #[cfg(all(test, feature = "diarization"))]
@@ -34,7 +38,8 @@ mod ort_parity;
 
 #[cfg(feature = "diarization")]
 pub use embedder::{
-    generate_segments, EmbeddingClusterer, SEGMENT_OVERLAP_SECONDS, SEGMENT_SECONDS,
+    generate_segments, EmbeddingClusterer, MIN_SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS,
+    SEGMENT_SECONDS,
 };
 
 #[cfg(feature = "diarization")]
@@ -91,18 +96,62 @@ pub enum DiarizationMethod {
     Provider,
 }
 
+/// How the embedding windows are cut.
+///
+/// A field rather than a constant so the evaluation harness can run the same
+/// pipeline both ways in one process and compare, instead of the product
+/// reading an environment variable it has no business reading. The window
+/// length is **not** part of this choice -- see `segmentation`'s module docs
+/// for why it cannot be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SegmentationMode {
+    /// A window every `SEGMENT_OVERLAP_SECONDS` from 0 to the end of the
+    /// recording, whatever is in it. The shipped rule, and the one every
+    /// voiceprint threshold was calibrated at.
+    FixedGrid,
+    /// Windows cut inside Silero's speech regions, starting at each onset and
+    /// hopping by `hop_seconds`. Falls back to `FixedGrid` when the VAD model
+    /// is not downloaded or will not load.
+    ///
+    /// **Measured, and deliberately not shipped.** On a 5-minute two-speaker
+    /// fixture with 0.8 s gaps it cuts frame error from 15.5% to 5.5% and is
+    /// faster; on the same fixture with 3-second turns it produces *no
+    /// speakers at all*. The cause is not in this module: `smooth_segments`
+    /// drops any merged run shorter than `EmbeddingClusterer`'s 5-second
+    /// `min_segment_duration`, and VAD-aligned runs are bounded by the speech
+    /// region while fixed-grid runs are not. Until that minimum is fixed,
+    /// `DEFAULT_SEGMENTATION` stays `FixedGrid` and this variant is
+    /// constructed only by `eval_segmentation_modes`. Full numbers:
+    /// `artifacts/qa/diarization-segmentation-2026-09-02.md`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "measured alternative segmentation, kept so the receipt's numbers stay reproducible; blocked on EmbeddingClusterer::min_segment_duration, see artifacts/qa/diarization-segmentation-2026-09-02.md"
+        )
+    )]
+    VadAligned { hop_seconds: f64 },
+}
+
+/// The segmentation the product runs.
+///
+/// Set from the measurement in
+/// `artifacts/qa/diarization-segmentation-2026-09-02.md`, not from
+/// preference: the adoption rule for this lane was that VAD alignment had to
+/// improve frame error *without* moving the calibrated voiceprint thresholds
+/// by more than 0.02.
+pub const DEFAULT_SEGMENTATION: SegmentationMode = SegmentationMode::FixedGrid;
+
 /// Speaker diarization engine
 pub struct DiarizationEngine {
     speakers: HashMap<String, Speaker>,
     model_id: String,
+    segmentation: SegmentationMode,
 }
 
 impl DiarizationEngine {
     pub fn new() -> Self {
-        Self {
-            speakers: HashMap::new(),
-            model_id: "ecapa_tdnn_speaker".to_string(),
-        }
+        Self::with_model("ecapa_tdnn_speaker")
     }
 
     /// Create an engine that uses a specific diarization model.
@@ -110,7 +159,16 @@ impl DiarizationEngine {
         Self {
             speakers: HashMap::new(),
             model_id: model_id.to_string(),
+            segmentation: DEFAULT_SEGMENTATION,
         }
+    }
+
+    /// Override how windows are cut. Only the evaluation harness uses this;
+    /// the product takes [`DEFAULT_SEGMENTATION`].
+    #[cfg(test)]
+    pub(crate) fn with_segmentation(mut self, segmentation: SegmentationMode) -> Self {
+        self.segmentation = segmentation;
+        self
     }
 
     /// Run diarization on audio file
@@ -140,7 +198,7 @@ impl DiarizationEngine {
         audio_path: &Path,
         duration: f64,
     ) -> Result<DiarizationResult> {
-        let segments = generate_segments(duration, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
+        let segments = self.segments_for(audio_path, duration);
         if segments.is_empty() {
             return Ok(DiarizationResult {
                 segments: Vec::new(),
@@ -242,6 +300,56 @@ impl DiarizationEngine {
             method: DiarizationMethod::Embedding,
             cluster_centroids,
         })
+    }
+
+    /// The embedding windows for one recording, under this engine's
+    /// [`SegmentationMode`].
+    ///
+    /// VAD alignment degrades to the fixed grid rather than failing: the
+    /// Silero model is an optional download, and a meeting must not stop
+    /// because an accuracy refinement's prerequisite is missing. It also
+    /// degrades when the VAD found no speech at all, because "embed nothing"
+    /// is a worse answer than "embed the metronome" for a recording the user
+    /// can plainly hear.
+    #[cfg(feature = "diarization")]
+    fn segments_for(&self, audio_path: &Path, duration: f64) -> Vec<(f64, f64)> {
+        let fixed = || generate_segments(duration, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
+        let SegmentationMode::VadAligned { hop_seconds } = self.segmentation else {
+            return fixed();
+        };
+
+        let Ok(manager) = crate::download::DownloadManager::new() else {
+            return fixed();
+        };
+        let Some(regions) =
+            segmentation::speech_regions_for_file(audio_path, &manager.silero_vad_model_path())
+        else {
+            return fixed();
+        };
+        let segments = segmentation::generate_vad_aligned_segments(
+            &regions,
+            SEGMENT_SECONDS,
+            hop_seconds,
+            MIN_SEGMENT_SECONDS,
+        );
+        if segments.is_empty() {
+            tracing::warn!(
+                "Diarization: Silero found no speech in {:.1}s of audio; falling back to the \
+                 fixed-window segmentation rather than returning no speakers",
+                duration
+            );
+            return fixed();
+        }
+        tracing::info!(
+            "Diarization: {} VAD-aligned windows over {} speech regions ({:.1}s of {:.1}s), \
+             against {} on the fixed grid",
+            segments.len(),
+            regions.len(),
+            segmentation::covered_seconds(&segments),
+            duration,
+            fixed().len(),
+        );
+        segments
     }
 
     /// Merge diarization results with transcript segments.
@@ -1368,6 +1476,108 @@ mod eval_tests {
                 return 0;
             }
             usage.ru_maxrss as u64
+        }
+    }
+
+    /// Compare the fixed grid against VAD-aligned segmentation at two hops,
+    /// on one fixture, in one process, with one embedder.
+    ///
+    /// Ignored like its neighbours: it downloads weights and runs real
+    /// inference. Prints one `DIAR-EVAL` line per mode so
+    /// `scripts/score-diarization-eval.mjs` can score all three against the
+    /// same ground truth:
+    ///
+    /// ```text
+    /// PLAINSONG_DATA_DIR=<dir> PLAINSONG_DIAR_EVAL_AUDIO=<wav> \
+    ///   cargo test --lib diarization::eval_tests::eval_segmentation_modes \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "diarization")]
+    #[tokio::test]
+    #[ignore = "evaluation harness: downloads models and runs real inference"]
+    async fn eval_segmentation_modes() {
+        let audio = eval_audio_path();
+        let model_id = std::env::var("PLAINSONG_DIAR_EVAL_MODEL")
+            .unwrap_or_else(|_| "ecapa_tdnn_speaker".to_string());
+        let manager = crate::download::DownloadManager::new().expect("download manager");
+        manager
+            .download_diarization_model_by_id(&model_id, |_: crate::download::DownloadProgress| {})
+            .await
+            .expect("embedding model");
+        // VAD alignment silently degrades to the fixed grid without this, so
+        // an eval that ran with it missing would report "no difference" and be
+        // wrong. Fail loudly instead.
+        manager
+            .download_silero_vad_model(|_: crate::download::DownloadProgress| {})
+            .await
+            .expect("Silero VAD model");
+
+        let duration = get_audio_duration(&audio).await.expect("fixture duration");
+
+        // What the VAD actually saw, printed before any embedding runs: a
+        // segmentation result is uninterpretable without it, and a fixture
+        // with no silence in it makes VAD alignment identical to the grid.
+        let regions =
+            segmentation::speech_regions_for_file(&audio, &manager.silero_vad_model_path())
+                .expect("Silero VAD must run for this comparison to mean anything");
+        let speech: f64 = regions.iter().map(|region| region.seconds()).sum();
+        println!(
+            "DIAR-SEG {}",
+            serde_json::json!({
+                "audio": audio.to_string_lossy(),
+                "durationSeconds": duration,
+                "speechRegions": regions.len(),
+                "speechSeconds": speech,
+                "windows": {
+                    "fixedGrid": generate_segments(
+                        duration,
+                        SEGMENT_SECONDS,
+                        SEGMENT_OVERLAP_SECONDS,
+                    ).len(),
+                    "vadHop1.0": segmentation::generate_vad_aligned_segments(
+                        &regions,
+                        SEGMENT_SECONDS,
+                        1.0,
+                        MIN_SEGMENT_SECONDS,
+                    ).len(),
+                    "vadHop0.5": segmentation::generate_vad_aligned_segments(
+                        &regions,
+                        SEGMENT_SECONDS,
+                        0.5,
+                        MIN_SEGMENT_SECONDS,
+                    ).len(),
+                },
+                "firstRegions": regions
+                    .iter()
+                    .take(6)
+                    .map(|region| serde_json::json!([region.start, region.end]))
+                    .collect::<Vec<_>>(),
+            })
+        );
+
+        for (label, mode) in [
+            ("fixed-grid-1.0s", SegmentationMode::FixedGrid),
+            (
+                "vad-aligned-1.0s",
+                SegmentationMode::VadAligned { hop_seconds: 1.0 },
+            ),
+            (
+                "vad-aligned-0.5s",
+                SegmentationMode::VadAligned { hop_seconds: 0.5 },
+            ),
+        ] {
+            let mut engine = DiarizationEngine::with_model(&model_id).with_segmentation(mode);
+            let started = std::time::Instant::now();
+            let result = engine
+                .diarize(&audio, duration)
+                .await
+                .expect("diarization must run");
+            report(
+                &format!("{model_id}/{label}"),
+                &audio,
+                started.elapsed(),
+                &result,
+            );
         }
     }
 

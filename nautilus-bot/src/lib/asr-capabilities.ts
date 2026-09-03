@@ -32,6 +32,7 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   openai_cloud: true,
   groq: true,
   cohere_transcribe: true,
+  cohere_local: true,
   qwen3_asr: true,
   deepgram: true,
   gemini_transcribe: true,
@@ -59,6 +60,7 @@ const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "distil_whisper",
   "moonshine",
   "qwen3_asr",
+  "cohere_local",
   "transcribe_cpp",
 ]);
 
@@ -583,6 +585,21 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
       "experimental — English is the only language verified in Plainsong, and the int4 decoders run on the CPU at anywhere from a quarter of real time to slower than real time depending on load (11-59 s to transcribe 44 s of speech on an M4 Pro across quiet and shared-CPU runs), so a meeting can take longer to transcribe than it took to hold.",
   },
   {
+    providerType: "cohere_local",
+    modelId: "cohere-transcribe-03-2026-q4",
+    languages: {
+      englishOnly: false,
+      count: 14,
+      label: "14 languages, and you have to pick one",
+    },
+    // 2,127,674,554 bytes across the eight pinned files.
+    sizeMib: 2029,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "experimental \u2014 the same weights the Cohere cloud route uses, run offline on the CPU. Measured on a quiet M4 Pro against the shipped Parakeet default: 0.67 s against 0.13 s for a 5.3 s utterance, and 7.5 s against 1.0 s for 44 s of speech. It also cannot detect a language, so it transcribes as English until you choose one, and its segment times are estimated from sentence lengths rather than measured, which is why it is not offered for meetings.",
+  },
+  {
     providerType: "transcribe_cpp",
     modelId: "parakeet-tdt-0.6b-v3-q8_0",
     languages: PARAKEET_V3_LANGUAGES,
@@ -620,6 +637,17 @@ const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
       // English only, on the two repo fixtures, in the spike receipt
       // artifacts/qa/transcribe-cpp-spike-2026-09-02.md. The other 24
       // languages are an upstream claim this build never exercised.
+      basis: "upstream_listed",
+      verifiedLanguages: ["English"],
+    },
+  ],
+  [
+    "cohere_local:cohere-transcribe-03-2026-q4",
+    {
+      // English only, on the two repo fixtures, in
+      // artifacts/qa/cohere-local-receipt-2026-09-02.md. The other 13
+      // languages are the upstream processor's list, which this build has
+      // never exercised.
       basis: "upstream_listed",
       verifiedLanguages: ["English"],
     },
@@ -751,6 +779,17 @@ const QWEN3_ASR_LANGUAGE_CODES: readonly string[] = [
   "da", "fi", "pl", "cs", "fil", "fa", "el", "hu", "mk", "ro",
 ];
 
+/**
+ * The 14 languages `CohereAsrProcessor` accepts. Mirrors
+ * `COHERE_LOCAL_LANGUAGES` in rust-sidecar/src/asr/cohere_local.rs and
+ * `COHERE_LOCAL_LANGUAGES` in rust-sidecar/src/settings.rs. Unlike every other
+ * local route this one cannot detect a language, so the list is also the set
+ * the user must choose from.
+ */
+const COHERE_LOCAL_LANGUAGE_CODES: readonly string[] = [
+  "ar", "de", "el", "en", "es", "fr", "it", "ja", "ko", "nl", "pl", "pt", "vi", "zh",
+];
+
 /** Language codes per route, where Plainsong can name the set. */
 const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper:tiny", WHISPER_LANGUAGE_CODES],
@@ -763,6 +802,7 @@ const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["parakeet:parakeet-tdt-0.6b-v3", PARAKEET_V3_LANGUAGE_CODES],
   ["transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0", PARAKEET_V3_LANGUAGE_CODES],
   ["qwen3_asr:qwen3-asr-0.6b", QWEN3_ASR_LANGUAGE_CODES],
+  ["cohere_local:cohere-transcribe-03-2026-q4", COHERE_LOCAL_LANGUAGE_CODES],
 ]);
 
 /**

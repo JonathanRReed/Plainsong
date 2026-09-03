@@ -22,7 +22,15 @@
  * arithmetic, not as VoxConverse.
  *
  *   node scripts/make-diarization-eval-fixture.mjs [--out-dir <dir>] \
- *     [--turn-seconds <n>] [--label <name>]
+ *     [--turn-seconds <n>] [--label <name>] [--speakers <2|3|4>] \
+ *     [--gap-seconds <n>]
+ *
+ * `--gap-seconds` inserts digital silence between turns. It defaults to 0,
+ * which makes a fixture that is wall-to-wall speech -- and a fixture with no
+ * silence in it cannot tell a VAD-driven segmentation apart from a metronome,
+ * because the VAD correctly reports one speech region covering the whole file.
+ * Anything measuring segmentation wants a non-zero gap; real turn boundaries
+ * are not butt-joined.
  *
  * `--turn-seconds` matters more than it looks. The default 6 s grid is an
  * exact multiple of the embedding backend's 1 s window hop, so that backend's
@@ -46,14 +54,23 @@ const sourceWav = path.join(repoRoot, "scripts/fixtures/real-speech-44s.wav");
 /** Default seconds per turn. Long enough that a windowed embedder gets several
  * windows inside a turn; short enough that 44 s holds seven turns. */
 const DEFAULT_TURN_SECONDS = 6;
-/** Ratio applied to the sample rate before restoring tempo. 0.82 is about
- * -3.4 semitones: clearly a different speaker, still natural. */
-const PITCH_RATIO = 0.82;
+/** Ratios applied to the sample rate before restoring tempo, one per voice
+ * after the first. 0.82 is about -3.4 semitones and 1.18 about +2.9: both
+ * clearly a different speaker from the source and from each other, and both
+ * still natural. A fourth voice would need a shift big enough to sound
+ * synthetic, which is why the flag stops at four and the receipt says so. */
+const PITCH_RATIOS = [0.82, 1.18, 0.7];
+/** Kept for the two-speaker default's ground-truth field. */
+const PITCH_RATIO = PITCH_RATIOS[0];
+/** Most voices this generator will build. */
+const MAX_SPEAKERS = PITCH_RATIOS.length + 1;
 
 function parseArgs(argv) {
   let outDir = path.join(repoRoot, "artifacts/qa/diarization-speakrs");
   let turnSeconds = DEFAULT_TURN_SECONDS;
   let label = "two-speaker";
+  let speakers = 2;
+  let gapSeconds = 0;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--out-dir") {
       outDir = path.resolve(argv[i + 1] ?? "");
@@ -67,9 +84,23 @@ function parseArgs(argv) {
     } else if (argv[i] === "--label") {
       label = argv[i + 1] ?? label;
       i += 1;
+    } else if (argv[i] === "--speakers") {
+      speakers = Number(argv[i + 1]);
+      if (!Number.isInteger(speakers) || speakers < 2 || speakers > MAX_SPEAKERS) {
+        throw new Error(
+          `--speakers must be an integer between 2 and ${MAX_SPEAKERS}, got ${argv[i + 1]}`,
+        );
+      }
+      i += 1;
+    } else if (argv[i] === "--gap-seconds") {
+      gapSeconds = Number(argv[i + 1]);
+      if (!Number.isFinite(gapSeconds) || gapSeconds < 0) {
+        throw new Error(`--gap-seconds must be zero or positive, got ${argv[i + 1]}`);
+      }
+      i += 1;
     }
   }
-  return { outDir, turnSeconds, label };
+  return { outDir, turnSeconds, label, speakers, gapSeconds };
 }
 
 /** Minimal WAV reader for the one shape this repo's fixtures use. */
@@ -133,8 +164,8 @@ function writePcm16Mono(file, samples, sampleRate) {
   fs.writeFileSync(file, buffer);
 }
 
-function pitchShift(input, output, sampleRate) {
-  const shiftedRate = Math.round(sampleRate * PITCH_RATIO);
+function pitchShift(input, output, sampleRate, ratio) {
+  const shiftedRate = Math.round(sampleRate * ratio);
   const result = spawnSync(
     "ffmpeg",
     [
@@ -145,7 +176,7 @@ function pitchShift(input, output, sampleRate) {
       "-i",
       input,
       "-af",
-      `asetrate=${shiftedRate},aresample=${sampleRate},atempo=${(1 / PITCH_RATIO).toFixed(6)}`,
+      `asetrate=${shiftedRate},aresample=${sampleRate},atempo=${(1 / ratio).toFixed(6)}`,
       "-ar",
       String(sampleRate),
       "-ac",
@@ -168,8 +199,9 @@ function pitchShift(input, output, sampleRate) {
  * looping each voice's source independently so a longer fixture keeps saying
  * new things instead of repeating one 44 s block verbatim.
  */
-function buildAlternating(voices, sampleRate, totalSeconds, turnSeconds) {
+function buildAlternating(voices, sampleRate, totalSeconds, turnSeconds, gapSeconds) {
   const turnSamples = Math.round(turnSeconds * sampleRate);
+  const gapSamples = Math.round(gapSeconds * sampleRate);
   const totalSamples = Math.round(totalSeconds * sampleRate);
   const out = new Int16Array(totalSamples);
   const cursors = voices.map(() => 0);
@@ -191,6 +223,11 @@ function buildAlternating(voices, sampleRate, totalSeconds, turnSeconds) {
       speaker: voice.name,
     });
     written += length;
+    // `out` is already zero-filled, so the gap is written by skipping it. The
+    // silence is deliberately absolute rather than low-level room tone: this
+    // fixture is a smoke test with arithmetic, and a VAD that cannot find a
+    // digital-silence boundary would not find a real one either.
+    written += gapSamples;
     turnIndex += 1;
   }
 
@@ -198,20 +235,31 @@ function buildAlternating(voices, sampleRate, totalSeconds, turnSeconds) {
 }
 
 function main() {
-  const { outDir, turnSeconds, label } = parseArgs(process.argv.slice(2));
+  const { outDir, turnSeconds, label, speakers, gapSeconds } = parseArgs(process.argv.slice(2));
   fs.mkdirSync(outDir, { recursive: true });
 
   const speakerA = readPcm16Mono(sourceWav);
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-diar-fixture-"));
-  const shiftedPath = path.join(scratch, "speaker-b.wav");
   try {
-    pitchShift(sourceWav, shiftedPath, speakerA.sampleRate);
-    const speakerB = readPcm16Mono(shiftedPath);
-
-    const voices = [
-      { name: "A", samples: speakerA.samples },
-      { name: "B", samples: speakerB.samples },
-    ];
+    const voices = [{ name: "A", samples: speakerA.samples }];
+    const ratios = [];
+    for (let index = 1; index < speakers; index += 1) {
+      const ratio = PITCH_RATIOS[index - 1];
+      const name = String.fromCharCode("A".charCodeAt(0) + index);
+      const shiftedPath = path.join(scratch, `speaker-${name.toLowerCase()}.wav`);
+      pitchShift(sourceWav, shiftedPath, speakerA.sampleRate, ratio);
+      // Each shifted voice starts at a different point in the source so two
+      // of them are never saying the same words at the same offset, which
+      // would make the separation problem easier than any real meeting.
+      const shifted = readPcm16Mono(shiftedPath);
+      const offset = Math.floor((shifted.samples.length * index) / speakers);
+      const rotated = new Int16Array(shifted.samples.length);
+      for (let i = 0; i < rotated.length; i += 1) {
+        rotated[i] = shifted.samples[(i + offset) % shifted.samples.length];
+      }
+      voices.push({ name, samples: rotated });
+      ratios.push(ratio);
+    }
 
     for (const seconds of [44, 300]) {
       const name = `${label}-${seconds}s`;
@@ -220,6 +268,7 @@ function main() {
         speakerA.sampleRate,
         seconds,
         turnSeconds,
+        gapSeconds,
       );
       const wavPath = path.join(outDir, `${name}.wav`);
       writePcm16Mono(wavPath, samples, speakerA.sampleRate);
@@ -232,8 +281,10 @@ function main() {
             sampleRate: speakerA.sampleRate,
             durationSeconds: Number(seconds.toFixed(3)),
             turnSeconds,
+            gapSeconds,
             pitchRatio: PITCH_RATIO,
-            speakers: ["A", "B"],
+            pitchRatios: ratios,
+            speakers: voices.map((voice) => voice.name),
             turns,
           },
           null,

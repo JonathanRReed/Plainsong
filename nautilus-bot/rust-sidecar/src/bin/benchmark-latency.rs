@@ -76,7 +76,8 @@ Options:
                         the primary but not gated against its thresholds
                         [default: scripts/fixtures/real-speech-44s.wav]
   --provider <NAME>     whisper, parakeet, moonshine, whisper_candle,
-                        distil_whisper, macos_apple_speech, or qwen3_asr
+                        distil_whisper, macos_apple_speech, qwen3_asr, or
+                        cohere_local
                         (plus transcribe_cpp when the sidecar is built with
                         --features asr-transcribe-cpp)
                         [default: whisper]
@@ -166,6 +167,7 @@ fn provider_from_str(value: &str) -> Option<AsrProviderType> {
         "distil_whisper" => AsrProviderType::DistilWhisper,
         "macos_apple_speech" => AsrProviderType::MacosAppleSpeech,
         "qwen3_asr" => AsrProviderType::Qwen3Asr,
+        "cohere_local" => AsrProviderType::CohereLocal,
         // Only resolvable when the spike feature is compiled in; a default
         // build rejects the name instead of silently benchmarking something
         // else.
@@ -272,7 +274,8 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let Some(provider_type) = provider_from_str(&provider_name) else {
         return Err(format!(
             "Unknown provider '{provider_name}'. Valid providers: whisper, parakeet, \
-             moonshine, whisper_candle, distil_whisper, macos_apple_speech, qwen3_asr"
+             moonshine, whisper_candle, distil_whisper, macos_apple_speech, qwen3_asr, \
+             cohere_local"
         ));
     };
 

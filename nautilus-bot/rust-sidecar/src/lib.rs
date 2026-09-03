@@ -18256,6 +18256,7 @@ fn dictation_provider_uses_local_model(provider: asr::AsrProviderType) -> bool {
             | asr::AsrProviderType::Moonshine
             | asr::AsrProviderType::Parakeet
             | asr::AsrProviderType::Qwen3Asr
+            | asr::AsrProviderType::CohereLocal
     )
 }
 
@@ -20867,6 +20868,7 @@ fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> &'static st
         asr::AsrProviderType::OpenAiCloud => "openai_cloud",
         asr::AsrProviderType::Groq => "groq",
         asr::AsrProviderType::CohereTranscribe => "cohere_transcribe",
+        asr::AsrProviderType::CohereLocal => "cohere_local",
         asr::AsrProviderType::Qwen3Asr => "qwen3_asr",
         asr::AsrProviderType::Deepgram => "deepgram",
         asr::AsrProviderType::GeminiTranscribe => "gemini_transcribe",
@@ -20888,6 +20890,7 @@ fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrProviderType>
         "openai_cloud" => Some(asr::AsrProviderType::OpenAiCloud),
         "groq" => Some(asr::AsrProviderType::Groq),
         "cohere_transcribe" => Some(asr::AsrProviderType::CohereTranscribe),
+        "cohere_local" => Some(asr::AsrProviderType::CohereLocal),
         "qwen3_asr" => Some(asr::AsrProviderType::Qwen3Asr),
         "deepgram" => Some(asr::AsrProviderType::Deepgram),
         "gemini_transcribe" => Some(asr::AsrProviderType::GeminiTranscribe),
