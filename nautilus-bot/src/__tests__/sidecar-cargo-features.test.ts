@@ -49,12 +49,45 @@ describe("sidecar cargo feature set", () => {
       "asr-transcribe-cpp",
     );
     const cargoToml = readRepoFile("rust-sidecar/Cargo.toml");
-    // The git dependency behind it stays optional, and pinned to a commit
-    // rather than a branch, so `--locked` builds are reproducible.
+    // The dependency behind it stays optional, and comes from crates.io at an
+    // exact version. A `git` source is unresolvable from a cargo cache holding
+    // only registry crates, which made `cargo metadata --locked --offline` fail
+    // for EVERY feature set -- the default and release ones included, which
+    // compile none of this -- and took `lint:rust`, `test:rust`,
+    // `licenses:generate` and `release:mac` with it on an offline box.
     const dependency = cargoToml.match(/^transcribe-cpp = \{(.*)\}$/m)?.[1] ?? "";
     expect(dependency).toContain("optional = true");
-    expect(dependency).toMatch(/rev = "[0-9a-f]{40}"/);
+    expect(dependency).toMatch(/version = "\d+\.\d+\.\d+"/);
+    expect(dependency).not.toContain("git =");
     expect(dependency).not.toContain("branch =");
+    expect(dependency).not.toContain("rev =");
+
+    // ...and the lockfile pins it by checksum, which a git source cannot carry.
+    const cargoLock = readRepoFile("rust-sidecar/Cargo.lock");
+    const locked = cargoLock.match(
+      /\[\[package\]\]\nname = "transcribe-cpp"\nversion = "([^"]+)"\nsource = "([^"]+)"\nchecksum = "([0-9a-f]{64})"/,
+    );
+    expect(locked?.[2]).toBe(
+      "registry+https://github.com/rust-lang/crates.io-index",
+    );
+    expect(dependency).toContain(`version = "${locked?.[1]}"`);
+  });
+
+  it("keeps the spike's crates out of the release build's third-party notices", () => {
+    // The spike's backend is named on the dependency line
+    // (`features = ["metal"]`), NOT as a `whisper-gpu`-style
+    // `transcribe-cpp?/metal` feature in `default`. A `dep?/feature` reference
+    // from an enabled feature pulls the optional crate into the release resolve
+    // graph even though nothing compiles it, and
+    // scripts/generate-third-party-notices.mjs resolves that same graph -- so
+    // that shape added transcribe-cpp and transcribe-cpp-sys to the shipped
+    // notices (532 -> 534 Rust packages) for crates the shipped binary does not
+    // contain.
+    const cargoToml = readRepoFile("rust-sidecar/Cargo.toml");
+    // Any non-comment line naming `transcribe-cpp?/…` would be that shape.
+    expect(cargoToml).not.toMatch(/^[^#\n]*"transcribe-cpp\?\/[^"]*"/m);
+    const notices = readRepoFile("THIRD-PARTY-NOTICES.txt");
+    expect(notices).not.toContain("transcribe-cpp");
   });
 
   it("uses one feature list for the release build, cargo wrapper, notices, and CI", () => {

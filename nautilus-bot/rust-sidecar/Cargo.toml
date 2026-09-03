@@ -68,13 +68,37 @@ tokenizers = { version = "0.23", optional = true }
 
 # transcribe.cpp: one ggml runtime that hosts Parakeet TDT, Whisper, Nemotron
 # streaming, Qwen3-ASR, Cohere Transcribe, Voxtral and Moonshine v2 from a
-# single GGUF loader, with Metal on by default on Apple targets. Pulled in only
-# by the `asr-transcribe-cpp` spike feature (OFF by default, not in the release
-# feature list) so the shipped binary is unchanged; see
-# artifacts/qa/transcribe-cpp-spike-2026-09-02.md for the measurement and the
-# adopt/defer recommendation. Pinned to the v0.2.3 release commit rather than a
-# branch so the build is reproducible; MIT-licensed, same as this crate.
-transcribe-cpp = { git = "https://github.com/handy-computer/transcribe.cpp", rev = "63a44d9239d610b3908e8a66b384924cd4a77217", default-features = false, features = ["metal"], optional = true }
+# single GGUF loader. Pulled in only by the `asr-transcribe-cpp` spike feature
+# (OFF by default, not in the release feature list) so the shipped binary is
+# unchanged; see artifacts/qa/transcribe-cpp-spike-2026-09-02.md for the
+# measurement and the adopt/defer recommendation. MIT-licensed, same as this
+# crate.
+#
+# The crates.io release, NOT the git rev it was cut from. A `git` source is not
+# resolvable from a cargo cache that only holds registry crates, so
+# `cargo metadata --locked --offline` failed for EVERY feature set -- including
+# the default and release ones that compile none of this -- which took
+# `lint:rust`, `test:rust`, `licenses:generate` and `release:mac` with it on an
+# offline box. Registry sources resolve from the local cache, and the lockfile
+# gains a checksum a git source cannot carry.
+#
+# Same bytes: transcribe-cpp 0.2.3 and transcribe-cpp-sys 0.2.3 were published
+# from 63a44d9239d610b3908e8a66b384924cd4a77217 (their `.cargo_vcs_info.json`
+# records that sha, which was the `release: 0.2.3` commit this used to pin),
+# and their `Cargo.toml.orig`, Rust sources, `include/`, `src/`, `cmake/` and
+# vendored `ggml/` trees diff clean against that checkout.
+#
+# `default-features = false, features = ["metal"]` rather than a `whisper-gpu`-
+# style `transcribe-cpp?/metal` feature in `default`. That shape was tried and
+# reverted: a `dep?/feature` reference from an ENABLED feature pulls the optional
+# crate into the release resolve graph even though nothing compiles it, which put
+# transcribe-cpp and transcribe-cpp-sys into the shipped THIRD-PARTY-NOTICES
+# (532 -> 534 Rust packages) -- notices for two crates the shipped binary does
+# not contain. Upstream's build.rs only forwards -DTRANSCRIBE_METAL on Apple
+# targets and documents `metal` as a no-op elsewhere, so naming it here does not
+# make this dependency macOS-only. A CPU measurement needs no rebuild either
+# way: PLAINSONG_TRANSCRIBE_CPP_BACKEND=cpu pins the device at runtime.
+transcribe-cpp = { version = "0.2.3", default-features = false, features = ["metal"], optional = true }
 
 # Audio preprocessing. Not optional: the mixed ("Me + Them") capture path
 # resamples whichever of the mic/loopback devices is running at the lower rate
