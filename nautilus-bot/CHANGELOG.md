@@ -266,6 +266,37 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Numbers as digits no longer reads an ordinary sentence as a date. "I may
+  second that motion", "we may first go" and "I march second in the parade"
+  keep their words; a month name that is also an ordinary word now needs a
+  year, a date word in front of it, an explicit "the", a clock time after
+  the day, or the head of a phrase before a day converts.
+- Numbers as digits no longer drops punctuation that sits inside a phrase it
+  rewrites: "ten per (cent", "the first of (May" and "twelve dollars and
+  fifty (cents" keep their parenthesis.
+- A one- or two-letter dictionary correction no longer splits a number it
+  merely appears inside — "twenty five servers" came out "20 five servers"
+  when a correction replaced text with "v".
+- A phrase expansion whose trigger contains a spoken number now still fires
+  with Numbers as digits on; "two factor auth" was being rewritten to
+  "2 factor auth" before the expansion could match.
+- Numbers as digits no longer runs over the result of a voice command, so
+  "replace two with three" can only change what it was asked to change and
+  leaves the rest of the previous insertion alone.
+- Numbers no longer come out half-written. "ten to one odds", "point five"
+  and a spoken digit run of a length with no phone shape stay as words, and
+  a run containing a spoken "oh" is written whole — "room two oh one"
+  becomes "room 201" rather than "room 2 oh one". A time preposition also
+  stays in scope across a list, so "at three fifteen, three thirty and three
+  forty five" is three times.
+- Large numbers are written with thousands separators the way they would be
+  typed: 75,000 for cardinals from ten thousand up, $1,200 for currency from
+  one thousand up. Years never get one.
+- "twenty-one" now converts like "twenty-first" already did, with either the
+  ASCII hyphen or the non-breaking hyphen some decoders emit.
+- The AI formatting pass is now told to keep numerals, currency, times and
+  dates exactly as written, so it cannot spell out what Numbers as digits
+  just wrote.
 - A meeting only stops itself for a call ending when it is the call whose
   offer was actually accepted. A recording started any other way, or started
   from an offer that was waved away, is no longer ended because some

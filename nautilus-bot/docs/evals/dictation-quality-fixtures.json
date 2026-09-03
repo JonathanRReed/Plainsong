@@ -255,6 +255,96 @@
       "label": "URLs and emails are never rewritten",
       "inputText": "the file is at https://example.com/two/three",
       "expectedItnOutput": "the file is at https://example.com/two/three"
+    },
+    {
+      "id": "num-month-word-ordinal-guard",
+      "label": "An ordinal after an ordinary-word month is not a date on its own",
+      "inputText": "i may second that motion",
+      "expectedItnOutput": "i may second that motion"
+    },
+    {
+      "id": "num-month-word-ordinal-guard-first",
+      "label": "A mid-sentence may plus first keeps its words",
+      "inputText": "we may first go",
+      "expectedItnOutput": "we may first go"
+    },
+    {
+      "id": "num-month-word-verb-guard",
+      "label": "March second after a subject is a marching order",
+      "inputText": "i march second in the parade",
+      "expectedItnOutput": "i march second in the parade"
+    },
+    {
+      "id": "num-month-word-with-date-word",
+      "label": "A date word in front of the month makes it a date",
+      "inputText": "let us ship on may first",
+      "expectedItnOutput": "let us ship on May 1"
+    },
+    {
+      "id": "num-span-punctuation-percent",
+      "label": "Punctuation inside a phrase stops the percent rule",
+      "inputText": "ten per (cent",
+      "expectedItnOutput": "10 per (cent"
+    },
+    {
+      "id": "num-span-punctuation-month",
+      "label": "Punctuation inside a phrase stops the ordinal-of-month rule",
+      "inputText": "the first of (May",
+      "expectedItnOutput": "the first of (May"
+    },
+    {
+      "id": "num-span-punctuation-cents",
+      "label": "Punctuation inside a phrase stops the cents rule",
+      "inputText": "twelve dollars and fifty (cents",
+      "expectedItnOutput": "$12.50 (cents"
+    },
+    {
+      "id": "num-all-or-nothing-ratio",
+      "label": "A ratio whose other half stays a word is left alone",
+      "inputText": "ten to one odds",
+      "expectedItnOutput": "ten to one odds"
+    },
+    {
+      "id": "num-all-or-nothing-decimal-tail",
+      "label": "A decimal with no integer half stays words",
+      "inputText": "point five",
+      "expectedItnOutput": "point five"
+    },
+    {
+      "id": "num-digit-run-with-oh",
+      "label": "A spoken oh is a zero inside a digit run",
+      "inputText": "room two oh one",
+      "expectedItnOutput": "room 201"
+    },
+    {
+      "id": "num-digit-run-unshaped-length",
+      "label": "A digit run with no phone shape stays words",
+      "inputText": "code five five five one two three four five",
+      "expectedItnOutput": "code five five five one two three four five"
+    },
+    {
+      "id": "num-thousands-separator",
+      "label": "Large cardinals carry thousands separators",
+      "inputText": "we hired seventy five thousand people",
+      "expectedItnOutput": "we hired 75,000 people"
+    },
+    {
+      "id": "num-currency-separator",
+      "label": "Currency carries separators from one thousand up",
+      "inputText": "one thousand two hundred dollars",
+      "expectedItnOutput": "$1,200"
+    },
+    {
+      "id": "num-hyphenated-cardinal",
+      "label": "A hyphenated cardinal converts like the ordinal does",
+      "inputText": "twenty-one servers",
+      "expectedItnOutput": "21 servers"
+    },
+    {
+      "id": "num-time-list",
+      "label": "A time preposition stays in scope across a list",
+      "inputText": "the slots are at three fifteen, three thirty and three forty five",
+      "expectedItnOutput": "the slots are at 3:15, 3:30 and 3:45"
     }
   ]
 }
