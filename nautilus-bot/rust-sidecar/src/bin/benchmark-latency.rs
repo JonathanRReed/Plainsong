@@ -23,7 +23,9 @@
 //! `DICTATION_STOP_CAPTURE_TAIL_MS` wait, no real insertion, no LLM pass.
 
 use plainsong_lib::asr::{
-    AsrProviderFactory, AsrProviderType, TranscriptionOptions, VocabularyHint,
+    AsrProviderFactory, AsrProviderType, PcmChunker, StreamingPartialTracker, StreamingResampler,
+    TranscriptionOptions, VocabularyHint, DEFAULT_STREAMING_CHUNK_MS, STREAMING_CHUNK_MS_CHOICES,
+    STREAMING_SAMPLE_RATE_HZ,
 };
 use plainsong_lib::dictation_pipeline::{apply_dictation_pipeline, DictationPipelineInput};
 use plainsong_lib::text::format::DictationAppCategory;
@@ -84,6 +86,12 @@ Options:
                         [default: artifacts/qa/dictation-latency-e2e.json]
   --print-transcript    Also print each fixture's full final transcript to
                         stderr (the receipts only carry 160-char samples)
+  --stream              Measure the dictation LIVE PREVIEW instead of a batch
+                        decode: feed --wav to the streaming engine in real
+                        time, in 100 ms slices, and report how long after each
+                        spoken word the first partial containing it arrived.
+                        Needs a build with --features asr-transcribe-cpp.
+  --stream-chunk-ms <MS> Streaming chunk size: 320, 560 or 1120 [default: 560]
   --ensure-model        Fetch the selected model first, through the same
                         pinned-SHA-256 download path the app uses (a model
                         already on disk is verified and receipted, not
@@ -111,6 +119,10 @@ struct BenchmarkArgs {
     report_path_e2e: PathBuf,
     print_transcript: bool,
     ensure_model: bool,
+    /// Measure the live preview instead of a batch decode.
+    stream: bool,
+    /// Streaming chunk size in ms; one of `STREAMING_CHUNK_MS_CHOICES`.
+    stream_chunk_ms: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +201,8 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
     let mut report_path_e2e = None;
     let mut print_transcript = false;
     let mut ensure_model = false;
+    let mut stream = false;
+    let mut stream_chunk_ms = None;
     let mut index = 0;
 
     while index < args.len() {
@@ -230,6 +244,13 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
             }
             "--ensure-model" => {
                 ensure_model = true;
+            }
+            "--stream" => {
+                stream = true;
+            }
+            "--stream-chunk-ms" => {
+                let value = next_value(args, &mut index, "--stream-chunk-ms")?;
+                set_once(&mut stream_chunk_ms, value, "--stream-chunk-ms")?;
             }
             "--" => {}
             unknown => {
@@ -278,6 +299,22 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
         None => DEFAULT_RUNS,
     };
 
+    let stream_chunk_ms = match stream_chunk_ms {
+        Some(value) => value
+            .parse::<u32>()
+            .ok()
+            .filter(|value| STREAMING_CHUNK_MS_CHOICES.contains(value))
+            .ok_or_else(|| {
+                let choices = STREAMING_CHUNK_MS_CHOICES
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("--stream-chunk-ms must be one of: {choices}")
+            })?,
+        None => DEFAULT_STREAMING_CHUNK_MS,
+    };
+
     let wav = existing_wav_path(wav, DEFAULT_WAV)?;
     let secondary_wav = existing_wav_path(secondary_wav, DEFAULT_SECONDARY_WAV)?;
 
@@ -295,6 +332,8 @@ fn parse_args(args: &[String]) -> Result<ParseOutcome, String> {
         ),
         print_transcript,
         ensure_model,
+        stream,
+        stream_chunk_ms,
     }))
 }
 
@@ -770,6 +809,311 @@ fn build_pipeline_report(input: PipelineReportInput<'_>) -> serde_json::Value {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Streaming live-preview harness (`--stream`)
+// ---------------------------------------------------------------------------
+
+/// How much audio each real-time slice carries. Independent of the streaming
+/// chunk size: the harness imitates a capture callback, and the session's own
+/// `PcmChunker` regroups the slices into whole chunks — which is exactly what
+/// the dictation task does, so the seam under test is the real one.
+const STREAM_SLICE_MS: u64 = 100;
+
+/// A word the reference decode aligned, and the wall-clock moment the first
+/// partial containing it arrived.
+#[derive(Debug, Clone)]
+struct WordArrival {
+    word: String,
+    /// When the speaker finished saying it, in ms from the start of the audio.
+    spoken_end_ms: f64,
+    /// When a partial first showed it, in ms from the start of the feed. `None`
+    /// when no partial ever contained it in that position.
+    partial_at_ms: Option<f64>,
+}
+
+impl WordArrival {
+    fn latency_ms(&self) -> Option<f64> {
+        self.partial_at_ms
+            .map(|at| (at - self.spoken_end_ms).max(0.0))
+    }
+}
+
+/// Lowercase alphanumeric tokens, so "Plainsong," and "plainsong" match.
+fn stream_tokens(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn stream_percentile(sorted: &[f64], percentile: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = (percentile / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+/// Process CPU seconds (user + system) burned so far by this process.
+fn process_cpu_seconds() -> f64 {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `usage` is a valid, zeroed `rusage` and RUSAGE_SELF is a
+    // documented constant; getrusage only writes into it.
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
+        return 0.0;
+    }
+    let secs = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1_000_000.0;
+    secs(usage.ru_utime) + secs(usage.ru_stime)
+}
+
+/// Read a WAV as 16 kHz mono f32, the rate every streaming session takes.
+fn load_wav_16k_mono(path: &Path) -> Result<Vec<f32>, String> {
+    let mut reader = hound::WavReader::open(path)
+        .map_err(|error| format!("Could not open {}: {error}", path.display()))?;
+    let spec = reader.spec();
+    let raw: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Could not read {}: {error}", path.display()))?,
+        hound::SampleFormat::Int => {
+            let scale = 1.0 / f32::from(i16::MAX);
+            reader
+                .samples::<i16>()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("Could not read {}: {error}", path.display()))?
+                .into_iter()
+                .map(|sample| f32::from(sample) * scale)
+                .collect()
+        }
+    };
+    let mono: Vec<f32> = if spec.channels <= 1 {
+        raw
+    } else {
+        let channels = usize::from(spec.channels);
+        raw.chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / frame.len() as f32)
+            .collect()
+    };
+    let mut resampler = StreamingResampler::new(spec.sample_rate);
+    Ok(resampler.push(&mono))
+}
+
+/// Feed a fixture to the live-preview engine in real time and report how far
+/// behind the speaker each partial was.
+#[cfg(feature = "asr-transcribe-cpp")]
+fn run_stream_benchmark(args: &BenchmarkArgs) -> i32 {
+    use plainsong_lib::asr::transcribe_cpp::{
+        streaming_reference_words, TranscribeCppStreamingProvider,
+    };
+    use plainsong_lib::asr::StreamingAsrProvider;
+
+    let pcm = match load_wav_16k_mono(&args.wav) {
+        Ok(pcm) => pcm,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return 1;
+        }
+    };
+    let audio_seconds = pcm.len() as f64 / f64::from(STREAMING_SAMPLE_RATE_HZ);
+
+    let provider = TranscribeCppStreamingProvider::with_chunk_ms(args.stream_chunk_ms);
+    if !provider.is_streaming_available() {
+        eprintln!(
+            "Error: the live-preview model is not installed and integrity-verified at {}. \
+             Run `benchmark-latency --provider transcribe_cpp --model {} --ensure-model --runs 1` \
+             first.",
+            provider.model_path().display(),
+            plainsong_lib::asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID
+        );
+        return 1;
+    }
+
+    // Reference alignment first, from a batch decode of the same weights, so
+    // "how long after the word was spoken" has a defensible zero.
+    eprintln!("Aligning the fixture with a batch decode of the same weights...");
+    let reference = match streaming_reference_words(&provider.model_path(), &pcm) {
+        Ok(words) if !words.is_empty() => words,
+        Ok(_) => {
+            eprintln!("Error: the reference decode produced no word timings.");
+            return 1;
+        }
+        Err(error) => {
+            eprintln!("Error: the reference decode failed: {error}");
+            return 1;
+        }
+    };
+
+    eprintln!(
+        "Streaming {} ({:.2} s) in real time at {} ms chunks...",
+        args.wav.display(),
+        audio_seconds,
+        args.stream_chunk_ms
+    );
+    let opened_at = Instant::now();
+    let mut session = match provider.open_session(None) {
+        Ok(session) => session,
+        Err(error) => {
+            eprintln!("Error: could not open a live-preview session: {error}");
+            return 1;
+        }
+    };
+    let model_load_ms = opened_at.elapsed().as_millis() as u64;
+    let chunk_samples = session.chunk_samples();
+    let mut chunker = PcmChunker::new(chunk_samples);
+    let mut tracker = StreamingPartialTracker::new();
+
+    let slice_samples =
+        (u64::from(STREAMING_SAMPLE_RATE_HZ) * STREAM_SLICE_MS / 1000).max(1) as usize;
+    let mut arrivals: Vec<WordArrival> = reference
+        .iter()
+        .map(|(word, end_s)| WordArrival {
+            word: word.trim().to_string(),
+            spoken_end_ms: end_s * 1000.0,
+            partial_at_ms: None,
+        })
+        .collect();
+    let reference_tokens: Vec<String> = arrivals
+        .iter()
+        .map(|arrival| stream_tokens(&arrival.word).join(""))
+        .collect();
+
+    let mut feed_ms: Vec<f64> = Vec::new();
+    let mut partial_count = 0usize;
+    let cpu_before = process_cpu_seconds();
+    let started = Instant::now();
+
+    for (index, slice) in pcm.chunks(slice_samples).enumerate() {
+        // Real time: hold each slice until its audio would actually have been
+        // captured. A preview that only looks fast because the harness fed it
+        // faster than a person speaks is not a measurement.
+        let due = Duration::from_millis((index as u64 + 1) * STREAM_SLICE_MS);
+        if let Some(wait) = due.checked_sub(started.elapsed()) {
+            std::thread::sleep(wait);
+        }
+        for chunk in chunker.push(slice) {
+            let fed_at = Instant::now();
+            let partial = match session.feed(&chunk) {
+                Ok(partial) => partial,
+                Err(error) => {
+                    eprintln!("Error: the live-preview session failed mid-stream: {error}");
+                    return 1;
+                }
+            };
+            feed_ms.push(fed_at.elapsed().as_secs_f64() * 1000.0);
+            if tracker.accept(&partial) {
+                partial_count += 1;
+                let at_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let seen = stream_tokens(&tracker.display());
+                for (position, token) in seen.iter().enumerate() {
+                    if reference_tokens.get(position) == Some(token)
+                        && arrivals[position].partial_at_ms.is_none()
+                    {
+                        arrivals[position].partial_at_ms = Some(at_ms);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(remainder) = chunker.take_remainder() {
+        let _ = session.feed(&remainder);
+    }
+    let final_partial = session.finalize();
+    let stream_wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let cpu_seconds = process_cpu_seconds() - cpu_before;
+    if let Ok(partial) = final_partial.as_ref() {
+        tracker.accept(partial);
+    }
+    drop(session);
+
+    let mut latencies: Vec<f64> = arrivals
+        .iter()
+        .filter_map(WordArrival::latency_ms)
+        .collect();
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut feeds = feed_ms.clone();
+    feeds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let matched = latencies.len();
+    let report = serde_json::json!({
+        "metricScope": "streaming_partial_only",
+        "engine": "transcribe_cpp_nemotron_streaming",
+        "fixture": args.wav.to_string_lossy(),
+        "audioSeconds": (audio_seconds * 1000.0).round() / 1000.0,
+        "chunkMs": args.stream_chunk_ms,
+        "sliceMs": STREAM_SLICE_MS,
+        "modelLoadMs": model_load_ms,
+        "referenceWords": reference.len(),
+        "wordsMatchedInAPartial": matched,
+        "partialsEmitted": partial_count,
+        "partialLatencyMs": {
+            "p50": if matched == 0 { 0.0 } else { (stream_percentile(&latencies, 50.0) * 10.0).round() / 10.0 },
+            "p95": if matched == 0 { 0.0 } else { (stream_percentile(&latencies, 95.0) * 10.0).round() / 10.0 },
+            "max": latencies.last().copied().unwrap_or(0.0),
+        },
+        "feedCallMs": {
+            "p50": (stream_percentile(&feeds, 50.0) * 10.0).round() / 10.0,
+            "p95": (stream_percentile(&feeds, 95.0) * 10.0).round() / 10.0,
+        },
+        "sidecarCpuPercentWhileStreaming":
+            ((cpu_seconds / (stream_wall_ms / 1000.0).max(0.001)) * 1000.0).round() / 10.0,
+        "finalPreviewText": tracker.display().trim(),
+        "referenceText": reference
+            .iter()
+            .map(|(word, _)| word.trim())
+            .collect::<Vec<_>>()
+            .join(" "),
+    });
+    println!(
+        "{}",
+        serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string())
+    );
+
+    eprintln!("\n--- Streaming live preview ---");
+    eprintln!("  chunk size          {} ms", args.stream_chunk_ms);
+    eprintln!("  session open        {model_load_ms} ms (model load)");
+    eprintln!("  partials emitted    {partial_count}");
+    eprintln!(
+        "  words aligned       {matched}/{} (a word the preview never showed in its \
+         reference position has no latency)",
+        reference.len()
+    );
+    if matched > 0 {
+        eprintln!(
+            "  partial latency     p50 {:.0} ms / p95 {:.0} ms / max {:.0} ms after the word ended",
+            stream_percentile(&latencies, 50.0),
+            stream_percentile(&latencies, 95.0),
+            latencies.last().copied().unwrap_or(0.0)
+        );
+    }
+    eprintln!(
+        "  feed() call         p50 {:.1} ms / p95 {:.1} ms",
+        stream_percentile(&feeds, 50.0),
+        stream_percentile(&feeds, 95.0)
+    );
+    eprintln!(
+        "  sidecar CPU         {:.1}% of one core over the {:.1} s stream",
+        (cpu_seconds / (stream_wall_ms / 1000.0).max(0.001)) * 100.0,
+        stream_wall_ms / 1000.0
+    );
+    eprintln!("  preview text        {}", tracker.display().trim());
+    0
+}
+
+#[cfg(not(feature = "asr-transcribe-cpp"))]
+fn run_stream_benchmark(_args: &BenchmarkArgs) -> i32 {
+    eprintln!(
+        "Error: --stream needs a build with --features asr-transcribe-cpp; this one has no \
+         streaming engine compiled in."
+    );
+    2
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse_args(&raw_args) {
@@ -799,6 +1143,10 @@ fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ort::logging=warn")),
         )
         .init();
+
+    if args.stream {
+        std::process::exit(run_stream_benchmark(&args));
+    }
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async move {

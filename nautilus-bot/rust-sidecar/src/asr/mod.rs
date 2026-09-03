@@ -259,19 +259,24 @@ pub const STREAMING_SAMPLE_RATE_HZ: u32 = 16_000;
 
 /// The chunk sizes a caller may pick from, smallest first.
 ///
-/// Cache-aware streaming FastConformers (Nemotron 3.5 ASR Streaming, the only
-/// family Plainsong has measured — see
-/// `artifacts/qa/transcribe-cpp-spike-2026-09-02.md`) are trained for a small
-/// set of look-ahead sizes; upstream documents 80 ms, 160 ms, 560 ms and
-/// 1120 ms. 80 ms is left out because at that size the per-chunk call overhead
-/// dominates on a machine that is also running the app.
+/// A cache-aware streaming FastConformer does not accept an arbitrary chunk:
+/// the chunk is the encoder's right-context window, and the model ships a
+/// discrete set of operating points. For Nemotron 3.5 ASR Streaming — the only
+/// streaming family Plainsong has measured, see
+/// `artifacts/qa/transcribe-cpp-spike-2026-09-02.md` — the GGUF port exposes
+/// `att_context_right` of 0, 3, 6 or 13, which at 80 ms per frame is 80, 320,
+/// 560 and 1120 ms. (NVIDIA's own card also names 160 ms, but the port does not
+/// offer the `att_context_right = 1` that would select it, so it is not in this
+/// table; the C1 lane brief asked for 160 and this is why it is 320 instead.)
+/// 80 ms is left out because at that size the per-chunk call overhead dominates
+/// on a machine that is also running the app.
 ///
 /// The tradeoff runs one way: a smaller chunk means the first partial arrives
 /// sooner and costs more encoder work per second of audio; a larger one means
 /// fewer, better-conditioned partials. 560 ms is the default because it is the
 /// largest chunk that still fits a ~600 ms end-to-end preview budget, and
 /// `artifacts/qa/streaming-partials-receipt-2026-09-02.md` measures all three.
-pub const STREAMING_CHUNK_MS_CHOICES: [u32; 3] = [160, 560, 1120];
+pub const STREAMING_CHUNK_MS_CHOICES: [u32; 3] = [320, 560, 1120];
 
 /// The chunk size a live preview opens with. Index 1 of the table above.
 pub const DEFAULT_STREAMING_CHUNK_MS: u32 = STREAMING_CHUNK_MS_CHOICES[1];
@@ -648,7 +653,7 @@ mod streaming_seam_tests {
         );
         assert!(STREAMING_CHUNK_MS_CHOICES.contains(&DEFAULT_STREAMING_CHUNK_MS));
         assert_eq!(streaming_chunk_samples(560), 8_960);
-        assert_eq!(streaming_chunk_samples(160), 2_560);
+        assert_eq!(streaming_chunk_samples(320), 5_120);
         assert_eq!(streaming_chunk_samples(1120), 17_920);
         // Never zero, whatever a caller does.
         assert_eq!(streaming_chunk_samples(0), 16);

@@ -22,8 +22,9 @@
 //! - The measurements are in `artifacts/qa/transcribe-cpp-spike-2026-09-02.md`.
 
 use super::{
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, ModelOption, TranscriptSegment,
-    TranscriptionResult,
+    streaming_chunk_samples, AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, ModelOption,
+    Partial, StreamingAsrProvider, StreamingAsrSession, TranscriptSegment, TranscriptionResult,
+    DEFAULT_STREAMING_CHUNK_MS, STREAMING_CHUNK_MS_CHOICES, STREAMING_SAMPLE_RATE_HZ,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -32,7 +33,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 use transcribe_cpp::{
-    Backend, CancelToken, Model, ModelOptions, RunOptions, Session, TimestampKind,
+    Backend, CancelToken, CommitPolicy, Model, ModelOptions, ParakeetStreamOptions, RunOptions,
+    Session, StreamExtension, StreamOptions, TimestampKind,
 };
 
 /// Directory under `models/` that holds every GGUF this provider fetches.
@@ -1041,9 +1043,699 @@ impl AsrProvider for TranscribeCppProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming session (live dictation preview)
+// ---------------------------------------------------------------------------
+
+/// The language codes the pinned Nemotron GGUF declares in its own model-card
+/// metadata at the revision this app downloads.
+///
+/// Three different counts are in circulation for this model and it matters
+/// which one the gate uses. NVIDIA advertises **40 language-locales**; the GGUF
+/// port's card says **32** are supported ("the model's tokenizer recognizes 40,
+/// but 8 are adaptation-ready and need fine-tuning"); and the file's own
+/// `language:` metadata — the only one that is pinned with the bytes — lists
+/// the **28** codes below. The gate uses the 28, because that is the list the
+/// artifact on disk actually claims, and being wrong here means showing a live
+/// preview in a language the recognizer will garble.
+pub(crate) const NEMOTRON_STREAMING_LANGUAGES: &[&str] = &[
+    "en", "es", "fr", "it", "pt", "nl", "de", "tr", "ru", "ar", "hi", "ja", "ko", "vi", "uk", "pl",
+    "sv", "cs", "nb", "da", "bg", "fi", "hr", "sk", "zh", "hu", "ro", "et",
+];
+
+/// The cache-aware right-context that produces `chunk_ms` of look-ahead.
+///
+/// The encoder advances 80 ms per frame, so `att_context_right` of 0, 3, 6 and
+/// 13 are 80, 320, 560 and 1120 ms — the four operating points the GGUF port
+/// exposes. An unrecognised size falls back to the default rather than pinning
+/// a value the model was not trained on.
+pub(crate) fn att_context_right_for_chunk_ms(chunk_ms: u32) -> i32 {
+    match chunk_ms {
+        80 => 0,
+        320 => 3,
+        560 => 6,
+        1120 => 13,
+        _ => att_context_right_for_chunk_ms(DEFAULT_STREAMING_CHUNK_MS),
+    }
+}
+
+/// How long a single `feed`/`finalize`/`reset` may take before the session is
+/// declared dead.
+///
+/// A live preview that has stopped answering must not hold the dictation stop
+/// path open waiting for it. Generous next to a measured per-chunk decode
+/// (tens of milliseconds) so ordinary contention never trips it.
+const STREAM_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What one `feed`/`finalize` produced, moved back over the channel.
+struct StreamOutcome {
+    stable: String,
+    volatile: String,
+}
+
+enum StreamCommand {
+    Feed(Vec<f32>),
+    Finalize,
+    Reset,
+}
+
+/// Opens Nemotron streaming sessions for the dictation live preview.
+///
+/// Separate from [`TranscribeCppProvider`] on purpose: that one is a route the
+/// user can select and it transcribes what gets inserted. This one is never a
+/// route — `route_model_options()` does not offer the Nemotron GGUF — and
+/// nothing it produces can reach the inserted text.
+pub struct TranscribeCppStreamingProvider {
+    model_dir: PathBuf,
+    chunk_ms: u32,
+}
+
+impl TranscribeCppStreamingProvider {
+    pub fn new() -> Self {
+        Self::with_chunk_ms(DEFAULT_STREAMING_CHUNK_MS)
+    }
+
+    /// The same provider at a named chunk size. `benchmark-latency --stream`
+    /// uses it to measure every entry of `STREAMING_CHUNK_MS_CHOICES`.
+    pub fn with_chunk_ms(chunk_ms: u32) -> Self {
+        let models_root = crate::paths::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Plainsong")
+            .join("models");
+        Self::with_models_root(&models_root, chunk_ms)
+    }
+
+    pub(crate) fn with_models_root(models_root: &Path, chunk_ms: u32) -> Self {
+        Self {
+            model_dir: models_root.join(TRANSCRIBE_CPP_MODEL_DIR),
+            chunk_ms: if STREAMING_CHUNK_MS_CHOICES.contains(&chunk_ms) {
+                chunk_ms
+            } else {
+                DEFAULT_STREAMING_CHUNK_MS
+            },
+        }
+    }
+
+    pub(crate) fn spec() -> &'static TranscribeCppModelSpec {
+        spec_for(NEMOTRON_STREAMING_GGUF_MODEL_ID)
+    }
+
+    pub fn model_path(&self) -> PathBuf {
+        self.model_dir.join(Self::spec().file_name)
+    }
+
+    pub fn chunk_ms(&self) -> u32 {
+        self.chunk_ms
+    }
+}
+
+impl Default for TranscribeCppStreamingProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamingAsrProvider for TranscribeCppStreamingProvider {
+    fn streaming_engine_name(&self) -> &str {
+        "Nemotron 3.5 ASR Streaming via transcribe.cpp"
+    }
+
+    fn streaming_model_id(&self) -> &str {
+        NEMOTRON_STREAMING_GGUF_MODEL_ID
+    }
+
+    /// The receipt, not the bytes — the same rule the batch route follows. A
+    /// half-written GGUF is not a live preview, it is a crash.
+    fn is_streaming_available(&self) -> bool {
+        let path = self.model_path();
+        std::fs::metadata(&path)
+            .map(|metadata| metadata.is_file() && metadata.len() > 0)
+            .unwrap_or(false)
+            && crate::download::is_model_artifact_trusted(&path, Some(Self::spec().sha256))
+    }
+
+    fn supports_language(&self, language: Option<&str>) -> bool {
+        let Some(language) = language else {
+            // No language selected means "let the recognizer decide", and this
+            // model has language detection. Nothing to refuse.
+            return true;
+        };
+        let normalized = language.trim().to_ascii_lowercase();
+        if normalized.is_empty() || normalized == "auto" {
+            return true;
+        }
+        // Accept both `en` and locale forms like `en-US` / `en_US`.
+        let base = normalized
+            .split(['-', '_'])
+            .next()
+            .unwrap_or(normalized.as_str());
+        NEMOTRON_STREAMING_LANGUAGES.contains(&base)
+    }
+
+    fn open_session(&self, language_hint: Option<&str>) -> Result<Box<dyn StreamingAsrSession>> {
+        let session = TranscribeCppStreamingSession::open(
+            &self.model_path(),
+            backend_choice_from_env(),
+            language_hint,
+            self.chunk_ms,
+        )?;
+        Ok(Box::new(session))
+    }
+}
+
+/// One live Nemotron stream, driven from a dedicated OS thread.
+///
+/// The binding's `Stream<'a>` borrows its `Session` mutably for the stream's
+/// whole life, so a struct owning both would be self-referential. Rather than
+/// reach for a raw pointer, the model, session and stream all live on one
+/// thread and this handle talks to it over a channel. Two things fall out for
+/// free: the native calls never touch a tokio worker, and closing the session
+/// *joins* that thread — so when `stop_dictation_for_sidecar` closes the
+/// preview, the GPU is provably released before the batch decode asks for it.
+///
+/// The model is loaded per session and dropped when the session closes.
+/// Caching it would save the ~0.5 s load on every dictation after the first, at
+/// the cost of holding roughly a gigabyte resident for the rest of the app's
+/// life; a preview is not worth that, and the load happens while the user is
+/// still drawing breath.
+pub struct TranscribeCppStreamingSession {
+    commands: Option<std::sync::mpsc::Sender<StreamCommand>>,
+    replies: std::sync::mpsc::Receiver<Result<StreamOutcome>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    chunk_samples: usize,
+    fed_samples: u64,
+    /// False once a call timed out or the worker died: the thread may still be
+    /// inside a native call, so it is detached rather than joined.
+    healthy: bool,
+    load_ms: u64,
+}
+
+impl TranscribeCppStreamingSession {
+    /// Milliseconds spent loading the model when this session opened. The
+    /// receipt reports it; nothing in the app reads it.
+    pub fn load_ms(&self) -> u64 {
+        self.load_ms
+    }
+
+    fn open(
+        model_path: &Path,
+        backend: BackendChoice,
+        language_hint: Option<&str>,
+        chunk_ms: u32,
+    ) -> Result<Self> {
+        let model_label = model_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let owned_path = model_path.to_path_buf();
+        let language = language_hint
+            .map(str::trim)
+            .filter(|hint| !hint.is_empty() && !hint.eq_ignore_ascii_case("auto"))
+            .map(str::to_string);
+        let att_context_right = att_context_right_for_chunk_ms(chunk_ms);
+
+        let (command_tx, command_rx) = std::sync::mpsc::channel::<StreamCommand>();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel::<Result<StreamOutcome>>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u64>>();
+
+        let worker_label = model_label.clone();
+        let worker = std::thread::Builder::new()
+            .name("plainsong-live-preview".to_string())
+            .spawn(move || {
+                stream_worker(
+                    owned_path,
+                    backend,
+                    language,
+                    att_context_right,
+                    worker_label,
+                    ready_tx,
+                    command_rx,
+                    reply_tx,
+                );
+            })
+            .context("Failed to start the live-preview thread")?;
+
+        let load_ms = match ready_rx.recv() {
+            Ok(Ok(load_ms)) => load_ms,
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = worker.join();
+                anyhow::bail!(
+                    "The live-preview engine stopped before it could load '{model_label}'."
+                );
+            }
+        };
+
+        Ok(Self {
+            commands: Some(command_tx),
+            replies: reply_rx,
+            worker: Some(worker),
+            chunk_samples: streaming_chunk_samples(chunk_ms),
+            fed_samples: 0,
+            healthy: true,
+            load_ms,
+        })
+    }
+
+    /// Send one command and wait for its reply, marking the session dead if the
+    /// worker does not answer.
+    fn call(&mut self, command: StreamCommand) -> Result<StreamOutcome> {
+        if !self.healthy {
+            anyhow::bail!("The live-preview session is no longer running.");
+        }
+        let Some(commands) = self.commands.as_ref() else {
+            anyhow::bail!("The live-preview session is closed.");
+        };
+        if commands.send(command).is_err() {
+            self.healthy = false;
+            anyhow::bail!("The live-preview engine stopped.");
+        }
+        match self.replies.recv_timeout(STREAM_CALL_TIMEOUT) {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(error)) => Err(error),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.healthy = false;
+                anyhow::bail!(
+                    "The live-preview engine did not answer within {} s.",
+                    STREAM_CALL_TIMEOUT.as_secs()
+                )
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                self.healthy = false;
+                anyhow::bail!("The live-preview engine stopped.")
+            }
+        }
+    }
+
+    fn partial_from(&self, outcome: StreamOutcome) -> Partial {
+        Partial {
+            stable_prefix: outcome.stable,
+            volatile_suffix: outcome.volatile,
+            elapsed_audio_s: self.fed_samples as f64 / f64::from(STREAMING_SAMPLE_RATE_HZ),
+        }
+    }
+
+    /// Shut the worker down. Joins only when the session is still healthy: a
+    /// thread that is wedged inside a native call would otherwise block the
+    /// dictation stop path forever.
+    pub fn close(&mut self) {
+        self.commands = None;
+        if let Some(worker) = self.worker.take() {
+            if self.healthy {
+                let _ = worker.join();
+            } else {
+                tracing::warn!(
+                    "Left the live-preview thread detached: it stopped answering, so joining it \
+                     would block the dictation stop path"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for TranscribeCppStreamingSession {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+impl StreamingAsrSession for TranscribeCppStreamingSession {
+    fn feed(&mut self, pcm16k: &[f32]) -> Result<Partial> {
+        self.fed_samples = self.fed_samples.saturating_add(pcm16k.len() as u64);
+        let outcome = self.call(StreamCommand::Feed(pcm16k.to_vec()))?;
+        Ok(self.partial_from(outcome))
+    }
+
+    fn finalize(&mut self) -> Result<Partial> {
+        let outcome = self.call(StreamCommand::Finalize)?;
+        Ok(self.partial_from(outcome))
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.call(StreamCommand::Reset)?;
+        self.fed_samples = 0;
+        Ok(())
+    }
+
+    fn chunk_samples(&self) -> usize {
+        self.chunk_samples
+    }
+}
+
+/// The body of the live-preview thread: load once, then serve commands until
+/// the handle drops.
+#[allow(clippy::too_many_arguments)]
+fn stream_worker(
+    model_path: PathBuf,
+    backend: BackendChoice,
+    language: Option<String>,
+    att_context_right: i32,
+    model_label: String,
+    ready_tx: std::sync::mpsc::Sender<Result<u64>>,
+    command_rx: std::sync::mpsc::Receiver<StreamCommand>,
+    reply_tx: std::sync::mpsc::Sender<Result<StreamOutcome>>,
+) {
+    let started = Instant::now();
+    let model = match Model::load_with(
+        &model_path,
+        &ModelOptions {
+            backend: backend.to_backend(),
+            device: None,
+        },
+    ) {
+        Ok(model) => model,
+        Err(error) => {
+            let _ = ready_tx.send(Err(anyhow::anyhow!(describe_transcribe_error(
+                &model_label,
+                &error
+            ))));
+            return;
+        }
+    };
+    if !model.capabilities().supports_streaming {
+        let _ = ready_tx.send(Err(anyhow::anyhow!(
+            "'{model_label}' is not a streaming model, so it cannot drive the live preview."
+        )));
+        return;
+    }
+    let mut session = match model.session() {
+        Ok(session) => session,
+        Err(error) => {
+            let _ = ready_tx.send(Err(anyhow::anyhow!(describe_transcribe_error(
+                &model_label,
+                &error
+            ))));
+            return;
+        }
+    };
+    let load_ms = started.elapsed().as_millis() as u64;
+    tracing::info!(
+        "Live preview loaded {} on {} in {} ms",
+        model_path.display(),
+        backend.label(),
+        load_ms
+    );
+    if ready_tx.send(Ok(load_ms)).is_err() {
+        return;
+    }
+
+    let run_options = RunOptions {
+        // Text only: the preview renders words, and asking for alignment makes
+        // the family materialize rows nobody reads.
+        timestamps: TimestampKind::None,
+        language,
+        ..RunOptions::default()
+    };
+    // Cache-aware right context matched to the chunk size the caller feeds.
+    // If the family rejects the extension the stream is begun without it
+    // rather than failing the preview outright — the model's own default
+    // operating point still streams.
+    let with_extension = StreamOptions {
+        commit_policy: CommitPolicy::Auto,
+        stable_prefix_agreement_n: 0,
+        family: Some(StreamExtension::ParakeetStream(ParakeetStreamOptions {
+            att_context_right: Some(att_context_right),
+        })),
+    };
+    let without_extension = StreamOptions {
+        commit_policy: CommitPolicy::Auto,
+        ..StreamOptions::default()
+    };
+    // Probed once, before any audio: begin a stream with the extension and
+    // abandon it. Deciding per utterance would mean a failed `begin` inside the
+    // reset path, where there is no caller left to tell.
+    let stream_options = match session.stream(&run_options, &with_extension) {
+        Ok(mut probe) => {
+            probe.reset();
+            with_extension
+        }
+        Err(error) => {
+            tracing::debug!(
+                "Live preview could not set the cache-aware right context ({}); \
+                 falling back to the model's default streaming point",
+                error
+            );
+            without_extension
+        }
+    };
+
+    'session: loop {
+        let mut stream = match session.stream(&run_options, &stream_options) {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = reply_tx.send(Err(anyhow::anyhow!(describe_transcribe_error(
+                    &model_label,
+                    &error
+                ))));
+                return;
+            }
+        };
+
+        loop {
+            let Ok(command) = command_rx.recv() else {
+                // The handle dropped: abandon the stream and let the model go.
+                return;
+            };
+            match command {
+                StreamCommand::Feed(pcm) => {
+                    let outcome = stream
+                        .feed(&pcm)
+                        .map_err(|error| {
+                            anyhow::anyhow!(describe_transcribe_error(&model_label, &error))
+                        })
+                        .map(|_| {
+                            let text = stream.text();
+                            StreamOutcome {
+                                stable: text.committed,
+                                volatile: text.tentative,
+                            }
+                        });
+                    if reply_tx.send(outcome).is_err() {
+                        return;
+                    }
+                }
+                StreamCommand::Finalize => {
+                    let outcome = stream
+                        .finalize()
+                        .map_err(|error| {
+                            anyhow::anyhow!(describe_transcribe_error(&model_label, &error))
+                        })
+                        .map(|_| {
+                            let text = stream.text();
+                            StreamOutcome {
+                                stable: text.committed,
+                                volatile: text.tentative,
+                            }
+                        });
+                    if reply_tx.send(outcome).is_err() {
+                        return;
+                    }
+                }
+                StreamCommand::Reset => {
+                    stream.reset();
+                    if reply_tx
+                        .send(Ok(StreamOutcome {
+                            stable: String::new(),
+                            volatile: String::new(),
+                        }))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue 'session;
+                }
+            }
+        }
+    }
+}
+
+/// Word end times from a batch decode of the *same* weights, in seconds.
+///
+/// Only the streaming receipt uses this: "partial latency" is measured from the
+/// moment a word finishes being spoken to the moment a partial containing it
+/// arrives, and something has to say when each word finished. Taking it from
+/// the same model that is being streamed keeps the two sides comparable — a
+/// different recognizer's alignment would fold its own segmentation into the
+/// number. Nothing in the app calls this.
+pub fn streaming_reference_words(model_path: &Path, pcm: &[f32]) -> Result<Vec<(String, f64)>> {
+    let model_label = model_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let model = Model::load_with(
+        model_path,
+        &ModelOptions {
+            backend: backend_choice_from_env().to_backend(),
+            device: None,
+        },
+    )
+    .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))?;
+    let mut session = model
+        .session()
+        .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))?;
+    let transcript = session
+        .run(
+            pcm,
+            &RunOptions {
+                timestamps: TimestampKind::Word,
+                ..RunOptions::default()
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))?;
+    Ok(transcript
+        .words
+        .iter()
+        .map(|word| (word.text.clone(), word.t1_ms as f64 / 1000.0))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_streaming_language_gate_uses_the_list_the_pinned_file_declares() {
+        let provider = TranscribeCppStreamingProvider::with_models_root(
+            Path::new("/nonexistent"),
+            DEFAULT_STREAMING_CHUNK_MS,
+        );
+        // 28 codes, from the GGUF's own `language:` metadata at the pinned
+        // revision. Not NVIDIA's advertised 40 locales, and not the port
+        // card's 32: this is the list the artifact on disk claims.
+        assert_eq!(NEMOTRON_STREAMING_LANGUAGES.len(), 28);
+        for supported in ["en", "es", "ja", "uk", "zh"] {
+            assert!(provider.supports_language(Some(supported)), "{supported}");
+        }
+        // Locale forms resolve to their base language.
+        assert!(provider.supports_language(Some("en-US")));
+        assert!(provider.supports_language(Some("pt_BR")));
+        // "no language selected" is not a refusal: the model detects it.
+        assert!(provider.supports_language(None));
+        assert!(provider.supports_language(Some("auto")));
+        assert!(provider.supports_language(Some("  ")));
+        // Anything the file does not declare keeps the older preview.
+        for unsupported in ["yue", "th", "he", "sw", "fil"] {
+            assert!(
+                !provider.supports_language(Some(unsupported)),
+                "{unsupported} is not in the pinned list and must not be claimed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_offered_chunk_size_maps_to_an_operating_point_the_model_ships() {
+        // att_context_right 0/3/6/13 at 80 ms per encoder frame.
+        assert_eq!(att_context_right_for_chunk_ms(80), 0);
+        assert_eq!(att_context_right_for_chunk_ms(320), 3);
+        assert_eq!(att_context_right_for_chunk_ms(560), 6);
+        assert_eq!(att_context_right_for_chunk_ms(1120), 13);
+        // Every size the app can pick is one of those.
+        for chunk_ms in STREAMING_CHUNK_MS_CHOICES {
+            assert!(
+                [0, 3, 6, 13].contains(&att_context_right_for_chunk_ms(chunk_ms)),
+                "{chunk_ms} ms has no operating point"
+            );
+        }
+        // A size the model was not trained on falls back to the default rather
+        // than pinning a right-context that does not exist.
+        assert_eq!(
+            att_context_right_for_chunk_ms(999),
+            att_context_right_for_chunk_ms(DEFAULT_STREAMING_CHUNK_MS)
+        );
+    }
+
+    #[test]
+    fn a_chunk_size_outside_the_table_falls_back_to_the_default() {
+        for requested in [0u32, 100, 999, 5_000] {
+            let provider =
+                TranscribeCppStreamingProvider::with_models_root(Path::new("/x"), requested);
+            assert_eq!(provider.chunk_ms(), DEFAULT_STREAMING_CHUNK_MS);
+        }
+        for requested in STREAMING_CHUNK_MS_CHOICES {
+            let provider =
+                TranscribeCppStreamingProvider::with_models_root(Path::new("/x"), requested);
+            assert_eq!(provider.chunk_ms(), requested);
+        }
+    }
+
+    /// Readiness is the integrity receipt, not the bytes. A file that is merely
+    /// present must not open a session.
+    #[test]
+    fn a_present_but_unverified_gguf_is_not_an_available_streaming_engine() {
+        let root = std::env::temp_dir()
+            .join("plainsong-streaming-availability")
+            .join(uuid::Uuid::new_v4().to_string());
+        let dir = root.join(TRANSCRIBE_CPP_MODEL_DIR);
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let provider =
+            TranscribeCppStreamingProvider::with_models_root(&root, DEFAULT_STREAMING_CHUNK_MS);
+        assert!(!provider.is_streaming_available(), "no file at all");
+
+        std::fs::write(provider.model_path(), b"not really a gguf").expect("write");
+        assert!(
+            !provider.is_streaming_available(),
+            "bytes without a trusted integrity receipt are not a usable engine"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_streaming_engine_names_the_model_the_route_catalog_refuses_to_offer() {
+        let provider = TranscribeCppStreamingProvider::with_models_root(
+            Path::new("/x"),
+            DEFAULT_STREAMING_CHUNK_MS,
+        );
+        assert_eq!(
+            provider.streaming_model_id(),
+            NEMOTRON_STREAMING_GGUF_MODEL_ID
+        );
+        // The whole point: it is a preview engine, never a transcription route.
+        assert!(route_model_options()
+            .iter()
+            .all(|option| option.id != NEMOTRON_STREAMING_GGUF_MODEL_ID));
+        assert!(!TranscribeCppStreamingProvider::spec().offered_as_route);
+    }
+
+    /// The real thing, when the weights happen to be installed on this machine.
+    ///
+    /// Skipped rather than failed otherwise: this is a unit-test suite that has
+    /// to pass on a checkout with no 716 MB GGUF in it. `--stream` in
+    /// `benchmark-latency` is the measured version of the same path, and
+    /// `artifacts/qa/streaming-partials-receipt-2026-09-02.md` is its receipt.
+    #[test]
+    fn an_installed_streaming_engine_transcribes_a_fed_tone_without_panicking() {
+        let provider = TranscribeCppStreamingProvider::new();
+        if !provider.is_streaming_available() {
+            eprintln!("skipping: the Nemotron streaming GGUF is not installed here");
+            return;
+        }
+        let mut session = provider.open_session(Some("en")).expect("open a session");
+        assert_eq!(
+            session.chunk_samples(),
+            streaming_chunk_samples(DEFAULT_STREAMING_CHUNK_MS)
+        );
+        // Silence: the words do not matter here, the state machine does.
+        let chunk = vec![0.0f32; session.chunk_samples()];
+        for _ in 0..3 {
+            let partial = session.feed(&chunk).expect("feed silence");
+            assert!(
+                partial.elapsed_audio_s > 0.0,
+                "the session must report the audio it has taken"
+            );
+        }
+        let final_partial = session.finalize().expect("finalize");
+        assert!(
+            final_partial.is_empty(),
+            "silence should not produce words: {final_partial:?}"
+        );
+        session.reset().expect("reset reopens the stream");
+        session.feed(&chunk).expect("feed after reset");
+    }
 
     #[test]
     fn every_pinned_model_has_an_immutable_url_and_a_full_length_digest() {
