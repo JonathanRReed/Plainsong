@@ -18,6 +18,9 @@ const downloadLivePreviewEngineModelMock = vi.fn();
 const deleteLivePreviewEngineModelMock = vi.fn();
 const installAppleSpeechLanguageMock = vi.fn();
 const cancelAppleSpeechLanguageInstallMock = vi.fn();
+const listOllamaModelCatalogMock = vi.fn();
+const installOllamaModelMock = vi.fn();
+const cancelOllamaModelInstallMock = vi.fn();
 const readinessContext = vi.hoisted(() => ({
   refresh: vi.fn(async () => {}),
   productReadiness: {
@@ -54,6 +57,9 @@ vi.mock("@/lib/backend/ai", () => ({
   getLivePreviewEngineStatus: () => getLivePreviewEngineStatusMock(),
   downloadLivePreviewEngineModel: () => downloadLivePreviewEngineModelMock(),
   deleteLivePreviewEngineModel: () => deleteLivePreviewEngineModelMock(),
+  listOllamaModelCatalog: () => listOllamaModelCatalogMock(),
+  installOllamaModel: (modelId: string, acceptedLicense: boolean) => installOllamaModelMock(modelId, acceptedLicense),
+  cancelOllamaModelInstall: () => cancelOllamaModelInstallMock(),
 }));
 
 /** A build with the streaming engine compiled in, weights not yet fetched. */
@@ -336,6 +342,24 @@ describe("Models screen", () => {
       notes: [],
     });
     cancelAppleSpeechLanguageInstallMock.mockResolvedValue(undefined);
+    listOllamaModelCatalogMock.mockResolvedValue([]);
+    installOllamaModelMock.mockResolvedValue(undefined);
+    cancelOllamaModelInstallMock.mockResolvedValue({ cancelled: true });
+  });
+
+  it("shows curated uninstalled Ollama models and requires Meta license acceptance", async () => {
+    listOllamaModelCatalogMock.mockResolvedValue([
+      { id: "llama3.2:3b", displayName: "Llama 3.2 3B", provider: "Meta via Ollama", diskSizeBytes: 2_019_392_628, contextTokens: 131072, minimumMemoryBytes: 4294967296, recommendedMemoryBytes: 8589934592, license: "Llama 3.2 Community License", disclosure: "Installing means you accept the Llama 3.2 Community License and Acceptable Use Policy.", lanes: ["dictation", "meetings"], expectedManifestDigest: "sha256:expected", installed: false, installedDigest: null, installedSizeBytes: null, ready: false },
+      { id: "gpt-oss:20b", displayName: "GPT-OSS 20B", provider: "OpenAI via Ollama", diskSizeBytes: 13_793_440_755, contextTokens: 131072, minimumMemoryBytes: 17179869184, recommendedMemoryBytes: 25769803776, license: "Apache-2.0", disclosure: null, lanes: ["meetings"], expectedManifestDigest: "sha256:expected", installed: false, installedDigest: null, installedSizeBytes: null, ready: false },
+    ]);
+    render(<Harness />);
+    expect(await screen.findByText("Llama 3.2 3B")).toBeInTheDocument();
+    const row = screen.getByText("Llama 3.2 3B").closest("div.rounded-md") as HTMLElement;
+    const install = within(row).getByRole("button", { name: "Install" });
+    expect(install).toBeDisabled();
+    fireEvent.click(within(row).getByRole("checkbox"));
+    fireEvent.click(install);
+    await waitFor(() => expect(installOllamaModelMock).toHaveBeenCalledWith("llama3.2:3b", true));
   });
 
   it("never offers a dictation-only provider for meeting notes", async () => {

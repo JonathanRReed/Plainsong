@@ -8,6 +8,7 @@ use crate::llm::transport::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
@@ -15,9 +16,139 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+#[cfg(test)]
+mod catalog_contract_tests {
+    use super::*;
+
+    #[test]
+    fn curated_catalog_has_the_exact_supported_ids() {
+        let ids = curated_model_catalog()
+            .iter()
+            .map(|model| model.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "gpt-oss:20b",
+                "deepseek-r1:8b",
+                "ministral-3:8b",
+                "llama3:8b",
+                "mistral:v0.2",
+                "llama3.2:3b",
+                "phi:2.7b",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_curated_ids_can_be_pulled_and_meta_requires_disclosure() {
+        assert!(validate_pull_request("gpt-oss:20b", false).is_ok());
+        assert!(validate_pull_request("arbitrary:latest", true).is_err());
+        assert!(validate_pull_request("llama3:8b", false).is_err());
+        assert!(validate_pull_request("llama3:8b", true).is_ok());
+    }
+
+    #[test]
+    fn a_different_installed_digest_is_not_ready() {
+        let model = curated_model_catalog().into_iter().next().unwrap();
+        assert!(!digest_is_ready(&model, Some("sha256:different")));
+        assert!(digest_is_ready(
+            &model,
+            Some(model.expected_manifest_digest.unwrap())
+        ));
+    }
+}
+
 const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
 const OLLAMA_SHOW_TIMEOUT: Duration = Duration::from_secs(3);
 const OLLAMA_METADATA_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, Copy)]
+pub struct CuratedOllamaModel {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub provider: &'static str,
+    pub disk_size_bytes: u64,
+    pub context_tokens: u64,
+    pub minimum_memory_bytes: Option<u64>,
+    pub recommended_memory_bytes: Option<u64>,
+    pub license: &'static str,
+    pub disclosure: Option<&'static str>,
+    pub lanes: &'static [&'static str],
+    pub expected_manifest_digest: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaCatalogEntry {
+    pub id: String,
+    pub display_name: String,
+    pub provider: String,
+    pub disk_size_bytes: u64,
+    pub context_tokens: u64,
+    pub minimum_memory_bytes: Option<u64>,
+    pub recommended_memory_bytes: Option<u64>,
+    pub license: String,
+    pub disclosure: Option<String>,
+    pub lanes: Vec<String>,
+    pub expected_manifest_digest: Option<String>,
+    pub installed: bool,
+    pub installed_digest: Option<String>,
+    pub installed_size_bytes: Option<u64>,
+    pub ready: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TagsResponse {
+    #[serde(default)]
+    models: Vec<TagModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TagModel {
+    name: String,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+const GIB: u64 = 1_073_741_824;
+
+pub fn curated_model_catalog() -> Vec<CuratedOllamaModel> {
+    vec![
+        CuratedOllamaModel { id: "gpt-oss:20b", display_name: "GPT-OSS 20B", provider: "OpenAI via Ollama", disk_size_bytes: 13_793_440_755, context_tokens: 131_072, minimum_memory_bytes: Some(16 * GIB), recommended_memory_bytes: Some(24 * GIB), license: "Apache-2.0", disclosure: None, lanes: &["meetings"], expected_manifest_digest: Some("sha256:17052f91a42e97930aa6e28a6c6c06a983e6a58dbb00434885a0cf5313e376f7") },
+        CuratedOllamaModel { id: "deepseek-r1:8b", display_name: "DeepSeek R1 Distill 8B", provider: "DeepSeek via Ollama", disk_size_bytes: 5_225_375_560, context_tokens: 131_072, minimum_memory_bytes: Some(8 * GIB), recommended_memory_bytes: Some(16 * GIB), license: "MIT", disclosure: Some("This tag currently resolves to DeepSeek-R1-0528-Qwen3-8B, a Qwen3-based distill."), lanes: &["meetings"], expected_manifest_digest: Some("sha256:6995872bfe4c521a67b32da386cd21d5c6e819b6e0d62f79f64ec83be99f5763") },
+        CuratedOllamaModel { id: "ministral-3:8b", display_name: "Ministral 3 8B", provider: "Mistral AI via Ollama", disk_size_bytes: 6_022_236_102, context_tokens: 262_144, minimum_memory_bytes: Some(8 * GIB), recommended_memory_bytes: Some(16 * GIB), license: "Apache-2.0", disclosure: None, lanes: &["dictation", "meetings"], expected_manifest_digest: Some("sha256:1922accd5827ebe6829e536369195db25eaf664528dc66206d646ea3bb386b71") },
+        CuratedOllamaModel { id: "llama3:8b", display_name: "Llama 3 8B", provider: "Meta via Ollama", disk_size_bytes: 4_661_224_191, context_tokens: 8_192, minimum_memory_bytes: Some(8 * GIB), recommended_memory_bytes: Some(16 * GIB), license: "Meta Llama 3 Community License", disclosure: Some("Installing means you accept the Meta Llama 3 Community License and Acceptable Use Policy."), lanes: &["dictation", "meetings"], expected_manifest_digest: Some("sha256:365c0bd3c000a25d28ddbf732fe1c6add414de7275464c4e4d1c3b5fcb5d8ad1") },
+        CuratedOllamaModel { id: "mistral:v0.2", display_name: "Mistral 7B v0.2", provider: "Mistral AI via Ollama", disk_size_bytes: 4_109_864_676, context_tokens: 32_768, minimum_memory_bytes: Some(8 * GIB), recommended_memory_bytes: Some(16 * GIB), license: "Apache-2.0", disclosure: None, lanes: &["dictation", "meetings"], expected_manifest_digest: Some("sha256:61e88e884507ba5e06c49b40e6226884b2a16e872382c2b44a42f2d119d804a5") },
+        CuratedOllamaModel { id: "llama3.2:3b", display_name: "Llama 3.2 3B", provider: "Meta via Ollama", disk_size_bytes: 2_019_392_628, context_tokens: 131_072, minimum_memory_bytes: Some(4 * GIB), recommended_memory_bytes: Some(8 * GIB), license: "Llama 3.2 Community License", disclosure: Some("Installing means you accept the Llama 3.2 Community License and Acceptable Use Policy."), lanes: &["dictation", "meetings"], expected_manifest_digest: Some("sha256:a80c4f17acd55265feec403c7aef86be0c25983ab279d83f3bcd3abbcb5b8b72") },
+        CuratedOllamaModel { id: "phi:2.7b", display_name: "Phi-2 3B", provider: "Microsoft via Ollama", disk_size_bytes: 1_602_462_823, context_tokens: 2_048, minimum_memory_bytes: Some(4 * GIB), recommended_memory_bytes: Some(8 * GIB), license: "MIT", disclosure: None, lanes: &["dictation"], expected_manifest_digest: Some("sha256:e2fd6321a5fe6bb3ac8a4e6f1cf04477fd2dea2924cf53237a995387e152ee9c") },
+    ]
+}
+
+pub fn validate_pull_request(model_id: &str, accepted_license: bool) -> Result<CuratedOllamaModel> {
+    let model = curated_model_catalog()
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Only models in Plainsong's curated Ollama catalog can be installed")
+        })?;
+    if model.provider.starts_with("Meta ") && !accepted_license {
+        anyhow::bail!(
+            "Accept the Meta model license before installing {}",
+            model.display_name
+        );
+    }
+    Ok(model)
+}
+
+fn digest_is_ready(model: &CuratedOllamaModel, installed_digest: Option<&str>) -> bool {
+    match model.expected_manifest_digest {
+        Some(expected) => installed_digest == Some(expected),
+        None => installed_digest.is_some(),
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct CachedModelContext {
@@ -57,6 +188,16 @@ impl OllamaClient {
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(self
+            .list_installed()
+            .await?
+            .models
+            .into_iter()
+            .map(|model| model.name)
+            .collect())
+    }
+
+    async fn list_installed(&self) -> Result<TagsResponse> {
         let response = self
             .client
             .get(format!("{}/api/tags", self.base_url))
@@ -69,20 +210,117 @@ impl OllamaClient {
             let body = read_error_body(response).await;
             anyhow::bail!("Ollama model list error {}: {}", status, body);
         }
-        let data: serde_json::Value = read_json_body(response, MODEL_LIST_BODY_LIMIT)
+        let data: TagsResponse = read_json_body(response, MODEL_LIST_BODY_LIMIT)
             .await
             .context("Failed to read or parse bounded Ollama response")?;
-        let models = data["models"]
-            .as_array()
-            .map(|models| {
-                models
-                    .iter()
-                    .filter_map(|model| model["name"].as_str().map(str::to_string))
-                    .collect::<Vec<_>>()
+        tracing::info!("Ollama returned {} models", data.models.len());
+        Ok(data)
+    }
+
+    pub async fn catalog(&self) -> Result<Vec<OllamaCatalogEntry>> {
+        let installed = self.list_installed().await.unwrap_or_default();
+        Ok(curated_model_catalog()
+            .into_iter()
+            .map(|model| {
+                let found = installed.models.iter().find(|item| item.name == model.id);
+                let installed_digest = found.and_then(|item| item.digest.as_deref());
+                OllamaCatalogEntry {
+                    id: model.id.to_string(),
+                    display_name: model.display_name.to_string(),
+                    provider: model.provider.to_string(),
+                    disk_size_bytes: model.disk_size_bytes,
+                    context_tokens: model.context_tokens,
+                    minimum_memory_bytes: model.minimum_memory_bytes,
+                    recommended_memory_bytes: model.recommended_memory_bytes,
+                    license: model.license.to_string(),
+                    disclosure: model.disclosure.map(str::to_string),
+                    lanes: model.lanes.iter().map(|lane| (*lane).to_string()).collect(),
+                    expected_manifest_digest: model.expected_manifest_digest.map(str::to_string),
+                    installed: found.is_some(),
+                    installed_digest: installed_digest.map(str::to_string),
+                    installed_size_bytes: found.and_then(|item| item.size),
+                    ready: found.is_some() && digest_is_ready(&model, installed_digest),
+                }
             })
-            .unwrap_or_default();
-        tracing::info!("Ollama returned {} models", models.len());
-        Ok(models)
+            .collect())
+    }
+
+    pub async fn pull_model<F>(
+        &self,
+        model_id: &str,
+        accepted_license: bool,
+        cancelled: &std::sync::atomic::AtomicBool,
+        cancel_notify: &tokio::sync::Notify,
+        progress: F,
+    ) -> Result<OllamaCatalogEntry>
+    where
+        F: Fn(u64, Option<u64>) + Send + Sync,
+    {
+        let model = validate_pull_request(model_id, accepted_license)?;
+        let response = self
+            .client
+            .post(format!("{}/api/pull", self.base_url))
+            .timeout(Duration::from_secs(60 * 60))
+            .json(&serde_json::json!({"model": model.id, "stream": true, "insecure": false}))
+            .send()
+            .await
+            .context("Failed to connect to local Ollama")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = read_error_body(response).await;
+            anyhow::bail!("Ollama pull error {}: {}", status, body);
+        }
+        let mut stream = response.bytes_stream();
+        let mut pending = String::new();
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel_notify.notified() => anyhow::bail!("Ollama model installation cancelled"),
+                chunk = stream.next() => chunk,
+            };
+            let Some(chunk) = chunk else { break };
+            if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("Ollama model installation cancelled");
+            }
+            pending.push_str(
+                std::str::from_utf8(&chunk.context("Failed to read Ollama pull response")?)
+                    .context("Ollama returned invalid UTF-8")?,
+            );
+            while let Some(newline) = pending.find('\n') {
+                let line = pending[..newline].trim().to_string();
+                pending.drain(..=newline);
+                if line.is_empty() {
+                    continue;
+                }
+                let update: Value =
+                    serde_json::from_str(&line).context("Ollama returned invalid pull progress")?;
+                if let Some(error) = update.get("error").and_then(Value::as_str) {
+                    anyhow::bail!("Ollama pull failed: {}", error);
+                }
+                progress(
+                    update.get("completed").and_then(Value::as_u64).unwrap_or(0),
+                    update.get("total").and_then(Value::as_u64),
+                );
+            }
+        }
+        let entry = self
+            .catalog()
+            .await?
+            .into_iter()
+            .find(|entry| entry.id == model.id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Installed model disappeared from the Ollama catalog")
+            })?;
+        if !entry.ready {
+            anyhow::bail!(
+                "Ollama installed {} with digest {}, expected {}",
+                model.id,
+                entry.installed_digest.as_deref().unwrap_or("missing"),
+                model
+                    .expected_manifest_digest
+                    .unwrap_or("a reported digest")
+            );
+        }
+        Ok(entry)
     }
 
     async fn cached_model_context(&self, model: &str) -> Option<ModelContextMetadata> {

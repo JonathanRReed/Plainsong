@@ -799,6 +799,46 @@ pub async fn dispatch_command(
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "list_ollama_model_catalog" => {
+            let result = state
+                .ollama_client
+                .catalog()
+                .await
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "install_ollama_model" => {
+            let model_id = params
+                .get("modelId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "modelId is required".to_string())?;
+            let accepted_license = params
+                .get("acceptedLicense")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            state
+                .ollama_pull_active
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .map_err(|_| "Another Ollama model installation is already running".to_string())?;
+            state.ollama_pull_cancelled.store(false, Ordering::SeqCst);
+            let active = Arc::clone(&state.ollama_pull_active);
+            let event_handle = handle.clone();
+            let result = state.ollama_client.pull_model(model_id, accepted_license, &state.ollama_pull_cancelled, &state.ollama_pull_cancel_notify, move |completed, total| {
+                event_handle.emit_event("ollama-model-pull-progress", serde_json::json!({
+                    "modelId": model_id, "completedBytes": completed, "totalBytes": total,
+                    "percentage": total.filter(|total| *total > 0).map(|total| completed.saturating_mul(100) / total),
+                }));
+            }).await;
+            active.store(false, Ordering::SeqCst);
+            let entry = result.map_err(|e| e.to_string())?;
+            serde_json::to_value(entry).map_err(|e| e.to_string())
+        }
+        "cancel_ollama_model_install" => {
+            let was_active = state.ollama_pull_active.load(Ordering::SeqCst);
+            state.ollama_pull_cancelled.store(true, Ordering::SeqCst);
+            state.ollama_pull_cancel_notify.notify_waiters();
+            Ok(serde_json::json!({ "cancelled": was_active }))
+        }
         "list_ollama_cloud_models" => {
             let result =
                 run_with_remote_processing_gate(state.as_ref(), list_ollama_cloud_models()).await?;
