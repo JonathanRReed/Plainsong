@@ -33,6 +33,29 @@
 
 use serde::Serialize;
 
+/// Maximum believable delay between an Electron stop gesture and receipt by
+/// the sidecar. Older or future timestamps are treated as malformed and fall
+/// back to the sidecar receipt time, keeping the epoch and elapsed fields on
+/// the same zero point without allowing an arbitrary IPC value to inflate the
+/// latency record.
+pub(crate) const MAX_GESTURE_TO_HANDLER_MS: i64 = 60_000;
+
+pub(crate) fn resolve_stop_timing(
+    handler_received_at_epoch_ms: i64,
+    stop_gesture_epoch_ms: Option<i64>,
+) -> (i64, u64) {
+    let Some(gesture_epoch_ms) = stop_gesture_epoch_ms else {
+        return (handler_received_at_epoch_ms, 0);
+    };
+    let Some(delay_ms) = handler_received_at_epoch_ms.checked_sub(gesture_epoch_ms) else {
+        return (handler_received_at_epoch_ms, 0);
+    };
+    if !(0..=MAX_GESTURE_TO_HANDLER_MS).contains(&delay_ms) {
+        return (handler_received_at_epoch_ms, 0);
+    }
+    (gesture_epoch_ms, delay_ms as u64)
+}
+
 /// How the format/cleanup stage of one dictation concluded.
 ///
 /// This is the field the audit actually wanted: not just "how long did
@@ -118,7 +141,7 @@ pub struct DictationTimingRecord {
 /// Inputs to [`assemble_dictation_timing_record`]. Plain data, no `Instant`s:
 /// every field is already-elapsed milliseconds (or an epoch timestamp),
 /// computed at the call site from one `Instant` captured once at function
-/// entry (`stop_signal_instant` in `stop_dictation_for_sidecar`) rather than
+/// entry plus the validated client-to-handler delay rather than
 /// re-read from shared state, so a concurrent reset can't corrupt a stage
 /// mid-flight. Keeping this a plain-data struct is what makes assembly
 /// testable without a real clock or a real dictation session.
@@ -296,6 +319,18 @@ impl DictationPreInsertBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gesture_delay_keeps_epoch_and_elapsed_values_aligned() {
+        assert_eq!(resolve_stop_timing(10_125, Some(10_000)), (10_000, 125));
+    }
+
+    #[test]
+    fn implausible_gesture_epochs_fall_back_to_handler_receipt() {
+        assert_eq!(resolve_stop_timing(10_000, Some(10_001)), (10_000, 0));
+        assert_eq!(resolve_stop_timing(100_000, Some(39_999)), (100_000, 0));
+        assert_eq!(resolve_stop_timing(i64::MAX, Some(-1)), (i64::MAX, 0));
+    }
 
     fn base_inputs() -> DictationTimingInputs {
         DictationTimingInputs {

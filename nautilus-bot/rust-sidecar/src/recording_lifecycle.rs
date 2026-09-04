@@ -892,6 +892,7 @@ pub(crate) async fn start_recording_for_sidecar(
             options.clone(),
             preferred_input_device.as_ref(),
             Some(handle.clone()),
+            settings_snapshot.privacy.vault_initialized,
         )
     };
     if let Err(error) = preparation_result {
@@ -1510,13 +1511,13 @@ pub(crate) fn spawn_meeting_capture_monitor(
                 return;
             };
 
-            let meetings_settings = state
-                .settings_manager
-                .lock()
-                .await
-                .settings()
-                .meetings
-                .clone();
+            let (meetings_settings, vault_enabled) = {
+                let settings = state.settings_manager.lock().await;
+                (
+                    settings.settings().meetings.clone(),
+                    settings.settings().privacy.vault_initialized,
+                )
+            };
             if let Some((call_id, app)) = bound_call {
                 let ended = state
                     .meeting_call_detector
@@ -1606,7 +1607,12 @@ pub(crate) fn spawn_meeting_capture_monitor(
             };
             // Sized to what this session actually writes: a mic-only meeting
             // writes one track, "me and them" writes three.
-            match audio::meeting_space_pressure(available, health.track_count) {
+            match audio::meeting_space_pressure_with_vault_reserve(
+                available,
+                health.track_count,
+                health.vault_staging_bytes,
+                vault_enabled,
+            ) {
                 audio::MeetingSpacePressure::Ok => {}
                 audio::MeetingSpacePressure::Low => {
                     if !low_space_reported {

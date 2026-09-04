@@ -292,10 +292,12 @@ describe("createDictationShortcutSignalRuntime", () => {
   it("stops a rapid hold-to-talk tap whose release lands before the start resolves", async () => {
     const harness = createHarness();
 
+    vi.setSystemTime(1_000);
     const press = harness.runtime.handleSignal({ ...holdToTalk, signal: "pressed" });
     // The release arrives while start_dictation is still in flight and the
     // cached phase is still "idle" — previously this resolved to "ignore" and
     // the microphone recorded forever.
+    vi.setSystemTime(1_125);
     await harness.runtime.handleSignal({ ...holdToTalk, signal: "released" });
     expect(harness.invocations.map((entry) => entry.command)).toEqual([
       "start_dictation",
@@ -311,7 +313,7 @@ describe("createDictationShortcutSignalRuntime", () => {
     ]);
     expect(harness.invocations[1]?.args).toEqual({
       stopReason: "release",
-      stopGestureEpochMs: expect.any(Number),
+      stopGestureEpochMs: 1_125,
     });
   });
 
