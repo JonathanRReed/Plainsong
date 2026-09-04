@@ -867,6 +867,7 @@ describe("DictationView modes", () => {
 
     await openConfigTab("Profiles");
     await screen.findByText("Recommended flow profiles");
+    fireEvent.click(screen.getByRole("button", { name: "Profile: Custom" }));
     fireEvent.change(screen.getByLabelText("Website this profile is for"), {
       target: { value: "unrelated.example" },
     });
