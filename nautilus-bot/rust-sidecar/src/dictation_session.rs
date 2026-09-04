@@ -1861,6 +1861,10 @@ pub(crate) async fn stop_dictation_for_sidecar(
         tracker.startup_latency_ms
     };
     let transcription_latency_ms = transcription_result.processing_time_ms;
+    let persist_to_history = should_persist_dictation(
+        dictation_options.save_to_inbox,
+        &settings_snapshot.transcription.dictation_retention_preset,
+    );
     let recording_id = uuid::Uuid::new_v4().to_string();
     let stored_text = if final_text.trim().is_empty() {
         raw_transcribed_text.clone()
@@ -1912,20 +1916,21 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // Opt-in: keep the captured WAV so this entry can be processed again.
     // Written before the row so a failed write never leaves a row that claims
     // audio it does not have; a failed row write removes the file again below.
-    let kept_audio_path = if settings_snapshot.transcription.dictation_keep_audio {
-        match write_kept_dictation_audio(&recording_id, &audio_bytes) {
-            Ok(path) => Some(path),
-            Err(error) => {
-                tracing::warn!("Dictation audio was not kept: {}", error);
-                warnings.push(format!(
-                    "The dictation audio could not be kept for Process again: {error}"
-                ));
-                None
+    let kept_audio_path =
+        if persist_to_history && settings_snapshot.transcription.dictation_keep_audio {
+            match write_kept_dictation_audio(&recording_id, &audio_bytes) {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    tracing::warn!("Dictation audio was not kept: {}", error);
+                    warnings.push(format!(
+                        "The dictation audio could not be kept for Process again: {error}"
+                    ));
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     let kept_audio_metadata = kept_audio_path
         .as_deref()
         .map(recording_audio::validate_plaintext_wav)
@@ -1984,7 +1989,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // Cursor delivery crosses native process and accessibility boundaries.
     // Commit the only recoverable copy first, as one transaction, so a helper
     // failure or app termination during insertion cannot erase the words.
-    {
+    if persist_to_history {
         let mut db = state.db.lock().await;
         if let Err(error) = db.create_dictation_history_entry(
             &recording,
@@ -2343,7 +2348,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
         transcription_result.optimization_applied,
     );
 
-    {
+    if persist_to_history {
         let mut db = state.db.lock().await;
         let _ = db.save_transcript_artifact(&TranscriptArtifactRecord {
             id: uuid::Uuid::new_v4().to_string(),
