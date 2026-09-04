@@ -1160,6 +1160,10 @@ export async function listOllamaModelCatalog(): Promise<OllamaCatalogEntry[]> {
   return await invoke("list_ollama_model_catalog");
 }
 
+export async function getCuratedOllamaModelCatalog(): Promise<OllamaCatalogEntry[]> {
+  return await invoke("get_curated_ollama_model_catalog");
+}
+
 export async function installOllamaModel(
   modelId: string,
   acceptedLicense = false,

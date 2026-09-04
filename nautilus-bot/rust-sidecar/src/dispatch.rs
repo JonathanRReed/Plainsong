@@ -807,6 +807,9 @@ pub async fn dispatch_command(
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "get_curated_ollama_model_catalog" => {
+            serde_json::to_value(state.ollama_client.curated_catalog()).map_err(|e| e.to_string())
+        }
         "install_ollama_model" => {
             let model_id = params
                 .get("modelId")

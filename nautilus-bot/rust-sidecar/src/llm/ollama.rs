@@ -93,6 +93,26 @@ mod catalog_contract_tests {
             .to_string()
             .contains("invalid pull progress"));
     }
+
+    #[test]
+    fn pull_requires_an_explicit_terminal_success_record() {
+        assert!(!pull_update_is_success(
+            &serde_json::json!({"status": "pulling manifest"})
+        ));
+        assert!(pull_update_is_success(
+            &serde_json::json!({"status": "success"})
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_catalog_propagates_tags_failure_but_curated_catalog_remains_available() {
+        let client = OllamaClient::with_base_url_and_timeout(
+            "http://127.0.0.1:9",
+            Duration::from_millis(50),
+        );
+        assert!(client.catalog().await.is_err());
+        assert_eq!(client.curated_catalog().len(), 7);
+    }
 }
 
 const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
@@ -187,6 +207,33 @@ fn digest_is_ready(model: &CuratedOllamaModel, installed_digest: Option<&str>) -
     }
 }
 
+fn catalog_entries(installed: &[TagModel]) -> Vec<OllamaCatalogEntry> {
+    curated_model_catalog()
+        .into_iter()
+        .map(|model| {
+            let found = installed.iter().find(|item| item.name == model.id);
+            let installed_digest = found.and_then(|item| item.digest.as_deref());
+            OllamaCatalogEntry {
+                id: model.id.to_string(),
+                display_name: model.display_name.to_string(),
+                provider: model.provider.to_string(),
+                disk_size_bytes: model.disk_size_bytes,
+                context_tokens: model.context_tokens,
+                minimum_memory_bytes: model.minimum_memory_bytes,
+                recommended_memory_bytes: model.recommended_memory_bytes,
+                license: model.license.to_string(),
+                disclosure: model.disclosure.map(str::to_string),
+                lanes: model.lanes.iter().map(|lane| (*lane).to_string()).collect(),
+                expected_manifest_digest: model.expected_manifest_digest.map(str::to_string),
+                installed: found.is_some(),
+                installed_digest: installed_digest.map(str::to_string),
+                installed_size_bytes: found.and_then(|item| item.size),
+                ready: found.is_some() && digest_is_ready(&model, installed_digest),
+            }
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct PullStreamParser {
     pending: Vec<u8>,
@@ -239,6 +286,10 @@ where
         update.get("total").and_then(Value::as_u64),
     );
     Ok(())
+}
+
+fn pull_update_is_success(update: &Value) -> bool {
+    update.get("status").and_then(Value::as_str) == Some("success")
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -309,31 +360,26 @@ impl OllamaClient {
     }
 
     pub async fn catalog(&self) -> Result<Vec<OllamaCatalogEntry>> {
-        let installed = self.list_installed().await.unwrap_or_default();
-        Ok(curated_model_catalog()
-            .into_iter()
-            .map(|model| {
-                let found = installed.models.iter().find(|item| item.name == model.id);
-                let installed_digest = found.and_then(|item| item.digest.as_deref());
-                OllamaCatalogEntry {
-                    id: model.id.to_string(),
-                    display_name: model.display_name.to_string(),
-                    provider: model.provider.to_string(),
-                    disk_size_bytes: model.disk_size_bytes,
-                    context_tokens: model.context_tokens,
-                    minimum_memory_bytes: model.minimum_memory_bytes,
-                    recommended_memory_bytes: model.recommended_memory_bytes,
-                    license: model.license.to_string(),
-                    disclosure: model.disclosure.map(str::to_string),
-                    lanes: model.lanes.iter().map(|lane| (*lane).to_string()).collect(),
-                    expected_manifest_digest: model.expected_manifest_digest.map(str::to_string),
-                    installed: found.is_some(),
-                    installed_digest: installed_digest.map(str::to_string),
-                    installed_size_bytes: found.and_then(|item| item.size),
-                    ready: found.is_some() && digest_is_ready(&model, installed_digest),
-                }
-            })
-            .collect())
+        let installed = self.list_installed().await?;
+        Ok(catalog_entries(&installed.models))
+    }
+
+    pub fn curated_catalog(&self) -> Vec<OllamaCatalogEntry> {
+        catalog_entries(&[])
+    }
+
+    async fn cancellable_catalog(
+        &self,
+        cancelled: &std::sync::atomic::AtomicBool,
+        cancel_notify: &tokio::sync::Notify,
+    ) -> Result<Vec<OllamaCatalogEntry>> {
+        if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("Ollama model installation cancelled");
+        }
+        tokio::select! {
+            _ = cancel_notify.notified() => anyhow::bail!("Ollama model installation cancelled"),
+            result = self.catalog() => result,
+        }
     }
 
     pub async fn pull_model<F>(
@@ -363,6 +409,7 @@ impl OllamaClient {
         }
         let mut stream = response.bytes_stream();
         let mut parser = PullStreamParser::default();
+        let mut reached_success = false;
         loop {
             if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
                 anyhow::bail!("Ollama model installation cancelled");
@@ -376,15 +423,22 @@ impl OllamaClient {
                 anyhow::bail!("Ollama model installation cancelled");
             }
             for update in parser.push(&chunk.context("Failed to read Ollama pull response")?)? {
+                reached_success = pull_update_is_success(&update);
                 report_pull_update(update, &progress)?;
             }
         }
         for update in parser.finish()? {
+            reached_success = pull_update_is_success(&update);
             report_pull_update(update, &progress)?;
         }
-        let entry = self
-            .catalog()
-            .await?
+        if !reached_success {
+            anyhow::bail!("Ollama pull ended before reporting success");
+        }
+        let catalog = self.cancellable_catalog(cancelled, cancel_notify).await?;
+        if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+            anyhow::bail!("Ollama model installation cancelled");
+        }
+        let entry = catalog
             .into_iter()
             .find(|entry| entry.id == model.id)
             .ok_or_else(|| {

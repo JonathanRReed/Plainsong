@@ -11,12 +11,12 @@ interface Props {
 }
 
 function size(bytes: number): string {
-  return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 }
 
 export function OllamaModelCatalog({ models, busyModelId, progressPercent, error, onInstall, onCancel }: Props) {
   const [accepted, setAccepted] = useState<Record<string, boolean>>({});
-  if (models.length === 0) return null;
+  if (models.length === 0 && !error) return null;
   return (
     <section className="space-y-3 rounded-lg border bg-muted/20 p-4" aria-label="Local Ollama model catalog">
       <div>

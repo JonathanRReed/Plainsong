@@ -21,6 +21,7 @@ export {
   listOllamaCloudModels,
   listOllamaModels,
   listOllamaModelCatalog,
+  getCuratedOllamaModelCatalog,
   installOllamaModel,
   cancelOllamaModelInstall,
   searchTranscripts,

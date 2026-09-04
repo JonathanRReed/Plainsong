@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelsScreen } from "@/components/models/models-screen";
@@ -19,6 +19,7 @@ const deleteLivePreviewEngineModelMock = vi.fn();
 const installAppleSpeechLanguageMock = vi.fn();
 const cancelAppleSpeechLanguageInstallMock = vi.fn();
 const listOllamaModelCatalogMock = vi.fn();
+const getCuratedOllamaModelCatalogMock = vi.fn();
 const installOllamaModelMock = vi.fn();
 const cancelOllamaModelInstallMock = vi.fn();
 const readinessContext = vi.hoisted(() => ({
@@ -58,6 +59,7 @@ vi.mock("@/lib/backend/ai", () => ({
   downloadLivePreviewEngineModel: () => downloadLivePreviewEngineModelMock(),
   deleteLivePreviewEngineModel: () => deleteLivePreviewEngineModelMock(),
   listOllamaModelCatalog: () => listOllamaModelCatalogMock(),
+  getCuratedOllamaModelCatalog: () => getCuratedOllamaModelCatalogMock(),
   installOllamaModel: (modelId: string, acceptedLicense: boolean) => installOllamaModelMock(modelId, acceptedLicense),
   cancelOllamaModelInstall: () => cancelOllamaModelInstallMock(),
 }));
@@ -343,6 +345,7 @@ describe("Models screen", () => {
     });
     cancelAppleSpeechLanguageInstallMock.mockResolvedValue(undefined);
     listOllamaModelCatalogMock.mockResolvedValue([]);
+    getCuratedOllamaModelCatalogMock.mockResolvedValue([]);
     installOllamaModelMock.mockResolvedValue(undefined);
     cancelOllamaModelInstallMock.mockResolvedValue({ cancelled: true });
   });
@@ -354,12 +357,40 @@ describe("Models screen", () => {
     ]);
     render(<Harness />);
     expect(await screen.findByText("Llama 3.2 3B")).toBeInTheDocument();
+    expect(screen.getByText(/2\.0 GB/)).toBeInTheDocument();
     const row = screen.getByText("Llama 3.2 3B").closest("div.rounded-md") as HTMLElement;
     const install = within(row).getByRole("button", { name: "Install" });
     expect(install).toBeDisabled();
     fireEvent.click(within(row).getByRole("checkbox"));
     fireEvent.click(install);
     await waitFor(() => expect(installOllamaModelMock).toHaveBeenCalledWith("llama3.2:3b", true));
+  });
+
+  it("keeps the curated catalog discoverable when Ollama status fails", async () => {
+    listOllamaModelCatalogMock.mockRejectedValue(new Error("connection refused"));
+    getCuratedOllamaModelCatalogMock.mockResolvedValue([
+      { id: "phi:2.7b", displayName: "Phi-2 3B", provider: "Microsoft via Ollama", diskSizeBytes: 1_602_462_823, contextTokens: 2048, minimumMemoryBytes: 4294967296, recommendedMemoryBytes: 8589934592, license: "MIT", disclosure: null, lanes: ["dictation"], expectedManifestDigest: "sha256:expected", installed: false, installedDigest: null, installedSizeBytes: null, ready: false },
+    ]);
+    render(<Harness />);
+    expect(await screen.findByText("Phi-2 3B")).toBeInTheDocument();
+    expect(screen.getByText(/Ollama is not responding on localhost/)).toBeInTheDocument();
+  });
+
+  it("does not let an older catalog response overwrite a newer one", async () => {
+    let resolveOld!: (models: unknown[]) => void;
+    const oldResponse = new Promise<unknown[]>((resolve) => { resolveOld = resolve; });
+    listOllamaModelCatalogMock
+      .mockImplementationOnce(() => oldResponse)
+      .mockResolvedValueOnce([
+        { id: "phi:2.7b", displayName: "Newest catalog", provider: "Microsoft via Ollama", diskSizeBytes: 1_602_462_823, contextTokens: 2048, minimumMemoryBytes: null, recommendedMemoryBytes: null, license: "MIT", disclosure: null, lanes: ["dictation"], expectedManifestDigest: "sha256:new", installed: true, installedDigest: "sha256:new", installedSizeBytes: 1_602_462_823, ready: true },
+      ]);
+    render(<StrictMode><Harness /></StrictMode>);
+    expect(await screen.findByText("Newest catalog")).toBeInTheDocument();
+    resolveOld([
+      { id: "phi:2.7b", displayName: "Stale catalog", provider: "Microsoft via Ollama", diskSizeBytes: 1_602_462_823, contextTokens: 2048, minimumMemoryBytes: null, recommendedMemoryBytes: null, license: "MIT", disclosure: null, lanes: ["dictation"], expectedManifestDigest: "sha256:old", installed: false, installedDigest: null, installedSizeBytes: null, ready: false },
+    ]);
+    await Promise.resolve();
+    expect(screen.queryByText("Stale catalog")).not.toBeInTheDocument();
   });
 
   it("never offers a dictation-only provider for meeting notes", async () => {

@@ -26,6 +26,7 @@ import {
   type BundledCleanupModelStatus,
   type LivePreviewEngineStatus,
   cancelOllamaModelInstall,
+  getCuratedOllamaModelCatalog,
   installOllamaModel,
   listOllamaModelCatalog,
   type OllamaCatalogEntry,
@@ -146,6 +147,7 @@ export function ModelsScreen({
   const [ollamaError, setOllamaError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const mountedRef = useRef(true);
+  const ollamaCatalogRequestRef = useRef(0);
   const readyOllamaModelIds = useMemo(
     () => ollamaCatalog.filter((model) => model.ready).map((model) => model.id),
     [ollamaCatalog],
@@ -227,11 +229,22 @@ export function ModelsScreen({
   }, [refresh, refreshBundledStatus, refreshAppleAvailability]);
 
   const refreshOllamaCatalog = useCallback(async () => {
+    const request = ++ollamaCatalogRequestRef.current;
     try {
       const models = await listOllamaModelCatalog();
-      if (mountedRef.current) setOllamaCatalog(models);
+      if (mountedRef.current && request === ollamaCatalogRequestRef.current) {
+        setOllamaCatalog(models);
+        setOllamaError(null);
+      }
     } catch (error) {
       console.warn("Failed to load the local Ollama catalog:", error);
+      const curated = await getCuratedOllamaModelCatalog().catch(() => []);
+      if (mountedRef.current && request === ollamaCatalogRequestRef.current) {
+        setOllamaCatalog(curated);
+        setOllamaError(
+          "Ollama is not responding on localhost. You can review the catalog, but installs and status checks need Ollama running.",
+        );
+      }
     }
   }, []);
 

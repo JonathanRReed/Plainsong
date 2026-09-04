@@ -187,6 +187,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_meeting_consent_notice_status",
   "get_meeting_transcript_details",
   "get_ollama_status",
+  "get_curated_ollama_model_catalog",
   "list_ollama_model_catalog",
   "get_permission_diagnostics",
   "get_projects",
