@@ -761,9 +761,9 @@ end tell`);
  * transcript lands in it, and closing by the original name silently leaves it
  * open. Observed on a real run, which is why the fallback exists.
  *
- * So: try the recorded name, then fall back to closing the document whose text
- * matches what this run pasted. Both are scoped to one document, so a document
- * the user already had open is never touched.
+ * So: try the recorded name, then fall back to the front document, where this
+ * harness explicitly placed the disposable document. Require its entire text
+ * to match what this run pasted; never search the user's other open documents.
  */
 function closeDisposableDocument(documentName, expectedText) {
   if (!documentName) return { attempted: false, ok: false, error: null };
@@ -792,14 +792,12 @@ function closeDisposableDocument(documentName, expectedText) {
   }
 
   const byContent = osascript(`tell application "TextEdit"
-  repeat with i from (count of documents) to 1 by -1
-    try
-      if (text of document i) contains ${asString(expectedText)} then
-        close document i saving no
-        return "closed"
-      end if
-    end try
-  end repeat
+  try
+    if (text of document 1) is ${asString(expectedText)} then
+      close document 1 saving no
+      return "closed"
+    end if
+  end try
   return "not-found"
 end tell`);
 
@@ -807,12 +805,12 @@ end tell`);
   return {
     attempted: true,
     ok: closed,
-    strategy: closed ? "content-match" : "none",
+    strategy: closed ? "front-document-exact-match" : "none",
     error: closed
       ? null
       : `close by recorded name failed (${
           byName.stderr || byName.spawnError || `exit ${byName.status}`
-        }); content-match fallback returned ${
+        }); front-document exact-match fallback returned ${
           byContent.ok ? byContent.stdout.trim() : byContent.stderr || byContent.spawnError
         }`,
     note: "TextEdit renames untitled documents after their first line, so the recorded name goes stale once the transcript is pasted.",

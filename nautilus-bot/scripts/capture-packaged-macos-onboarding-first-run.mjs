@@ -33,7 +33,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import net from "node:net";
 import { spawn } from "node:child_process";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -71,17 +70,6 @@ if (!fs.existsSync(binaryPath)) {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function freePort() {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
-
 /**
  * The renderer target, once Electron has one.
  *
@@ -89,62 +77,67 @@ async function freePort() {
  * overlay windows appear shortly after, so the target is matched on its own
  * URL rather than on being first.
  */
-async function waitForRendererTarget(port, deadline) {
+async function attachToRenderer(cdp, deadline) {
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-      const targets = await response.json();
-      const page = targets.find(
-        (target) =>
-          target.type === "page" &&
-          typeof target.url === "string" &&
-          !target.url.includes("overlay") &&
-          !target.url.startsWith("devtools://"),
-      );
-      if (page?.webSocketDebuggerUrl) {
-        return page;
-      }
-    } catch {
-      // The debugger port is not listening yet.
+    const { targetInfos } = await cdp.send("Target.getTargets");
+    const page = targetInfos.find(
+      (target) =>
+        target.type === "page" &&
+        typeof target.url === "string" &&
+        !target.url.includes("overlay") &&
+        !target.url.startsWith("devtools://"),
+    );
+    if (page) {
+      const { sessionId } = await cdp.send("Target.attachToTarget", {
+        targetId: page.targetId,
+        flatten: true,
+      });
+      cdp.sessionId = sessionId;
+      return;
     }
     await delay(250);
   }
-  throw new Error("Electron never exposed a renderer target on the debug port");
+  throw new Error("Electron never exposed a renderer target on the debug pipe");
 }
 
-/** A minimal CDP client over the Node 22+ global WebSocket. */
+/** A minimal CDP client over Chromium's private, inherited pipe transport. */
 class Cdp {
-  constructor(socket) {
-    this.socket = socket;
+  constructor(input, output) {
+    this.input = input;
+    this.output = output;
     this.nextId = 1;
     this.pending = new Map();
-    socket.addEventListener("message", (event) => {
-      const message = JSON.parse(event.data);
-      const entry = this.pending.get(message.id);
-      if (!entry) return;
-      this.pending.delete(message.id);
-      if (message.error) {
-        entry.reject(new Error(message.error.message));
-        return;
+    this.sessionId = null;
+    let buffered = "";
+    output.setEncoding("utf8");
+    output.on("data", (chunk) => {
+      buffered += chunk;
+      const frames = buffered.split("\0");
+      buffered = frames.pop();
+      for (const frame of frames) {
+        if (frame) this.receive(JSON.parse(frame));
       }
-      entry.resolve(message.result);
     });
   }
 
-  static async connect(url) {
-    const socket = new WebSocket(url);
-    await new Promise((resolve, reject) => {
-      socket.addEventListener("open", resolve, { once: true });
-      socket.addEventListener("error", reject, { once: true });
-    });
-    return new Cdp(socket);
+  receive(message) {
+    const entry = this.pending.get(message.id);
+    if (!entry) return;
+    this.pending.delete(message.id);
+    if (message.error) {
+      entry.reject(new Error(message.error.message));
+      return;
+    }
+    entry.resolve(message.result);
   }
 
   send(method, params = {}) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      const message = { id, method, params };
+      if (this.sessionId) message.sessionId = this.sessionId;
+      this.input.write(`${JSON.stringify(message)}\0`);
     });
   }
 
@@ -164,11 +157,8 @@ class Cdp {
   }
 
   close() {
-    try {
-      this.socket.close();
-    } catch {
-      // Already gone.
-    }
+    this.input.end();
+    this.output.destroy();
   }
 }
 
@@ -207,7 +197,6 @@ const OBSERVE_EXPRESSION = `(() => {
 })()`;
 
 async function launch({ profileRoot, label, afterObserve }) {
-  const port = await freePort();
   const dataDirectory = path.join(profileRoot, "data");
   const configDirectory = path.join(profileRoot, "config");
   const electronProfile = path.join(profileRoot, "electron-profile");
@@ -217,10 +206,13 @@ async function launch({ profileRoot, label, afterObserve }) {
 
   const child = spawn(
     binaryPath,
-    [`--user-data-dir=${electronProfile}`, `--remote-debugging-port=${port}`],
+    [`--user-data-dir=${electronProfile}`, "--remote-debugging-pipe"],
     {
       detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      // Chromium reads CDP commands from fd 3 and writes responses to fd 4.
+      // Inherited pipes keep the privileged renderer undiscoverable to other
+      // local processes, unlike a loopback remote-debugging port.
+      stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         PLAINSONG_DATA_DIR: dataDirectory,
@@ -243,8 +235,8 @@ async function launch({ profileRoot, label, afterObserve }) {
   let observation = null;
   let cdp = null;
   try {
-    const target = await waitForRendererTarget(port, deadline);
-    cdp = await Cdp.connect(target.webSocketDebuggerUrl);
+    cdp = new Cdp(child.stdio[3], child.stdio[4]);
+    await attachToRenderer(cdp, deadline);
     await cdp.send("Runtime.enable");
 
     // Poll until the launch has actually decided something, which is either

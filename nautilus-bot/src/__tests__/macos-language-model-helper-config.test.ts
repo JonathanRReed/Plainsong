@@ -12,6 +12,7 @@ function read(relativePath: string): string {
 
 const HELPER_NAME = "plainsong-native-language-model-helper";
 const SOURCE = "scripts/native-macos-language-model-helper.swift";
+const macIt = process.platform === "darwin" ? it : it.skip;
 
 describe("Apple Foundation Models helper entitlements", () => {
   it("carries no entitlement at all", () => {
@@ -28,7 +29,7 @@ describe("Apple Foundation Models helper entitlements", () => {
     expect(keys).toEqual([]);
   });
 
-  it("is a valid property list", () => {
+  macIt("is a valid property list", () => {
     const result = spawnSync(
       "/usr/bin/plutil",
       [

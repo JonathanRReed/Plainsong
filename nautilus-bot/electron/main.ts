@@ -1433,6 +1433,25 @@ async function handleLocalCommand(
   };
 
   switch (command) {
+    case "capture_selected_text_for_playback": {
+      if (!senderWindow || senderWindow !== mainWindow || !senderWindow.isFocused()) {
+        throw new Error(
+          "Selected text playback requires the focused main Plainsong window",
+        );
+      }
+      if (!ipcBridge) {
+        throw new Error("Selected text playback service is not ready");
+      }
+      const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
+      const grant = captureAdmission.consume(senderWindow.id, route);
+      await ipcBridge.invoke("register_capture_admission", { nonce: grant.nonce });
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar("capture_selected_text_for_playback", {
+          admissionNonce: grant.nonce,
+        }),
+      };
+    }
     case "__window_set_size__": {
       if (!senderWindow) {
         return { handled: true, result: null };
@@ -1853,6 +1872,28 @@ async function handleLocalCommand(
       await ipcBridge.invokeSidecar("stop_recording", { recordingId });
       return { handled: true, result: null };
     }
+    case "pause_meeting_capture":
+    case "resume_meeting_capture": {
+      if (!senderWindow) {
+        throw new Error("Changing meeting capture requires a Plainsong window");
+      }
+      if (!ipcBridge) {
+        throw new Error("Meeting capture service is not ready");
+      }
+      const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
+      captureAdmission.consume(senderWindow.id, route);
+      if (!activeMeetingRecordingId) {
+        throw new Error("There is no active meeting capture");
+      }
+      const sidecarCommand =
+        command === "pause_meeting_capture" ? "pause_recording" : "resume_recording";
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar(sidecarCommand, {
+          recordingId: activeMeetingRecordingId,
+        }),
+      };
+    }
     case "prepare_recording_playback": {
       // Main window only: the overlays have no transcript to play against, and
       // a token minted for a hidden window would be a token nobody can see.
@@ -2176,9 +2217,7 @@ async function handleDictationVadSignal(payload: unknown): Promise<void> {
     // be seeded from the monitor's pre-roll ring. The sidecar stops the monitor
     // on every start, so the ring is always fresh; without the flag a hotkey
     // press would splice the two seconds before the press onto the transcript.
-    await ipcBridge.invoke("start_dictation", {
-      options: { handsFreeTrigger: true },
-    });
+    await dictationShortcutSignalRuntime.startHandsFree({ handsFreeTrigger: true });
     return;
   }
 }
@@ -2960,9 +2999,11 @@ app.on("before-quit", (event) => {
   if (!isQuitting && activeMeetingRecordingId && ipcBridge) {
     event.preventDefault();
     isQuitting = true;
+    ipcBridge.setQuitPending(true);
     void finalizeActiveMeetingBeforeQuit().then((result) => {
       if (result.status === "failed") {
         isQuitting = false;
+        ipcBridge?.setQuitPending(false);
         const reason =
           result.error instanceof Error
             ? result.error.message

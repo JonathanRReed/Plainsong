@@ -257,10 +257,11 @@ impl AsrProvider for DistilWhisperProvider {
 
         let text = tokio::task::spawn_blocking(move || run_distil_candle(&model_dir, &temp_path))
             .await
-            .context("Distil-Whisper inference task panicked")??;
+            .context("Distil-Whisper inference task panicked");
 
         // Cleanup temp file (even if inference fails)
         let _ = std::fs::remove_file(&audio_for_dur);
+        let text = text??;
 
         let duration = Self::wav_duration_seconds(audio_path);
         let segment = TranscriptSegment {

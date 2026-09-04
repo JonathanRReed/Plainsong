@@ -377,14 +377,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
   const [modelError, setModelError] = useState<string | null>(null);
   const [modelSkipped, setModelSkipped] = useState(false);
-  // Placeholder only, corrected by the settings-load effect below before any
-  // download can actually fire (see the dictationProvider branches there).
-  // Kept as "base.en" rather than the new "parakeet-tdt-0.6b-v3" default so
-  // a settings.json that already names a non-default provider (e.g. an
-  // existing whisper/base.en setup) is never at risk of racing a real click
-  // against the correction effect and downloading the wrong model; the
-  // fresh-install case corrects to Parakeet the same way.
-  const [selectedModelId, setSelectedModelId] = useState("base.en");
+  const [modelSelectionHydration, setModelSelectionHydration] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
+  // Start on the fresh-install default, then keep model actions gated until
+  // persisted settings have had a chance to restore an existing selection.
+  const [selectedModelId, setSelectedModelId] = useState("parakeet-tdt-0.6b-v3");
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
   const [meetingModelState, setMeetingModelState] = useState<
@@ -394,10 +392,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [meetingDownloadPercent, setMeetingDownloadPercent] = useState<number | null>(null);
   const meetingDownloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
   const modelInteractionStartedRef = useRef(false);
-  // Captures whatever dictation provider was already persisted at mount, so
+  // Captures whatever dictation route was already persisted at mount, so
   // ensureDefaultModelDownloading can tell "nothing configured yet" apart
   // from "user already has a different, working route" -- see its comment.
   const initialDictationProviderRef = useRef<string | null>(null);
+  const initialDictationModelIdRef = useRef<string | null>(null);
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
   // Hold-to-talk and hands-free are real, working modes configured from
@@ -474,10 +473,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   useEffect(() => {
     let mounted = true;
-    void Promise.all([
-      getSettings(),
-      getAsrProviders().catch(() => [] as AsrProviderInfo[]),
-    ])
+    void Promise.all([getSettings(), getAsrProviders()])
       .then(([settings, providers]) => {
         if (!mounted) {
           return;
@@ -519,6 +515,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               : "ollama",
         );
         initialDictationProviderRef.current = settings.transcription.dictationProvider ?? null;
+        initialDictationModelIdRef.current =
+          settings.transcription.dictationModelId ??
+          settings.transcription.selectedModelId ??
+          null;
         if (settings.transcription.dictationProvider === "moonshine") {
           setSelectedModelId("moonshine-base");
         } else if (settings.transcription.dictationProvider === "parakeet") {
@@ -564,9 +564,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               ? "hold_to_talk"
               : "toggle"
         );
+        setModelSelectionHydration("ready");
       })
       .catch(() => {
-        // Keep defaults if onboarding loads before settings are ready.
+        if (mounted) {
+          // The displayed default is not trustworthy until both persisted
+          // settings and provider status have loaded. Keep model actions
+          // fail-closed instead of treating a rejected read as hydration.
+          setModelSelectionHydration("error");
+        }
       });
 
     return () => {
@@ -898,6 +904,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   }, []);
 
   const startModelDownload = useCallback(async (modelId?: string) => {
+    if (modelSelectionHydration !== "ready") {
+      return false;
+    }
     const option =
       POWER_MODEL_OPTIONS.find((candidate) => candidate.id === modelId) ?? POWER_MODEL_OPTIONS[0];
     modelInteractionStartedRef.current = true;
@@ -943,7 +952,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     } finally {
       downloadingProviderTypeRef.current = null;
     }
-  }, []);
+  }, [modelSelectionHydration]);
 
   // Advancing past the visible model surface starts the selected fast default
   // in the background so the user can continue setting up the shortcut. The
@@ -955,16 +964,20 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // macos_apple_speech, a cloud provider). Someone who opens "Fix dictation
   // setup" for an unrelated reason (a hotkey conflict, say) and just clicks
   // through this step must not have their working provider silently
-  // downgraded/overwritten. Both "parakeet" (the current default) and
-  // "whisper" (the default for every install that predates this default
-  // change -- i.e. the entire pre-upgrade user base) count as "still on a
-  // default route" here, not as a deliberate non-default choice.
+  // downgraded/overwritten. Parakeet is the current default, while only
+  // whisper/base.en is the legacy default; other Whisper models may be a
+  // deliberate user choice and must be preserved.
   const ensureDefaultModelDownloading = useCallback(() => {
     const existingProvider = initialDictationProviderRef.current;
+    const existingModelId = initialDictationModelIdRef.current?.trim() ?? "";
+    const hasCustomWhisperModel =
+      existingProvider === "whisper" &&
+      existingModelId.length > 0 &&
+      existingModelId !== "base.en";
     const hasExistingNonDefaultRoute =
       Boolean(existingProvider) &&
       existingProvider !== "parakeet" &&
-      existingProvider !== "whisper";
+      (existingProvider !== "whisper" || hasCustomWhisperModel);
     if (hasExistingNonDefaultRoute) {
       return;
     }
@@ -1137,9 +1150,16 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     setSaveError(null);
     setSaveErrorContext(null);
     try {
-      if (aiNotesChoice === "ollama") {
+      if (aiNotesChoice === "ollama" || aiNotesChoice === "none") {
         const settings = await getSettings();
-        if (settings.privacy.meetingsAi.provider !== "ollama") {
+        if (aiNotesChoice === "none") {
+          // These Rust-backed settings are the authoritative gates used by
+          // post-transcription processing. The renderer-only preference below
+          // cannot prevent either transcript analysis or title generation.
+          settings.transcription.enableAutoAnalysis = false;
+          settings.transcription.meetingAutoNameEnabled = false;
+          await saveSettings(settings);
+        } else if (settings.privacy.meetingsAi.provider !== "ollama") {
           // A provider change invalidates the model id with it: a model name
           // from OpenAI means nothing to Ollama, and null asks for the
           // provider's own default rather than a name that cannot resolve.
@@ -1453,15 +1473,27 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         ) : null}
 
         {step === "dictation-model" ? (
-          <DictationModelStep
-            state={modelState}
-            error={modelError}
-            percent={downloadPercent}
-            selectedId={selectedModelId}
-            downloadFromFooter={mode === "full"}
-            onSelect={setSelectedModelId}
-            onDownload={() => void startModelDownload(selectedModelId)}
-          />
+          <>
+            <DictationModelStep
+              state={modelState}
+              error={modelError}
+              percent={downloadPercent}
+              selectedId={selectedModelId}
+              downloadFromFooter={mode === "full"}
+              downloadDisabled={modelSelectionHydration !== "ready"}
+              onSelect={setSelectedModelId}
+              onDownload={() => void startModelDownload(selectedModelId)}
+            />
+            {modelSelectionHydration === "error" ? (
+              <p
+                role="alert"
+                aria-label="Model setup unavailable"
+                className="text-sm text-destructive"
+              >
+                Model setup could not be loaded. Reopen onboarding and try again.
+              </p>
+            ) : null}
+          </>
         ) : null}
 
         {step === "hotkey" ? (
@@ -1600,6 +1632,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               saveBusy ||
               permissionRequestBusy ||
               scratchBusy ||
+              (step === "dictation-model" && modelSelectionHydration !== "ready") ||
               (step === "meeting-setup" && meetingModelState === "downloading") ||
               // Only block Continue for a download in progress while the
               // user is still on a visible, foreground model surface.
@@ -2324,6 +2357,7 @@ function DictationModelStep({
   percent,
   selectedId,
   downloadFromFooter,
+  downloadDisabled,
   onSelect,
   onDownload,
 }: {
@@ -2332,6 +2366,7 @@ function DictationModelStep({
   percent: number | null;
   selectedId: string;
   downloadFromFooter: boolean;
+  downloadDisabled: boolean;
   onSelect(id: string): void;
   onDownload(): void;
 }) {
@@ -2379,7 +2414,12 @@ function DictationModelStep({
       </div>
 
       {state === "idle" && !downloadFromFooter ? (
-        <Button id="download-model-btn" onClick={onDownload} className="gap-2">
+        <Button
+          id="download-model-btn"
+          onClick={onDownload}
+          className="gap-2"
+          disabled={downloadDisabled}
+        >
           <Download className="h-4 w-4" />
           Download {selectedOption?.label}
         </Button>
@@ -2410,7 +2450,12 @@ function DictationModelStep({
             Download failed: {error}
           </div>
           {!downloadFromFooter ? (
-            <Button variant="outline" size="sm" onClick={onDownload}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onDownload}
+              disabled={downloadDisabled}
+            >
               Retry download
             </Button>
           ) : null}

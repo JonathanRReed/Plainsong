@@ -450,12 +450,10 @@ describe("IpcBridge crash-loop containment", () => {
     consoleWarn.mockRestore();
   });
 
-  // A SIGTERM aimed at the process group (logout, restart, a QA harness) can
-  // reach the sidecar before Electron's own quit path marks the bridge as
-  // shutting down. The bridge used to read that as a fault and schedule a
-  // replacement, which is where "[sidecar] restarting in 1000ms (attempt 1/5)"
-  // came from in packaged smoke logs that had nothing wrong with them.
-  it("does not replace a sidecar killed by a process-group teardown signal", async () => {
+  // ChildProcess only reports which signal killed the child, not whether it
+  // targeted the child alone or its process group. While the bridge is still
+  // active, a sidecar killed with SIGTERM must therefore be replaced.
+  it("replaces a sidecar killed by an external SIGTERM", async () => {
     const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
     const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const firstChild = fakeChildProcess();
@@ -475,9 +473,8 @@ describe("IpcBridge crash-loop containment", () => {
     firstChild.emit("exit", null, "SIGTERM");
     await vi.advanceTimersByTimeAsync(31_000);
 
-    // One spawn: the original. No replacement was scheduled.
     expect((spawnProcess as unknown as { mock: { calls: unknown[] } }).mock.calls)
-      .toHaveLength(1);
+      .toHaveLength(2);
     // The renderer is still told the sidecar is gone and why.
     expect(runtimeEvents).toContainEqual({
       name: "sidecar-runtime-changed",
@@ -490,6 +487,23 @@ describe("IpcBridge crash-loop containment", () => {
 
     bridge.shutdown();
     consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("does not restart during deferred active-meeting shutdown", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const firstChild = fakeChildProcess();
+    const spawnProcess = vi.fn(() => firstChild as never);
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+
+    bridge.setQuitPending(true);
+    firstChild.emit("exit", null, "SIGTERM");
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+    bridge.shutdown();
     consoleWarn.mockRestore();
   });
 

@@ -25,7 +25,7 @@ use crate::recording_audio::{
 };
 use crate::recording_pause::{PauseLedger, PauseSpan};
 use crate::settings;
-use crate::sidecar_handle::SidecarHandle;
+use crate::sidecar_handle::{AppEmitter, SidecarHandle};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
@@ -1915,6 +1915,7 @@ impl AudioCapture {
         &mut self,
         plan: RecordingCapturePlan,
         options: RecordingOptions,
+        preferred_input_device: Option<&settings::AudioInputDevicePreference>,
         event_handle: Option<SidecarHandle>,
     ) -> Result<String> {
         self.ensure_microphone_preparation_retry_is_safe(options.mic)?;
@@ -1958,10 +1959,18 @@ impl AudioCapture {
         let paused = Arc::new(AtomicBool::new(false));
         let recorded_frames = Arc::new(AtomicU64::new(0));
         let preferred_mic_device = if options.mic {
-            Some(
-                self.resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
-                    .0,
-            )
+            let (device, resolved_input) = match preferred_input_device {
+                Some(preference) => self.resolve_input_device(Some(preference))?,
+                None => {
+                    self.resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
+                }
+            };
+            if let (Some(handle), Some(advisory)) =
+                (event_handle.as_ref(), resolved_input.advisory.as_deref())
+            {
+                handle.emit_event("audio-input-advisory", advisory.to_string());
+            }
+            Some(device)
         } else {
             None
         };

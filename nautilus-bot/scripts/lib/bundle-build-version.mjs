@@ -64,7 +64,8 @@ function prereleaseOffset(prerelease, version) {
   if (!prerelease) {
     return RELEASE_OFFSET;
   }
-  const [tag, number] = prerelease.split(".");
+  const identifiers = prerelease.split(".");
+  const [tag, number] = identifiers;
   const rank = PRERELEASE_RANK[tag];
   if (rank === undefined) {
     throw new Error(
@@ -72,8 +73,13 @@ function prereleaseOffset(prerelease, version) {
         `expected one of ${Object.keys(PRERELEASE_RANK).join(", ")}`,
     );
   }
-  const sequence = Number(number ?? 0);
-  if (!Number.isSafeInteger(sequence) || sequence < 0 || sequence >= RANK_STRIDE) {
+  if (identifiers.length !== 2 || !/^(?:0|[1-9]\d*)$/.test(number ?? "")) {
+    throw new Error(
+      `Prerelease must contain exactly a tag and numeric sequence in ${version}`,
+    );
+  }
+  const sequence = Number(number);
+  if (!Number.isSafeInteger(sequence) || sequence >= RANK_STRIDE) {
     throw new Error(
       `Prerelease sequence must be an integer below ${RANK_STRIDE} in ${version}`,
     );

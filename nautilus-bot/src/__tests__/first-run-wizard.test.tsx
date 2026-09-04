@@ -257,8 +257,10 @@ vi.mock("@/lib/backend/settings", () => ({
 }));
 
 async function clickPrimary(label: RegExp) {
+  const button = screen.getByRole("button", { name: label });
+  await waitFor(() => expect(button).toBeEnabled());
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: label }));
+    fireEvent.click(button);
   });
 }
 
@@ -336,6 +338,77 @@ describe("FirstRunWizard", () => {
     expect(screen.getByText(/downloads on demand/i)).toBeInTheDocument();
     expect(screen.getByText("2.8 GiB")).toBeInTheDocument();
     expect(screen.queryByText(/already ships with/i)).not.toBeInTheDocument();
+  });
+
+  it("waits for the persisted model selection before starting a download", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const providerDiscovery = deferred<AsrProviderInfo[]>();
+    vi.mocked(asrBackend.getAsrProviders).mockImplementationOnce(
+      () => providerDiscovery.promise,
+    );
+    currentSettings.transcription.dictationProvider = "parakeet";
+    currentSettings.transcription.dictationModelId = "parakeet-tdt-0.6b-v3";
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    const downloadButton = screen.getByRole("button", {
+      name: /download and continue/i,
+    });
+    expect(downloadButton).toBeDisabled();
+    fireEvent.click(downloadButton);
+    expect(asrBackend.downloadAsrModels).not.toHaveBeenCalled();
+
+    await act(async () => {
+      providerDiscovery.resolve(providers);
+    });
+
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    fireEvent.click(downloadButton);
+    await waitFor(() => {
+      expect(asrBackend.downloadAsrModels).toHaveBeenCalledWith(
+        "parakeet",
+        "parakeet-tdt-0.6b-v3",
+      );
+    });
+  });
+
+  it("keeps model download disabled when settings hydration fails", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const settingsBackend = await import("@/lib/backend/settings");
+    vi.mocked(settingsBackend.getSettings).mockRejectedValueOnce(
+      new Error("settings unavailable"),
+    );
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    expect(
+      await screen.findByRole("alert", { name: /model setup unavailable/i }),
+    ).toBeInTheDocument();
+    const downloadButton = screen.getByRole("button", {
+      name: /download and continue/i,
+    });
+    expect(downloadButton).toBeDisabled();
+    fireEvent.click(downloadButton);
+    expect(asrBackend.downloadAsrModels).not.toHaveBeenCalled();
+  });
+
+  it("keeps model download disabled when provider hydration fails", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    vi.mocked(asrBackend.getAsrProviders).mockRejectedValueOnce(
+      new Error("providers unavailable"),
+    );
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    expect(
+      await screen.findByRole("alert", { name: /model setup unavailable/i }),
+    ).toBeInTheDocument();
+    const downloadButton = screen.getByRole("button", {
+      name: /download and continue/i,
+    });
+    expect(downloadButton).toBeDisabled();
+    fireEvent.click(downloadButton);
+    expect(asrBackend.downloadAsrModels).not.toHaveBeenCalled();
   });
 
   it("announces each step and moves focus to the new heading", async () => {
@@ -628,6 +701,55 @@ describe("FirstRunWizard", () => {
       expect(currentSettings.transcription.dictationModelId).toBe(
         "parakeet-tdt-0.6b-v3",
       );
+    });
+  });
+
+  it("preserves a deliberately selected non-default Whisper model", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "small.en";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i); // permissions -> dictation-model
+    await clickPrimary(/continue/i); // -> hotkey, preserves the existing route
+
+    expect(downloadAsrModels).not.toHaveBeenCalled();
+    expect(currentSettings.transcription.dictationProvider).toBe("whisper");
+    expect(currentSettings.transcription.dictationModelId).toBe("small.en");
+  });
+
+  it("downloads base.en for a legacy Whisper route with only selectedModelId", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = undefined as never;
+    currentSettings.transcription.selectedModelId = "base.en";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
+    });
+  });
+
+  it("downloads base.en when a legacy Whisper route has no model id", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = undefined as never;
+    currentSettings.transcription.selectedModelId = undefined as never;
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
     });
   });
 
@@ -1435,7 +1557,7 @@ describe("FirstRunWizard", () => {
       ).toBeInTheDocument();
     });
 
-    it("remembers a transcripts-only choice", async () => {
+    it("disables automatic meeting processing for a transcripts-only choice", async () => {
       const ai = await import("@/lib/backend/ai");
       vi.mocked(ai.getOllamaStatus).mockResolvedValue(false);
 
@@ -1449,6 +1571,8 @@ describe("FirstRunWizard", () => {
 
       await waitFor(() => {
         expect(storage.get(AI_NOTES_OPT_OUT_STORAGE_KEY)).toBe("true");
+        expect(currentSettings.transcription.enableAutoAnalysis).toBe(false);
+        expect(currentSettings.transcription.meetingAutoNameEnabled).toBe(false);
       });
     });
 

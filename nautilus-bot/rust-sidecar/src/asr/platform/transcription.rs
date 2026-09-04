@@ -9,6 +9,10 @@ use std::time::Instant;
 /// to the macOS Speech helper. Segment timestamps come back relative to the
 /// staged file, so this is subtracted before they are reported.
 const PREPENDED_SILENCE_MS: u32 = 750;
+const MAX_STAGING_SAMPLE_RATE: u32 = 192_000;
+const MAX_STAGING_CHANNELS: u16 = 8;
+const MAX_STAGING_INPUT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_STAGED_AUDIO_BYTES: u64 = 512 * 1024 * 1024;
 
 /// The frames of silence to prepend at one sample rate, and the seconds that
 /// many frames actually last.
@@ -226,6 +230,47 @@ fn stage_macos_speech_input_at(
         return Ok(ManagedAudioPath::borrowed(audio_path));
     }
 
+    let input_bytes = std::fs::metadata(audio_path)
+        .with_context(|| {
+            format!(
+                "Failed to inspect macOS Speech input '{}'",
+                audio_path.display()
+            )
+        })?
+        .len();
+    anyhow::ensure!(
+        input_bytes <= MAX_STAGING_INPUT_BYTES,
+        "macOS Speech input is too large to stage safely"
+    );
+    anyhow::ensure!(
+        spec.sample_rate <= MAX_STAGING_SAMPLE_RATE,
+        "macOS Speech input sample rate {} exceeds the supported maximum of {} Hz",
+        spec.sample_rate,
+        MAX_STAGING_SAMPLE_RATE
+    );
+    anyhow::ensure!(
+        spec.channels <= MAX_STAGING_CHANNELS,
+        "macOS Speech input channel count {} exceeds the supported maximum of {}",
+        spec.channels,
+        MAX_STAGING_CHANNELS
+    );
+
+    let (prepended_frames, prepended_seconds) = prepended_silence(spec.sample_rate);
+    let prepended_samples = (prepended_frames as u64)
+        .checked_mul(spec.channels as u64)
+        .context("macOS Speech silence sample count overflowed")?;
+    let bytes_per_sample = u64::from(spec.bits_per_sample / 8);
+    let staged_output_bytes = u64::from(reader.len())
+        .checked_add(prepended_samples)
+        .and_then(|samples| samples.checked_mul(bytes_per_sample))
+        .and_then(|sample_bytes| sample_bytes.checked_add(44))
+        .context("macOS Speech staged output size overflowed")?;
+    anyhow::ensure!(
+        staged_output_bytes <= MAX_STAGED_AUDIO_BYTES,
+        "macOS Speech staged output would exceed the {} byte safety limit",
+        MAX_STAGED_AUDIO_BYTES
+    );
+
     let staged_audio = ManagedAudioPath::temporary(staged_path);
     let staged_file = create_private_file(&staged_audio.path).with_context(|| {
         format!(
@@ -240,8 +285,7 @@ fn stage_macos_speech_input_at(
         )
     })?;
 
-    let (prepended_frames, prepended_seconds) = prepended_silence(spec.sample_rate);
-    let prepended_samples = prepended_frames * spec.channels as usize;
+    let prepended_samples = prepended_samples as usize;
 
     match (spec.sample_format, spec.bits_per_sample) {
         (hound::SampleFormat::Int, 16) => {
@@ -501,6 +545,34 @@ mod tests {
             .map(|entry| entry.expect("read staging entry").path())
             .collect::<Vec<_>>();
         assert_eq!(remaining, vec![input_path]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn crafted_sample_rate_is_rejected_before_staged_file_creation() {
+        let root = temp_root("unsafe-stage-rate");
+        let input_path = root.join("crafted.wav");
+        let staged_path = root.join("staged.wav");
+        let sample_rate = 2_000_000_000_u32;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&36_u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&0_u32.to_le_bytes());
+        std::fs::write(&input_path, wav).expect("write crafted WAV");
+
+        let error = stage_macos_speech_input_at(&input_path, staged_path.clone())
+            .expect_err("unreasonable header values must be rejected");
+        assert!(error.to_string().contains("sample rate"));
+        assert!(!staged_path.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

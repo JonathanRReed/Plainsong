@@ -409,6 +409,44 @@ describe("dictation latency pipeline gate (Wave 3, asr_and_local_format_only)", 
     );
   });
 
+  it("rejects invalid stage samples and percentiles that do not match them", () => {
+    const invalidSamples = verifyDictationLatencyReport(
+      validPipelineReport({
+        primary: validFixtureReport({
+          stageBreakdownMs: {
+            ...validFixtureReport().stageBreakdownMs,
+            asr: { measurementsMs: [85, "bad", 95, -1, 105], p50: 95, p95: 105 },
+          },
+        }),
+      }),
+    );
+    expect(invalidSamples.pass).toBe(false);
+    expect(invalidSamples.failures).toContain(
+      "primary.stageBreakdownMs.asr.measurementsMs[1] must be a finite, non-negative number",
+    );
+    expect(invalidSamples.failures).toContain(
+      "primary.stageBreakdownMs.asr.measurementsMs[3] must be a finite, non-negative number",
+    );
+
+    const forgedPercentiles = verifyDictationLatencyReport(
+      validPipelineReport({
+        primary: validFixtureReport({
+          stageBreakdownMs: {
+            ...validFixtureReport().stageBreakdownMs,
+            asr: { measurementsMs: [100, 200, 300, 400, 500], p50: 0, p95: 0 },
+          },
+        }),
+      }),
+    );
+    expect(forgedPercentiles.pass).toBe(false);
+    expect(forgedPercentiles.failures).toContain(
+      "primary.stageBreakdownMs.asr.p50 must match the nearest-rank P50 of primary.stageBreakdownMs.asr.measurementsMs (300ms)",
+    );
+    expect(forgedPercentiles.failures).toContain(
+      "primary.stageBreakdownMs.asr.p95 must match the nearest-rank P95 of primary.stageBreakdownMs.asr.measurementsMs (500ms)",
+    );
+  });
+
   it("requires a non-empty insertionStrategy label since insertion is mocked", () => {
     const result = verifyDictationLatencyReport(
       validPipelineReport({ insertionStrategy: "" }),

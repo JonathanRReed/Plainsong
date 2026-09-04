@@ -463,7 +463,7 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("Privacy & Security"));
     expect(
       await screen.findByRole("switch", {
-        name: "Use cloud AI for summaries and answers",
+        name: "Allow cloud AI processing",
       }),
     ).toBeInTheDocument();
     expect(
@@ -502,6 +502,14 @@ describe("SettingsView performance behavior", () => {
     expect(
       screen.getByRole("combobox", { name: "How search finds a meeting" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows spoken commands as disabled when the setting is absent", async () => {
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    fireEvent.click(await screen.findByText("Transcription"));
+
+    expect(await screen.findByRole("switch", { name: "Spoken commands" })).not.toBeChecked();
   });
 
   it("invalidates ASR runtime probes before refreshing permission diagnostics", async () => {
@@ -756,7 +764,7 @@ describe("SettingsView performance behavior", () => {
     // "not encrypted" just because privacy.encryptRecordings no longer exists
     // on the saved Settings object.
     const remoteProcessingRow = screen
-      .getByText("Use cloud AI for summaries and answers")
+      .getByText("Allow cloud AI processing")
       .closest(".flex.items-center.justify-between");
     const remoteProcessingSwitch = within(
       remoteProcessingRow as HTMLElement,
@@ -1963,6 +1971,56 @@ describe("SettingsView performance behavior", () => {
     expect(screen.queryByText(/read-only/)).toBeNull();
   });
 
+  it("serializes rapid saved-prompt writes through the settings scheduler", async () => {
+    const backend = await import("@/lib/backend");
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("AI & Keys"));
+    fireEvent.click(await screen.findByRole("button", { name: "Manage prompts" }));
+    const dialog = await screen.findByRole("dialog");
+    const saveSettings = vi.mocked(backend.saveSettings);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText("Saving…")).toBeNull());
+
+    let finishFirstSave: (() => void) | undefined;
+    saveSettings.mockClear();
+    saveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishFirstSave = resolve;
+        }),
+    );
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Hide Decisions made" }),
+    );
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Hide Open questions" }),
+    );
+    await act(async () => Promise.resolve());
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+
+    finishFirstSave?.();
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    const finalWrite = saveSettings.mock.calls[1]?.[0];
+    expect(
+      finalWrite?.ai?.savedPrompts?.filter((prompt) => prompt.hidden),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Decisions made" }),
+        expect.objectContaining({ name: "Open questions" }),
+      ]),
+    );
+  });
+
   // ── Translate to English (roadmap item B7a) ────────────────────────────
   it("refuses translate-to-English on an English-only whisper model and says why", async () => {
     render(
@@ -2087,7 +2145,7 @@ describe("Settings copy clarity", () => {
     await screen.findByText("API keys");
     expect(
       screen.queryByRole("switch", {
-        name: "Use cloud AI for summaries and answers",
+        name: "Allow cloud AI processing",
       }),
     ).toBeNull();
     expect(screen.getByText("Cloud AI is off")).toBeInTheDocument();
@@ -2098,9 +2156,12 @@ describe("Settings copy clarity", () => {
     fireEvent.click(screen.getByText("Privacy & Security"));
     expect(
       await screen.findByRole("switch", {
-        name: "Use cloud AI for summaries and answers",
+        name: "Allow cloud AI processing",
       }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Dictation requests may also include captured/),
+    ).toHaveTextContent("selected text or app context");
   });
 
   /**

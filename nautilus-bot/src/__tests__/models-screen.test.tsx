@@ -1039,13 +1039,13 @@ describe("Models screen", () => {
     ).toBeInTheDocument();
   });
 
-  it("says a short file is an unfinished download, not a bad checksum", async () => {
+  it("does not mistake a short installed file for an unfinished download", async () => {
     getLivePreviewEngineStatusMock.mockResolvedValue({
       ...LIVE_PREVIEW_STATUS,
       ready: false,
-      // An interrupted download: some of the bytes landed, none of them are
-      // wrong. Accusing the file of failing its checksum sends the user
-      // hunting for a problem that is not there.
+      // bytesOnDisk describes the installed path, not the separate temporary
+      // file used for interrupted downloads. Its size cannot identify why
+      // verification failed.
       bytesOnDisk: 120_000_000,
     });
     render(<Harness />);
@@ -1054,10 +1054,10 @@ describe("Models screen", () => {
       name: "Live preview engine",
     })) as HTMLElement;
     expect(
-      within(row).getByText(/the download did not finish/i),
+      within(row).getByText(/could not verify the file on disk against its pinned checksum/i),
     ).toBeInTheDocument();
     expect(
-      within(row).queryByText(/checksum/i),
+      within(row).queryByText(/the download did not finish/i),
     ).not.toBeInTheDocument();
   });
 

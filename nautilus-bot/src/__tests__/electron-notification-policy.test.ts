@@ -229,7 +229,7 @@ describe("transcript and notes notifications", () => {
     ).toBeNull();
   });
 
-  it("reports notes ready or failed, with the failure trimmed to one line", () => {
+  it("reports notes ready or failed without exposing the failure reason", () => {
     expect(
       notificationForSidecarEvent(
         "meeting-analysis-status",
@@ -247,20 +247,18 @@ describe("transcript and notes notifications", () => {
 
     const failed = notificationForSidecarEvent(
       "meeting-analysis-status",
-      { recordingId: "rec-1", phase: "failed", error: "summary:   Ollama is not\n running" },
+      {
+        recordingId: "rec-1",
+        phase: "failed",
+        error: "provider echoed transcript secret: Project Nightingale",
+      },
       context(),
     );
     expect(failed?.title).toBe("Meeting notes failed");
-    expect(failed?.body).toBe("summary: Ollama is not running");
-
-    const longError = "x".repeat(400);
-    const trimmed = notificationForSidecarEvent(
-      "meeting-analysis-status",
-      { recordingId: "rec-1", phase: "failed", error: longError },
-      context(),
+    expect(failed?.body).toBe(
+      "Plainsong could not write the summary; open the meeting to retry.",
     );
-    expect(trimmed?.body.length).toBeLessThanOrEqual(160);
-    expect(trimmed?.body.endsWith("…")).toBe(true);
+    expect(failed?.body).not.toContain("Project Nightingale");
 
     const noReason = notificationForSidecarEvent(
       "meeting-analysis-status",
