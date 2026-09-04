@@ -186,6 +186,15 @@ describe("buildSidecarEnv", () => {
 });
 
 describe("getCommandTimeoutMs", () => {
+  it("keeps main-routed pause and resume on the fast sidecar timeout", () => {
+    expect(getCommandTimeoutMs("pause_recording")).toBe(
+      getCommandTimeoutMs("pause_meeting_capture"),
+    );
+    expect(getCommandTimeoutMs("resume_recording")).toBe(
+      getCommandTimeoutMs("resume_meeting_capture"),
+    );
+  });
+
   it("uses shorter timeouts for quick reads and longer windows for heavy work", () => {
     expect(getCommandTimeoutMs("get_settings")).toBeLessThan(getCommandTimeoutMs("save_settings"));
     expect(getCommandTimeoutMs("download_asr_models")).toBeGreaterThan(
