@@ -33,16 +33,25 @@ export function dispatcher(): string {
 
 let allModules: string | undefined;
 
+function rustModules(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      return rustModules(entryPath);
+    }
+    return entry.isFile() && entry.name.endsWith(".rs") ? [entryPath] : [];
+  });
+}
+
 /**
- * Every `.rs` file directly under `rust-sidecar/src`, concatenated in name
- * order. Read once and cached; these files do not change during a test run.
+ * Every `.rs` file under `rust-sidecar/src`, concatenated in path order. Read
+ * once and cached; these files do not change during a test run.
  */
 export function sidecarSource(): string {
   if (allModules === undefined) {
-    allModules = readdirSync(SIDECAR_SRC)
-      .filter((entry) => entry.endsWith(".rs"))
+    allModules = rustModules(SIDECAR_SRC)
       .sort()
-      .map((entry) => readFileSync(path.join(SIDECAR_SRC, entry), "utf8"))
+      .map((modulePath) => readFileSync(modulePath, "utf8"))
       .join("\n");
   }
   return allModules;
