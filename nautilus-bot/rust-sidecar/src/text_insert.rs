@@ -1299,24 +1299,42 @@ pub(crate) fn escape_powershell_single_quoted(value: &str) -> String {
 }
 
 #[cfg(any(test, target_os = "windows"))]
-pub(crate) fn build_windows_sendkeys_script(keys: &str, target_app: Option<&str>) -> String {
-    let mut statements = vec!["Add-Type -AssemblyName System.Windows.Forms".to_string()];
-
-    if let Some(app_name) = target_app.map(str::trim).filter(|value| !value.is_empty()) {
-        statements.push("Add-Type -AssemblyName Microsoft.VisualBasic".to_string());
-        statements.push(format!(
-            "[Microsoft.VisualBasic.Interaction]::AppActivate('{}') | Out-Null",
-            escape_powershell_single_quoted(app_name)
+pub(crate) fn build_windows_sendkeys_script(
+    keys: &str,
+    target_identity: Option<&str>,
+) -> Result<String, String> {
+    let Some(target_identity) = target_identity else {
+        return Ok(format!(
+            "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')",
+            escape_powershell_single_quoted(keys)
         ));
-        statements.push("Start-Sleep -Milliseconds 60".to_string());
-    }
+    };
+    let identity = target_identity
+        .strip_prefix("windows-hwnd-pid:")
+        .ok_or_else(|| "Windows paste target identity is missing or invalid.".to_string())?;
+    let (hwnd, process_id) = identity
+        .split_once(':')
+        .ok_or_else(|| "Windows paste target identity is missing or invalid.".to_string())?;
+    let hwnd = hwnd
+        .parse::<u64>()
+        .map_err(|_| "Windows paste target HWND is invalid.".to_string())?;
+    let process_id = process_id
+        .parse::<u32>()
+        .map_err(|_| "Windows paste target process ID is invalid.".to_string())?;
 
-    statements.push(format!(
-        "[System.Windows.Forms.SendKeys]::SendWait('{}')",
+    Ok(format!(
+        r#"Add-Type -AssemblyName System.Windows.Forms; Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class PlainsongPasteTarget {{
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}}
+"@; $target = [IntPtr]::new({hwnd}); $expectedPid = [uint32]{process_id}; if (-not [PlainsongPasteTarget]::IsWindow($target)) {{ exit 40 }}; $actualPid = 0; [void][PlainsongPasteTarget]::GetWindowThreadProcessId($target, [ref]$actualPid); if ($actualPid -ne $expectedPid) {{ exit 41 }}; if ([PlainsongPasteTarget]::GetForegroundWindow() -ne $target) {{ [void][PlainsongPasteTarget]::SetForegroundWindow($target) }}; $confirmed = $false; for ($i = 0; $i -lt 10; $i++) {{ $foreground = [PlainsongPasteTarget]::GetForegroundWindow(); $foregroundPid = 0; [void][PlainsongPasteTarget]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid); if ($foreground -eq $target -and $foregroundPid -eq $expectedPid) {{ $confirmed = $true; break }}; Start-Sleep -Milliseconds 20 }}; if (-not $confirmed) {{ exit 42 }}; $foreground = [PlainsongPasteTarget]::GetForegroundWindow(); $foregroundPid = 0; [void][PlainsongPasteTarget]::GetWindowThreadProcessId($foreground, [ref]$foregroundPid); if ($foreground -ne $target -or $foregroundPid -ne $expectedPid) {{ exit 43 }}; [System.Windows.Forms.SendKeys]::SendWait('{}')"#,
         escape_powershell_single_quoted(keys)
-    ));
-
-    statements.join("; ")
+    ))
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -1537,6 +1555,48 @@ pub(crate) fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasteDispatchStatus {
+    Confirmed,
+    FallbackDispatched,
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_paste_key() -> Result<PasteDispatchStatus, String> {
+    let system_events_error = match std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to keystroke \"v\" using command down")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            tracing::info!("Cmd+V posted via System Events");
+            return Ok(PasteDispatchStatus::Confirmed);
+        }
+        Ok(output) => format!(
+            "System Events exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => format!("Failed to invoke osascript for paste: {}", error),
+    };
+
+    // CGEvent::post has no delivery result. It remains useful as a fallback,
+    // but must not be treated as confirmation that the target received the
+    // paste (in particular when macOS silently denies event posting).
+    dispatch_command_keystroke(9)
+        .map(|()| {
+            tracing::info!("Cmd+V posted via CoreGraphics fallback");
+            PasteDispatchStatus::FallbackDispatched
+        })
+        .map_err(|error| {
+            format!(
+                "{}; CoreGraphics paste failed: {}",
+                system_events_error, error
+            )
+        })
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn send_native_copy_key(
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
@@ -1548,10 +1608,10 @@ pub(crate) fn send_native_copy_key(
 
 #[cfg(target_os = "windows")]
 pub(crate) fn send_native_copy_key(
-    target_app: Option<&str>,
-    _target_app_bundle_id: Option<&str>,
+    _target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
 ) -> Result<(), String> {
-    let script = build_windows_sendkeys_script("^c", target_app);
+    let script = build_windows_sendkeys_script("^c", target_app_bundle_id)?;
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script.as_str()])
         .status()
@@ -1570,7 +1630,7 @@ pub(crate) fn send_native_undo_key() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn send_native_undo_key() -> Result<(), String> {
-    let script = build_windows_sendkeys_script("^z", None);
+    let script = build_windows_sendkeys_script("^z", None)?;
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script.as_str()])
         .status()
@@ -1682,11 +1742,9 @@ pub(crate) fn dispatch_paste_from_clipboard(
         PasteDispatchFailure::Other(format!("Failed to stage clipboard paste: {}", error))
     })?;
 
-    match dispatch_command_keystroke(9)
-        .map_err(|error| format!("CoreGraphics paste failed: {}", error))
-    {
-        Ok(()) => {
-            if !keep_text_in_clipboard {
+    match send_native_paste_key() {
+        Ok(status) => {
+            if !keep_text_in_clipboard && status == PasteDispatchStatus::Confirmed {
                 if let Some(previous) = previous_clipboard {
                     schedule_clipboard_restore(previous, text.to_string());
                 }
@@ -1882,10 +1940,13 @@ pub(crate) fn capture_application_context_text(
 pub(crate) fn dispatch_paste_from_clipboard(
     _text: &str,
     _keep_text_in_clipboard: bool,
-    target_app: Option<&str>,
-    _target_app_bundle_id: Option<&str>,
+    _target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
 ) -> Result<CursorInsertStrategy, String> {
-    let script = build_windows_sendkeys_script("^v", target_app);
+    let target_identity = target_app_bundle_id.ok_or_else(|| {
+        "Windows paste was stopped because the original window identity is unavailable.".to_string()
+    })?;
+    let script = build_windows_sendkeys_script("^v", Some(target_identity))?;
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script.as_str()])
         .status()

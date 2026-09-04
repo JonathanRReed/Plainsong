@@ -260,21 +260,6 @@ export async function reprocessDictation(
   });
 }
 
-interface CursorInsertSmokeTestResult {
-  text: string;
-  targetApp?: string | null;
-  targetBundleId?: string | null;
-  pasted: boolean;
-  copied: boolean;
-  error?: string | null;
-}
-
-export async function smokeTestCursorInsert(
-  text?: string
-): Promise<CursorInsertSmokeTestResult> {
-  return await invoke("smoke_test_cursor_insert", { text });
-}
-
 export async function captureSelectedTextForPlayback(): Promise<string | null> {
   return await invoke("capture_selected_text_for_playback");
 }
@@ -399,11 +384,16 @@ export interface RecordingPauseSnapshot {
  * `meeting-recording-state-changed`, which is what every window renders from.
  */
 export async function pauseRecording(recordingId: string): Promise<RecordingPauseSnapshot> {
-  return await invoke("pause_recording", { recordingId });
+  // The public API retains the ID parameter for callers, but the privileged
+  // main process deliberately selects the active recording rather than
+  // trusting renderer-owned target state.
+  void recordingId;
+  return await invoke("pause_meeting_capture");
 }
 
 export async function resumeRecording(recordingId: string): Promise<RecordingPauseSnapshot> {
-  return await invoke("resume_recording", { recordingId });
+  void recordingId;
+  return await invoke("resume_meeting_capture");
 }
 
 /** Mirrors `ActiveCall` in rust-sidecar/src/meeting_detect.rs. */

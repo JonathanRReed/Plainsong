@@ -1451,12 +1451,14 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 }
             }
 
+            let ai_selection = dictation_session_ai_selection(&settings_snapshot)?;
             match execute_dictation_command_action(
                 state,
                 &command_key,
                 action,
                 command_context_text.as_deref(),
                 &command_context_source,
+                &ai_selection,
             )
             .await
             {
@@ -1544,25 +1546,26 @@ pub(crate) async fn stop_dictation_for_sidecar(
         && !final_text.is_empty()
         && command_applied.is_none()
     {
-        let attempt = match selected_analysis_provider_and_settings(
-            state,
-            settings::AiLane::Dictation,
-        )
-        .await
-        .and_then(|(provider, remote_processing_enabled, _, _)| {
-            enforce_remote_provider_policy(provider, remote_processing_enabled).map(|()| provider)
-        }) {
-            Ok(provider) => {
+        let attempt = match dictation_session_ai_selection(&settings_snapshot).and_then(
+            |(provider, remote_processing_enabled, model)| {
+                enforce_remote_provider_policy(provider, remote_processing_enabled)
+                    .map(|()| (provider, remote_processing_enabled, model))
+            },
+        ) {
+            Ok((provider, remote_processing_enabled, model)) => {
                 let format_timeout = pre_insert_budget.remaining(
                     dictation_format_timeout(provider),
                     std::time::Instant::now(),
                 );
                 let translated = tokio::time::timeout(
                     format_timeout,
-                    run_custom_dictation_transform_with_selected_provider(
+                    run_custom_dictation_transform_with_provider(
                         state,
                         final_text.as_str(),
                         DICTATION_TRANSLATE_TO_ENGLISH_PROMPT,
+                        provider,
+                        &model,
+                        remote_processing_enabled,
                     ),
                 )
                 .await;
@@ -1627,26 +1630,26 @@ pub(crate) async fn stop_dictation_for_sidecar(
                     // call the budget is meant to time, and a policy-blocked
                     // remote provider should fail fast rather than occupy
                     // the timer only to be rejected inside it.
-                    let attempt = match selected_analysis_provider_and_settings(
-                        state,
-                        settings::AiLane::Dictation,
-                    )
-                    .await
-                    .and_then(|(provider, remote_processing_enabled, _, _)| {
-                        enforce_remote_provider_policy(provider, remote_processing_enabled)
-                            .map(|()| provider)
-                    }) {
-                        Ok(provider) => {
+                    let attempt = match dictation_session_ai_selection(&settings_snapshot).and_then(
+                        |(provider, remote_processing_enabled, model)| {
+                            enforce_remote_provider_policy(provider, remote_processing_enabled)
+                                .map(|()| (provider, remote_processing_enabled, model))
+                        },
+                    ) {
+                        Ok((provider, remote_processing_enabled, model)) => {
                             let format_timeout = pre_insert_budget.remaining(
                                 dictation_format_timeout(provider),
                                 std::time::Instant::now(),
                             );
                             let transform = tokio::time::timeout(
                                 format_timeout,
-                                run_custom_dictation_transform_with_selected_provider(
+                                run_custom_dictation_transform_with_provider(
                                     state,
                                     final_text.as_str(),
                                     prompt.as_str(),
+                                    provider,
+                                    &model,
+                                    remote_processing_enabled,
                                 ),
                             )
                             .await;
@@ -2063,7 +2066,23 @@ pub(crate) async fn stop_dictation_for_sidecar(
         };
     } else {
         if undo_previous_insert {
-            if recent_inserted_text.is_some() {
+            // Re-sample focus immediately before the destructive operation.
+            // The session's start target alone is insufficient because focus
+            // can change while audio is being transcribed.
+            let focused_app = get_frontmost_app_name();
+            let focused_bundle_id = get_frontmost_app_bundle_id();
+            let undo_authorized = recent_delivery.as_ref().is_some_and(|delivery| {
+                recent_delivery_authorizes_undo(
+                    delivery,
+                    app_target.as_deref(),
+                    app_bundle_id.as_deref(),
+                    focused_app.as_deref(),
+                    focused_bundle_id.as_deref(),
+                    &requested_insertion_mode,
+                    chrono::Utc::now(),
+                )
+            });
+            if undo_authorized {
                 match send_native_undo_key() {
                     Ok(()) => {
                         undo_performed = true;
@@ -2073,14 +2092,20 @@ pub(crate) async fn stop_dictation_for_sidecar(
                         paste_error = Some(error);
                     }
                 }
-            } else if final_text.is_empty() {
-                paste_error = Some("No recent dictation insert was available to undo.".to_string());
+            }
+            if !undo_performed {
+                if paste_error.is_none() {
+                    paste_error =
+                        Some("No recent dictation insert was available to undo.".to_string());
+                }
                 actual_insertion_mode = "command_only".to_string();
                 outcome = "error".to_string();
             }
         }
 
-        if !final_text.is_empty() {
+        if !final_text.is_empty()
+            && replacement_insertion_is_authorized(undo_previous_insert, undo_performed)
+        {
             let insert_started_at = std::time::Instant::now();
             insertion_dispatched_ms = Some(
                 stop_signal_instant
@@ -2442,6 +2467,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 app_target: app_target.clone(),
                 app_bundle_id: app_bundle_id.clone(),
                 delivered_at: now,
+                undo_eligible: insertion_confirmed_flag,
             });
         } else if undo_performed {
             *recent_delivery_slot = None;

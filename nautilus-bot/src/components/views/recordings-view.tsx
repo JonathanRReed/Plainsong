@@ -1141,6 +1141,13 @@ export function RecordingsView() {
   const [speakerVoices, setSpeakerVoices] = useState<
     Record<string, SpeakerVoiceState>
   >({});
+  const [speakerVoicesRecordingId, setSpeakerVoicesRecordingId] = useState<
+    string | null
+  >(null);
+  // Suggestion requests may finish out of order. Keep both the meeting and a
+  // generation here so an old response can never populate the next meeting.
+  const speakerVoiceRequestRef = useRef(0);
+  const selectedRecordingIdRef = useRef<string | null>(null);
   const [speakerNameOptions, setSpeakerNameOptions] = useState<string[]>([]);
   const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
   // null while creating a new template; the template being edited otherwise.
@@ -1334,6 +1341,7 @@ export function RecordingsView() {
       }
     },
   });
+  selectedRecordingIdRef.current = selectedRecording?.id ?? null;
 
   // Loaded on mount, then re-read on every `settings-changed` broadcast --
   // the same pattern models-screen.tsx uses for its own settings-derived
@@ -1770,8 +1778,15 @@ export function RecordingsView() {
    * missing chip, not a broken transcript.
    */
   const refreshSpeakerVoices = useCallback(async (recordingId: string) => {
+    const request = ++speakerVoiceRequestRef.current;
     try {
       const result = await suggestSpeakerVoices(recordingId);
+      if (
+        request !== speakerVoiceRequestRef.current ||
+        selectedRecordingIdRef.current !== recordingId
+      ) {
+        return;
+      }
       const next: Record<string, SpeakerVoiceState> = {};
       if (result.enabled) {
         for (const cluster of result.clusters) {
@@ -1788,12 +1803,20 @@ export function RecordingsView() {
         }
       }
       setSpeakerVoices(next);
+      setSpeakerVoicesRecordingId(recordingId);
       // Attendees first, then remembered voices — the sidecar has already
       // ranked them, so this side does not re-decide the order.
       setSpeakerNameOptions(result.enabled ? result.nameOptions : []);
     } catch (error) {
+      if (
+        request !== speakerVoiceRequestRef.current ||
+        selectedRecordingIdRef.current !== recordingId
+      ) {
+        return;
+      }
       console.warn("Failed to load remembered-voice suggestions:", error);
       setSpeakerVoices({});
+      setSpeakerVoicesRecordingId(null);
       setSpeakerNameOptions([]);
     }
   }, []);
@@ -1801,13 +1824,17 @@ export function RecordingsView() {
   // Re-asked whenever the open meeting changes. Cheap: it compares stored
   // centroids, it does not re-run the embedder over the audio.
   useEffect(() => {
+    // Invalidate and hide the previous meeting's map synchronously with the
+    // transition; the request below is the only one allowed to refill it.
+    speakerVoiceRequestRef.current += 1;
+    setSpeakerVoices({});
+    setSpeakerVoicesRecordingId(null);
+    setSpeakerNameOptions([]);
     if (!selectedRecording) {
-      setSpeakerVoices({});
-      setSpeakerNameOptions([]);
       return;
     }
     void refreshSpeakerVoices(selectedRecording.id);
-  }, [selectedRecording, refreshSpeakerVoices]);
+  }, [selectedRecording?.id, refreshSpeakerVoices]);
 
   // And whenever a remembered voice is forgotten. "Delete all" in Settings
   // used to leave the open transcript offering names for voices that no
@@ -1833,20 +1860,28 @@ export function RecordingsView() {
       cancelled = true;
       unlisten?.();
     };
-  }, [selectedRecording, refreshSpeakerVoices]);
+  }, [selectedRecording?.id, refreshSpeakerVoices]);
 
   const handleConfirmSpeakerVoice = async (speakerId: string, profileId: string) => {
-    if (!selectedRecording) {
+    if (
+      !selectedRecording ||
+      speakerVoicesRecordingId !== selectedRecording.id ||
+      speakerVoices[speakerId]?.suggestion?.profileId !== profileId
+    ) {
       return;
     }
+    const recordingId = selectedRecording.id;
     try {
       const { displayName } = await rememberSpeakerVoice({
-        recordingId: selectedRecording.id,
+        recordingId,
         speakerId,
         profileId,
       });
+      if (selectedRecordingIdRef.current !== recordingId) {
+        return;
+      }
       setSpeakerNames((prev) => ({ ...prev, [speakerId]: displayName }));
-      await refreshSpeakerVoices(selectedRecording.id);
+      await refreshSpeakerVoices(recordingId);
       toast(`Speaker named ${displayName}.`, "success");
     } catch (error) {
       const message =
@@ -1857,7 +1892,11 @@ export function RecordingsView() {
   };
 
   const handleRejectSpeakerVoice = async (speakerId: string, profileId: string) => {
-    if (!selectedRecording) {
+    if (
+      !selectedRecording ||
+      speakerVoicesRecordingId !== selectedRecording.id ||
+      speakerVoices[speakerId]?.suggestion?.profileId !== profileId
+    ) {
       return;
     }
     try {
@@ -2834,7 +2873,11 @@ export function RecordingsView() {
     // feature was turned on has none, and the sidecar refuses -- which used to
     // mean the rename failed outright rather than falling back to the plain
     // one the reader actually asked for.
-    const canRemember = Boolean(remember && speakerVoices[speakerId]);
+    const canRemember = Boolean(
+      remember &&
+        speakerVoicesRecordingId === selectedRecording.id &&
+        speakerVoices[speakerId]
+    );
     try {
       if (canRemember) {
         // One call: it renames the speaker through the same path below and
@@ -6121,11 +6164,19 @@ export function RecordingsView() {
                       activeMatchIndex={activeTranscriptMatchIndex}
                       onMatchesChange={handleTranscriptMatchesChange}
                       onRenameSpeaker={handleRenameSpeaker}
-                      speakerVoices={speakerVoices}
+                      speakerVoices={
+                        speakerVoicesRecordingId === selectedRecording?.id
+                          ? speakerVoices
+                          : {}
+                      }
                       rememberVoicesEnabled={rememberVoicesEnabled}
                       onConfirmSpeakerVoice={handleConfirmSpeakerVoice}
                       onRejectSpeakerVoice={handleRejectSpeakerVoice}
-                      speakerNameOptions={speakerNameOptions}
+                      speakerNameOptions={
+                        speakerVoicesRecordingId === selectedRecording?.id
+                          ? speakerNameOptions
+                          : []
+                      }
                       onEditSegment={async (segmentIds, newText) => {
                         if (!selectedRecording || segmentIds.length === 0) return;
                         try {

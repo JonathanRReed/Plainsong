@@ -1824,15 +1824,32 @@ pub async fn dispatch_command(
             // The session's in-memory centroids count here: this is the moment
             // an unnamed cluster becomes a named one, and it is the moment its
             // signature is written.
-            let (signatures, _attendees) =
+            let (signatures, attendees) =
                 cluster_voice_context(&db, &state.session_cluster_voices, &recording_id)?;
             let signature = signatures
-                .into_iter()
+                .iter()
                 .find(|signature| signature.speaker_id == speaker_id)
                 .ok_or_else(|| {
                     "Plainsong has no voice signature for this speaker. Run speaker identification again with \"Remember voices\" on."
                         .to_string()
-                })?;
+                })?
+                .clone();
+
+            let profiles = db.list_speaker_profiles().map_err(|e| e.to_string())?;
+            if let Some(profile_id) = requested_profile_id.as_deref() {
+                if !diarization::voiceprints::is_current_suggestion(
+                    &signatures,
+                    &profiles,
+                    &attendees,
+                    &speaker_id,
+                    profile_id,
+                ) {
+                    return Err(
+                        "That remembered-voice suggestion is no longer valid for this speaker. Refresh the meeting and try again."
+                            .to_string(),
+                    );
+                }
+            }
             db.record_named_cluster_voice_signature(
                 &recording_id,
                 &speaker_id,
@@ -1846,11 +1863,10 @@ pub async fn dispatch_command(
             // never drift apart; only the free-text path uses `name`.
             let (profile_id, display_name) = match requested_profile_id {
                 Some(profile_id) => {
-                    let profile = db
-                        .list_speaker_profiles()
-                        .map_err(|e| e.to_string())?
-                        .into_iter()
+                    let profile = profiles
+                        .iter()
                         .find(|profile| profile.id == profile_id)
+                        .cloned()
                         .ok_or("That remembered voice no longer exists.")?;
                     if profile.embedding_model_id != signature.embedding_model_id {
                         return Err(
@@ -2071,6 +2087,7 @@ pub async fn dispatch_command(
                         diarization::model_label(&diarization_model_id)
                     )
                 })?;
+            let resolved_diarizer = format!("plainsong:{}", resolved_model.model_id);
             let diarization = diarization::run_diarization_with_model(
                 &resolved.primary,
                 &resolved_model.model_id,
@@ -2116,10 +2133,10 @@ pub async fn dispatch_command(
                     transcript_revision,
                     &transcript.segments,
                     &alias_updates,
-                    Some(&format!("plainsong:{diarization_model_id}")),
+                    Some(&resolved_diarizer),
                     Some(serde_json::json!({
                         "recording_id": &recording_id,
-                        "diarizer": format!("plainsong:{diarization_model_id}"),
+                        "diarizer": &resolved_diarizer,
                         "speaker_count": diarization.speakers.len(),
                         "speaker_segment_count": diarization.segments.len(),
                     })),
@@ -3415,7 +3432,7 @@ pub async fn dispatch_command(
             open_installed_nautilus_app_impl()?;
             Ok(serde_json::Value::Null)
         }
-        "smoke_test_cursor_insert" => {
+        "qa_smoke_test_cursor_insert" => {
             let text: Option<String> = serde_json::from_value(
                 params
                     .get("text")
@@ -3423,7 +3440,7 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Null),
             )
             .map_err(|e| e.to_string())?;
-            smoke_test_cursor_insert_impl(state.as_ref(), text).await
+            qa_smoke_test_cursor_insert_impl(state.as_ref(), text).await
         }
         "capture_selected_text_for_playback" => {
             let result = capture_selected_text_for_playback_impl().await?;
