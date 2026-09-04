@@ -3,10 +3,10 @@
  *
  * WHY THIS EXISTS
  * ---------------
- * `smoke_test_cursor_insert` returns `pasted: true` as soon as `CGEvent::post` returns
+ * `qa_smoke_test_cursor_insert` returns `pasted: true` as soon as `CGEvent::post` returns
  * (rust-sidecar/src/lib.rs paste_text_systemwide -> dispatch_paste_from_clipboard).
  * `CGEvent::post` returns nothing, so `pasted: true` says only "we dispatched a keystroke",
- * never "the text landed". Worse, `smoke_test_cursor_insert` calls `paste_text_systemwide`
+ * never "the text landed". The QA-only command calls `paste_text_systemwide`
  * with `keep_text_in_clipboard: true`, so the sample text is copied to the system clipboard
  * *after* the paste attempt on every code path. A naive post-insert `pbpaste` would therefore
  * always "match" even if nothing was inserted anywhere.

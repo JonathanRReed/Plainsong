@@ -135,7 +135,6 @@ const LONG_COMMANDS = new Set<string>([
   // Re-hashes every owned audio file for one meeting; a long meeting's WAV
   // bundle takes real time to read end to end.
   "revalidate_recording_audio",
-  "smoke_test_cursor_insert",
   "start_dictation",
   "start_recording",
   "stop_dictation",
