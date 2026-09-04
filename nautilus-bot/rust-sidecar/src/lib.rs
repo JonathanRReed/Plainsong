@@ -809,6 +809,10 @@ struct RecentDictationDelivery {
     app_target: Option<String>,
     app_bundle_id: Option<String>,
     delivered_at: chrono::DateTime<chrono::Utc>,
+    /// Only a positively confirmed cursor insertion can own an undo entry.
+    /// Clipboard copies and best-effort paste dispatches remain available for
+    /// retry, but must never authorize a system-wide undo keystroke.
+    undo_eligible: bool,
 }
 
 const RECENT_DICTATION_DELIVERY_WINDOW_SECS: i64 = 45;
@@ -2283,7 +2287,6 @@ async fn selected_analysis_runtime(
 ) -> Result<llm::ProviderRuntime, String> {
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state, lane).await?;
-    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
     if lane == settings::AiLane::Meetings {
         enforce_meeting_lane_provider_policy(provider)?;
     }
@@ -2295,6 +2298,29 @@ async fn selected_analysis_runtime(
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
         })
+        .unwrap_or_else(|| provider.default_model())
+        .to_string();
+    analysis_runtime_for_provider(
+        state,
+        provider,
+        remote_processing_enabled,
+        Some(&selected_model),
+        request_timeout,
+    )
+    .await
+}
+
+async fn analysis_runtime_for_provider(
+    state: &AppState,
+    provider: AnalysisProvider,
+    remote_processing_enabled: bool,
+    model: Option<&str>,
+    request_timeout: Option<Duration>,
+) -> Result<llm::ProviderRuntime, String> {
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+    let selected_model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| provider.default_model())
         .to_string();
     let api_key = if provider.is_remote() {
@@ -2391,6 +2417,62 @@ fn capture_hotkey_target_context(
     let sanitized =
         sanitize_dictation_target(get_frontmost_app_name(), get_frontmost_app_bundle_id());
     (sanitized.0, sanitized.1, browser_url)
+}
+
+#[cfg(target_os = "windows")]
+fn capture_hotkey_target_context(
+    _include_browser_url: bool,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let script = r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class PlainsongTargetCapture {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+"@;
+$hwnd = [PlainsongTargetCapture]::GetForegroundWindow()
+if ($hwnd -eq [IntPtr]::Zero) { exit 1 }
+$processId = 0
+[void][PlainsongTargetCapture]::GetWindowThreadProcessId($hwnd, [ref]$processId)
+$process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+if ($processId -eq 0 -or $null -eq $process -or [string]::IsNullOrWhiteSpace($process.ProcessName)) { exit 1 }
+$process.ProcessName
+$hwnd.ToInt64()
+$processId
+"#;
+    let output = match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return (None, None, None),
+    };
+    let mut lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim);
+    let Some(name) = lines.next().filter(|value| !value.is_empty()) else {
+        return (None, None, None);
+    };
+    let Some(hwnd) = lines.next().and_then(|value| value.parse::<u64>().ok()) else {
+        return (None, None, None);
+    };
+    let Some(process_id) = lines.next().and_then(|value| value.parse::<u32>().ok()) else {
+        return (None, None, None);
+    };
+    (
+        Some(name.to_string()),
+        Some(format!("windows-hwnd-pid:{hwnd}:{process_id}")),
+        None,
+    )
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn capture_hotkey_target_context(
+    _include_browser_url: bool,
+) -> (Option<String>, Option<String>, Option<String>) {
+    (None, None, None)
 }
 
 #[cfg(target_os = "macos")]
@@ -3519,22 +3601,10 @@ async fn save_settings_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
     mut settings: settings::Settings,
 ) -> Result<serde_json::Value, String> {
-    let (privileged_privacy, previous_shortcuts, previous_onboarding) = {
+    let previous_shortcuts = {
         let manager = state.settings_manager.lock().await;
-        (
-            manager.settings().privacy.clone(),
-            manager.settings().shortcuts.clone(),
-            manager.settings().onboarding.clone(),
-        )
+        manager.settings().shortcuts.clone()
     };
-    preserve_privileged_privacy_settings(&privileged_privacy, &mut settings.privacy);
-    // The first-run record is the sidecar's, not the renderer's. Every settings
-    // write from the renderer is a read-modify-write of the whole document, so
-    // one built from a stale or hand-made `Settings` literal -- or a forged
-    // one -- would silently erase the record and put the install back where
-    // this bug started. See `preserve_sidecar_onboarding_record` and
-    // `save_settings_never_overwrites_the_onboarding_record` in tests.rs.
-    preserve_sidecar_onboarding_record(&previous_onboarding, &mut settings.onboarding);
     // Keeps the legacy `toggleDictation` key and the binding table telling the
     // same story whichever one the writer edited; see the function's doc for
     // which side wins when.
@@ -3698,6 +3768,20 @@ async fn save_settings_for_sidecar(
 
     {
         let mut settings_manager = state.settings_manager.lock().await;
+        // Read security-owned values under the same lock as the replacement.
+        // Otherwise a vault migration can commit after an earlier snapshot and
+        // have its salt erased by this delayed save.
+        preserve_privileged_privacy_settings(
+            &settings_manager.settings().privacy,
+            &mut settings.privacy,
+        );
+        // Preserve this under the same lock as the replacement. Onboarding can
+        // be recorded while this save awaits ASR work, so a snapshot taken at
+        // the start of the request could roll a newer record back here.
+        preserve_sidecar_onboarding_record(
+            &settings_manager.settings().onboarding,
+            &mut settings.onboarding,
+        );
         *settings_manager.settings_mut() = settings;
         settings_manager.save().map_err(|e| e.to_string())?;
         emit_settings_changed(handle, settings_manager.settings());
@@ -3927,7 +4011,7 @@ async fn reset_app_state_for_sidecar(
 }
 
 /// Whether the hands-free idle-time monitor should be running, given the setting and
-/// the current dictation session state. Pure decision table, factored out of
+/// the current dictation and meeting session state. Pure decision table, factored out of
 /// `reconcile_hands_free_monitor` so the guard logic ("can't run alongside an active
 /// session; never runs at all unless the setting is on") is unit-testable without
 /// needing a full `AppState`/audio device.
@@ -3938,9 +4022,13 @@ async fn reset_app_state_for_sidecar(
 ///   real dictation capture stream owns the microphone and the monitor must not race
 ///   it for the same device, and a session is already starting/active so there is
 ///   nothing for the monitor to trigger anyway.
-/// - Setting on + session `Idle` → should run.
-fn hands_free_monitor_should_run(enabled: bool, session_state: DictationSessionState) -> bool {
-    enabled && session_state == DictationSessionState::Idle
+/// - Setting on + session `Idle` + no meeting recording → should run.
+fn hands_free_monitor_should_run(
+    enabled: bool,
+    session_state: DictationSessionState,
+    meeting_recording: bool,
+) -> bool {
+    enabled && session_state == DictationSessionState::Idle && !meeting_recording
 }
 
 /// Reconcile the hands-free *idle-time* monitor (see
@@ -4294,7 +4382,7 @@ async fn reconcile_hands_free_monitor(
 
     let mut audio = state.audio_capture.lock().await;
 
-    if !hands_free_monitor_should_run(hands_free_enabled, session_state) {
+    if !hands_free_monitor_should_run(hands_free_enabled, session_state, audio.is_recording()) {
         audio.stop_hands_free_monitor();
         if !hands_free_enabled {
             // The monitor is off for good here, not just yielding the microphone
@@ -4355,7 +4443,7 @@ mod playback_preparation_tests {
         dir
     }
 
-    fn write_wav(path: &Path) {
+    fn write_wav_with_offset(path: &Path, sample_offset: i16) {
         let mut writer = hound::WavWriter::create(
             path,
             hound::WavSpec {
@@ -4368,10 +4456,14 @@ mod playback_preparation_tests {
         .expect("create wav");
         for index in 0..16_000_i32 {
             writer
-                .write_sample(((index % 200) as i16 - 100) * 50)
+                .write_sample(((index % 200) as i16 - 100) * 50 + sample_offset)
                 .expect("write sample");
         }
         writer.finalize().expect("finalize wav");
+    }
+
+    fn write_wav(path: &Path) {
+        write_wav_with_offset(path, 0);
     }
 
     fn asset(
@@ -4579,6 +4671,82 @@ mod playback_preparation_tests {
         )
         .expect_err("a length that contradicts the database must fail");
         assert!(error.contains("does not match stored metadata"), "{error}");
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            0,
+            "the rejected plaintext is removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playback_refuses_equal_length_ciphertext_from_another_recording() {
+        let dir = scratch_dir("substitution");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let key = [9u8; 32];
+
+        let expected_plaintext = dir.join("expected.wav");
+        write_wav(&expected_plaintext);
+        let expected_bytes = std::fs::metadata(&expected_plaintext)
+            .expect("stat expected plaintext")
+            .len();
+        let expected_sha256 = recording_audio::compute_file_sha256(&expected_plaintext)
+            .expect("hash expected plaintext");
+        let victim_ciphertext = dir.join("victim.wav.enc");
+        {
+            let mut reader = std::fs::File::open(&expected_plaintext).expect("open expected");
+            let mut writer = std::fs::File::create(&victim_ciphertext).expect("create victim");
+            crate::crypto::ProjectKeyManager::encrypt_stream(
+                &mut reader,
+                &mut writer,
+                &key,
+                |_| {},
+            )
+            .expect("encrypt expected");
+        }
+
+        let substitute_plaintext = dir.join("substitute.wav");
+        write_wav_with_offset(&substitute_plaintext, 1);
+        assert_eq!(
+            std::fs::metadata(&substitute_plaintext)
+                .expect("stat substitute plaintext")
+                .len(),
+            expected_bytes,
+            "the substitution must evade the length check"
+        );
+        {
+            let mut reader = std::fs::File::open(&substitute_plaintext).expect("open substitute");
+            let mut writer = std::fs::File::create(&victim_ciphertext).expect("replace victim");
+            crate::crypto::ProjectKeyManager::encrypt_stream(
+                &mut reader,
+                &mut writer,
+                &key,
+                |_| {},
+            )
+            .expect("encrypt substitute");
+        }
+
+        let mut primary = asset(
+            victim_ciphertext,
+            recording_audio::RecordingAudioProtection::Encrypted,
+        );
+        primary.plaintext_bytes = Some(expected_bytes);
+        primary.plaintext_sha256 = Some(expected_sha256);
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("rec-playback");
+        bundle.insert(primary).expect("insert victim asset");
+
+        let error = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            Some(&key),
+            &runtime,
+            std::slice::from_ref(&dir),
+            RuntimeAudioResolveMode::PlaybackPrimary,
+        )
+        .expect_err("same-vault ciphertext from another recording must fail");
+        assert!(error.contains("plaintext hash does not match"), "{error}");
         assert_eq!(
             std::fs::read_dir(&runtime)
                 .expect("list runtime dir")

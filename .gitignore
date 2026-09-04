@@ -108,8 +108,8 @@ temp/
 # Generated QA/benchmark evidence — belt-and-suspenders with
 # nautilus-bot/.gitignore in case a build/rename experiment lands outside it.
 # Mirrors that file: raw captures stay out, the Markdown/JSON receipts under
-# artifacts/qa/ are tracked so cited evidence is not silently dropped, and the
-# two per-machine dictation-latency JSON receipts stay ignored on purpose.
+# artifacts/qa/ are tracked so cited evidence is not silently dropped. Mirrors
+# the nested exclusions for machine-local latency and sensitive hotkey captures.
 **/artifacts/**
 !**/artifacts/qa/
 !**/artifacts/qa/**/
@@ -117,6 +117,7 @@ temp/
 !**/artifacts/qa/**/*.json
 **/artifacts/qa/dictation-latency.json
 **/artifacts/qa/dictation-latency-e2e.json
+**/artifacts/qa/macos/capture-dictation-hotkey-*.json
 dist-electron/
 dist-native/
 release/

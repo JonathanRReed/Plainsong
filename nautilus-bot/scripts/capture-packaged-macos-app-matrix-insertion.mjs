@@ -8,7 +8,7 @@
  *
  * What the sidecar says about itself - `pasted`, the frontmost app it thinks it targeted, the fact
  * that the RPC returned - is recorded under `selfReported` as corroboration and CANNOT make a run
- * pass. `smoke_test_cursor_insert` reports `pasted: true` as soon as CGEvent::post returns, and
+ * pass. `qa_smoke_test_cursor_insert` reports `pasted: true` as soon as CGEvent::post returns, and
  * CGEvent::post returns nothing at all.
  *
  * `--observed` survives only as an optional operator note. It is recorded, it is never gating, and
@@ -690,7 +690,11 @@ function launchSidecar() {
   const child = spawn(sidecarPath, [], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, ...qaProfile.env },
+    env: {
+      ...process.env,
+      ...qaProfile.env,
+      PLAINSONG_PACKAGED_QA_APP_MATRIX: "1",
+    },
   });
   const childExit = new Promise((resolve) => {
     child.on("exit", (code, signal) => resolve({ code, signal }));
@@ -1121,7 +1125,7 @@ async function run() {
       scopeCaveats.push(artifact.rowClosure.reason);
     }
 
-    artifact.sidecarResult = await sidecar.sendCommand("smoke_test_cursor_insert", {
+    artifact.sidecarResult = await sidecar.sendCommand("qa_smoke_test_cursor_insert", {
       text: sampleText,
     });
     artifact.selfReported.sidecarCommandCompleted = true;

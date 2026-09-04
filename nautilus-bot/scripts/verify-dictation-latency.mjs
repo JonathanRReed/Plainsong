@@ -268,8 +268,34 @@ function verifyStageBreakdown(prefix, breakdown, failures, expectedCount) {
     }
     if (!Array.isArray(stats.measurementsMs)) {
       failures.push(`${prefix}.stageBreakdownMs.${stage}.measurementsMs must be an array`);
-    } else if (finiteNumber(expectedCount) && stats.measurementsMs.length !== expectedCount) {
-      failures.push(`${prefix}.stageBreakdownMs.${stage}.measurementsMs length must match sampleCount`);
+    } else {
+      if (finiteNumber(expectedCount) && stats.measurementsMs.length !== expectedCount) {
+        failures.push(`${prefix}.stageBreakdownMs.${stage}.measurementsMs length must match sampleCount`);
+      }
+      stats.measurementsMs.forEach((measurement, index) => {
+        if (!finiteNumber(measurement) || measurement < 0) {
+          failures.push(
+            `${prefix}.stageBreakdownMs.${stage}.measurementsMs[${index}] must be a finite, non-negative number`,
+          );
+        }
+      });
+
+      const allValid = stats.measurementsMs.every(
+        (measurement) => finiteNumber(measurement) && measurement >= 0,
+      );
+      if (stats.measurementsMs.length > 0 && allValid) {
+        for (const [field, percentile] of [
+          ["p50", 50],
+          ["p95", 95],
+        ]) {
+          const expected = nearestRankPercentile(stats.measurementsMs, percentile);
+          if (stats[field] !== expected) {
+            failures.push(
+              `${prefix}.stageBreakdownMs.${stage}.${field} must match the nearest-rank P${percentile} of ${prefix}.stageBreakdownMs.${stage}.measurementsMs (${expected}ms)`,
+            );
+          }
+        }
+      }
     }
     if (!finiteNumber(stats.p50) || stats.p50 < 0) {
       failures.push(`${prefix}.stageBreakdownMs.${stage}.p50 must be a finite, non-negative number`);

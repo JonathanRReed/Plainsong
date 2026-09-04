@@ -25,7 +25,7 @@ use crate::recording_audio::{
 };
 use crate::recording_pause::{PauseLedger, PauseSpan};
 use crate::settings;
-use crate::sidecar_handle::SidecarHandle;
+use crate::sidecar_handle::{AppEmitter, SidecarHandle};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
@@ -158,9 +158,9 @@ pub(crate) fn admit_dictation_samples(
 /// Bytes a mono 16-bit WAV track consumes per second at 48 kHz, the rate every
 /// mixed meeting session lands on.
 pub const MEETING_WAV_BYTES_PER_SECOND_PER_TRACK: u64 = 48_000 * 2;
-/// AES-GCM staging adds a 12-byte nonce and 16-byte authentication tag to each
-/// independently encrypted WAV track.
-pub const MEETING_VAULT_OVERHEAD_BYTES_PER_TRACK: u64 = 12 + 16;
+const VAULT_STREAM_HEADER_BYTES: u64 = 21;
+const VAULT_STREAM_FRAME_PLAINTEXT_BYTES: u64 = 1024 * 1024;
+const VAULT_STREAM_FRAME_OVERHEAD_BYTES: u64 = 4 + 16;
 /// Recording time a meeting must have room for before it is allowed to start.
 ///
 /// Refusing here is recoverable and honest; running out mid-meeting is not — the
@@ -208,9 +208,9 @@ pub struct RecordingCaptureHealth {
     /// How many WAV tracks this session writes, so the polling loop can size the
     /// free-space thresholds to what the meeting actually consumes.
     pub track_count: u64,
-    /// Bytes already committed to the session's plaintext WAV files. A vault
-    /// needs at least this much free space again to stage their ciphertext.
-    pub plaintext_bytes: u64,
+    /// Exact bytes needed to stage encrypted copies of the session's current
+    /// plaintext WAV files.
+    pub vault_staging_bytes: u64,
     /// Whether the user has paused capture. Frames are being dropped on
     /// purpose, so nothing below may be read as a fault or as silence.
     pub paused: bool,
@@ -317,18 +317,31 @@ pub enum MeetingSpacePressure {
     Critical,
 }
 
+pub fn meeting_vault_staging_bytes(track_plaintext_bytes: &[u64]) -> u64 {
+    track_plaintext_bytes
+        .iter()
+        .fold(0_u64, |total, plaintext| {
+            // The stream always writes one trailing frame, including for empty input.
+            let frames = plaintext
+                .checked_div(VAULT_STREAM_FRAME_PLAINTEXT_BYTES)
+                .unwrap_or(0)
+                .saturating_add(1);
+            total.saturating_add(
+                plaintext
+                    .saturating_add(VAULT_STREAM_HEADER_BYTES)
+                    .saturating_add(frames.saturating_mul(VAULT_STREAM_FRAME_OVERHEAD_BYTES)),
+            )
+        })
+}
+
 pub fn meeting_space_pressure_with_vault_reserve(
     available_bytes: u64,
     track_count: u64,
-    plaintext_bytes: u64,
+    vault_staging_bytes: u64,
     vault_enabled: bool,
 ) -> MeetingSpacePressure {
     let encryption_reserve = if vault_enabled {
-        plaintext_bytes.saturating_add(
-            track_count
-                .max(1)
-                .saturating_mul(MEETING_VAULT_OVERHEAD_BYTES_PER_TRACK),
-        )
+        vault_staging_bytes
     } else {
         0
     };
@@ -366,11 +379,9 @@ pub fn meeting_start_space_shortfall_with_vault_reserve(
     // Vault finalization stages ciphertext beside the plaintext before deleting
     // the latter, so admission must provide room for both full-size copies.
     let needed = if vault_enabled {
-        capture.saturating_mul(2).saturating_add(
-            track_count
-                .max(1)
-                .saturating_mul(MEETING_VAULT_OVERHEAD_BYTES_PER_TRACK),
-        )
+        let per_track_capture = meeting_headroom_bytes(1, MEETING_START_MIN_HEADROOM_SECONDS);
+        let track_sizes = vec![per_track_capture; track_count.max(1) as usize];
+        capture.saturating_add(meeting_vault_staging_bytes(&track_sizes))
     } else {
         capture
     };
@@ -1055,13 +1066,14 @@ impl AudioCapture {
                 .ok()
                 .and_then(|slot| slot.clone()),
             track_count: session.track_count(),
-            plaintext_bytes: std::iter::once(&session.audio_path)
-                .chain(session.mic_audio_path.iter())
-                .chain(session.system_audio_path.iter())
-                .filter_map(|path| std::fs::metadata(path).ok())
-                .fold(0_u64, |total, metadata| {
-                    total.saturating_add(metadata.len())
-                }),
+            vault_staging_bytes: meeting_vault_staging_bytes(
+                &std::iter::once(&session.audio_path)
+                    .chain(session.mic_audio_path.iter())
+                    .chain(session.system_audio_path.iter())
+                    .filter_map(|path| std::fs::metadata(path).ok())
+                    .map(|metadata| metadata.len())
+                    .collect::<Vec<_>>(),
+            ),
             paused: session.paused.load(Ordering::Relaxed),
             inactivity: match session.mixed_capture.as_ref() {
                 Some(mixed) => mixed.source_inactivity(),
@@ -1317,6 +1329,11 @@ impl AudioCapture {
     ) -> Result<ResolvedAudioInputDevice> {
         if self.is_dictating.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("Dictation already in progress"));
+        }
+        if self.is_recording() {
+            return Err(anyhow::anyhow!(
+                "Cannot start dictation while a meeting recording is active"
+            ));
         }
 
         while self.dictation_buffer.pop().is_some() {}
@@ -1978,12 +1995,18 @@ impl AudioCapture {
         &mut self,
         plan: RecordingCapturePlan,
         options: RecordingOptions,
+        preferred_input_device: Option<&settings::AudioInputDevicePreference>,
         event_handle: Option<SidecarHandle>,
         vault_enabled: bool,
     ) -> Result<String> {
         self.ensure_microphone_preparation_retry_is_safe(options.mic)?;
         if self.active_recording.is_some() {
             return Err(anyhow::anyhow!("A recording session is already active"));
+        }
+        if self.is_dictating.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!(
+                "Cannot start recording while dictation is active"
+            ));
         }
         if SYSTEM_AUDIO_TEST_ACTIVE.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!(
@@ -2022,10 +2045,18 @@ impl AudioCapture {
         let paused = Arc::new(AtomicBool::new(false));
         let recorded_frames = Arc::new(AtomicU64::new(0));
         let preferred_mic_device = if options.mic {
-            Some(
-                self.resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
-                    .0,
-            )
+            let (device, resolved_input) = match preferred_input_device {
+                Some(preference) => self.resolve_input_device(Some(preference))?,
+                None => {
+                    self.resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
+                }
+            };
+            if let (Some(handle), Some(advisory)) =
+                (event_handle.as_ref(), resolved_input.advisory.as_deref())
+            {
+                handle.emit_event("audio-input-advisory", advisory.to_string());
+            }
+            Some(device)
         } else {
             None
         };
@@ -2676,8 +2707,8 @@ impl AudioCapture {
     /// point is that the mic is never opened for this purpose when the setting is off, so
     /// idle CPU/battery behavior for users who don't enable hands-free is unaffected.
     ///
-    /// No-op (returns `Ok(())`) if the monitor is already running or a dictation session is
-    /// currently active (the monitor and a live dictation capture must never run at once).
+    /// No-op (returns `Ok(())`) if the monitor is already running, a dictation session is
+    /// currently active, or a meeting owns the capture device.
     pub fn start_hands_free_monitor(
         &mut self,
         preference: Option<&settings::AudioInputDevicePreference>,
@@ -2688,10 +2719,9 @@ impl AudioCapture {
         if self.hands_free_monitor_active.load(Ordering::SeqCst) {
             return Ok(());
         }
-        if self.is_dictating.load(Ordering::SeqCst) {
-            // A real dictation session owns listening duties right now; the monitor
-            // stays off until it's stopped and idle again (see `stop_dictation`'s
-            // caller in lib.rs, which restarts the monitor once the session ends).
+        if self.is_dictating.load(Ordering::SeqCst) || self.is_recording() {
+            // A real dictation or meeting session owns listening duties right now;
+            // reconciliation restarts the monitor once capture ends.
             return Ok(());
         }
 
@@ -3469,11 +3499,11 @@ mod recording_capture_health_tests {
     use super::{
         meeting_headroom_bytes, meeting_space_pressure, meeting_space_pressure_with_vault_reserve,
         meeting_start_space_shortfall, meeting_start_space_shortfall_with_vault_reserve,
-        run_wav_writer_thread, silence_auto_stop_due, silence_auto_stop_warning_due,
-        silence_auto_stop_warning_minutes, write_aligned_wav_files, MeetingSpacePressure,
-        RecordingCaptureHealth, SourceInactivity, MEETING_CRITICAL_SPACE_STOP_SECONDS,
-        MEETING_LOW_SPACE_WARN_SECONDS, MEETING_START_MIN_HEADROOM_SECONDS,
-        MEETING_VAULT_OVERHEAD_BYTES_PER_TRACK,
+        meeting_vault_staging_bytes, run_wav_writer_thread, silence_auto_stop_due,
+        silence_auto_stop_warning_due, silence_auto_stop_warning_minutes, write_aligned_wav_files,
+        MeetingSpacePressure, RecordingCaptureHealth, SourceInactivity,
+        MEETING_CRITICAL_SPACE_STOP_SECONDS, MEETING_LOW_SPACE_WARN_SECONDS,
+        MEETING_START_MIN_HEADROOM_SECONDS,
     };
     use std::sync::{Arc, Mutex};
 
@@ -3623,7 +3653,7 @@ mod recording_capture_health_tests {
     #[test]
     fn vault_thresholds_reserve_space_for_the_encrypted_copy() {
         let capture = meeting_headroom_bytes(MIC_ONLY_TRACKS, MEETING_START_MIN_HEADROOM_SECONDS);
-        let vault_start_need = capture * 2 + MEETING_VAULT_OVERHEAD_BYTES_PER_TRACK;
+        let vault_start_need = capture + meeting_vault_staging_bytes(&[capture]);
         assert_eq!(
             meeting_start_space_shortfall_with_vault_reserve(
                 vault_start_need - 1,
@@ -3646,9 +3676,9 @@ mod recording_capture_health_tests {
             meeting_headroom_bytes(MIC_ONLY_TRACKS, MEETING_CRITICAL_SPACE_STOP_SECONDS);
         assert_eq!(
             meeting_space_pressure_with_vault_reserve(
-                plaintext + critical_capture + MEETING_VAULT_OVERHEAD_BYTES_PER_TRACK,
+                meeting_vault_staging_bytes(&[plaintext]) + critical_capture,
                 MIC_ONLY_TRACKS,
-                plaintext,
+                meeting_vault_staging_bytes(&[plaintext]),
                 true,
             ),
             MeetingSpacePressure::Critical,
@@ -3656,11 +3686,30 @@ mod recording_capture_health_tests {
         );
         assert_eq!(
             meeting_space_pressure(
-                plaintext + critical_capture + MEETING_VAULT_OVERHEAD_BYTES_PER_TRACK,
+                meeting_vault_staging_bytes(&[plaintext]) + critical_capture,
                 MIC_ONLY_TRACKS,
             ),
             MeetingSpacePressure::Ok,
             "non-vault meetings must retain the capture-only threshold"
+        );
+    }
+
+    #[test]
+    fn vault_staging_reserve_matches_stream_boundaries_exactly() {
+        const FRAME: u64 = 1024 * 1024;
+        assert_eq!(meeting_vault_staging_bytes(&[0]), 21 + 4 + 16);
+        assert_eq!(
+            meeting_vault_staging_bytes(&[FRAME - 1]),
+            FRAME - 1 + 21 + 20
+        );
+        assert_eq!(meeting_vault_staging_bytes(&[FRAME]), FRAME + 21 + 40);
+        assert_eq!(
+            meeting_vault_staging_bytes(&[FRAME + 1]),
+            FRAME + 1 + 21 + 40
+        );
+        assert_eq!(
+            meeting_vault_staging_bytes(&[FRAME, 0]),
+            FRAME + (2 * 21) + (3 * 20)
         );
     }
 
@@ -3673,7 +3722,7 @@ mod recording_capture_health_tests {
             writer_failure: None,
             capture_failure: None,
             track_count: 1,
-            plaintext_bytes: 0,
+            vault_staging_bytes: 0,
             paused: false,
             inactivity: SourceInactivity {
                 mic_seconds: mic,

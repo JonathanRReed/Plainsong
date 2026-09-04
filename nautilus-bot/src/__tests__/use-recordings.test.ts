@@ -139,6 +139,19 @@ describe("useRecordings", () => {
     });
   });
 
+  it("keeps refetch stable across rerenders", async () => {
+    const { result, rerender } = renderHook(() => useRecordings("p1"), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.recordings).toHaveLength(1);
+    });
+    const refetch = result.current.refetch;
+
+    rerender();
+
+    expect(result.current.refetch).toBe(refetch);
+  });
+
   it("deduplicates recording fetches by project key", async () => {
     const { getRecordings } = await import("@/lib/backend");
     const mockedGetRecordings = vi.mocked(getRecordings);

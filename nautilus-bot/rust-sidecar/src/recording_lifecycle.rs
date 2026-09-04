@@ -748,16 +748,20 @@ pub(crate) async fn start_recording_for_sidecar(
         })?;
     }
 
-    if options.mic && options.preferred_input_device_id.is_none() {
-        let settings = state.settings_manager.lock().await.settings().clone();
-        options.preferred_input_device_id = settings
+    let preferred_input_device = if options.mic && options.preferred_input_device_id.is_none() {
+        let preference = settings_snapshot
             .audio
             .meeting_input_device
             .as_ref()
-            .filter(|_| settings.audio.meeting_input_override_enabled)
-            .or(settings.audio.preferred_input_device.as_ref())
-            .map(|device| device.device_id.clone());
-    }
+            .filter(|_| settings_snapshot.audio.meeting_input_override_enabled)
+            .or(settings_snapshot.audio.preferred_input_device.as_ref())
+            .cloned();
+        options.preferred_input_device_id =
+            preference.as_ref().map(|device| device.device_id.clone());
+        preference
+    } else {
+        None
+    };
 
     {
         let vault_state = state.vault_state.lock().await;
@@ -835,6 +839,10 @@ pub(crate) async fn start_recording_for_sidecar(
         attendees: Vec::new(),
         pause_spans: Vec::new(),
         video_service: models::known_video_service(options.video_service.as_deref()),
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
     };
 
     {
@@ -876,14 +884,19 @@ pub(crate) async fn start_recording_for_sidecar(
 
     let preparation_result = {
         let mut audio = state.audio_capture.lock().await;
+        // The idle hands-free stream must yield before meeting capture opens the
+        // microphone. Dictation admission independently rejects the active meeting.
+        audio.stop_hands_free_monitor();
         audio.start_recording(
             plan.clone(),
             options.clone(),
+            preferred_input_device.as_ref(),
             Some(handle.clone()),
             settings_snapshot.privacy.vault_initialized,
         )
     };
     if let Err(error) = preparation_result {
+        reconcile_hands_free_monitor(state.as_ref(), handle).await;
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         // Opening the capture devices is where a missing or busy input device
@@ -911,6 +924,7 @@ pub(crate) async fn start_recording_for_sidecar(
             let mut audio = state.audio_capture.lock().await;
             audio.abort_prepared_recording();
         }
+        reconcile_hands_free_monitor(state.as_ref(), handle).await;
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         let code = if meeting_start_failure_is_out_of_space(&message) {
             MeetingStartErrorCode::DiskFull
@@ -931,6 +945,7 @@ pub(crate) async fn start_recording_for_sidecar(
         audio.activate_recording(&recording_id)
     };
     if let Err(error) = activation_result {
+        reconcile_hands_free_monitor(state.as_ref(), handle).await;
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         let code = if meeting_start_failure_is_out_of_space(&message) {
@@ -1595,7 +1610,7 @@ pub(crate) fn spawn_meeting_capture_monitor(
             match audio::meeting_space_pressure_with_vault_reserve(
                 available,
                 health.track_count,
-                health.plaintext_bytes,
+                health.vault_staging_bytes,
                 vault_enabled,
             ) {
                 audio::MeetingSpacePressure::Ok => {}
@@ -1732,6 +1747,9 @@ pub(crate) async fn stop_recording_for_sidecar(
             );
         }
     }
+    // Restart idle listening only after capture has actually ended; reconciliation
+    // also keeps it off when a failed stop left the meeting active.
+    reconcile_hands_free_monitor(state.as_ref(), handle).await;
     result
 }
 

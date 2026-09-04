@@ -143,6 +143,18 @@ pub struct Recording {
     /// one. Serialized as `videoService`; `None` for every other meeting.
     #[serde(default)]
     pub video_service: Option<String>,
+    /// Whether every expected portion of the recording was transcribed.
+    #[serde(default)]
+    pub transcript_complete: bool,
+    /// Human-readable reason a transcript is known to be incomplete.
+    #[serde(default)]
+    pub transcript_degraded_reason: Option<String>,
+    /// When the user accepted that cleanup may remove an incomplete meeting's audio.
+    #[serde(default)]
+    pub transcript_incomplete_acknowledged_at: Option<DateTime<Utc>>,
+    /// Human-readable description of microphone or system-audio capture loss.
+    #[serde(default)]
+    pub capture_degraded_summary: Option<String>,
 }
 
 /// One person in a meeting. Mirrors `MeetingAttendee` in
@@ -276,14 +288,15 @@ pub fn sanitize_meeting_attendees(attendees: Vec<MeetingAttendee>) -> Vec<Meetin
 ///
 /// The single place an attendee list becomes prompt-bound text. Addresses are
 /// dropped here rather than at each call site so there is exactly one thing
-/// to audit: a summary lane pointed at a cloud provider must not carry the
-/// reader's contact book there, and a model does not answer better for
-/// knowing someone's employer domain.
+/// to audit. EventKit can use an address as the display name when it has no
+/// real name, so checking only the separate `email` field is not a sufficient
+/// privacy boundary: a summary lane pointed at a cloud provider must not carry
+/// the reader's contact book there.
 pub fn attendee_names_for_context(attendees: &[MeetingAttendee]) -> Vec<String> {
     attendees
         .iter()
         .map(|attendee| collapse_whitespace(&attendee.name))
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !name.contains('@'))
         .collect()
 }
 
@@ -1030,6 +1043,8 @@ mod attendee_tests {
         let names = attendee_names_for_context(&[
             attendee("Alice  Brown", Some("alice@acme-holdings.example")),
             attendee("Bob", Some("bob@example.com")),
+            // EventKit supplies this shape when a participant has no display name.
+            attendee("victim@example.com", Some("victim@example.com")),
             attendee("   ", None),
         ]);
         assert_eq!(names, vec!["Alice Brown", "Bob"]);

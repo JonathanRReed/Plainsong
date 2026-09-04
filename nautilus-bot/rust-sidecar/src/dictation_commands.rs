@@ -130,6 +130,7 @@ pub(crate) async fn execute_dictation_command_action(
     action: DictationCommandAction,
     captured_context_text: Option<&str>,
     context_source: &str,
+    ai_selection: &(AnalysisProvider, bool, String),
 ) -> Result<DictationCommandExecutionResult, DictationCommandError> {
     use crate::dictation_parity::{
         append_to_context_selection, delete_phrase_from_context, lowercase_context_selection,
@@ -336,10 +337,13 @@ pub(crate) async fn execute_dictation_command_action(
             .map_err(DictationCommandError::MissingContext)?;
             let prompt = resolve_dictation_command_prompt(state, command_key).await?;
             let output_text = match command_key {
-                "rewrite_shorter" => run_custom_dictation_transform_with_selected_provider(
+                "rewrite_shorter" => run_custom_dictation_transform_with_provider(
                     state,
                     &contextual_input,
                     &prompt,
+                    ai_selection.0,
+                    &ai_selection.2,
+                    ai_selection.1,
                 )
                 .await
                 .map(|(output, _, _)| output)
@@ -350,10 +354,13 @@ pub(crate) async fn execute_dictation_command_action(
                     );
                     rewrite_shorter_text(&contextual_input)
                 }),
-                "rewrite_professional" => run_custom_dictation_transform_with_selected_provider(
+                "rewrite_professional" => run_custom_dictation_transform_with_provider(
                     state,
                     &contextual_input,
                     &prompt,
+                    ai_selection.0,
+                    &ai_selection.2,
+                    ai_selection.1,
                 )
                 .await
                 .map(|(output, _, _)| output)
@@ -364,10 +371,13 @@ pub(crate) async fn execute_dictation_command_action(
                     );
                     rewrite_professional_text(&contextual_input)
                 }),
-                "bulletize_selection" => run_custom_dictation_transform_with_selected_provider(
+                "bulletize_selection" => run_custom_dictation_transform_with_provider(
                     state,
                     &contextual_input,
                     &prompt,
+                    ai_selection.0,
+                    &ai_selection.2,
+                    ai_selection.1,
                 )
                 .await
                 .map(|(output, _, _)| output)

@@ -184,14 +184,17 @@ impl FocusedFieldFingerprint {
     /// concerned. Erring towards "not the same" costs a suggestion; erring the
     /// other way reads a stranger's field.
     ///
-    /// None of this is airtight on its own, and it is not asked to be. An app
-    /// that publishes nothing distinguishing leaves two `None`s comparing equal
-    /// — which is why identity is never the last gate. `evaluate_post_insert_readback`
-    /// runs `readback_holds_insertion_remnant` immediately after this and
-    /// refuses to diff a field that does not still visibly hold the text
-    /// Plainsong typed, whatever the fingerprint said.
+    /// At least one field-specific discriminator must be available on both
+    /// reads. App, window, role, and content overlap are not field identity:
+    /// sibling controls can share all of them. If Accessibility publishes
+    /// neither an identifier nor a frame, fail closed rather than risk reading
+    /// a different control.
     pub fn matches_insertion(&self, insertion: &FocusedFieldFingerprint) -> bool {
-        self.pid == insertion.pid
+        let has_field_identity = (self.identifier.is_some() && insertion.identifier.is_some())
+            || (self.frame.is_some() && insertion.frame.is_some());
+
+        has_field_identity
+            && self.pid == insertion.pid
             && self.frame == insertion.frame
             && optional_eq_ignore_case(self.role.as_deref(), insertion.role.as_deref())
             && optional_eq_ignore_case(self.identifier.as_deref(), insertion.identifier.as_deref())
@@ -1420,11 +1423,11 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_diff_a_field_that_no_longer_holds_the_insertion_however_well_it_matched() {
-        // The last line of defence, tested with the fingerprint deliberately
-        // made useless: both reads publish nothing distinguishing and agree on
-        // every remaining field, so identity says "same element". The content
-        // is what refuses — and it refuses before anything is diffed.
+    fn refuses_a_field_without_a_field_specific_identity() {
+        // Both reads publish nothing that distinguishes sibling fields. Even
+        // if another field contains overlapping dictated words, it must fail
+        // at identity rather than allowing content similarity to authenticate
+        // the control.
         let indistinguishable = FocusedFieldFingerprint {
             pid: Some(742),
             role: None,
@@ -1437,7 +1440,7 @@ mod tests {
             frontmost_app_name: Some("Slack".to_string()),
         };
         let reader = FakeReader(Ok(Some(FocusedFieldSnapshot {
-            text: "quarterly report to the board".to_string(),
+            text: "send it to kubernetes please".to_string(),
             fingerprint: indistinguishable.clone(),
         })));
         let mut request = request("send it to cuban netties");
@@ -1445,7 +1448,7 @@ mod tests {
 
         assert_eq!(
             evaluate_post_insert_readback(&reader, &request),
-            ReadbackOutcome::Aborted(ReadbackAbort::InsertionRemnantMissing)
+            ReadbackOutcome::Aborted(ReadbackAbort::FocusChanged)
         );
     }
 
