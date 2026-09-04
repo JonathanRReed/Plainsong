@@ -77,14 +77,6 @@ const PARAKEET_V2_ARTIFACTS: [(&str, u64, u64); 4] = [
     (PARAKEET_VOCAB_FILE, 9_384, 4096),
 ];
 
-fn v3_min_bytes(file_name: &str) -> u64 {
-    PARAKEET_V3_ARTIFACTS
-        .iter()
-        .find(|(name, _, _)| *name == file_name)
-        .map(|(_, _, min)| *min)
-        .unwrap_or(4096)
-}
-
 fn v3_sha256(file_name: &str) -> Option<&'static str> {
     match file_name {
         PARAKEET_TDT_ENCODER_FILE => {
@@ -1610,7 +1602,10 @@ mod tests {
 
         // Everything but the joiner, at plausible sizes.
         for file_name in [PARAKEET_TDT_ENCODER_FILE, PARAKEET_TDT_DECODER_FILE] {
-            sparse_file(&model_dir.join(file_name), v3_min_bytes(file_name) + 1);
+            sparse_file(
+                &model_dir.join(file_name),
+                tdt_min_bytes(PARAKEET_V3, file_name) + 1,
+            );
         }
         std::fs::write(model_dir.join(PARAKEET_VOCAB_FILE), token_file_body(64))
             .expect("write tokens");
@@ -1642,7 +1637,10 @@ mod tests {
         )
         .expect("write truncated encoder");
         for file_name in [PARAKEET_TDT_DECODER_FILE, PARAKEET_TDT_JOINER_FILE] {
-            sparse_file(&model_dir.join(file_name), v3_min_bytes(file_name) + 1);
+            sparse_file(
+                &model_dir.join(file_name),
+                tdt_min_bytes(PARAKEET_V3, file_name) + 1,
+            );
         }
         std::fs::write(model_dir.join(PARAKEET_VOCAB_FILE), token_file_body(64))
             .expect("write tokens");
@@ -1820,7 +1818,7 @@ mod tests {
                 "{name}: floor {minimum} must be below upstream size {upstream}"
             );
         }
-        assert_eq!(v3_min_bytes("unknown.onnx"), 4096);
+        assert_eq!(tdt_min_bytes(PARAKEET_V3, "unknown.onnx"), 4096);
         assert_eq!(PARAKEET_V3_REVISION.len(), 40);
         assert!(PARAKEET_LEGACY_ONNX_SOURCES[0]
             .0
