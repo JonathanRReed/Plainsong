@@ -37,6 +37,36 @@ pub(crate) struct DictationReprocessRequest {
     pub(crate) model_id: Option<String>,
 }
 
+async fn persist_reprocess_success_after_audio_protection<T>(
+    protection: Result<(), String>,
+    persist_success: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    protection?;
+    Ok(persist_success.await)
+}
+
+#[cfg(test)]
+mod reprocess_success_persistence_tests {
+    use super::persist_reprocess_success_after_audio_protection;
+    use std::cell::Cell;
+
+    #[tokio::test]
+    async fn encryption_failure_does_not_persist_a_saved_outcome() {
+        let persisted = Cell::new(false);
+        let result = persist_reprocess_success_after_audio_protection(
+            Err("simulated encryption failure".to_string()),
+            async { persisted.set(true) },
+        )
+        .await;
+
+        assert_eq!(result, Err("simulated encryption failure".to_string()));
+        assert!(
+            !persisted.get(),
+            "saved outcome ran after encryption failed"
+        );
+    }
+}
+
 /// Whether a saved dictation's audio can be run again, decided from facts the
 /// caller already has so the refusal can name the setting that would have
 /// kept it. Pure so the policy is testable without a database or a file.
@@ -519,6 +549,10 @@ pub(crate) async fn reprocess_dictation_impl(
         analysis_failure: None,
         pause_spans: Vec::new(),
         video_service: None,
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
         attendees: Vec::new(),
     };
     let history_text = crate::store::DictationHistoryTextRecord {
@@ -562,6 +596,19 @@ pub(crate) async fn reprocess_dictation_impl(
             end_to_end_ms: Some(transcription_latency_ms as i64),
             created_at: now,
         });
+    }
+    // Do not report the new history entry as saved while its retained copy
+    // bypasses an initialized vault. The helper is a no-op without a vault;
+    // with one, it journals the transition before requiring the runtime key,
+    // so an encryption failure remains visible and blocks vault lock rather
+    // than leaving an ordinary plaintext asset behind.
+    let protection = if kept_audio_metadata.is_some() {
+        encrypt_finalized_recording_audio(state, Some(handle), &recording_id).await
+    } else {
+        Ok(())
+    };
+    persist_reprocess_success_after_audio_protection(protection, async {
+        let mut db = state.db.lock().await;
         // Mirrors `dictation_completed` closely enough that the history
         // inspector reads the new entry through the same code path.
         let _ = db.log_audit_event(
@@ -603,7 +650,8 @@ pub(crate) async fn reprocess_dictation_impl(
             })),
             "info",
         );
-    }
+    })
+    .await?;
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.message = None;
     }

@@ -15,7 +15,6 @@ describe("macOS frontmost target capture", () => {
     expect(source.split(splitLookup)).toHaveLength(2);
 
     for (const declaration of [
-      "async fn smoke_test_cursor_insert_impl(",
       "async fn capture_selected_text_for_playback_impl(",
       "async fn transform_selected_text_impl(",
       "fn resolve_recent_dictation_repaste_target(",

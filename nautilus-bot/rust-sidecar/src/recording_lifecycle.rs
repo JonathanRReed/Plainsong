@@ -748,16 +748,20 @@ pub(crate) async fn start_recording_for_sidecar(
         })?;
     }
 
-    if options.mic && options.preferred_input_device_id.is_none() {
-        let settings = state.settings_manager.lock().await.settings().clone();
-        options.preferred_input_device_id = settings
+    let preferred_input_device = if options.mic && options.preferred_input_device_id.is_none() {
+        let preference = settings_snapshot
             .audio
             .meeting_input_device
             .as_ref()
-            .filter(|_| settings.audio.meeting_input_override_enabled)
-            .or(settings.audio.preferred_input_device.as_ref())
-            .map(|device| device.device_id.clone());
-    }
+            .filter(|_| settings_snapshot.audio.meeting_input_override_enabled)
+            .or(settings_snapshot.audio.preferred_input_device.as_ref())
+            .cloned();
+        options.preferred_input_device_id =
+            preference.as_ref().map(|device| device.device_id.clone());
+        preference
+    } else {
+        None
+    };
 
     {
         let vault_state = state.vault_state.lock().await;
@@ -835,6 +839,10 @@ pub(crate) async fn start_recording_for_sidecar(
         attendees: Vec::new(),
         pause_spans: Vec::new(),
         video_service: models::known_video_service(options.video_service.as_deref()),
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
     };
 
     {
@@ -879,7 +887,12 @@ pub(crate) async fn start_recording_for_sidecar(
         // The idle hands-free stream must yield before meeting capture opens the
         // microphone. Dictation admission independently rejects the active meeting.
         audio.stop_hands_free_monitor();
-        audio.start_recording(plan.clone(), options.clone(), Some(handle.clone()))
+        audio.start_recording(
+            plan.clone(),
+            options.clone(),
+            preferred_input_device.as_ref(),
+            Some(handle.clone()),
+        )
     };
     if let Err(error) = preparation_result {
         reconcile_hands_free_monitor(state.as_ref(), handle).await;

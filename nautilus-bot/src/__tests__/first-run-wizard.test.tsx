@@ -631,6 +631,55 @@ describe("FirstRunWizard", () => {
     });
   });
 
+  it("preserves a deliberately selected non-default Whisper model", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "small.en";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i); // permissions -> dictation-model
+    await clickPrimary(/continue/i); // -> hotkey, preserves the existing route
+
+    expect(downloadAsrModels).not.toHaveBeenCalled();
+    expect(currentSettings.transcription.dictationProvider).toBe("whisper");
+    expect(currentSettings.transcription.dictationModelId).toBe("small.en");
+  });
+
+  it("downloads base.en for a legacy Whisper route with only selectedModelId", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = undefined as never;
+    currentSettings.transcription.selectedModelId = "base.en";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
+    });
+  });
+
+  it("downloads base.en when a legacy Whisper route has no model id", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = undefined as never;
+    currentSettings.transcription.selectedModelId = undefined as never;
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
+    });
+  });
+
   it("completes full onboarding only after the explicit model download", async () => {
     const onComplete = vi.fn();
     const asrBackend = await import("@/lib/backend/asr");
@@ -1435,7 +1484,7 @@ describe("FirstRunWizard", () => {
       ).toBeInTheDocument();
     });
 
-    it("remembers a transcripts-only choice", async () => {
+    it("disables automatic meeting processing for a transcripts-only choice", async () => {
       const ai = await import("@/lib/backend/ai");
       vi.mocked(ai.getOllamaStatus).mockResolvedValue(false);
 
@@ -1449,6 +1498,8 @@ describe("FirstRunWizard", () => {
 
       await waitFor(() => {
         expect(storage.get(AI_NOTES_OPT_OUT_STORAGE_KEY)).toBe("true");
+        expect(currentSettings.transcription.enableAutoAnalysis).toBe(false);
+        expect(currentSettings.transcription.meetingAutoNameEnabled).toBe(false);
       });
     });
 

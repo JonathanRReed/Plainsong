@@ -22,7 +22,6 @@ export {
   reprocessDictation,
   reprocessDictationText,
   searchDictationHistory,
-  smokeTestCursorInsert,
   startDictation,
   stopDictation,
   updateDictationDictionaryEntry,
