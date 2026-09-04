@@ -3870,6 +3870,49 @@ describe("RecordingsView", () => {
 });
 
 describe("RecordingsView remembered voices", () => {
+  it("keeps suggestions when the selected recording object refreshes with the same ID", async () => {
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [
+        {
+          speakerId: "speaker_0",
+          appliedProfileId: null,
+          matchState: null,
+          suggestion: { profileId: "p-dana", displayName: "Dana", percent: 91 },
+        },
+      ],
+      nameOptions: ["Dana"],
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Goals notes");
+    await waitFor(() => {
+      expect(
+        transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion,
+      ).toMatchObject({ profileId: "p-dana" });
+    });
+
+    backend.suggestSpeakerVoices.mockRejectedValue(
+      new Error("suggestion service unavailable"),
+    );
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "Keep the same remembered voice" },
+    });
+    await waitFor(() => {
+      expect(backend.updateRecordingNotes).toHaveBeenCalledWith(
+        "r1",
+        "Goals\nKeep the same remembered voice",
+      );
+    });
+
+    expect(backend.suggestSpeakerVoices).toHaveBeenCalledTimes(1);
+    expect(
+      transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion,
+    ).toMatchObject({ profileId: "p-dana" });
+    expect(transcriptViewerProps.current?.speakerNameOptions).toEqual(["Dana"]);
+  });
+
   it("ignores a suggestion response from the previously open meeting", async () => {
     const firstResponse = deferred<Awaited<ReturnType<typeof backend.suggestSpeakerVoices>>>();
     recordings = [
@@ -3909,6 +3952,7 @@ describe("RecordingsView remembered voices", () => {
     await waitFor(() =>
       expect(backend.suggestSpeakerVoices).toHaveBeenCalledWith("r1"),
     );
+    fireEvent.click(screen.getByRole("button", { name: "All meetings" }));
     fireEvent.click(screen.getByText("Planning review"));
     await waitFor(() =>
       expect(transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion)

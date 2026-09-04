@@ -1834,7 +1834,7 @@ export function RecordingsView() {
       return;
     }
     void refreshSpeakerVoices(selectedRecording.id);
-  }, [selectedRecording, refreshSpeakerVoices]);
+  }, [selectedRecording?.id, refreshSpeakerVoices]);
 
   // And whenever a remembered voice is forgotten. "Delete all" in Settings
   // used to leave the open transcript offering names for voices that no
@@ -1860,7 +1860,7 @@ export function RecordingsView() {
       cancelled = true;
       unlisten?.();
     };
-  }, [selectedRecording, refreshSpeakerVoices]);
+  }, [selectedRecording?.id, refreshSpeakerVoices]);
 
   const handleConfirmSpeakerVoice = async (speakerId: string, profileId: string) => {
     if (
