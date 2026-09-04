@@ -58,6 +58,7 @@ const FAST_COMMANDS = new Set<string>([
   "list_diarization_models",
   // Flip an atomic on the live capture session and record the span. Pause is
   // pressed mid-sentence; a slow answer here reads as a stuck button.
+  "pause_meeting_capture",
   "pause_recording",
   // Sits directly in front of a user-initiated capture start: a slow registry
   // write must fail fast rather than delay the meeting behind it.
@@ -66,6 +67,7 @@ const FAST_COMMANDS = new Set<string>([
   // front of the first-run wizard opening or closing, so a slow answer is a
   // visibly stuck launch.
   "record_onboarding_state",
+  "resume_meeting_capture",
   "resume_recording",
 ]);
 

@@ -13,6 +13,8 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+const macIt = process.platform === "darwin" ? it : it.skip;
+
 function createTempRepo(scriptName: string) {
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "plainsong-release-preflight-"));
   const tempScriptsDir = path.join(tempRoot, "scripts");
@@ -113,7 +115,7 @@ describe("release-credentials-preflight.mjs", () => {
     // race whenever the rest of the suite is running in parallel.
   }, 30_000);
 
-  it("accepts a Developer ID identity and a Keychain notarization profile", () => {
+  macIt("accepts a Developer ID identity and a Keychain notarization profile", () => {
     const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
     try {
       const tempBinDir = path.join(tempRoot, "bin");
@@ -188,7 +190,7 @@ describe("release-credentials-preflight.mjs", () => {
     }
   }, 30_000);
 
-  it("rejects a named Keychain profile that cannot authenticate", () => {
+  macIt("rejects a named Keychain profile that cannot authenticate", () => {
     const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
     try {
       const tempBinDir = path.join(tempRoot, "bin");

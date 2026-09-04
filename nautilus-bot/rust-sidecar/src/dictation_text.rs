@@ -332,6 +332,11 @@ pub(crate) fn enrich_meeting_transcript(
     dictionary_entries: &[models::DictationDictionaryEntry],
 ) {
     let mut cleaned_segments: Vec<models::TranscriptSegment> = Vec::new();
+    let unscoped_entries = dictionary_entries
+        .iter()
+        .filter(|entry| entry.app_scope.is_none() && entry.category_scope.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
 
     for segment in transcript.segments.drain(..) {
         let cleaned_text = sanitize_meeting_segment_text(&segment.text);
@@ -340,12 +345,12 @@ pub(crate) fn enrich_meeting_transcript(
         }
         // Correct before the merge below, so a taught term is matched inside one
         // segment rather than across a join that may not exist yet.
-        let cleaned_text = if dictionary_entries.is_empty() {
+        let cleaned_text = if unscoped_entries.is_empty() {
             cleaned_text
         } else {
             crate::dictation_pipeline::apply_learned_dictionary(
                 cleaned_text.as_str(),
-                dictionary_entries,
+                &unscoped_entries,
                 None,
                 text::format::DictationAppCategory::Other,
             )
