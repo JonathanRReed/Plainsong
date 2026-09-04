@@ -3037,7 +3037,11 @@ impl Database {
                     recordings.imported_source_name,
                     recordings.pause_spans,
                     recordings.video_service,
-                    recordings.attendees
+                    recordings.attendees,
+                    recordings.transcript_complete,
+                    recordings.transcript_degraded_reason,
+                    recordings.transcript_incomplete_acknowledged_at,
+                    recordings.capture_degraded_summary
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -3116,6 +3120,12 @@ impl Database {
                         .and_then(|value| serde_json::from_str(&value).ok())
                         .unwrap_or_default(),
                 ),
+                transcript_complete: row.get::<_, i64>(27)? != 0,
+                transcript_degraded_reason: row.get(28)?,
+                transcript_incomplete_acknowledged_at: row
+                    .get::<_, Option<String>>(29)?
+                    .and_then(|value| value.parse().ok()),
+                capture_degraded_summary: row.get(30)?,
             })
         })?;
 
@@ -3158,7 +3168,11 @@ impl Database {
                     recordings.imported_source_name,
                     recordings.pause_spans,
                     recordings.video_service,
-                    recordings.attendees
+                    recordings.attendees,
+                    recordings.transcript_complete,
+                    recordings.transcript_degraded_reason,
+                    recordings.transcript_incomplete_acknowledged_at,
+                    recordings.capture_degraded_summary
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -3227,6 +3241,12 @@ impl Database {
                         .and_then(|value| serde_json::from_str(&value).ok())
                         .unwrap_or_default(),
                 ),
+                transcript_complete: row.get::<_, i64>(27)? != 0,
+                transcript_degraded_reason: row.get(28)?,
+                transcript_incomplete_acknowledged_at: row
+                    .get::<_, Option<String>>(29)?
+                    .and_then(|value| value.parse().ok()),
+                capture_degraded_summary: row.get(30)?,
             })
         });
 
@@ -7408,6 +7428,10 @@ mod tests {
             pause_spans: Vec::new(),
             video_service: None,
             attendees: Vec::new(),
+            transcript_complete: true,
+            transcript_degraded_reason: None,
+            transcript_incomplete_acknowledged_at: None,
+            capture_degraded_summary: None,
         };
         let transcript = Transcript {
             id: format!("{id}-transcript"),
@@ -8451,6 +8475,10 @@ mod tests {
             attendees: Vec::new(),
             pause_spans: Vec::new(),
             video_service: None,
+            transcript_complete: true,
+            transcript_degraded_reason: None,
+            transcript_incomplete_acknowledged_at: None,
+            capture_degraded_summary: None,
         }
     }
 
@@ -8982,11 +9010,30 @@ mod tests {
         db.complete_recording_with_transcript_state("clean", "completed", true, None)
             .unwrap();
 
+        let degraded = db.get_recording("degraded").unwrap().unwrap();
         assert_eq!(
-            db.get_recording("degraded").unwrap().unwrap().status,
-            "completed",
+            degraded.status, "completed",
             "a degraded transcript is still a completed meeting"
         );
+        assert!(!degraded.transcript_complete);
+        assert_eq!(
+            degraded.transcript_degraded_reason.as_deref(),
+            Some("chunk 41 of 60 failed")
+        );
+        let listed = db
+            .get_recordings(None)
+            .unwrap()
+            .into_iter()
+            .find(|recording| recording.id == "degraded")
+            .unwrap();
+        assert!(!listed.transcript_complete);
+        let response = serde_json::to_value(listed).unwrap();
+        assert_eq!(response["transcriptComplete"], false);
+        assert_eq!(
+            response["transcriptDegradedReason"],
+            "chunk 41 of 60 failed"
+        );
+        assert!(response.get("transcript_complete").is_none());
         assert_eq!(
             db.recording_ids_with_unacknowledged_incomplete_transcripts()
                 .unwrap(),
@@ -9011,6 +9058,12 @@ mod tests {
             Some("chunk 41 of 60 failed")
         );
         assert!(acknowledged.acknowledged_at.is_some());
+        assert!(db
+            .get_recording("degraded")
+            .unwrap()
+            .unwrap()
+            .transcript_incomplete_acknowledged_at
+            .is_some());
 
         // Acknowledging something that is not true is refused.
         assert!(db.acknowledge_incomplete_transcript("clean").is_err());
@@ -9067,6 +9120,14 @@ mod tests {
             Some(
                 "The microphone delivered nothing for about 320s of this 3600s meeting".to_string()
             )
+        );
+        assert_eq!(
+            db.get_recording(&recording.id)
+                .unwrap()
+                .unwrap()
+                .capture_degraded_summary
+                .as_deref(),
+            Some("The microphone delivered nothing for about 320s of this 3600s meeting")
         );
 
         // A later clean finalize clears the caveat rather than leaving a stale one.

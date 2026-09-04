@@ -549,6 +549,10 @@ pub(crate) async fn reprocess_dictation_impl(
         analysis_failure: None,
         pause_spans: Vec::new(),
         video_service: None,
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
         attendees: Vec::new(),
     };
     let history_text = crate::store::DictationHistoryTextRecord {
