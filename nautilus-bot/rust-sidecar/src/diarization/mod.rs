@@ -629,7 +629,12 @@ fn resolve_model_for_run_with(
     requested_id: &str,
     is_available: impl Fn(&str) -> bool,
 ) -> Option<ResolvedDiarizationModel> {
-    if is_available(requested_id) {
+    // Availability follows the artifact the extractor would open, so an
+    // unknown id answers for ECAPA-TDNN. Do not let that implementation detail
+    // make an unknown selection look as though it ran unchanged: only ids this
+    // build actually offers may take the no-substitution branch.
+    let requested_is_known = known_diarization_model_id(requested_id);
+    if requested_is_known && is_available(requested_id) {
         return Some(ResolvedDiarizationModel {
             model_id: requested_id.to_string(),
             fallback_notice: None,
@@ -645,6 +650,22 @@ fn resolve_model_for_run_with(
         });
     }
     None
+}
+
+fn known_diarization_model_id(model_id: &str) -> bool {
+    if embedding_model_artifact_id(model_id) == model_id {
+        return true;
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    {
+        model_id == crate::download::SPEAKRS_MODEL_ID
+    }
+
+    #[cfg(not(feature = "diarization-speakrs"))]
+    {
+        false
+    }
 }
 
 /// Run diarization with a specific speaker embedding model.
@@ -807,6 +828,18 @@ mod tests {
             .expect("the selected model can run");
         assert_eq!(resolved.model_id, "campplus_speaker");
         assert_eq!(resolved.fallback_notice, None);
+    }
+
+    #[test]
+    fn an_unknown_model_id_runs_the_default_and_says_so() {
+        let resolved = resolve_model_for_run_with("retired_speaker_model", |_| true)
+            .expect("the default can still run");
+        assert_eq!(resolved.model_id, DEFAULT_EMBEDDING_MODEL_ID);
+        let notice = resolved
+            .fallback_notice
+            .expect("normalizing an unknown id is a reported substitution");
+        assert!(notice.contains("retired_speaker_model"), "{notice}");
+        assert!(notice.contains("ECAPA-TDNN 512"), "{notice}");
     }
 
     /// Nothing downloaded means no speaker labels, not a quiet substitution of
