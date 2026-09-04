@@ -377,7 +377,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
   const [modelError, setModelError] = useState<string | null>(null);
   const [modelSkipped, setModelSkipped] = useState(false);
-  const [modelSelectionLoading, setModelSelectionLoading] = useState(true);
+  const [modelSelectionHydration, setModelSelectionHydration] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
   // Start on the fresh-install default, then keep model actions gated until
   // persisted settings have had a chance to restore an existing selection.
   const [selectedModelId, setSelectedModelId] = useState("parakeet-tdt-0.6b-v3");
@@ -471,10 +473,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   useEffect(() => {
     let mounted = true;
-    void Promise.all([
-      getSettings(),
-      getAsrProviders().catch(() => [] as AsrProviderInfo[]),
-    ])
+    void Promise.all([getSettings(), getAsrProviders()])
       .then(([settings, providers]) => {
         if (!mounted) {
           return;
@@ -565,13 +564,14 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               ? "hold_to_talk"
               : "toggle"
         );
+        setModelSelectionHydration("ready");
       })
       .catch(() => {
-        // Keep defaults if onboarding loads before settings are ready.
-      })
-      .finally(() => {
         if (mounted) {
-          setModelSelectionLoading(false);
+          // The displayed default is not trustworthy until both persisted
+          // settings and provider status have loaded. Keep model actions
+          // fail-closed instead of treating a rejected read as hydration.
+          setModelSelectionHydration("error");
         }
       });
 
@@ -904,6 +904,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   }, []);
 
   const startModelDownload = useCallback(async (modelId?: string) => {
+    if (modelSelectionHydration !== "ready") {
+      return false;
+    }
     const option =
       POWER_MODEL_OPTIONS.find((candidate) => candidate.id === modelId) ?? POWER_MODEL_OPTIONS[0];
     modelInteractionStartedRef.current = true;
@@ -949,7 +952,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     } finally {
       downloadingProviderTypeRef.current = null;
     }
-  }, []);
+  }, [modelSelectionHydration]);
 
   // Advancing past the visible model surface starts the selected fast default
   // in the background so the user can continue setting up the shortcut. The
@@ -1470,15 +1473,27 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         ) : null}
 
         {step === "dictation-model" ? (
-          <DictationModelStep
-            state={modelState}
-            error={modelError}
-            percent={downloadPercent}
-            selectedId={selectedModelId}
-            downloadFromFooter={mode === "full"}
-            onSelect={setSelectedModelId}
-            onDownload={() => void startModelDownload(selectedModelId)}
-          />
+          <>
+            <DictationModelStep
+              state={modelState}
+              error={modelError}
+              percent={downloadPercent}
+              selectedId={selectedModelId}
+              downloadFromFooter={mode === "full"}
+              downloadDisabled={modelSelectionHydration !== "ready"}
+              onSelect={setSelectedModelId}
+              onDownload={() => void startModelDownload(selectedModelId)}
+            />
+            {modelSelectionHydration === "error" ? (
+              <p
+                role="alert"
+                aria-label="Model setup unavailable"
+                className="text-sm text-destructive"
+              >
+                Model setup could not be loaded. Reopen onboarding and try again.
+              </p>
+            ) : null}
+          </>
         ) : null}
 
         {step === "hotkey" ? (
@@ -1617,7 +1632,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               saveBusy ||
               permissionRequestBusy ||
               scratchBusy ||
-              (step === "dictation-model" && modelSelectionLoading) ||
+              (step === "dictation-model" && modelSelectionHydration !== "ready") ||
               (step === "meeting-setup" && meetingModelState === "downloading") ||
               // Only block Continue for a download in progress while the
               // user is still on a visible, foreground model surface.
@@ -2342,6 +2357,7 @@ function DictationModelStep({
   percent,
   selectedId,
   downloadFromFooter,
+  downloadDisabled,
   onSelect,
   onDownload,
 }: {
@@ -2350,6 +2366,7 @@ function DictationModelStep({
   percent: number | null;
   selectedId: string;
   downloadFromFooter: boolean;
+  downloadDisabled: boolean;
   onSelect(id: string): void;
   onDownload(): void;
 }) {
@@ -2397,7 +2414,12 @@ function DictationModelStep({
       </div>
 
       {state === "idle" && !downloadFromFooter ? (
-        <Button id="download-model-btn" onClick={onDownload} className="gap-2">
+        <Button
+          id="download-model-btn"
+          onClick={onDownload}
+          className="gap-2"
+          disabled={downloadDisabled}
+        >
           <Download className="h-4 w-4" />
           Download {selectedOption?.label}
         </Button>
@@ -2428,7 +2450,12 @@ function DictationModelStep({
             Download failed: {error}
           </div>
           {!downloadFromFooter ? (
-            <Button variant="outline" size="sm" onClick={onDownload}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onDownload}
+              disabled={downloadDisabled}
+            >
               Retry download
             </Button>
           ) : null}

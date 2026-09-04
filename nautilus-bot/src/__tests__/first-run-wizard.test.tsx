@@ -372,6 +372,45 @@ describe("FirstRunWizard", () => {
     });
   });
 
+  it("keeps model download disabled when settings hydration fails", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const settingsBackend = await import("@/lib/backend/settings");
+    vi.mocked(settingsBackend.getSettings).mockRejectedValueOnce(
+      new Error("settings unavailable"),
+    );
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    expect(
+      await screen.findByRole("alert", { name: /model setup unavailable/i }),
+    ).toBeInTheDocument();
+    const downloadButton = screen.getByRole("button", {
+      name: /download and continue/i,
+    });
+    expect(downloadButton).toBeDisabled();
+    fireEvent.click(downloadButton);
+    expect(asrBackend.downloadAsrModels).not.toHaveBeenCalled();
+  });
+
+  it("keeps model download disabled when provider hydration fails", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    vi.mocked(asrBackend.getAsrProviders).mockRejectedValueOnce(
+      new Error("providers unavailable"),
+    );
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    expect(
+      await screen.findByRole("alert", { name: /model setup unavailable/i }),
+    ).toBeInTheDocument();
+    const downloadButton = screen.getByRole("button", {
+      name: /download and continue/i,
+    });
+    expect(downloadButton).toBeDisabled();
+    fireEvent.click(downloadButton);
+    expect(asrBackend.downloadAsrModels).not.toHaveBeenCalled();
+  });
+
   it("announces each step and moves focus to the new heading", async () => {
     render(<FirstRunWizard onComplete={vi.fn()} />);
 
