@@ -25,7 +25,7 @@ use crate::recording_audio::{
 };
 use crate::recording_pause::{PauseLedger, PauseSpan};
 use crate::settings;
-use crate::sidecar_handle::SidecarHandle;
+use crate::sidecar_handle::{AppEmitter, SidecarHandle};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
