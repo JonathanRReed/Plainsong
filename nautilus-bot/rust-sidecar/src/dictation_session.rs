@@ -1976,6 +1976,10 @@ pub(crate) async fn stop_dictation_for_sidecar(
         attendees: Vec::new(),
         pause_spans: Vec::new(),
         video_service: None,
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
     };
 
     // Cursor delivery crosses native process and accessibility boundaries.

@@ -835,6 +835,10 @@ pub(crate) async fn start_recording_for_sidecar(
         attendees: Vec::new(),
         pause_spans: Vec::new(),
         video_service: models::known_video_service(options.video_service.as_deref()),
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
     };
 
     {

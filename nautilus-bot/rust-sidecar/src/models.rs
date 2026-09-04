@@ -143,6 +143,18 @@ pub struct Recording {
     /// one. Serialized as `videoService`; `None` for every other meeting.
     #[serde(default)]
     pub video_service: Option<String>,
+    /// Whether every expected portion of the recording was transcribed.
+    #[serde(default)]
+    pub transcript_complete: bool,
+    /// Human-readable reason a transcript is known to be incomplete.
+    #[serde(default)]
+    pub transcript_degraded_reason: Option<String>,
+    /// When the user accepted that cleanup may remove an incomplete meeting's audio.
+    #[serde(default)]
+    pub transcript_incomplete_acknowledged_at: Option<DateTime<Utc>>,
+    /// Human-readable description of microphone or system-audio capture loss.
+    #[serde(default)]
+    pub capture_degraded_summary: Option<String>,
 }
 
 /// One person in a meeting. Mirrors `MeetingAttendee` in
