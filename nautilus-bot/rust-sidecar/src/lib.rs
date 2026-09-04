@@ -3541,22 +3541,14 @@ async fn save_settings_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
     mut settings: settings::Settings,
 ) -> Result<serde_json::Value, String> {
-    let (privileged_privacy, previous_shortcuts, previous_onboarding) = {
+    let (privileged_privacy, previous_shortcuts) = {
         let manager = state.settings_manager.lock().await;
         (
             manager.settings().privacy.clone(),
             manager.settings().shortcuts.clone(),
-            manager.settings().onboarding.clone(),
         )
     };
     preserve_privileged_privacy_settings(&privileged_privacy, &mut settings.privacy);
-    // The first-run record is the sidecar's, not the renderer's. Every settings
-    // write from the renderer is a read-modify-write of the whole document, so
-    // one built from a stale or hand-made `Settings` literal -- or a forged
-    // one -- would silently erase the record and put the install back where
-    // this bug started. See `preserve_sidecar_onboarding_record` and
-    // `save_settings_never_overwrites_the_onboarding_record` in tests.rs.
-    preserve_sidecar_onboarding_record(&previous_onboarding, &mut settings.onboarding);
     // Keeps the legacy `toggleDictation` key and the binding table telling the
     // same story whichever one the writer edited; see the function's doc for
     // which side wins when.
@@ -3720,6 +3712,13 @@ async fn save_settings_for_sidecar(
 
     {
         let mut settings_manager = state.settings_manager.lock().await;
+        // Preserve this under the same lock as the replacement. Onboarding can
+        // be recorded while this save awaits ASR work, so a snapshot taken at
+        // the start of the request could roll a newer record back here.
+        preserve_sidecar_onboarding_record(
+            &settings_manager.settings().onboarding,
+            &mut settings.onboarding,
+        );
         *settings_manager.settings_mut() = settings;
         settings_manager.save().map_err(|e| e.to_string())?;
         emit_settings_changed(handle, settings_manager.settings());
