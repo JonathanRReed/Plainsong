@@ -631,6 +631,55 @@ describe("FirstRunWizard", () => {
     });
   });
 
+  it("preserves a deliberately selected non-default Whisper model", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "small.en";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i); // permissions -> dictation-model
+    await clickPrimary(/continue/i); // -> hotkey, preserves the existing route
+
+    expect(downloadAsrModels).not.toHaveBeenCalled();
+    expect(currentSettings.transcription.dictationProvider).toBe("whisper");
+    expect(currentSettings.transcription.dictationModelId).toBe("small.en");
+  });
+
+  it("downloads base.en for a legacy Whisper route with only selectedModelId", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = undefined as never;
+    currentSettings.transcription.selectedModelId = "base.en";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
+    });
+  });
+
+  it("downloads base.en when a legacy Whisper route has no model id", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = undefined as never;
+    currentSettings.transcription.selectedModelId = undefined as never;
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
+    });
+  });
+
   it("completes full onboarding only after the explicit model download", async () => {
     const onComplete = vi.fn();
     const asrBackend = await import("@/lib/backend/asr");
