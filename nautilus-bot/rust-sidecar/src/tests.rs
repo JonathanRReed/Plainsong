@@ -3834,6 +3834,41 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
 }
 
 #[test]
+fn empty_delete_command_results_are_delivered_to_the_selection() {
+    assert!(should_insert_dictation_result(
+        "",
+        Some("delete_phrase"),
+        false,
+        false,
+    ));
+    assert!(should_insert_dictation_result(
+        "",
+        Some("delete_selection"),
+        false,
+        false,
+    ));
+    assert!(!should_insert_dictation_result("", None, false, false));
+    assert!(!should_insert_dictation_result(
+        "",
+        Some("rewrite_shorter"),
+        false,
+        false,
+    ));
+    assert!(!should_insert_dictation_result(
+        "",
+        Some("delete_phrase"),
+        true,
+        false,
+    ));
+    assert!(should_insert_dictation_result(
+        "",
+        Some("delete_phrase"),
+        true,
+        true,
+    ));
+}
+
+#[test]
 fn formatting_warnings_describe_only_the_formatting_pass() {
     // Both warnings are pushed while formatting runs, long before
     // insertion is attempted, so neither may assert that the text was
