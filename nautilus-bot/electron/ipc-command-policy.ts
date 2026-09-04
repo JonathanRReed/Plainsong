@@ -10,6 +10,7 @@ const ANALYSIS_COMMANDS = new Set<string>([
   "ask_memory",
   "extract_action_items",
   "extract_action_items_grounded",
+  "prepare_meeting_brief",
   // Re-runs the whole meeting analysis pass (summary, action items, title), so
   // it needs the analysis timeout. Membership here also gives it a
   // recordingId-scoped work key, which is what stops a second retry from
@@ -58,6 +59,7 @@ const FAST_COMMANDS = new Set<string>([
   "list_diarization_models",
   // Flip an atomic on the live capture session and record the span. Pause is
   // pressed mid-sentence; a slow answer here reads as a stuck button.
+  "pause_meeting_capture",
   "pause_recording",
   // Sits directly in front of a user-initiated capture start: a slow registry
   // write must fail fast rather than delay the meeting behind it.
@@ -66,6 +68,7 @@ const FAST_COMMANDS = new Set<string>([
   // front of the first-run wizard opening or closing, so a slow answer is a
   // visibly stuck launch.
   "record_onboarding_state",
+  "resume_meeting_capture",
   "resume_recording",
 ]);
 
@@ -77,6 +80,7 @@ const EXTENDED_COMMANDS = new Set<string>([
   "create_backup_default",
   "create_settings_backup_default",
   "download_asr_models",
+  "download_bundled_cleanup_model",
   "download_diarization_model",
   "download_platform_assets",
   "download_whisper_model",
@@ -169,7 +173,15 @@ function stringArgument(args: unknown, names: string[]): string | null {
   return null;
 }
 
+function canonicalLocaleWorkKey(locale: string): string {
+  return locale.toLowerCase().replace(/-/g, "_");
+}
+
 export function getCommandWorkKey(command: string, args?: unknown): string | null {
+  if (command === "install_apple_speech_language") {
+    const locale = stringArgument(args, ["locale"]) ?? command;
+    return `${command}:${canonicalLocaleWorkKey(locale)}`;
+  }
   if (command.startsWith("download_")) {
     const target =
       stringArgument(args, ["modelName", "modelId", "providerType", "assetId"]) ??
@@ -185,7 +197,7 @@ export function getCommandWorkKey(command: string, args?: unknown): string | nul
     return `reprocess_dictation:${stringArgument(args, ["historyId"]) ?? command}`;
   }
   if (ANALYSIS_COMMANDS.has(command)) {
-    const target = stringArgument(args, ["runId", "recordingId"]) ?? command;
+    const target = stringArgument(args, ["runId", "recordingId", "eventId"]) ?? command;
     return `${command}:${target}`;
   }
   if (

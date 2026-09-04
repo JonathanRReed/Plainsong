@@ -1451,12 +1451,14 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 }
             }
 
+            let ai_selection = dictation_session_ai_selection(&settings_snapshot)?;
             match execute_dictation_command_action(
                 state,
                 &command_key,
                 action,
                 command_context_text.as_deref(),
                 &command_context_source,
+                &ai_selection,
             )
             .await
             {
@@ -1544,25 +1546,26 @@ pub(crate) async fn stop_dictation_for_sidecar(
         && !final_text.is_empty()
         && command_applied.is_none()
     {
-        let attempt = match selected_analysis_provider_and_settings(
-            state,
-            settings::AiLane::Dictation,
-        )
-        .await
-        .and_then(|(provider, remote_processing_enabled, _, _)| {
-            enforce_remote_provider_policy(provider, remote_processing_enabled).map(|()| provider)
-        }) {
-            Ok(provider) => {
+        let attempt = match dictation_session_ai_selection(&settings_snapshot).and_then(
+            |(provider, remote_processing_enabled, model)| {
+                enforce_remote_provider_policy(provider, remote_processing_enabled)
+                    .map(|()| (provider, remote_processing_enabled, model))
+            },
+        ) {
+            Ok((provider, remote_processing_enabled, model)) => {
                 let format_timeout = pre_insert_budget.remaining(
                     dictation_format_timeout(provider),
                     std::time::Instant::now(),
                 );
                 let translated = tokio::time::timeout(
                     format_timeout,
-                    run_custom_dictation_transform_with_selected_provider(
+                    run_custom_dictation_transform_with_provider(
                         state,
                         final_text.as_str(),
                         DICTATION_TRANSLATE_TO_ENGLISH_PROMPT,
+                        provider,
+                        &model,
+                        remote_processing_enabled,
                     ),
                 )
                 .await;
@@ -1627,26 +1630,26 @@ pub(crate) async fn stop_dictation_for_sidecar(
                     // call the budget is meant to time, and a policy-blocked
                     // remote provider should fail fast rather than occupy
                     // the timer only to be rejected inside it.
-                    let attempt = match selected_analysis_provider_and_settings(
-                        state,
-                        settings::AiLane::Dictation,
-                    )
-                    .await
-                    .and_then(|(provider, remote_processing_enabled, _, _)| {
-                        enforce_remote_provider_policy(provider, remote_processing_enabled)
-                            .map(|()| provider)
-                    }) {
-                        Ok(provider) => {
+                    let attempt = match dictation_session_ai_selection(&settings_snapshot).and_then(
+                        |(provider, remote_processing_enabled, model)| {
+                            enforce_remote_provider_policy(provider, remote_processing_enabled)
+                                .map(|()| (provider, remote_processing_enabled, model))
+                        },
+                    ) {
+                        Ok((provider, remote_processing_enabled, model)) => {
                             let format_timeout = pre_insert_budget.remaining(
                                 dictation_format_timeout(provider),
                                 std::time::Instant::now(),
                             );
                             let transform = tokio::time::timeout(
                                 format_timeout,
-                                run_custom_dictation_transform_with_selected_provider(
+                                run_custom_dictation_transform_with_provider(
                                     state,
                                     final_text.as_str(),
                                     prompt.as_str(),
+                                    provider,
+                                    &model,
+                                    remote_processing_enabled,
                                 ),
                             )
                             .await;
