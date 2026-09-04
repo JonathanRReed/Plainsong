@@ -846,7 +846,16 @@ impl<'a> McpServer<'a> {
 pub fn serve<R: BufRead, W: Write>(
     source: &dyn MeetingSource,
     input: R,
+    output: W,
+) -> std::io::Result<()> {
+    serve_with_gate(source, input, output, super::local_tools_gate)
+}
+
+fn serve_with_gate<R: BufRead, W: Write, F: FnMut() -> super::LocalToolsGate>(
+    source: &dyn MeetingSource,
+    input: R,
     mut output: W,
+    mut read_gate: F,
 ) -> std::io::Result<()> {
     let mut server = McpServer::new(source);
     let mut input = input;
@@ -857,6 +866,14 @@ pub fn serve<R: BufRead, W: Write>(
             .take(MAX_LINE_BYTES as u64 + 1)
             .read_until(b'\n', &mut buffer)?;
         if read == 0 {
+            return Ok(());
+        }
+        // MCP hosts commonly keep this process alive. Re-read the persisted
+        // switch for every message so turning Local tools off revokes an
+        // established session before it can dispatch another request.
+        let gate = read_gate();
+        if !gate.is_enabled() {
+            eprintln!("{}", gate.refusal_message());
             return Ok(());
         }
         if buffer.len() > MAX_LINE_BYTES {
@@ -1299,7 +1316,13 @@ mod tests {
         input.push(b'\n');
 
         let mut output = Vec::new();
-        serve(&source, std::io::BufReader::new(&input[..]), &mut output).unwrap();
+        serve_with_gate(
+            &source,
+            std::io::BufReader::new(&input[..]),
+            &mut output,
+            || super::super::LocalToolsGate::Enabled,
+        )
+        .unwrap();
         let lines: Vec<&str> = std::str::from_utf8(&output)
             .unwrap()
             .lines()
@@ -1326,7 +1349,13 @@ mod tests {
         let source = FakeSource::sample();
         let input = vec![b'a'; MAX_LINE_BYTES * 2];
         let mut output = Vec::new();
-        serve(&source, std::io::BufReader::new(&input[..]), &mut output).unwrap();
+        serve_with_gate(
+            &source,
+            std::io::BufReader::new(&input[..]),
+            &mut output,
+            || super::super::LocalToolsGate::Enabled,
+        )
+        .unwrap();
         let text = std::str::from_utf8(&output).unwrap();
         assert!(text.contains("exceeds"), "{text}");
     }
@@ -1601,7 +1630,10 @@ mod tests {
             request(2, "ping", json!({}))
         );
         let mut output = Vec::new();
-        serve(&source, input.as_bytes(), &mut output).unwrap();
+        serve_with_gate(&source, input.as_bytes(), &mut output, || {
+            super::super::LocalToolsGate::Enabled
+        })
+        .unwrap();
         let text = String::from_utf8(output).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "{text}");
@@ -1612,12 +1644,45 @@ mod tests {
     }
 
     #[test]
+    fn serve_stops_before_dispatch_when_local_tools_are_revoked() {
+        let source = FakeSource::sample();
+        let input = format!(
+            "{}\n{}\n",
+            request(1, "ping", json!({})),
+            request(2, "ping", json!({}))
+        );
+        let mut checks = 0;
+        let mut output = Vec::new();
+        serve_with_gate(&source, input.as_bytes(), &mut output, || {
+            checks += 1;
+            if checks == 1 {
+                super::super::LocalToolsGate::Enabled
+            } else {
+                super::super::LocalToolsGate::Disabled {
+                    settings_path: std::path::PathBuf::from("settings.json"),
+                }
+            }
+        })
+        .unwrap();
+
+        let text = String::from_utf8(output).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(checks, 2);
+        assert_eq!(lines.len(), 1, "a request was served after revocation");
+        let response: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(response["id"], 1);
+    }
+
+    #[test]
     fn serve_rejects_an_oversized_line_and_keeps_going() {
         let source = FakeSource::sample();
         let huge = "x".repeat(MAX_LINE_BYTES + 10);
         let input = format!("{}\n{}\n", huge, request(2, "ping", json!({})));
         let mut output = Vec::new();
-        serve(&source, input.as_bytes(), &mut output).unwrap();
+        serve_with_gate(&source, input.as_bytes(), &mut output, || {
+            super::super::LocalToolsGate::Enabled
+        })
+        .unwrap();
         let text = String::from_utf8(output).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
