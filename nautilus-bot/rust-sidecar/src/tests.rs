@@ -4727,19 +4727,20 @@ fn custom_mode_matches_domain_before_app() {
 }
 
 #[test]
-fn windows_sendkeys_script_is_built_without_activation_by_default() {
-    let script = build_windows_sendkeys_script("^v", None);
+fn windows_sendkeys_script_activates_and_revalidates_the_captured_window() {
+    let script = build_windows_sendkeys_script("^v", Some("windows-hwnd-pid:1234:5678")).unwrap();
     assert!(script.contains("System.Windows.Forms"));
     assert!(script.contains("SendWait('^v')"));
     assert!(!script.contains("AppActivate"));
+    assert!(script.contains("SetForegroundWindow"));
+    assert!(script.contains("GetForegroundWindow"));
+    assert!(script.contains("$target = [IntPtr]::new(1234)"));
+    assert!(script.contains("$expectedPid = [uint32]5678"));
 }
 
 #[test]
-fn windows_sendkeys_script_escapes_target_app_names() {
-    let script = build_windows_sendkeys_script("^v", Some("Bob's Editor"));
-    assert!(script.contains("Microsoft.VisualBasic"));
-    assert!(script.contains("AppActivate('Bob''s Editor')"));
-    assert!(script.contains("SendWait('^v')"));
+fn windows_sendkeys_script_rejects_an_untrusted_target_identity() {
+    assert!(build_windows_sendkeys_script("^v", Some("Bob's Editor")).is_err());
 }
 
 #[test]
