@@ -1824,15 +1824,32 @@ pub async fn dispatch_command(
             // The session's in-memory centroids count here: this is the moment
             // an unnamed cluster becomes a named one, and it is the moment its
             // signature is written.
-            let (signatures, _attendees) =
+            let (signatures, attendees) =
                 cluster_voice_context(&db, &state.session_cluster_voices, &recording_id)?;
             let signature = signatures
-                .into_iter()
+                .iter()
                 .find(|signature| signature.speaker_id == speaker_id)
                 .ok_or_else(|| {
                     "Plainsong has no voice signature for this speaker. Run speaker identification again with \"Remember voices\" on."
                         .to_string()
-                })?;
+                })?
+                .clone();
+
+            let profiles = db.list_speaker_profiles().map_err(|e| e.to_string())?;
+            if let Some(profile_id) = requested_profile_id.as_deref() {
+                if !diarization::voiceprints::is_current_suggestion(
+                    &signatures,
+                    &profiles,
+                    &attendees,
+                    &speaker_id,
+                    profile_id,
+                ) {
+                    return Err(
+                        "That remembered-voice suggestion is no longer valid for this speaker. Refresh the meeting and try again."
+                            .to_string(),
+                    );
+                }
+            }
             db.record_named_cluster_voice_signature(
                 &recording_id,
                 &speaker_id,
@@ -1846,11 +1863,10 @@ pub async fn dispatch_command(
             // never drift apart; only the free-text path uses `name`.
             let (profile_id, display_name) = match requested_profile_id {
                 Some(profile_id) => {
-                    let profile = db
-                        .list_speaker_profiles()
-                        .map_err(|e| e.to_string())?
-                        .into_iter()
+                    let profile = profiles
+                        .iter()
                         .find(|profile| profile.id == profile_id)
+                        .cloned()
                         .ok_or("That remembered voice no longer exists.")?;
                     if profile.embedding_model_id != signature.embedding_model_id {
                         return Err(
