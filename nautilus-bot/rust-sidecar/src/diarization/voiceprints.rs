@@ -435,6 +435,23 @@ pub fn build_suggestions(
     ordered
 }
 
+/// Confirm that a profile is the suggestion the matcher currently considers
+/// eligible for this exact recording cluster. Callers must not trust a profile
+/// id supplied by the renderer: navigation can make UI state stale.
+pub fn is_current_suggestion(
+    signatures: &[ClusterVoiceSignature],
+    profiles: &[StoredVoiceProfile],
+    attendees: &[String],
+    speaker_id: &str,
+    profile_id: &str,
+) -> bool {
+    build_suggestions(signatures, profiles, attendees)
+        .into_iter()
+        .find(|cluster| cluster.speaker_id == speaker_id)
+        .and_then(|cluster| cluster.suggestion)
+        .is_some_and(|suggestion| suggestion.profile_id == profile_id)
+}
+
 /// Whether a confident match may be applied to this cluster without asking.
 ///
 /// Three conditions, all required: the user turned auto-apply on, the match
@@ -1077,6 +1094,37 @@ mod tests {
         assert_eq!(built[0].suggestion.as_ref().unwrap().display_name, "Dana");
         assert_eq!(built[1].speaker_id, "S2");
         assert!(built[1].suggestion.is_none());
+    }
+
+    #[test]
+    fn confirmation_accepts_only_the_current_cluster_suggestion() {
+        let profiles = vec![
+            profile("p1", "Dana", "ecapa_tdnn_speaker", vec![1.0, 0.0, 0.0]),
+            profile("p2", "Ravi", "ecapa_tdnn_speaker", vec![0.0, 1.0, 0.0]),
+        ];
+        let signatures = vec![signature("S1", 0.93)];
+
+        assert!(is_current_suggestion(
+            &signatures,
+            &profiles,
+            &[],
+            "S1",
+            "p1"
+        ));
+        assert!(!is_current_suggestion(
+            &signatures,
+            &profiles,
+            &[],
+            "S1",
+            "p2"
+        ));
+        assert!(!is_current_suggestion(
+            &signatures,
+            &profiles,
+            &[],
+            "S2",
+            "p1"
+        ));
     }
 
     #[test]
