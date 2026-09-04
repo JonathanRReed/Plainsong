@@ -7,7 +7,7 @@ Regenerate from nautilus-bot/ with:
 Application package: plainsong@0.9.0-beta.4
 Rust dependency packages: 525
 npm production dependency packages: 79
-Downloadable model artifacts: 22
+Downloadable model artifacts: 23
 
 The dependency indexes retain declared license identifiers and repository URLs
 even when no license file is available in the installed package or Cargo cache.
@@ -233,7 +233,7 @@ pinned in the source, and stored in the user's own models directory. The
 terms are the upstream project's, not Plainsong's, and are reproduced here
 because several differ from the license of the code that runs them.
 
-Model artifacts: 22
+Model artifacts: 23
 Artifacts whose upstream declares no license: 2 (ERes2NetV2 speaker embedding (int8), pyannote community-1 bundle (speakrs export))
 
 S1-mini by Superwhisper (GGUF)
@@ -285,6 +285,15 @@ Parakeet TDT 0.6b v3 (sherpa-onnx int8 export)
   Files: encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt
   Pinned in: rust-sidecar/src/asr/parakeet.rs (PARAKEET_V3_*)
   Note: Attribution is a condition of use, not a courtesy: this notice, shipped with the app, is how it is met. Derived from NVIDIA's nvidia/parakeet-tdt-0.6b-v3.
+
+Parakeet TDT 0.6b v2 (sherpa-onnx int8 export)
+  Used for: English speech recognition on the high-throughput local route.
+  License: CC-BY-4.0
+  Repository: https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8
+  Revision: 1ab9323565ddb038682214b292f588070a538ce2
+  Files: encoder.int8.onnx, decoder.int8.onnx, joiner.int8.onnx, tokens.txt
+  Pinned in: rust-sidecar/src/asr/parakeet.rs (PARAKEET_V2_*)
+  Note: Attribution is a condition of use, not a courtesy: this notice, shipped with the app, is how it is met. Derived from NVIDIA's nvidia/parakeet-tdt-0.6b-v2.
 
 Parakeet TDT CTC 110m (legacy export)
   Used for: Speech recognition for installs that still carry the earlier Parakeet download.

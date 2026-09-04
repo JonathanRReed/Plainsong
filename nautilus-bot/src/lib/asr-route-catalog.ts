@@ -377,6 +377,7 @@ function isExperimentalRoute(providerType: AsrProviderType, modelId: string) {
     // default Cargo feature. Offered when a build has it, never recommended.
     providerType === "transcribe_cpp" ||
     normalized.includes("experimental") ||
+    normalized === "parakeet-tdt-0.6b-v2" ||
     normalized === "parakeet-tdt-ctc-110m"
   );
 }
@@ -388,9 +389,11 @@ function routeDisplayLabel(
 ) {
   if (
     providerType === "parakeet" &&
-    modelId === "parakeet-tdt-0.6b-v3"
+    (modelId === "parakeet-tdt-0.6b-v3" || modelId === "parakeet-tdt-0.6b-v2")
   ) {
-    return "Parakeet TDT 0.6B v3";
+    return modelId === "parakeet-tdt-0.6b-v3"
+      ? "Parakeet TDT 0.6B v3"
+      : "Parakeet TDT 0.6B v2";
   }
 
   return upstreamLabel;
@@ -408,11 +411,13 @@ function routeSummary(
     return "English-only accuracy alternative that is slower on long local meetings.";
   }
   if (providerType === "parakeet") {
-    // The only surviving non-v3 route is the legacy 110M export, which is
-    // English-only and short-form -- it must not claim meeting coverage.
-    return modelId === "parakeet-tdt-0.6b-v3"
-      ? "Fast local long-form meeting route with the current recommended Parakeet release."
-      : "Legacy English-only Parakeet export, kept as a short-form dictation fallback.";
+    if (modelId === "parakeet-tdt-0.6b-v3") {
+      return "Fast local long-form meeting route with the current recommended multilingual Parakeet release.";
+    }
+    if (modelId === "parakeet-tdt-0.6b-v2") {
+      return "Experimental English-only local dictation route; real-audio qualification is pending.";
+    }
+    return "Legacy English-only Parakeet export, kept as a short-form dictation fallback.";
   }
   if (providerType === "openai_cloud") {
     // Only whisper-1 requests OpenAI's verbose_json response format

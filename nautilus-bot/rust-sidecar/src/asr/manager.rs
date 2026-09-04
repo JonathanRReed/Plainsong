@@ -19,8 +19,8 @@ use tokio::sync::RwLock;
 // disagree.
 const PARAKEET_ONNX_NAMES: [&str; 2] = ["encoder.onnx", "model.onnx"];
 const PARAKEET_VOCAB_NAMES: [&str; 1] = ["tokens.txt"];
-// Parakeet TDT v3: three ONNX graphs plus tokens, with the same size floors as
-// `PARAKEET_V3_ARTIFACTS` in `asr/parakeet.rs`.
+// Parakeet TDT v2/v3: three ONNX graphs plus tokens, with the same conservative
+// size floors as their pinned artifact contracts in `asr/parakeet.rs`.
 const PARAKEET_V3_REQUIRED_FILES: [(&str, u64); 4] = [
     ("encoder.int8.onnx", 64 * 1024 * 1024),
     ("decoder.int8.onnx", 1024 * 1024),
@@ -127,11 +127,13 @@ impl AsrManager {
         };
 
         match provider_type {
-            // Only two Parakeet routes exist, and both are pure ONNX. Anything
+            // All current Parakeet routes are pure ONNX. Anything
             // else -- including the retired managed-Python `parakeet-ctc-*`
             // ids -- resolves to v3 so an old settings file still lands on a
             // route that runs.
             AsrProviderType::Parakeet => match candidate {
+                "parakeet-tdt-0.6b-v2" => "parakeet-tdt-0.6b-v2".to_string(),
+                "parakeet-tdt-0.6b-v3" => "parakeet-tdt-0.6b-v3".to_string(),
                 "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
                     "parakeet-tdt-ctc-110m".to_string()
                 }
@@ -1615,7 +1617,10 @@ fn runtime_diagnostics_for_provider(
                             "Parakeet model '{}' is not downloaded yet.",
                             normalized_model
                         ),
-                        "Download Parakeet TDT v3 (encoder + decoder + joiner + tokens) in Settings -> ASR Models.".to_string(),
+                        format!(
+                            "Download Parakeet TDT {} (encoder + decoder + joiner + tokens) in Settings -> ASR Models.",
+                            normalized_model.strip_prefix("parakeet-tdt-0.6b-").unwrap_or("model")
+                        ),
                     )
                 };
                 return RuntimeDiagnosticsInternal {
@@ -1640,7 +1645,12 @@ fn runtime_diagnostics_for_provider(
                     if legacy {
                         "Parakeet legacy ONNX runtime ready.".to_string()
                     } else {
-                        "Parakeet TDT v3 native ONNX runtime ready.".to_string()
+                        format!(
+                            "Parakeet TDT {} native ONNX runtime ready.",
+                            normalized_model
+                                .strip_prefix("parakeet-tdt-0.6b-")
+                                .unwrap_or("model")
+                        )
                     }
                 })),
                 runtime_details: RuntimeDetails {
@@ -2228,7 +2238,7 @@ fn missing_or_invalid_qwen3_asr_files(model_dir: &Path) -> Vec<String> {
 /// unusable.
 ///
 /// Both routes are native ONNX, so neither reports a `python_path`. The legacy
-/// 110M export sits directly in `models/parakeet`; TDT v3 gets a subdirectory
+/// 110M export sits directly in `models/parakeet`; TDT v2/v3 get subdirectories
 /// beside it. These paths and filenames have to match `asr/parakeet.rs` exactly
 /// -- when they drifted apart, diagnostics reported Ready for a model that
 /// transcription then could not find.
@@ -2512,6 +2522,29 @@ mod tests {
             model_dir,
             models_root.join("parakeet").join("parakeet-tdt-0.6b-v3"),
             "v3 lives in its own subdirectory, beside the legacy export"
+        );
+        assert_eq!(
+            missing,
+            vec![
+                "encoder.int8.onnx",
+                "decoder.int8.onnx",
+                "joiner.int8.onnx",
+                "tokens.txt"
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(models_root);
+    }
+
+    #[test]
+    fn parakeet_v2_diagnostics_use_the_v2_subdirectory() {
+        let models_root = temp_models_root();
+
+        let (model_dir, missing) =
+            parakeet_model_dir_and_missing_files(&models_root, "parakeet-tdt-0.6b-v2");
+        assert_eq!(
+            model_dir,
+            models_root.join("parakeet").join("parakeet-tdt-0.6b-v2")
         );
         assert_eq!(
             missing,
@@ -2900,6 +2933,19 @@ mod tests {
                 .await
                 .expect("legacy Parakeet model should resolve"),
             "parakeet-tdt-0.6b-v3"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_model_preserves_parakeet_v2_as_a_distinct_route() {
+        let manager = AsrManager::new();
+
+        assert_eq!(
+            manager
+                .resolve_download_model_id(AsrProviderType::Parakeet, Some("parakeet-tdt-0.6b-v2"),)
+                .await
+                .expect("Parakeet v2 should resolve"),
+            "parakeet-tdt-0.6b-v2"
         );
     }
 

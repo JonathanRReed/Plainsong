@@ -201,9 +201,9 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
     case "distil_whisper":
       return normalizedModelId.startsWith("distil");
     case "parakeet":
-      // Only the v3 TDT route is long-form capable. The legacy 110M export is
-      // a short-form English model and stays out of the meeting lane.
-      return normalizedModelId.startsWith("parakeet-tdt-0.6b");
+      // Only v3 has a real-audio long-form receipt in Plainsong. V2 remains a
+      // dictation-only preview until the exact pinned export is qualified.
+      return normalizedModelId === "parakeet-tdt-0.6b-v3";
     case "groq":
     case "elevenlabs_scribe":
     case "cohere_transcribe":
@@ -530,6 +530,17 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
   },
   {
     providerType: "parakeet",
+    modelId: "parakeet-tdt-0.6b-v2",
+    languages: ENGLISH_ONLY,
+    // 661,190,513 bytes across the four pinned int8 artifacts.
+    sizeMib: 631,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff:
+      "English only; choose v3 for multilingual work. Plainsong has not yet published a same-hardware accuracy and latency comparison for this export.",
+  },
+  {
+    providerType: "parakeet",
     modelId: "parakeet-tdt-ctc-110m",
     languages: ENGLISH_ONLY,
     // 458,161,021 bytes for model.onnx upstream = 436.9 MiB. Mirrors
@@ -639,6 +650,13 @@ const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
     {
       basis: "upstream_listed",
       verifiedLanguages: ["English"],
+    },
+  ],
+  [
+    "parakeet:parakeet-tdt-0.6b-v2",
+    {
+      basis: "upstream_listed",
+      verifiedLanguages: [],
     },
   ],
   [
@@ -821,6 +839,7 @@ const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper:large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["whisper_candle:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["parakeet:parakeet-tdt-0.6b-v3", PARAKEET_V3_LANGUAGE_CODES],
+  ["parakeet:parakeet-tdt-0.6b-v2", ["en"]],
   ["transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0", PARAKEET_V3_LANGUAGE_CODES],
   ["qwen3_asr:qwen3-asr-0.6b", QWEN3_ASR_LANGUAGE_CODES],
   ["cohere_local:cohere-transcribe-03-2026-q4", COHERE_LOCAL_LANGUAGE_CODES],
