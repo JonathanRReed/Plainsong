@@ -10,7 +10,9 @@ const source = fs.readFileSync(
 describe("packaged macOS launch-performance receipt", () => {
   it("launches the measured run through LaunchServices and keeps optional DOM verification on private pipes", () => {
     expect(source).toContain('const OPEN_BINARY = "/usr/bin/open"');
-    expect(source).toContain('"-na", appPath, "--args"');
+    expect(source).toContain('"-n", "-W", appPath, "--args"');
+    expect(source).not.toContain('"-a", appPath');
+    expect(source).toContain("--plainsong-launch-metrics-file=");
     expect(source).toContain('const verifyDomContract = args.includes("--verify-dom-contract")');
     expect(source).toContain('"--remote-debugging-pipe"');
     expect(source).toContain('stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"]');
@@ -45,5 +47,16 @@ describe("packaged macOS launch-performance receipt", () => {
     ]) {
       expect(source).toContain(field);
     }
+  });
+
+  it("separates timing from release trust and fails closed for release qualification", () => {
+    expect(source).toContain("timingPass");
+    expect(source).toContain("trustPass");
+    expect(source).toContain("releaseQualifiedPass: timingPass && trustPass");
+    expect(source).toContain("developerIdSigned");
+    expect(source).toContain("notarized");
+    expect(source).toContain("stapled");
+    expect(source).toContain('architecture === "arm64"');
+    expect(source).toContain('args.includes("--diagnostic-allow-unqualified")');
   });
 });

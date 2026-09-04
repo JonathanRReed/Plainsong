@@ -23,6 +23,11 @@ node scripts/capture-packaged-macos-launch-performance.mjs \
   --profile-root /private/tmp/plainsong-launch-profile
 ```
 
+`--diagnostic-allow-unqualified` changes only the process exit decision. The
+receipt still records separate `timingPass`, `trustPass`, and
+`releaseQualifiedPass` values. Without that flag, Developer ID signing,
+notarization, stapling, arm64 architecture, and latency must all pass.
+
 Run the release gate only against the exact signed, notarized, and stapled
 candidate. The JSON receipt records the source SHA, executable hash, code-signing
 assessment, architecture, macOS and hardware identity, display refresh rate,

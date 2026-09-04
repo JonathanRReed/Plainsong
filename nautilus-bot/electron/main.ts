@@ -24,6 +24,7 @@ import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
 import {
   createReadStream,
+  appendFileSync,
   existsSync,
   lstatSync,
   readFileSync,
@@ -188,6 +189,13 @@ import {
 
 const launchStartedAt = ELECTRON_MODULE_ENTRY_AT;
 const recordedLaunchMilestones = new Set<LaunchMilestoneName>();
+const launchMetricsFileArgument = process.argv.find((argument) =>
+  argument.startsWith("--plainsong-launch-metrics-file="),
+);
+const launchMetricsFile =
+  process.env.PLAINSONG_QA_MODE === "1"
+    ? launchMetricsFileArgument?.slice("--plainsong-launch-metrics-file=".length)
+    : undefined;
 
 function recordLaunchMilestone(
   name: LaunchMilestoneName,
@@ -197,15 +205,21 @@ function recordLaunchMilestone(
   if (recordedLaunchMilestones.has(name)) return;
   recordedLaunchMilestones.add(name);
   const elapsedMs = Number(process.hrtime.bigint() - launchStartedAt) / 1_000_000;
-  console.log(
-    formatLaunchMilestone({
+  const line = formatLaunchMilestone({
       name,
       elapsedMs: Math.round(elapsedMs * 1000) / 1000,
       wallTimeMs: Date.now(),
       source,
       ...(rendererElapsedMs === undefined ? {} : { rendererElapsedMs }),
-    }),
-  );
+    });
+  console.log(line);
+  if (launchMetricsFile) {
+    try {
+      appendFileSync(launchMetricsFile, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      console.warn("[launch] could not append milestone receipt", error);
+    }
+  }
 }
 
 recordLaunchMilestone("electron-module-entry");

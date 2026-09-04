@@ -22,6 +22,7 @@ const thresholdMs = Number(valueFor("--threshold-ms", "1500"));
 const profileCondition = valueFor("--profile-condition", "fresh");
 const requestedProfileRoot = valueFor("--profile-root");
 const verifyDomContract = args.includes("--verify-dom-contract");
+const diagnosticAllowUnqualified = args.includes("--diagnostic-allow-unqualified");
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 if (process.platform !== "darwin") {
@@ -165,6 +166,7 @@ async function main() {
   const dataRoot = path.join(profileRoot, "data");
   const configRoot = path.join(profileRoot, "config");
   const chromiumLog = path.join(profileRoot, "electron-launch.log");
+  const milestoneLog = path.join(profileRoot, "launch-milestones.jsonl");
   for (const directory of [electronProfile, dataRoot, configRoot]) {
     fs.mkdirSync(directory, { recursive: true });
   }
@@ -174,10 +176,10 @@ async function main() {
   const child = spawn(
     OPEN_BINARY,
     [
-      "-W",
-      "-na", appPath, "--args",
+      "-n", "-W", appPath, "--args",
       `--user-data-dir=${electronProfile}`,
       `--log-file=${chromiumLog}`,
+      `--plainsong-launch-metrics-file=${milestoneLog}`,
       "--plainsong-quit-after-launch-metrics",
     ],
     {
@@ -202,7 +204,7 @@ async function main() {
   let interactiveMs = null;
   let finalObservation = null;
   while (Date.now() < deadline) {
-    const output = fs.existsSync(chromiumLog) ? fs.readFileSync(chromiumLog, "utf8") : "";
+    const output = fs.existsSync(milestoneLog) ? fs.readFileSync(milestoneLog, "utf8") : "";
     const milestones = [...output.matchAll(/\[launch-milestone\] (\{[^\n]+\})/g)]
       .map((match) => JSON.parse(match[1]));
     const presented = milestones.find((entry) => entry.name === "renderer-post-commit-frame");
@@ -221,7 +223,8 @@ async function main() {
   await new Promise((resolve) => child.once("close", resolve));
 
   const chromiumOutput = fs.existsSync(chromiumLog) ? fs.readFileSync(chromiumLog, "utf8") : "";
-  const milestoneLogs = `${stdout}\n${stderr}\n${chromiumOutput}`
+  const mainMilestoneOutput = fs.existsSync(milestoneLog) ? fs.readFileSync(milestoneLog, "utf8") : "";
+  const milestoneLogs = `${stdout}\n${stderr}\n${chromiumOutput}\n${mainMilestoneOutput}`
     .split(/\r?\n/)
     .filter((line) => line.includes("[launch-milestone] "));
   const codesign = commandOutput("/usr/bin/codesign", ["-dv", "--verbose=4", appPath]);
@@ -232,15 +235,24 @@ async function main() {
   const domContractObservation = verifyDomContract
     ? await verifyRendererDomOverPrivatePipe(executable, profileRoot)
     : null;
+  const signingIdentity = codesign.match(/Authority=(.+)/)?.[1] ?? null;
+  const developerIdSigned = signingIdentity?.startsWith("Developer ID Application:") === true;
+  const notarized = /Notarized Developer ID/i.test(spctl);
+  const stapled = /validate action worked/i.test(stapler);
+  const architecture = commandOutput("/usr/bin/file", [executable]).match(/\b(?:arm64|x86_64|universal)\b/)?.[0] ?? null;
+  const timingPass = interactiveMs !== null && interactiveMs < thresholdMs;
+  const trustPass = developerIdSigned && notarized && stapled && architecture === "arm64";
+  const releaseQualifiedPass = timingPass && trustPass;
   const report = {
     generatedAt: new Date().toISOString(),
     sourceSha: commandOutput("/usr/bin/git", ["-C", repoRoot, "rev-parse", "HEAD"]),
     appPath,
     appSha256: sha256(executable),
-    signingIdentity: codesign.match(/Authority=(.+)/)?.[1] ?? null,
-    notarized: /Notarized Developer ID/i.test(spctl),
-    stapled: /validate action worked/i.test(stapler),
-    architecture: commandOutput("/usr/bin/file", [executable]).match(/\b(?:arm64|x86_64|universal)\b/)?.[0] ?? null,
+    signingIdentity,
+    developerIdSigned,
+    notarized,
+    stapled,
+    architecture,
     macosVersion: commandOutput("/usr/bin/sw_vers", ["-productVersion"]),
     hardwareModel: commandOutput("/usr/sbin/sysctl", ["-n", "hw.model"]),
     displayRefreshRateHz,
@@ -249,12 +261,16 @@ async function main() {
     thresholdMs,
     firstPresentedMs,
     interactiveMs,
-    pass: interactiveMs !== null && interactiveMs < thresholdMs,
+    timingPass,
+    trustPass,
+    releaseQualifiedPass: timingPass && trustPass,
+    mode: diagnosticAllowUnqualified ? "diagnostic" : "release",
+    pass: diagnosticAllowUnqualified ? timingPass : releaseQualifiedPass,
     observation: finalObservation,
     milestoneLogs,
     domContractVerifiedWithPrivatePipe: domContractObservation !== null,
     domContractObservation,
-    rawLaunchOutput: { stdout, stderr, chromium: chromiumOutput },
+    rawLaunchOutput: { stdout, stderr, chromium: chromiumOutput, mainMilestones: mainMilestoneOutput },
   };
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, `${JSON.stringify(report, null, 2)}\n`);

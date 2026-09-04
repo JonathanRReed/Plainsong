@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@/lib/electron";
+import { scheduleAfterPaint } from "@/lib/post-paint";
 import {
   normalizeCallCaptureRequest,
   publishCallCaptureRequest,
@@ -257,7 +258,7 @@ function AppShell() {
   useEffect(() => {
     if (onboardingGate.action === "wait" || interactiveMarkedRef.current) return;
     interactiveMarkedRef.current = true;
-    requestAnimationFrame(() => {
+    scheduleAfterPaint(() => {
       window.electronAPI?.reportLaunchMilestone(
         "workspace-or-wizard-interactive",
         performance.now(),
@@ -564,7 +565,7 @@ function AppShell() {
 
 function App() {
   useEffect(() => {
-    requestAnimationFrame(() => {
+    scheduleAfterPaint(() => {
       window.electronAPI?.reportLaunchMilestone(
         "renderer-post-commit-frame",
         performance.now(),
