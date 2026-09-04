@@ -7,9 +7,11 @@ import {
   useState,
   type ComponentType,
   type ErrorInfo,
+  type MutableRefObject,
   type ReactNode,
 } from "react";
 import { listen } from "@/lib/electron";
+import { scheduleAfterPaint } from "@/lib/post-paint";
 import {
   normalizeCallCaptureRequest,
   publishCallCaptureRequest,
@@ -215,6 +217,24 @@ function AppRuntimeListeners() {
   return null;
 }
 
+function LaunchInteractiveReporter({
+  marked,
+}: {
+  marked: MutableRefObject<boolean>;
+}) {
+  useEffect(() => {
+    if (marked.current) return;
+    marked.current = true;
+    scheduleAfterPaint(() => {
+      window.electronAPI?.reportLaunchMilestone(
+        "workspace-or-wizard-interactive",
+        performance.now(),
+      );
+    });
+  }, [marked]);
+  return null;
+}
+
 /**
  * Everything inside the providers, so the first-run gate can read the same
  * live readiness the rest of the app does.
@@ -234,6 +254,7 @@ function AppShell() {
   const firstViewMarked = useRef(false);
   const mainRef = useRef<HTMLElement>(null);
   const navigationFocusReadyRef = useRef(false);
+  const interactiveMarkedRef = useRef(false);
 
   // UI overlays
   const { decision: onboardingGate, recordCompleted, recordDeferred } =
@@ -530,6 +551,9 @@ function AppShell() {
             }
           >
             <ActiveView />
+            {!wizardMode && (
+              <LaunchInteractiveReporter marked={interactiveMarkedRef} />
+            )}
           </Suspense>
         </main>
         <span
@@ -544,13 +568,25 @@ function AppShell() {
 
       {/* Opened by the first-run gate, or by hand from Settings, Home or Setup. */}
       {wizardMode && (
-        <FirstRunWizard mode={wizardMode} onComplete={handleWizardComplete} />
+        <>
+          <FirstRunWizard mode={wizardMode} onComplete={handleWizardComplete} />
+          <LaunchInteractiveReporter marked={interactiveMarkedRef} />
+        </>
       )}
     </>
   );
 }
 
 function App() {
+  useEffect(() => {
+    scheduleAfterPaint(() => {
+      window.electronAPI?.reportLaunchMilestone(
+        "renderer-post-commit-frame",
+        performance.now(),
+      );
+    });
+  }, []);
+
   return (
     <ThemeProvider>
       <ToastProvider>

@@ -71,4 +71,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
 
   getWindowLabel: (): Promise<string | null> =>
     ipcRenderer.invoke("window:get-label"),
+
+  reportLaunchMilestone: (name: string, rendererElapsedMs: number): void => {
+    ipcRenderer.send("launch:renderer-milestone", { name, rendererElapsedMs });
+  },
 });

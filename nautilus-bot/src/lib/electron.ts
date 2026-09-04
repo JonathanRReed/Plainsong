@@ -155,6 +155,7 @@ declare global {
       on(event: string, handler: (payload: unknown) => void): number;
       off(event: string, subscriptionId: number): void;
       getWindowLabel(): Promise<string | null>;
+      reportLaunchMilestone(name: string, rendererElapsedMs: number): void;
     };
   }
 }
