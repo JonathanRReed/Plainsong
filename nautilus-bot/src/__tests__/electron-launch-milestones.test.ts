@@ -4,8 +4,21 @@ import {
   formatLaunchMilestone,
   parseRendererLaunchMilestone,
 } from "../../electron/launch-milestones";
+import fs from "node:fs";
+import path from "node:path";
 
 describe("launch milestone contract", () => {
+  it("scopes first sidecar responses to a process generation and ignores notifications", () => {
+    const bridge = fs.readFileSync(
+      path.resolve(import.meta.dirname, "../../electron/ipc-bridge.ts"),
+      "utf8",
+    );
+    expect(bridge).toContain("private sidecarGeneration = 0");
+    expect(bridge).toContain("const generation = ++this.sidecarGeneration");
+    expect(bridge).toContain("this.handleSidecarMessage(msg, generation)");
+    expect(bridge).toContain("generation !== this.sidecarGeneration");
+    expect(bridge).toContain("msg.id !== null && msg.id !== undefined");
+  });
   it("keeps the required startup milestones in one typed vocabulary", () => {
     expect(LAUNCH_MILESTONE_NAMES).toEqual([
       "electron-module-entry",
@@ -27,7 +40,9 @@ describe("launch milestone contract", () => {
         rendererElapsedMs: 18.25,
       }),
     ).toEqual({ name: "renderer-post-commit-frame", rendererElapsedMs: 18.25 });
-    expect(parseRendererLaunchMilestone({ name: "app-ready", rendererElapsedMs: 2 })).toBeNull();
+    expect(
+      parseRendererLaunchMilestone({ name: "app-ready", rendererElapsedMs: 2 }),
+    ).toBeNull();
     expect(
       parseRendererLaunchMilestone({
         name: "renderer-first-contentful-paint",

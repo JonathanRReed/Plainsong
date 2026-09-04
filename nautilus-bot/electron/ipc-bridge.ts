@@ -38,7 +38,11 @@ type PendingRequest = {
 
 type EventCallback = (eventName: string, payload: unknown) => void;
 type WindowCommandCallback = (command: string, payload: unknown) => void;
-type CommandResolvedCallback = (command: string, args: unknown, result: unknown) => void;
+type CommandResolvedCallback = (
+  command: string,
+  args: unknown,
+  result: unknown,
+) => void;
 type TerminatedCallback = (reason: string) => void;
 type LifecycleCallback = () => void;
 
@@ -85,16 +89,13 @@ export function sidecarError(rawMessage: string): SidecarError {
  * message was reworded. The string still travels alongside, as `message`.
  */
 export type SidecarTerminationReason =
-  | "crash"
-  | "killed"
-  | "spawn_failed"
-  | "unresponsive";
+  "crash" | "killed" | "spawn_failed" | "unresponsive";
 type SenderValidator = (senderUrl: string) => boolean;
 type LocalCommandResult = { handled: boolean; result?: unknown };
 type LocalCommandCallback = (
   event: IpcMainInvokeEvent,
   command: string,
-  args: unknown
+  args: unknown,
 ) => Promise<LocalCommandResult> | LocalCommandResult;
 
 // Renderer-initiated commands must be explicitly approved here.
@@ -321,7 +322,6 @@ export function isRendererCommandAllowed(command: string): boolean {
   return ALLOWED_RENDERER_COMMANDS.has(command);
 }
 
-
 export class IpcBridge {
   private sidecarPath: string;
   private readonly spawnProcess: typeof spawn;
@@ -346,6 +346,7 @@ export class IpcBridge {
   private spawnedCallback: LifecycleCallback | null = null;
   private firstResponseCallback: LifecycleCallback | null = null;
   private firstResponseSeen = false;
+  private sidecarGeneration = 0;
 
   constructor(sidecarPath: string, spawnProcess: typeof spawn = spawn) {
     this.sidecarPath = sidecarPath;
@@ -419,6 +420,7 @@ export class IpcBridge {
 
   private spawnSidecar(): void {
     this.firstResponseSeen = false;
+    const generation = ++this.sidecarGeneration;
     console.log(`[sidecar] spawning: ${this.sidecarPath}`);
 
     this.process = this.spawnProcess(this.sidecarPath, [], {
@@ -432,7 +434,7 @@ export class IpcBridge {
       if (!line.trim()) return;
       try {
         const msg = JSON.parse(line) as JsonRpcResponse;
-        this.handleSidecarMessage(msg);
+        this.handleSidecarMessage(msg, generation);
       } catch (e) {
         console.warn("[sidecar] unparseable stdout:", line, e);
       }
@@ -527,10 +529,16 @@ export class IpcBridge {
       this.restartTimer = null;
     }
 
-    if (!this.shuttingDown && !this.quitPending && this.restartAttempts < this.maxRestarts) {
+    if (
+      !this.shuttingDown &&
+      !this.quitPending &&
+      this.restartAttempts < this.maxRestarts
+    ) {
       const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
       this.restartAttempts++;
-      console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
+      console.log(
+        `[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`,
+      );
       this.restartTimer = setTimeout(() => {
         this.restartTimer = null;
         if (this.shuttingDown || this.quitPending) {
@@ -549,13 +557,18 @@ export class IpcBridge {
     }
     this.pending.clear();
     if (pendingCount > 0) {
-      console.warn(`[sidecar] rejected ${pendingCount} pending request(s): ${message}`);
+      console.warn(
+        `[sidecar] rejected ${pendingCount} pending request(s): ${message}`,
+      );
     }
     this.terminatedCallback?.(message);
   }
 
-  private handleSidecarMessage(msg: JsonRpcResponse): void {
-    if (!this.firstResponseSeen) {
+  private handleSidecarMessage(msg: JsonRpcResponse, generation: number): void {
+    if (generation !== this.sidecarGeneration) {
+      return;
+    }
+    if (!this.firstResponseSeen && msg.id !== null && msg.id !== undefined) {
       this.firstResponseSeen = true;
       this.firstResponseCallback?.();
     }
@@ -589,7 +602,11 @@ export class IpcBridge {
         pending.reject(sidecarError(msg.error.message));
       } else {
         pending.resolve(msg.result);
-        this.commandResolvedCallback?.(pending.command, pending.args, msg.result);
+        this.commandResolvedCallback?.(
+          pending.command,
+          pending.args,
+          msg.result,
+        );
       }
     }
   }
@@ -621,12 +638,21 @@ export class IpcBridge {
           } catch {
             // The timeout still rejects even if the sidecar has already exited.
           }
-          reject(new Error(`Command timed out after ${getCommandTimeoutMs(command)}ms: ${command}`));
+          reject(
+            new Error(
+              `Command timed out after ${getCommandTimeoutMs(command)}ms: ${command}`,
+            ),
+          );
         }
       }, getCommandTimeoutMs(command));
       this.pending.set(id, { command, args, resolve, reject, timeout });
       try {
-        this.sendToSidecar({ jsonrpc: "2.0", id, method: command, params: args ?? {} });
+        this.sendToSidecar({
+          jsonrpc: "2.0",
+          id,
+          method: command,
+          params: args ?? {},
+        });
       } catch (e) {
         // Clear timeout before deleting to prevent race condition
         clearTimeout(timeout);
@@ -679,7 +705,9 @@ export class IpcBridge {
           return;
         }
         if (Date.now() - startedAt >= timeoutMs) {
-          reject(new Error("Timed out waiting for the audio sidecar to restart"));
+          reject(
+            new Error("Timed out waiting for the audio sidecar to restart"),
+          );
           return;
         }
         setTimeout(check, 25);
@@ -711,31 +739,37 @@ export class IpcBridge {
   }
 
   private registerIpcHandler(): void {
-    ipcMain.handle("sidecar:invoke", async (event, command: string, args?: unknown) => {
-      // The allowlist checks *what* is being asked for; this checks *who* is
-      // asking. Without it any frame that ends up in a window with our preload
-      // — including one loaded from an unexpected origin — reaches the sidecar.
-      if (!this.isTrustedSender(event)) {
-        console.warn("[security] rejected sidecar command from untrusted sender", {
-          command,
-          url: trustedSenderFrameUrl(event),
-        });
-        throw new Error("Renderer command rejected: untrusted sender");
-      }
-
-      if (!isRendererCommandAllowed(command)) {
-        throw new Error(`Renderer command is not allowed: ${command}`);
-      }
-
-      if (this.localCommandCallback) {
-        const local = await this.localCommandCallback(event, command, args);
-        if (local.handled) {
-          return local.result ?? null;
+    ipcMain.handle(
+      "sidecar:invoke",
+      async (event, command: string, args?: unknown) => {
+        // The allowlist checks *what* is being asked for; this checks *who* is
+        // asking. Without it any frame that ends up in a window with our preload
+        // — including one loaded from an unexpected origin — reaches the sidecar.
+        if (!this.isTrustedSender(event)) {
+          console.warn(
+            "[security] rejected sidecar command from untrusted sender",
+            {
+              command,
+              url: trustedSenderFrameUrl(event),
+            },
+          );
+          throw new Error("Renderer command rejected: untrusted sender");
         }
-      }
 
-      return await this.invoke(command, args);
-    });
+        if (!isRendererCommandAllowed(command)) {
+          throw new Error(`Renderer command is not allowed: ${command}`);
+        }
+
+        if (this.localCommandCallback) {
+          const local = await this.localCommandCallback(event, command, args);
+          if (local.handled) {
+            return local.result ?? null;
+          }
+        }
+
+        return await this.invoke(command, args);
+      },
+    );
   }
 
   shutdown(): void {
@@ -756,12 +790,17 @@ export class IpcBridge {
     this.pending.clear();
     if (pendingCount > 0) {
       console.warn(
-        `[sidecar] rejected ${pendingCount} pending request(s): ${SIDECAR_SHUTDOWN_MESSAGE}`
+        `[sidecar] rejected ${pendingCount} pending request(s): ${SIDECAR_SHUTDOWN_MESSAGE}`,
       );
     }
     if (this.process && !this.process.killed) {
       try {
-        this.sendToSidecar({ jsonrpc: "2.0", id: randomUUID(), method: "shutdown", params: {} });
+        this.sendToSidecar({
+          jsonrpc: "2.0",
+          id: randomUUID(),
+          method: "shutdown",
+          params: {},
+        });
       } catch {
         // ignore
       }
