@@ -2063,7 +2063,23 @@ pub(crate) async fn stop_dictation_for_sidecar(
         };
     } else {
         if undo_previous_insert {
-            if recent_inserted_text.is_some() {
+            // Re-sample focus immediately before the destructive operation.
+            // The session's start target alone is insufficient because focus
+            // can change while audio is being transcribed.
+            let focused_app = get_frontmost_app_name();
+            let focused_bundle_id = get_frontmost_app_bundle_id();
+            let undo_authorized = recent_delivery.as_ref().is_some_and(|delivery| {
+                recent_delivery_authorizes_undo(
+                    delivery,
+                    app_target.as_deref(),
+                    app_bundle_id.as_deref(),
+                    focused_app.as_deref(),
+                    focused_bundle_id.as_deref(),
+                    &requested_insertion_mode,
+                    chrono::Utc::now(),
+                )
+            });
+            if undo_authorized {
                 match send_native_undo_key() {
                     Ok(()) => {
                         undo_performed = true;
@@ -2442,6 +2458,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 app_target: app_target.clone(),
                 app_bundle_id: app_bundle_id.clone(),
                 delivered_at: now,
+                undo_eligible: insertion_confirmed_flag,
             });
         } else if undo_performed {
             *recent_delivery_slot = None;

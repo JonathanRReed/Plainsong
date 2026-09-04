@@ -608,7 +608,9 @@ impl Default for TranscriptionSettings {
             dictation_selected_custom_mode_id: None,
             dictation_custom_modes: Vec::new(),
             dictation_context_source: "none".to_string(),
-            dictation_command_mode_enabled: true,
+            // Spoken commands are opt-in because ASR output is untrusted and
+            // some commands can modify another application's document.
+            dictation_command_mode_enabled: false,
             dictation_command_prefix: "command".to_string(),
             dictation_insertion_mode: "auto".to_string(),
             dictation_active_languages: Vec::new(),
@@ -4327,7 +4329,7 @@ mod tests {
         assert!(settings.transcription.use_shared_asr_selection);
         assert_eq!(settings.transcription.dictation_provider, "parakeet");
         assert_eq!(settings.transcription.meeting_provider, "parakeet");
-        assert!(settings.transcription.dictation_command_mode_enabled);
+        assert!(!settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "auto");
         assert!(settings.transcription.dictation_snippets_enabled);
