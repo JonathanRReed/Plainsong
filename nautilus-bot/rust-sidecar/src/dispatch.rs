@@ -96,6 +96,27 @@ mod dictation_start_error_race_tests {
             }
         });
     }
+
+    #[test]
+    fn force_stop_releases_tracker_before_waiting_for_audio() {
+        const SOURCE: &str = include_str!("dispatch.rs");
+        let start = SOURCE
+            .find("\"force_stop_dictation\" => {")
+            .expect("force stop");
+        let end = SOURCE[start..]
+            .find("\"get_dictation_audio_level\" => {")
+            .expect("next dispatch arm")
+            + start;
+        let body = &SOURCE[start..end];
+        let release = body.find("drop(tracker);").expect("tracker release");
+        let audio = body
+            .find("state.audio_capture.lock().await")
+            .expect("audio cleanup");
+        assert!(
+            release < audio,
+            "force-stop must not wait for audio while holding tracker"
+        );
+    }
 }
 
 /// Dispatch a JSON-RPC command by name to the appropriate handler function.
@@ -205,30 +226,29 @@ pub async fn dispatch_command(
                     ));
                 }
             }
+            tracker.stopping_session_id = Some(active_session_id);
+            drop(tracker);
             let mut audio = state.audio_capture.lock().await;
             audio.abort_dictation_for_session(active_session_id);
             drop(audio);
-            let mut runtime_state = state.dictation_runtime_state.lock().await;
-            *runtime_state = DictationSessionState::Idle;
-            drop(runtime_state);
-            *state.dictation_start_options.lock().await = models::DictationStartOptions::default();
+            let cleaned_current_session = reset_dictation_session_runtime_if_current(
+                &state.dictation_runtime_state,
+                &state.dictation_session_tracker,
+                &state.dictation_start_options,
+                active_session_id,
+            )
+            .await;
+            if !cleaned_current_session {
+                return Err(format!(
+                    "Dictation session {} changed while force-stop was cleaning up",
+                    active_session_id
+                ));
+            }
             if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
                 if overlay.session_id == Some(active_session_id) {
                     *overlay = DictationOverlayState::default();
                 }
             }
-            tracker.active_session_id = None;
-            tracker.stopping_session_id = None;
-            tracker.started_at = None;
-            tracker.started_at_epoch_ms = None;
-            tracker.startup_latency_ms = None;
-            tracker.acknowledged_at_epoch_ms = None;
-            tracker.capture_ready_at_epoch_ms = None;
-            tracker.first_stable_partial_at_epoch_ms = None;
-            tracker.stop_requested_at = None;
-            tracker.final_transcript_at_epoch_ms = None;
-            tracker.insertion_completed_at_epoch_ms = None;
-            drop(tracker);
             handle.emit_event("dictation-state-changed", serde_json::json!({ "phase": "idle", "stopReason": "force-stop", "outcome": "aborted" }));
             handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
             reconcile_hands_free_monitor(state.as_ref(), handle).await;

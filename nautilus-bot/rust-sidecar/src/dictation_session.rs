@@ -823,7 +823,7 @@ pub(crate) async fn reset_dictation_session_runtime(
     }
 }
 
-async fn reset_dictation_session_runtime_if_current(
+pub(crate) async fn reset_dictation_session_runtime_if_current(
     runtime_state: &Mutex<DictationSessionState>,
     session_tracker: &Mutex<DictationSessionTracker>,
     start_options: &Mutex<models::DictationStartOptions>,
@@ -1230,21 +1230,24 @@ pub(crate) async fn stop_dictation_for_sidecar(
     ))
     .await;
 
-    let (audio_bytes, hit_max_duration) = {
+    let audio_stop_result = {
         let mut audio = state.audio_capture.lock().await;
         let hit_max_duration = audio.dictation_hit_max_duration();
-        match audio.stop_dictation_for_session(session_id) {
-            Ok(audio_bytes) => (audio_bytes, hit_max_duration),
-            Err(error) => {
-                return Err(fail_dictation_stop(
-                    state,
-                    handle,
-                    &failure_context,
-                    None,
-                    format!("Failed to stop dictation audio: {}", error),
-                )
-                .await);
-            }
+        audio
+            .stop_dictation_for_session(session_id)
+            .map(|audio_bytes| (audio_bytes, hit_max_duration))
+    };
+    let (audio_bytes, hit_max_duration) = match audio_stop_result {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(fail_dictation_stop(
+                state,
+                handle,
+                &failure_context,
+                None,
+                format!("Failed to stop dictation audio: {}", error),
+            )
+            .await);
         }
     };
     // Put the live preview down before anything asks the GPU for the final
@@ -2999,6 +3002,21 @@ mod dictation_idle_reset_tests {
         assert!(
             reset < close,
             "session ownership must be checked before scoped preview cleanup"
+        );
+    }
+
+    #[test]
+    fn audio_guard_is_released_before_stop_failure_cleanup() {
+        const SOURCE: &str = include_str!("dictation_session.rs");
+        let start = SOURCE
+            .find("let audio_stop_result = {")
+            .expect("scoped audio stop result");
+        let body = &SOURCE[start..];
+        let guard_end = body.find("};").expect("audio guard end");
+        let failure = body.find("fail_dictation_stop(").expect("failure cleanup");
+        assert!(
+            guard_end < failure,
+            "failure cleanup must run after the audio guard is dropped"
         );
     }
 }
