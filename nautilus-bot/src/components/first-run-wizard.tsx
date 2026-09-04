@@ -377,14 +377,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [modelState, setModelState] = useState<"idle" | "downloading" | "done" | "error">("idle");
   const [modelError, setModelError] = useState<string | null>(null);
   const [modelSkipped, setModelSkipped] = useState(false);
-  // Placeholder only, corrected by the settings-load effect below before any
-  // download can actually fire (see the dictationProvider branches there).
-  // Kept as "base.en" rather than the new "parakeet-tdt-0.6b-v3" default so
-  // a settings.json that already names a non-default provider (e.g. an
-  // existing whisper/base.en setup) is never at risk of racing a real click
-  // against the correction effect and downloading the wrong model; the
-  // fresh-install case corrects to Parakeet the same way.
-  const [selectedModelId, setSelectedModelId] = useState("base.en");
+  const [modelSelectionLoading, setModelSelectionLoading] = useState(true);
+  // Start on the fresh-install default, then keep model actions gated until
+  // persisted settings have had a chance to restore an existing selection.
+  const [selectedModelId, setSelectedModelId] = useState("parakeet-tdt-0.6b-v3");
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
   const [meetingModelState, setMeetingModelState] = useState<
@@ -567,6 +563,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       })
       .catch(() => {
         // Keep defaults if onboarding loads before settings are ready.
+      })
+      .finally(() => {
+        if (mounted) {
+          setModelSelectionLoading(false);
+        }
       });
 
     return () => {
@@ -1600,6 +1601,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               saveBusy ||
               permissionRequestBusy ||
               scratchBusy ||
+              (step === "dictation-model" && modelSelectionLoading) ||
               (step === "meeting-setup" && meetingModelState === "downloading") ||
               // Only block Continue for a download in progress while the
               // user is still on a visible, foreground model surface.

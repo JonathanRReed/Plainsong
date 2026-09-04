@@ -257,8 +257,10 @@ vi.mock("@/lib/backend/settings", () => ({
 }));
 
 async function clickPrimary(label: RegExp) {
+  const button = screen.getByRole("button", { name: label });
+  await waitFor(() => expect(button).toBeEnabled());
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: label }));
+    fireEvent.click(button);
   });
 }
 
@@ -336,6 +338,38 @@ describe("FirstRunWizard", () => {
     expect(screen.getByText(/downloads on demand/i)).toBeInTheDocument();
     expect(screen.getByText("2.8 GiB")).toBeInTheDocument();
     expect(screen.queryByText(/already ships with/i)).not.toBeInTheDocument();
+  });
+
+  it("waits for the persisted model selection before starting a download", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const providerDiscovery = deferred<AsrProviderInfo[]>();
+    vi.mocked(asrBackend.getAsrProviders).mockImplementationOnce(
+      () => providerDiscovery.promise,
+    );
+    currentSettings.transcription.dictationProvider = "parakeet";
+    currentSettings.transcription.dictationModelId = "parakeet-tdt-0.6b-v3";
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    const downloadButton = screen.getByRole("button", {
+      name: /download and continue/i,
+    });
+    expect(downloadButton).toBeDisabled();
+    fireEvent.click(downloadButton);
+    expect(asrBackend.downloadAsrModels).not.toHaveBeenCalled();
+
+    await act(async () => {
+      providerDiscovery.resolve(providers);
+    });
+
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    fireEvent.click(downloadButton);
+    await waitFor(() => {
+      expect(asrBackend.downloadAsrModels).toHaveBeenCalledWith(
+        "parakeet",
+        "parakeet-tdt-0.6b-v3",
+      );
+    });
   });
 
   it("announces each step and moves focus to the new heading", async () => {
