@@ -242,6 +242,13 @@ fn is_dictionary_word_boundary(ch: char) -> bool {
     !(ch.is_ascii_alphanumeric() || ch == '_')
 }
 
+// Dictionary entries can be restored from an untrusted backup, so the
+// transformation needs its own budget in addition to validation at the CRUD
+// boundary.  Returning the original transcript when a budget is exceeded is
+// preferable to delivering a partially transformed dictation.
+const MAX_DICTIONARY_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_DICTIONARY_REPLACEMENTS: usize = 100_000;
+
 /// Word-boundary replacement via zero-width boundary checks around each raw
 /// needle match, instead of a regex whose boundary groups consume the
 /// separator character (which makes adjacent occurrences like "jon jon jon"
@@ -251,10 +258,14 @@ fn replace_dictionary_word_bounded_all(
     needle: &str,
     replacement: &str,
     case_insensitive: bool,
-) -> (String, usize) {
+    replacement_budget: usize,
+) -> Option<(String, usize)> {
+    if haystack.len() > MAX_DICTIONARY_OUTPUT_BYTES {
+        return None;
+    }
     let trimmed = needle.trim();
     if trimmed.is_empty() {
-        return (haystack.to_string(), 0);
+        return Some((haystack.to_string(), 0));
     }
 
     let escaped = regex::escape(trimmed);
@@ -262,7 +273,7 @@ fn replace_dictionary_word_bounded_all(
         .case_insensitive(case_insensitive)
         .build()
     else {
-        return (haystack.to_string(), 0);
+        return Some((haystack.to_string(), 0));
     };
 
     let mut output = String::with_capacity(haystack.len());
@@ -280,6 +291,16 @@ fn replace_dictionary_word_bounded_all(
         if !(boundary_before && boundary_after) {
             continue;
         }
+        if applied >= replacement_budget {
+            return None;
+        }
+        let projected_len = output
+            .len()
+            .checked_add(found.start() - last_end)
+            .and_then(|len| len.checked_add(replacement.len()))?;
+        if projected_len > MAX_DICTIONARY_OUTPUT_BYTES {
+            return None;
+        }
         output.push_str(&haystack[last_end..found.start()]);
         output.push_str(replacement);
         last_end = found.end();
@@ -287,26 +308,31 @@ fn replace_dictionary_word_bounded_all(
     }
 
     if applied == 0 {
-        return (haystack.to_string(), 0);
+        return Some((haystack.to_string(), 0));
+    }
+    if output.len().checked_add(haystack.len() - last_end)? > MAX_DICTIONARY_OUTPUT_BYTES {
+        return None;
     }
     output.push_str(&haystack[last_end..]);
-    (output, applied)
+    Some((output, applied))
 }
 
 fn replace_dictionary_case_sensitive_all(
     haystack: &str,
     needle: &str,
     replacement: &str,
-) -> (String, usize) {
-    replace_dictionary_word_bounded_all(haystack, needle, replacement, false)
+    replacement_budget: usize,
+) -> Option<(String, usize)> {
+    replace_dictionary_word_bounded_all(haystack, needle, replacement, false, replacement_budget)
 }
 
 fn replace_dictionary_case_insensitive_all(
     haystack: &str,
     needle: &str,
     replacement: &str,
-) -> (String, usize) {
-    replace_dictionary_word_bounded_all(haystack, needle, replacement, true)
+    replacement_budget: usize,
+) -> Option<(String, usize)> {
+    replace_dictionary_word_bounded_all(haystack, needle, replacement, true, replacement_budget)
 }
 
 pub fn apply_dictation_dictionary(
@@ -332,6 +358,9 @@ pub fn apply_dictation_dictionary_for_category(
     if input.trim().is_empty() || rules.is_empty() {
         return (input.to_string(), 0);
     }
+    if input.len() > MAX_DICTIONARY_OUTPUT_BYTES {
+        return (input.to_string(), 0);
+    }
 
     let mut output = input.to_string();
     let mut applied_total = 0usize;
@@ -352,18 +381,23 @@ pub fn apply_dictation_dictionary_for_category(
             continue;
         }
 
-        let (next, applied) = if rule.case_sensitive {
+        let transformed = if rule.case_sensitive {
             replace_dictionary_case_sensitive_all(
                 output.as_str(),
                 rule.spoken_form.as_str(),
                 rule.replacement.as_str(),
+                MAX_DICTIONARY_REPLACEMENTS - applied_total,
             )
         } else {
             replace_dictionary_case_insensitive_all(
                 output.as_str(),
                 rule.spoken_form.as_str(),
                 rule.replacement.as_str(),
+                MAX_DICTIONARY_REPLACEMENTS - applied_total,
             )
+        };
+        let Some((next, applied)) = transformed else {
+            return (input.to_string(), 0);
         };
         if applied > 0 {
             output = next;
@@ -397,6 +431,9 @@ pub fn apply_dictation_snippets_for_category(
     if input.trim().is_empty() || snippets.is_empty() {
         return (input.to_string(), 0);
     }
+    if input.len() > MAX_DICTIONARY_OUTPUT_BYTES {
+        return (input.to_string(), 0);
+    }
 
     let mut output = input.to_string();
     let mut applied_total = 0usize;
@@ -420,12 +457,15 @@ pub fn apply_dictation_snippets_for_category(
         // Word-bounded, exactly like dictionary entries. A bare substring
         // replace fired on any trigger that happened to sit inside a longer
         // dictated word, so a "brb" snippet rewrote the middle of "brbecue".
-        let (next, applied) = replace_dictionary_word_bounded_all(
+        let Some((next, applied)) = replace_dictionary_word_bounded_all(
             output.as_str(),
             snippet.trigger.as_str(),
             snippet.expansion.as_str(),
             !snippet.case_sensitive,
-        );
+            MAX_DICTIONARY_REPLACEMENTS - applied_total,
+        ) else {
+            return (input.to_string(), 0);
+        };
         if applied > 0 {
             output = next;
             applied_total += applied;
@@ -1275,6 +1315,32 @@ mod tests {
         let (output, applied) = apply_dictation_dictionary("jon jon jon", &rules, None);
         assert_eq!(output, "John John John");
         assert_eq!(applied, 3);
+    }
+
+    #[test]
+    fn dictionary_expansion_budget_rejects_cascading_amplification() {
+        let mut rules = vec![DictionaryRule {
+            spoken_form: "hello".to_string(),
+            replacement: "a00  a00".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        }];
+        for index in 0..20 {
+            rules.push(DictionaryRule {
+                spoken_form: format!("a{index:02}"),
+                replacement: format!("a{:02}  a{:02}", index + 1, index + 1),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: None,
+            });
+        }
+
+        let (output, applied) = apply_dictation_dictionary("hello", &rules, None);
+        assert_eq!(output, "hello");
+        assert_eq!(applied, 0);
     }
 
     #[test]
