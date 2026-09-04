@@ -604,6 +604,14 @@ pub(crate) async fn reprocess_dictation_impl(
             "info",
         );
     }
+    // Do not report the new history entry as saved while its retained copy
+    // bypasses an initialized vault. The helper is a no-op without a vault;
+    // with one, it journals the transition before requiring the runtime key,
+    // so an encryption failure remains visible and blocks vault lock rather
+    // than leaving an ordinary plaintext asset behind.
+    if kept_audio_metadata.is_some() {
+        encrypt_finalized_recording_audio(state, Some(handle), &recording_id).await?;
+    }
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.message = None;
     }
