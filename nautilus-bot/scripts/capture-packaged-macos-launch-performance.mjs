@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { terminateProfileProcesses } from "./lib/launch-process-cleanup.mjs";
 
 const OPEN_BINARY = "/usr/bin/open";
 const PROFILE_STAMP_FILE = "launch-candidate.json";
@@ -202,6 +203,7 @@ async function verifyRendererDomOverPrivatePipe(executable, profileRoot) {
       "Private-pipe DOM verification did not observe the Plainsong shell.",
     );
   } finally {
+    await terminateProfileProcesses(path.join(profileRoot, "electron-profile"));
     child.stdio[3].end();
     child.stdio[4].destroy();
   }
@@ -309,31 +311,42 @@ async function main() {
   let firstPresentedMs = null;
   let interactiveMs = null;
   let finalObservation = null;
-  while (Date.now() < deadline) {
-    if (childClosed) break;
-    const output = fs.existsSync(milestoneLog)
-      ? fs.readFileSync(milestoneLog, "utf8")
-      : "";
-    const milestones = [
-      ...output.matchAll(/\[launch-milestone\] (\{[^\n]+\})/g),
-    ].map((match) => JSON.parse(match[1]));
-    const presented = milestones.find(
-      (entry) => entry.name === "renderer-post-commit-frame",
-    );
-    const interactive = milestones.find(
-      (entry) => entry.name === "workspace-or-wizard-interactive",
-    );
-    if (presented)
-      firstPresentedMs = presented.wallTimeMs - launchedAtWallTimeMs;
-    if (interactive) {
-      interactiveMs = interactive.wallTimeMs - launchedAtWallTimeMs;
-      finalObservation = { source: "typed-renderer-milestone" };
-      break;
+  try {
+    while (Date.now() < deadline) {
+      if (childClosed) break;
+      const output = fs.existsSync(milestoneLog)
+        ? fs.readFileSync(milestoneLog, "utf8")
+        : "";
+      const milestones = [
+        ...output.matchAll(/\[launch-milestone\] (\{[^\n]+\})/g),
+      ].map((match) => JSON.parse(match[1]));
+      const presented = milestones.find(
+        (entry) => entry.name === "renderer-post-commit-frame",
+      );
+      const interactive = milestones.find(
+        (entry) => entry.name === "workspace-or-wizard-interactive",
+      );
+      if (presented)
+        firstPresentedMs = presented.wallTimeMs - launchedAtWallTimeMs;
+      if (interactive) {
+        interactiveMs = interactive.wallTimeMs - launchedAtWallTimeMs;
+        finalObservation = { source: "typed-renderer-milestone" };
+        break;
+      }
+      await delay(20);
     }
-    await delay(20);
+  } finally {
+    if (interactiveMs === null) {
+      await terminateProfileProcesses(electronProfile);
+    }
+    if (!childClosed) child.kill("SIGTERM");
+    await childCompletion;
+    // LaunchServices may acknowledge the request just before the app process
+    // becomes visible. Give that handoff a short settling window, then sweep
+    // the unique profile again so an early `open` exit cannot race cleanup.
+    await delay(250);
+    await terminateProfileProcesses(electronProfile);
   }
-  if (interactiveMs === null) child.kill("SIGTERM");
-  await childCompletion;
 
   const chromiumOutput = fs.existsSync(chromiumLog)
     ? fs.readFileSync(chromiumLog, "utf8")
