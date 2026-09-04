@@ -172,7 +172,15 @@ function stringArgument(args: unknown, names: string[]): string | null {
   return null;
 }
 
+function canonicalLocaleWorkKey(locale: string): string {
+  return locale.toLowerCase().replace(/-/g, "_");
+}
+
 export function getCommandWorkKey(command: string, args?: unknown): string | null {
+  if (command === "install_apple_speech_language") {
+    const locale = stringArgument(args, ["locale"]) ?? command;
+    return `${command}:${canonicalLocaleWorkKey(locale)}`;
+  }
   if (command.startsWith("download_")) {
     const target =
       stringArgument(args, ["modelName", "modelId", "providerType", "assetId"]) ??
