@@ -1624,13 +1624,34 @@ pub(crate) fn send_native_copy_key(
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn send_native_undo_key() -> Result<(), String> {
+pub(crate) fn send_native_undo_key(
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
+    let has_target = target_app
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+        || target_app_bundle_id
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+    if !has_target {
+        return Err("Undo requires an identifiable target application.".to_string());
+    }
+    reactivate_target_application(target_app, target_app_bundle_id)?;
+    std::thread::sleep(std::time::Duration::from_millis(50));
     dispatch_command_keystroke(6).map_err(|error| format!("Undo keystroke failed: {}", error))
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn send_native_undo_key() -> Result<(), String> {
-    let script = build_windows_sendkeys_script("^z", None)?;
+pub(crate) fn send_native_undo_key(
+    _target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
+    let target_identity = target_app_bundle_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Undo requires an identifiable target application.".to_string())?;
+    let script = build_windows_sendkeys_script("^z", Some(target_identity))?;
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script.as_str()])
         .status()
@@ -1643,7 +1664,10 @@ pub(crate) fn send_native_undo_key() -> Result<(), String> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub(crate) fn send_native_undo_key() -> Result<(), String> {
+pub(crate) fn send_native_undo_key(
+    _target_app: Option<&str>,
+    _target_app_bundle_id: Option<&str>,
+) -> Result<(), String> {
     Err("Undo command is not supported on this platform.".to_string())
 }
 

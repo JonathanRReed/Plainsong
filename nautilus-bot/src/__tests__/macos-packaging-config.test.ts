@@ -263,6 +263,12 @@ describe("encodeBundleBuildVersion", () => {
     expect(() => encodeBundleBuildVersion("0.9.0-nightly.1")).toThrow(
       /Unrankable prerelease tag/,
     );
+    expect(() => encodeBundleBuildVersion("0.9.0-alpha")).toThrow(
+      /exactly a tag and numeric sequence/,
+    );
+    expect(() => encodeBundleBuildVersion("0.9.0-beta.2.1")).toThrow(
+      /exactly a tag and numeric sequence/,
+    );
     expect(() => encodeBundleBuildVersion("0.9.0-beta.500")).toThrow(
       /Prerelease sequence/,
     );
