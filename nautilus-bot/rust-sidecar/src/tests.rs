@@ -2604,6 +2604,7 @@ fn meeting_transcripts_ignore_destination_scoped_dictionary_entries() {
     let entries = vec![
         dictionary_entry_fixture("widget", "Widget Pro", Some("Slack"), None),
         dictionary_entry_fixture("today", "TODAY", None, Some("email")),
+        dictionary_entry_fixture("Ship", "Dispatch", None, Some("other")),
     ];
 
     enrich_meeting_transcript(&mut transcript, &entries);
