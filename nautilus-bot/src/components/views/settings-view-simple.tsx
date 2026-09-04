@@ -184,6 +184,10 @@ type TabId = SettingsTabId;
 type QueuedSettingsSave = {
   version: number;
   settings: Settings;
+  waiters: Array<{
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  }>;
 };
 
 type SettingsSaveScheduler = {
@@ -752,7 +756,9 @@ export function SettingsView() {
                 applySecurityStatusFromSettings(queued.settings);
               }
             }
+            queued.waiters.forEach(({ resolve }) => resolve());
           } catch (e) {
+            queued.waiters.forEach(({ reject }) => reject(e));
             if (mountedRef.current) {
               setError(
                 e instanceof Error ? e.message : "Failed to save settings",
@@ -772,12 +778,28 @@ export function SettingsView() {
   );
 
   const queueSettingsSave = useCallback(
-    (next: Settings, debounceMs = SETTINGS_SAVE_DEBOUNCE_MS) => {
+    (
+      next: Settings,
+      debounceMs = SETTINGS_SAVE_DEBOUNCE_MS,
+      awaitCompletion = false,
+    ): Promise<void> | undefined => {
       const scheduler = saveSchedulerRef.current;
       scheduler.nextVersion += 1;
+      let waiter: QueuedSettingsSave["waiters"][number] | undefined;
+      const completion = awaitCompletion
+        ? new Promise<void>((resolve, reject) => {
+            waiter = { resolve, reject };
+          })
+        : undefined;
       scheduler.pending = {
         version: scheduler.nextVersion,
         settings: next,
+        // Replacing a debounced snapshot subsumes it. Its callers therefore
+        // complete only when the newer snapshot has actually landed.
+        waiters: [
+          ...(scheduler.pending?.waiters ?? []),
+          ...(waiter ? [waiter] : []),
+        ],
       };
 
       if (scheduler.timer) {
@@ -787,6 +809,7 @@ export function SettingsView() {
         void flushPendingSettingsSave();
       }, debounceMs);
       markSettingsPerf("settings-save-queued");
+      return completion;
     },
     [flushPendingSettingsSave],
   );
@@ -1016,6 +1039,7 @@ export function SettingsView() {
         scheduler.pending = {
           version: scheduler.pending.version,
           settings: mergeKeepingPendingEdits(scheduler.pending.settings),
+          waiters: scheduler.pending.waiters,
         };
       }
       setPersistedSettings(incoming);
@@ -1574,12 +1598,10 @@ export function SettingsView() {
    * about the write, and a `return true` written before any I/O told it a
    * save had succeeded when the settings file was read-only or the disk was
    * full: the row closed, the list looked saved, and it was not. So this
-   * mirrors the picker's own path in `use-saved-prompts.ts`: optimistic
-   * state, an awaited write, and the failure shown inside the dialog the
-   * reader is looking at.
-   *
-   * Anything already queued is flushed first, so this write cannot land
-   * underneath an older one still waiting out its debounce.
+   * uses the same scheduler as every other edit, but awaits this queued
+   * snapshot so the dialog can report the real result. Keeping it in the
+   * queue also means rapid prompt actions and other settings edits cannot
+   * issue overlapping whole-settings writes that complete out of order.
    */
   const persistSavedPrompts = useCallback(
     async (next: readonly SavedPrompt[]): Promise<boolean> => {
@@ -1596,12 +1618,9 @@ export function SettingsView() {
       setError(null);
 
       try {
-        await flushPendingSettingsSave(true);
-        await saveSettings(updated);
-        if (mountedRef.current) {
-          setPersistedSettings(updated);
-          applySecurityStatusFromSettings(updated);
-        }
+        const completion = queueSettingsSave(updated, 0, true);
+        void flushPendingSettingsSave(true);
+        await completion;
         return true;
       } catch (e) {
         const message =
@@ -1615,7 +1634,7 @@ export function SettingsView() {
         return false;
       }
     },
-    [applySecurityStatusFromSettings, flushPendingSettingsSave],
+    [flushPendingSettingsSave, queueSettingsSave],
   );
 
   // Change one field of the newest settings, for writes the user did not ask
@@ -1639,6 +1658,7 @@ export function SettingsView() {
         scheduler.pending = {
           version: scheduler.pending.version,
           settings: applyPatch(scheduler.pending.settings),
+          waiters: scheduler.pending.waiters,
         };
         latestSettingsRef.current = applyPatch(current);
         setDraftSettings((previous) =>

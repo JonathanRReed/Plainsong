@@ -1963,6 +1963,52 @@ describe("SettingsView performance behavior", () => {
     expect(screen.queryByText(/read-only/)).toBeNull();
   });
 
+  it("serializes rapid saved-prompt writes through the settings scheduler", async () => {
+    const backend = await import("@/lib/backend");
+    let finishFirstSave: (() => void) | undefined;
+    vi.mocked(backend.saveSettings).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishFirstSave = resolve;
+        }),
+    );
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("AI & Keys"));
+    fireEvent.click(await screen.findByRole("button", { name: "Manage prompts" }));
+    const dialog = await screen.findByRole("dialog");
+    vi.mocked(backend.saveSettings).mockClear();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Hide Decisions made" }),
+    );
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Hide Open questions" }),
+    );
+    await act(async () => Promise.resolve());
+    expect(backend.saveSettings).toHaveBeenCalledTimes(1);
+
+    finishFirstSave?.();
+    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(2));
+    const finalWrite = vi.mocked(backend.saveSettings).mock.calls[1]?.[0];
+    expect(
+      finalWrite?.ai?.savedPrompts?.filter((prompt) => prompt.hidden),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Decisions made" }),
+        expect.objectContaining({ name: "Open questions" }),
+      ]),
+    );
+  });
+
   // ── Translate to English (roadmap item B7a) ────────────────────────────
   it("refuses translate-to-English on an English-only whisper model and says why", async () => {
     render(
