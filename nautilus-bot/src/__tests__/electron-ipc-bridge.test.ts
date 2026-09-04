@@ -18,6 +18,10 @@ import {
 } from "../../electron/capture-admission";
 
 describe("privileged storage command admission", () => {
+  it("does not expose the system-wide insertion smoke test to the renderer", () => {
+    expect(isRendererCommandAllowed("smoke_test_cursor_insert")).toBe(false);
+  });
+
   it("allows native picker requests but never raw privileged approval commands", () => {
     expect(isRendererCommandAllowed("select_export_location")).toBe(true);
     expect(isRendererCommandAllowed("select_backup_location")).toBe(true);

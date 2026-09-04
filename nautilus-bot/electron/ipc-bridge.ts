@@ -287,7 +287,6 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "set_provider_secret",
   "set_recording_source_type",
   "set_update_channel",
-  "smoke_test_cursor_insert",
   "start_dictation",
   "stop_dictation",
   "summarize_recording",

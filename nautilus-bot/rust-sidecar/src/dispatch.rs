@@ -3415,16 +3415,6 @@ pub async fn dispatch_command(
             open_installed_nautilus_app_impl()?;
             Ok(serde_json::Value::Null)
         }
-        "smoke_test_cursor_insert" => {
-            let text: Option<String> = serde_json::from_value(
-                params
-                    .get("text")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
-            )
-            .map_err(|e| e.to_string())?;
-            smoke_test_cursor_insert_impl(state.as_ref(), text).await
-        }
         "capture_selected_text_for_playback" => {
             let result = capture_selected_text_for_playback_impl().await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
