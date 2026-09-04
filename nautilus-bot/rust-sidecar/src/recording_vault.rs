@@ -1511,9 +1511,9 @@ pub(crate) enum RuntimeAudioResolveMode {
     /// Post-processing, diarization and export: every ready track, each one
     /// re-decoded and re-hashed against what the database recorded.
     Full,
-    /// Playback: the primary mix alone, and a temporary this process just
-    /// decrypted from an authenticated stream is checked by header and length
-    /// instead of by decoding and hashing every sample.
+    /// Playback: the primary mix alone. A temporary this process just
+    /// decrypted from an authenticated stream is checked by header, length,
+    /// and hash, but is not decoded sample by sample.
     ///
     /// Serving only the primary is not a shortcut — `prepare_recording_playback`
     /// never used any other track. Resolving all three on a dual-track meeting
@@ -1652,6 +1652,26 @@ pub(crate) fn resolve_recording_audio_bundle_in_directory(
                         {
                             return Err(format!(
                                 "Recording '{}' '{}' audio plaintext length does not match stored metadata",
+                                bundle.recording_id,
+                                asset.role.as_str()
+                            ));
+                        }
+                        let plaintext_sha256 = recording_audio::compute_file_sha256(&temp_path)
+                            .map_err(|error| {
+                                format!(
+                                    "Could not hash decrypted recording '{}' '{}' audio: {}",
+                                    bundle.recording_id,
+                                    asset.role.as_str(),
+                                    error
+                                )
+                            })?;
+                        if asset
+                            .plaintext_sha256
+                            .as_deref()
+                            .is_some_and(|expected| expected != plaintext_sha256)
+                        {
+                            return Err(format!(
+                                "Recording '{}' '{}' audio plaintext hash does not match stored metadata",
                                 bundle.recording_id,
                                 asset.role.as_str()
                             ));
