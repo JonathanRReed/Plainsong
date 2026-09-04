@@ -288,7 +288,7 @@ export function createDictationShortcutSignalRuntime(deps: {
   // generation, and only that generation may consume or clear its own release.
   let startGeneration = 0;
   let activeStartGeneration: number | null = null;
-  let pendingHoldReleaseGeneration: number | null = null;
+  let pendingHoldRelease: { generation: number; stopGestureEpochMs: number } | null = null;
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearWatchdog = (): void => {
@@ -327,7 +327,10 @@ export function createDictationShortcutSignalRuntime(deps: {
           // Rapid tap: the release arrived while start_dictation was still in
           // flight. Tag it with the generation that is starting so only that
           // start consumes it.
-          pendingHoldReleaseGeneration = activeStartGeneration;
+          pendingHoldRelease = {
+            generation: activeStartGeneration,
+            stopGestureEpochMs,
+          };
         } else if (watchdogTimer !== null) {
           // The start already resolved (watchdog armed) but the sidecar's
           // phase "recording" event has not been observed yet, so the cached
@@ -361,10 +364,10 @@ export function createDictationShortcutSignalRuntime(deps: {
       // already recorded for THIS generation (possible if the signal races the
       // invoke) must survive.
       if (
-        pendingHoldReleaseGeneration !== null &&
-        pendingHoldReleaseGeneration !== generation
+        pendingHoldRelease !== null &&
+        pendingHoldRelease.generation !== generation
       ) {
-        pendingHoldReleaseGeneration = null;
+        pendingHoldRelease = null;
       }
       let started = false;
       try {
@@ -379,19 +382,23 @@ export function createDictationShortcutSignalRuntime(deps: {
         if (activeStartGeneration === generation) {
           activeStartGeneration = null;
         }
-        if (!started && pendingHoldReleaseGeneration === generation) {
-          pendingHoldReleaseGeneration = null;
+        if (!started && pendingHoldRelease?.generation === generation) {
+          pendingHoldRelease = null;
         }
       }
-      if (holdToTalkWithRelease && pendingHoldReleaseGeneration === generation) {
-        pendingHoldReleaseGeneration = null;
+      if (holdToTalkWithRelease && pendingHoldRelease?.generation === generation) {
+        const { stopGestureEpochMs: releaseGestureEpochMs } = pendingHoldRelease;
+        pendingHoldRelease = null;
         deps.log?.("dictation shortcut stop_dictation", {
           phase: deps.getPhase(),
           behavior: input.behavior,
           capability: input.capability,
           stopReason: "release",
         });
-        await deps.invoke("stop_dictation", { stopReason: "release", stopGestureEpochMs });
+        await deps.invoke("stop_dictation", {
+          stopReason: "release",
+          stopGestureEpochMs: releaseGestureEpochMs,
+        });
         return;
       }
       if (holdToTalkWithRelease) {
