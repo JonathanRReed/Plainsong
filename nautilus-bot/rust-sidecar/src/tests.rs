@@ -2435,6 +2435,14 @@ fn extract_company_candidates_finds_title_and_suffix_patterns() {
 }
 
 #[test]
+fn relationship_snippet_uses_original_unicode_offsets() {
+    assert_eq!(
+        find_entity_snippet("İİİİİ. ACME is a customer.", "acme").as_deref(),
+        Some("ACME is a customer.")
+    );
+}
+
+#[test]
 fn build_relationship_memory_aggregates_people_and_companies() {
     let now = chrono::Utc::now();
     let recording = sample_recording(
