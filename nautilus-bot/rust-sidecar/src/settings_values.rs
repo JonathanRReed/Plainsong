@@ -661,7 +661,7 @@ pub(crate) fn normalize_asr_model_id(
         // The retired `parakeet-ctc-0.6b` / `parakeet-ctc-1.1b` ids fall through
         // to the v3 default, matching `asr::parakeet::normalize_parakeet_model_id`.
         asr::AsrProviderType::Parakeet => match candidate {
-            "parakeet-tdt-0.6b-v3" | "parakeet-tdt-0.6b-v2" => "parakeet-tdt-0.6b-v3".to_string(),
+            "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" => candidate.to_string(),
             "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => "parakeet-tdt-ctc-110m".to_string(),
             _ => "parakeet-tdt-0.6b-v3".to_string(),
         },
@@ -789,4 +789,17 @@ pub(crate) fn provider_model_map_to_settings(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contextual_settings_preserve_parakeet_v2() {
+        assert_eq!(
+            normalize_asr_model_id(asr::AsrProviderType::Parakeet, "parakeet-tdt-0.6b-v2",),
+            "parakeet-tdt-0.6b-v2"
+        );
+    }
 }
