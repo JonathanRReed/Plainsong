@@ -2071,6 +2071,7 @@ pub async fn dispatch_command(
                         diarization::model_label(&diarization_model_id)
                     )
                 })?;
+            let resolved_diarizer = format!("plainsong:{}", resolved_model.model_id);
             let diarization = diarization::run_diarization_with_model(
                 &resolved.primary,
                 &resolved_model.model_id,
@@ -2116,10 +2117,10 @@ pub async fn dispatch_command(
                     transcript_revision,
                     &transcript.segments,
                     &alias_updates,
-                    Some(&format!("plainsong:{diarization_model_id}")),
+                    Some(&resolved_diarizer),
                     Some(serde_json::json!({
                         "recording_id": &recording_id,
-                        "diarizer": format!("plainsong:{diarization_model_id}"),
+                        "diarizer": &resolved_diarizer,
                         "speaker_count": diarization.speakers.len(),
                         "speaker_segment_count": diarization.segments.len(),
                     })),
