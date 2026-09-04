@@ -58,6 +58,7 @@ const FAST_COMMANDS = new Set<string>([
   "list_diarization_models",
   // Flip an atomic on the live capture session and record the span. Pause is
   // pressed mid-sentence; a slow answer here reads as a stuck button.
+  "pause_meeting_capture",
   "pause_recording",
   // Sits directly in front of a user-initiated capture start: a slow registry
   // write must fail fast rather than delay the meeting behind it.
@@ -66,6 +67,7 @@ const FAST_COMMANDS = new Set<string>([
   // front of the first-run wizard opening or closing, so a slow answer is a
   // visibly stuck launch.
   "record_onboarding_state",
+  "resume_meeting_capture",
   "resume_recording",
 ]);
 
@@ -170,7 +172,15 @@ function stringArgument(args: unknown, names: string[]): string | null {
   return null;
 }
 
+function canonicalLocaleWorkKey(locale: string): string {
+  return locale.toLowerCase().replace(/-/g, "_");
+}
+
 export function getCommandWorkKey(command: string, args?: unknown): string | null {
+  if (command === "install_apple_speech_language") {
+    const locale = stringArgument(args, ["locale"]) ?? command;
+    return `${command}:${canonicalLocaleWorkKey(locale)}`;
+  }
   if (command.startsWith("download_")) {
     const target =
       stringArgument(args, ["modelName", "modelId", "providerType", "assetId"]) ??

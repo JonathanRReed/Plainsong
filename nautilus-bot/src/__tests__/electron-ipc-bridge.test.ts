@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { BrowserWindow } from "electron";
 import { describe, expect, it, vi } from "vitest";
-import { getCommandTimeoutMs } from "../../electron/ipc-command-policy";
+import { getCommandTimeoutMs, getCommandWorkKey } from "../../electron/ipc-command-policy";
 import {
   isExpectedSidecarStdinClose,
   MICROPHONE_RECOVERY_MESSAGE,
@@ -54,6 +54,23 @@ describe("privileged storage command admission", () => {
       remoteName: "gdrive",
       folder: "PlainsongBackups",
     });
+  });
+});
+
+describe("Apple Speech language install admission", () => {
+  it("deduplicates equivalent hyphenated and underscored locales", () => {
+    const hyphenated = getCommandWorkKey("install_apple_speech_language", {
+      locale: "en-US",
+    });
+    const underscored = getCommandWorkKey("install_apple_speech_language", {
+      locale: "en_US",
+    });
+
+    expect(hyphenated).toBe("install_apple_speech_language:en_us");
+    expect(underscored).toBe(hyphenated);
+    expect(getCommandWorkKey("install_apple_speech_language", { locale: "fr_FR" })).toBe(
+      "install_apple_speech_language:fr_fr",
+    );
   });
 });
 
@@ -186,6 +203,15 @@ describe("buildSidecarEnv", () => {
 });
 
 describe("getCommandTimeoutMs", () => {
+  it("keeps main-routed pause and resume on the fast sidecar timeout", () => {
+    expect(getCommandTimeoutMs("pause_recording")).toBe(
+      getCommandTimeoutMs("pause_meeting_capture"),
+    );
+    expect(getCommandTimeoutMs("resume_recording")).toBe(
+      getCommandTimeoutMs("resume_meeting_capture"),
+    );
+  });
+
   it("uses shorter timeouts for quick reads and longer windows for heavy work", () => {
     expect(getCommandTimeoutMs("get_settings")).toBeLessThan(getCommandTimeoutMs("save_settings"));
     expect(getCommandTimeoutMs("download_asr_models")).toBeGreaterThan(
