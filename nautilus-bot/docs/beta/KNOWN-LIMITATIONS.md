@@ -245,10 +245,11 @@ using sensitive content.
   change back. Nothing is matched from a calendar or an attendee list: a
   suggestion always comes from the audio, and where a meeting has attendees
   they only decide which of several suggestions is shown first, never which
-  voice matched. While Remembered voices is on, Plainsong retains a signature
-  for every diarized voice cluster, including speakers you never name or match.
+  voice matched. Suggestions for speakers you never named do not survive
+  quitting Plainsong: the signature behind them is only written once a speaker
+  has a name, so until then it is held in memory and goes when the app does.
   Turning the switch off stops future collection but does not delete existing
-  signatures; use Forget or Delete all in Settings to remove stored voice data.
+  remembered voices; use Forget or Delete all in Settings to remove them.
   Reopening such a meeting later shows the transcript exactly as it was, with
   no chips, until you run speaker identification again. And a suggestion is an
   offer —
