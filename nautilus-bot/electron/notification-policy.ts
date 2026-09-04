@@ -252,10 +252,10 @@ export function notificationForSidecarEvent(
         return {
           kind: "meeting_notes_failed",
           title: "Meeting notes failed",
-          body: oneSentence(
-            stringField(payload, "error"),
-            "Plainsong could not write the summary; open the meeting to retry.",
-          ),
+          // Analysis errors can include response bodies supplied by a remote
+          // provider. Keep those diagnostics inside the app, where the user
+          // chose to view them, rather than exposing them in an OS preview.
+          body: "Plainsong could not write the summary; open the meeting to retry.",
           focus: meetingFocus(recordingId),
           dedupeKey: `meeting_notes_failed:${recordingId}`,
         };
