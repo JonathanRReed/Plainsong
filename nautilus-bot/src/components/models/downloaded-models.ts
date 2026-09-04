@@ -14,7 +14,7 @@ import type { AsrProviderType } from "@/types";
  *
  * The mapping from file to model mirrors where each provider writes:
  *   - whisper      `models/whisper/ggml-<modelId>.bin`  (asr/whisper.rs `new`)
- *   - parakeet v3  `models/parakeet/parakeet-tdt-0.6b-v3/…` (its own subdirectory)
+ *   - parakeet v2/v3  `models/parakeet/parakeet-tdt-0.6b-v<version>/…`
  *   - parakeet 110m  files sitting directly in `models/parakeet/`
  *   - moonshine    `models/moonshine/` vs `models/moonshine_tiny/`
  *   - everything else downloadable: one model per provider directory.
@@ -75,9 +75,13 @@ function modelIdForFile(
   }
 
   if (providerType === "parakeet") {
-    return path.includes("/parakeet-tdt-0.6b-v3/")
-      ? "parakeet-tdt-0.6b-v3"
-      : "parakeet-tdt-ctc-110m";
+    if (path.includes("/parakeet-tdt-0.6b-v2/")) {
+      return "parakeet-tdt-0.6b-v2";
+    }
+    if (path.includes("/parakeet-tdt-0.6b-v3/")) {
+      return "parakeet-tdt-0.6b-v3";
+    }
+    return "parakeet-tdt-ctc-110m";
   }
 
   if (providerType === "moonshine") {

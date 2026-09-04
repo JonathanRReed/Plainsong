@@ -1462,7 +1462,7 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             _ => "base.en".to_string(),
         },
         "parakeet" => match model_id.trim() {
-            "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" => "parakeet-tdt-0.6b-v3".to_string(),
+            "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" => model_id.trim().to_string(),
             "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => "parakeet-tdt-ctc-110m".to_string(),
             _ => "parakeet-tdt-0.6b-v3".to_string(),
         },
@@ -2995,6 +2995,12 @@ mod tests {
         normalize_loaded_transcription_settings(&mut retired_model);
         assert_eq!(retired_model.dictation_provider, "parakeet");
         assert_eq!(retired_model.dictation_model_id, "parakeet-tdt-0.6b-v3");
+
+        assert_eq!(
+            normalize_transcription_model_id("parakeet", "parakeet-tdt-0.6b-v2"),
+            "parakeet-tdt-0.6b-v2",
+            "the supported v2 route must not be rewritten to v3"
+        );
     }
 
     #[test]

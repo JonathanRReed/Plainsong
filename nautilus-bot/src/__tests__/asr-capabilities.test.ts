@@ -111,6 +111,7 @@ describe("ASR capability mappings", () => {
     expect(isMeetingEligibleProvider("whisper_candle")).toBe(false);
     expect(isSharedMeetingCompatible("distil_whisper", "distil-large-v3.5")).toBe(true);
     expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-0.6b-v3")).toBe(true);
+    expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-0.6b-v2")).toBe(false);
     expect(isSharedMeetingCompatible("whisper", "base.en")).toBe(false);
     expect(isSharedMeetingCompatible("whisper_candle", "whisper-large-v3-turbo")).toBe(false);
   });
@@ -192,6 +193,7 @@ describe("ASR model capability metadata", () => {
     expect(getAsrModelCapability("whisper", "large-v3-turbo")?.sizeMib).toBe(1620);
     expect(getAsrModelCapability("whisper", "large-v3")?.sizeMib).toBe(2900);
     expect(getAsrModelCapability("parakeet", "parakeet-tdt-0.6b-v3")?.sizeMib).toBe(639);
+    expect(getAsrModelCapability("parakeet", "parakeet-tdt-0.6b-v2")?.sizeMib).toBe(631);
     expect(getAsrModelCapability("distil_whisper", "distil-large-v3.5")?.sizeMib).toBe(2888);
   });
 
@@ -223,6 +225,7 @@ describe("ASR model capability metadata", () => {
       expect(asrModelTier("whisper", modelId)).toBe("more");
     }
     expect(asrModelTier("parakeet", "parakeet-tdt-ctc-110m")).toBe("more");
+    expect(asrModelTier("parakeet", "parakeet-tdt-0.6b-v2")).toBe("more");
     expect(asrModelTier("moonshine", "moonshine-base")).toBe("more");
   });
 
@@ -265,6 +268,11 @@ describe("ASR model capability metadata", () => {
     const parakeet = describeAsrModel("parakeet", "parakeet-tdt-0.6b-v3");
     expect(parakeet).toContain("25 European languages listed upstream");
     expect(parakeet).toContain("English verified in Plainsong");
+
+    const parakeetV2 = describeAsrModel("parakeet", "parakeet-tdt-0.6b-v2");
+    expect(parakeetV2).toContain("English only");
+    expect(parakeetV2).toContain("not yet qualified");
+    expect(parakeetV2).toContain("same-hardware");
   });
 
   it("returns null rather than inventing metadata for routes it has none for", () => {
