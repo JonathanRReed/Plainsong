@@ -72,6 +72,7 @@ const providers: AsrProviderInfo[] = [
     selectedModelId: "parakeet-tdt-0.6b-v3",
     modelOptions: [
       { id: "parakeet-tdt-0.6b-v3", label: "Parakeet TDT 0.6B v3" },
+      { id: "parakeet-tdt-0.6b-v2", label: "Parakeet TDT 0.6B v2" },
       { id: "parakeet-tdt-ctc-110m", label: "Parakeet TDT CTC 110M legacy" },
     ],
     downloadStatus: "Downloaded",
@@ -412,6 +413,22 @@ describe("asr-route-catalog", () => {
           route.modelId === "parakeet-tdt-0.6b-v3",
       ),
     ).toBe(true);
+    expect(
+      meetingRoutes.some(
+        (route) =>
+          route.providerType === "parakeet" &&
+          route.modelId === "parakeet-tdt-0.6b-v2",
+      ),
+    ).toBe(false);
+
+    const v2 = routes.find(
+      (route) =>
+        route.providerType === "parakeet" &&
+        route.modelId === "parakeet-tdt-0.6b-v2",
+    );
+    expect(v2?.summary).toContain("Experimental");
+    expect(v2?.summary).toContain("qualification is pending");
+    expect(v2?.recommendedRank.meeting).toBeNull();
   });
 
   it("does not repeat an unqualified language count in the Parakeet route label", () => {
