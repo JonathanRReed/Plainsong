@@ -6114,6 +6114,57 @@ fn undo_requires_confirmed_insert_and_unchanged_known_target() {
 }
 
 #[test]
+fn undo_fails_closed_when_a_recorded_bundle_id_is_unavailable() {
+    let now = chrono::Utc::now();
+    let delivery = RecentDictationDelivery {
+        text: "ship it tomorrow".to_string(),
+        app_target: Some("Slack".to_string()),
+        app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+        delivered_at: now,
+        undo_eligible: true,
+    };
+
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        None,
+        Some("Slack"),
+        None,
+        "auto",
+        now,
+    ));
+}
+
+#[test]
+fn undo_rejects_delivery_timestamps_from_the_future() {
+    let now = chrono::Utc::now();
+    let delivery = RecentDictationDelivery {
+        text: "ship it tomorrow".to_string(),
+        app_target: Some("Slack".to_string()),
+        app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+        delivered_at: now + chrono::Duration::seconds(1),
+        undo_eligible: true,
+    };
+
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "auto",
+        now,
+    ));
+}
+
+#[test]
+fn replacement_insertion_requires_its_requested_undo_to_succeed() {
+    assert!(replacement_insertion_is_authorized(false, false));
+    assert!(replacement_insertion_is_authorized(true, true));
+    assert!(!replacement_insertion_is_authorized(true, false));
+}
+
+#[test]
 fn meeting_retention_normalization_behaves_as_expected() {
     assert_eq!(normalize_meeting_audio_storage_mode("always"), "always");
     assert_eq!(

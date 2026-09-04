@@ -2089,14 +2089,20 @@ pub(crate) async fn stop_dictation_for_sidecar(
                         paste_error = Some(error);
                     }
                 }
-            } else if final_text.is_empty() {
-                paste_error = Some("No recent dictation insert was available to undo.".to_string());
+            }
+            if !undo_performed {
+                if paste_error.is_none() {
+                    paste_error =
+                        Some("No recent dictation insert was available to undo.".to_string());
+                }
                 actual_insertion_mode = "command_only".to_string();
                 outcome = "error".to_string();
             }
         }
 
-        if !final_text.is_empty() {
+        if !final_text.is_empty()
+            && replacement_insertion_is_authorized(undo_previous_insert, undo_performed)
+        {
             let insert_started_at = std::time::Instant::now();
             insertion_dispatched_ms = Some(
                 stop_signal_instant

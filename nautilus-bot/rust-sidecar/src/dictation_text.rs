@@ -580,8 +580,9 @@ pub(crate) fn recent_delivery_is_fresh(
     delivery: &RecentDictationDelivery,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    now.signed_duration_since(delivery.delivered_at)
-        <= chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS)
+    let age = now.signed_duration_since(delivery.delivered_at);
+    age >= chrono::Duration::zero()
+        && age <= chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS)
 }
 
 pub(crate) fn recent_delivery_matches_target_and_is_fresh(
@@ -618,6 +619,7 @@ pub(crate) fn recent_delivery_authorizes_undo(
         bundle_id,
     ) {
         (Some(delivery_id), Some(target_id)) => delivery_id.eq_ignore_ascii_case(target_id),
+        (Some(_), None) => false,
         _ => match (delivery.app_target.as_deref(), app) {
             (Some(delivery_app), Some(target_app)) => delivery_app.eq_ignore_ascii_case(target_app),
             _ => false,
@@ -626,6 +628,13 @@ pub(crate) fn recent_delivery_authorizes_undo(
 
     strict_target_matches(session_app, session_bundle_id)
         && strict_target_matches(focused_app, focused_bundle_id)
+}
+
+pub(crate) fn replacement_insertion_is_authorized(
+    undo_requested: bool,
+    undo_performed: bool,
+) -> bool {
+    !undo_requested || undo_performed
 }
 
 pub(crate) fn infer_learned_correction_result(
