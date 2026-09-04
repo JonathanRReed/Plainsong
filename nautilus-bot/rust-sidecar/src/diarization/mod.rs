@@ -633,9 +633,7 @@ fn resolve_model_for_run_with(
     // unknown id answers for ECAPA-TDNN. Do not let that implementation detail
     // make an unknown selection look as though it ran unchanged: only ids this
     // build actually offers may take the no-substitution branch.
-    let requested_is_known = embedding_model_artifact_id(requested_id) == requested_id
-        || cfg!(feature = "diarization-speakrs")
-            && requested_id == crate::download::SPEAKRS_MODEL_ID;
+    let requested_is_known = known_diarization_model_id(requested_id);
     if requested_is_known && is_available(requested_id) {
         return Some(ResolvedDiarizationModel {
             model_id: requested_id.to_string(),
@@ -652,6 +650,22 @@ fn resolve_model_for_run_with(
         });
     }
     None
+}
+
+fn known_diarization_model_id(model_id: &str) -> bool {
+    if embedding_model_artifact_id(model_id) == model_id {
+        return true;
+    }
+
+    #[cfg(feature = "diarization-speakrs")]
+    {
+        model_id == crate::download::SPEAKRS_MODEL_ID
+    }
+
+    #[cfg(not(feature = "diarization-speakrs"))]
+    {
+        false
+    }
 }
 
 /// Run diarization with a specific speaker embedding model.
