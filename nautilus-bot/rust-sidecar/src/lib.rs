@@ -2415,6 +2415,62 @@ fn capture_hotkey_target_context(
     (sanitized.0, sanitized.1, browser_url)
 }
 
+#[cfg(target_os = "windows")]
+fn capture_hotkey_target_context(
+    _include_browser_url: bool,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let script = r#"
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class PlainsongTargetCapture {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+"@;
+$hwnd = [PlainsongTargetCapture]::GetForegroundWindow()
+if ($hwnd -eq [IntPtr]::Zero) { exit 1 }
+$processId = 0
+[void][PlainsongTargetCapture]::GetWindowThreadProcessId($hwnd, [ref]$processId)
+$process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+if ($processId -eq 0 -or $null -eq $process -or [string]::IsNullOrWhiteSpace($process.ProcessName)) { exit 1 }
+$process.ProcessName
+$hwnd.ToInt64()
+$processId
+"#;
+    let output = match std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return (None, None, None),
+    };
+    let mut lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim);
+    let Some(name) = lines.next().filter(|value| !value.is_empty()) else {
+        return (None, None, None);
+    };
+    let Some(hwnd) = lines.next().and_then(|value| value.parse::<u64>().ok()) else {
+        return (None, None, None);
+    };
+    let Some(process_id) = lines.next().and_then(|value| value.parse::<u32>().ok()) else {
+        return (None, None, None);
+    };
+    (
+        Some(name.to_string()),
+        Some(format!("windows-hwnd-pid:{hwnd}:{process_id}")),
+        None,
+    )
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn capture_hotkey_target_context(
+    _include_browser_url: bool,
+) -> (Option<String>, Option<String>, Option<String>) {
+    (None, None, None)
+}
+
 #[cfg(target_os = "macos")]
 fn capture_pending_hotkey_target(state: &AppState) {
     // Keep hotkey target capture free of AppleScript/browser automation so
