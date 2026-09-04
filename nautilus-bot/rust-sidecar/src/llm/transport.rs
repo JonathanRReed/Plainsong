@@ -771,6 +771,36 @@ impl ProviderRuntime {
         }
     }
 
+    async fn model_context_metadata_with_live_policy(
+        &self,
+    ) -> Result<ModelContextMetadata, LlmError> {
+        self.enforce_live_remote_policy()?;
+        if !self.selection.provider.is_remote() {
+            return self
+                .transport
+                .model_context_metadata(&self.selection.model)
+                .await;
+        }
+
+        let mut grant = self
+            .selection
+            .remote_processing_gate
+            .grant()
+            .map_err(|message| {
+                LlmError::new(self.selection.provider, ErrorKind::Policy, message)
+            })?;
+        let metadata = self.transport.model_context_metadata(&self.selection.model);
+        tokio::pin!(metadata);
+        tokio::select! {
+            result = &mut metadata => result,
+            _ = grant.cancelled() => Err(LlmError::new(
+                self.selection.provider,
+                ErrorKind::Policy,
+                "Remote processing was disabled while analysis was running; the active request was cancelled.",
+            )),
+        }
+    }
+
     pub async fn execute(
         &self,
         purpose: CompletionPurpose,
@@ -806,9 +836,7 @@ impl CompletionTransport for ProviderRuntime {
     }
 
     async fn model_context_metadata(&self, _model: &str) -> Result<ModelContextMetadata, LlmError> {
-        self.transport
-            .model_context_metadata(&self.selection.model)
-            .await
+        self.model_context_metadata_with_live_policy().await
     }
 
     async fn invalidate_model_context_metadata(&self, _model: &str) {
@@ -1151,6 +1179,29 @@ mod tests {
             })
             .await
             .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Policy);
+    }
+
+    #[tokio::test]
+    async fn live_remote_policy_stops_subsequent_metadata_requests() {
+        let gate = Arc::new(crate::remote_processing::RemoteProcessingGate::new(true));
+        let runtime = ProviderRuntime::new(
+            ProviderSelection {
+                provider: Provider::Gemini,
+                model: "gemini-2.5-flash".to_string(),
+                remote_processing_enabled: true,
+                remote_processing_gate: Arc::clone(&gate),
+                api_key: Some("must-not-be-used".to_string()),
+                timeout: Duration::from_secs(1),
+                models_root: std::path::PathBuf::from("/tmp/plainsong-test-models"),
+            },
+            &OllamaClient::new(),
+        )
+        .unwrap();
+        gate.set_allowed(false);
+
+        let error = runtime.model_context_metadata("ignored").await.unwrap_err();
+
         assert_eq!(error.kind, ErrorKind::Policy);
     }
 

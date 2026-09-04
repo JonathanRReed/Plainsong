@@ -255,6 +255,10 @@ pub(crate) fn imported_recording_row(
         analysis_failure: None,
         pause_spans: Vec::new(),
         video_service: None,
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
         attendees: Vec::new(),
     }
 }

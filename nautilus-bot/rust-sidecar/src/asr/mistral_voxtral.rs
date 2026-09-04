@@ -37,7 +37,7 @@ use crate::secrets;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 const MISTRAL_TRANSCRIPTIONS_URL: &str = "https://api.mistral.ai/v1/audio/transcriptions";
 
@@ -71,6 +71,14 @@ const MISTRAL_WHOLE_FILE_HTTP_TIMEOUTS: CloudAsrHttpTimeouts = CloudAsrHttpTimeo
 /// Mistral's documented ceiling on `context_bias`: "up to 100 words or
 /// phrases".
 const MAX_CONTEXT_BIAS_TERMS: usize = 100;
+
+/// Defensive limits for the structure of an otherwise byte-bounded provider
+/// response. Fifty thousand segments is far beyond what a two-hour recording
+/// can usefully display, while still preventing a compact hostile payload from
+/// monopolizing a runtime worker. The speaker limit is similarly generous for
+/// a single meeting.
+const MAX_RESPONSE_SEGMENTS: usize = 50_000;
+const MAX_RESPONSE_SPEAKERS: usize = 256;
 
 pub struct MistralVoxtralProvider {
     model_id: String,
@@ -201,27 +209,36 @@ const UNSCORED_CLOUD_CONFIDENCE: f64 = 0.92;
 /// header already work on, so labels are mapped through an appearance table
 /// rather than parsed. A payload that numbers speakers differently between two
 /// requests therefore cannot leak its numbering into the transcript.
-fn speaker_label(raw: &serde_json::Value, seen: &mut Vec<String>) -> String {
+fn speaker_label(raw: &serde_json::Value, seen: &mut HashMap<String, u32>) -> Result<String> {
     let key = match raw {
         serde_json::Value::String(value) => value.trim().to_string(),
         serde_json::Value::Number(value) => value.to_string(),
         _ => String::new(),
     };
-    if let Some(index) = seen.iter().position(|existing| existing == &key) {
-        return provider_speaker_id(index as u32);
+    if let Some(index) = seen.get(&key) {
+        return Ok(provider_speaker_id(*index));
     }
-    seen.push(key);
-    provider_speaker_id((seen.len() - 1) as u32)
+    if seen.len() >= MAX_RESPONSE_SPEAKERS {
+        anyhow::bail!("Mistral response exceeded the {MAX_RESPONSE_SPEAKERS}-speaker limit");
+    }
+    let index = seen.len() as u32;
+    seen.insert(key, index);
+    Ok(provider_speaker_id(index))
 }
 
 #[cfg(test)]
 pub(crate) fn parse_mistral_transcript(payload: &str) -> Result<ParsedMistralTranscript> {
     let response: MistralTranscriptionResponse =
         serde_json::from_str(payload).context("Failed to decode Mistral transcription payload")?;
-    Ok(parse_mistral_response(response))
+    parse_mistral_response(response)
 }
 
-fn parse_mistral_response(response: MistralTranscriptionResponse) -> ParsedMistralTranscript {
+fn parse_mistral_response(
+    response: MistralTranscriptionResponse,
+) -> Result<ParsedMistralTranscript> {
+    if response.segments.len() > MAX_RESPONSE_SEGMENTS {
+        anyhow::bail!("Mistral response exceeded the {MAX_RESPONSE_SEGMENTS}-segment limit");
+    }
     let text = response.text.unwrap_or_default().trim().to_string();
     let language = response
         .language
@@ -230,7 +247,7 @@ fn parse_mistral_response(response: MistralTranscriptionResponse) -> ParsedMistr
 
     let mut segments: Vec<TranscriptSegment> = Vec::new();
     let mut speaker_turns: Vec<SpeakerTurn> = Vec::new();
-    let mut seen_speakers: Vec<String> = Vec::new();
+    let mut seen_speakers: HashMap<String, u32> = HashMap::new();
 
     for segment in &response.segments {
         let segment_text = segment.text.trim();
@@ -257,7 +274,7 @@ fn parse_mistral_response(response: MistralTranscriptionResponse) -> ParsedMistr
             confidence: UNSCORED_CLOUD_CONFIDENCE,
         });
         if let Some(raw) = segment.speaker.as_ref() {
-            let speaker_id = speaker_label(raw, &mut seen_speakers);
+            let speaker_id = speaker_label(raw, &mut seen_speakers)?;
             speaker_turns.push(SpeakerTurn {
                 start_time: start,
                 end_time: end,
@@ -290,12 +307,12 @@ fn parse_mistral_response(response: MistralTranscriptionResponse) -> ParsedMistr
         text
     };
 
-    ParsedMistralTranscript {
+    Ok(ParsedMistralTranscript {
         text,
         segments,
         speaker_turns,
         language,
-    }
+    })
 }
 
 impl Default for MistralVoxtralProvider {
@@ -375,9 +392,9 @@ impl MistralVoxtralProvider {
         }
 
         let payload: serde_json::Value = read_cloud_asr_json(response, "Mistral Voxtral").await?;
-        Ok(parse_mistral_response(
+        parse_mistral_response(
             serde_json::from_value(payload).context("Failed to decode Mistral payload")?,
-        ))
+        )
     }
 
     fn finish(
@@ -725,6 +742,42 @@ mod tests {
             .map(|turn| turn.speaker_id.as_str())
             .collect();
         assert_eq!(ids, vec!["S1", "S2"]);
+    }
+
+    #[test]
+    fn a_response_with_too_many_segments_is_rejected_before_processing() {
+        let response = MistralTranscriptionResponse {
+            segments: (0..=MAX_RESPONSE_SEGMENTS)
+                .map(|_| MistralSegment {
+                    text: "a".to_string(),
+                    start: None,
+                    end: None,
+                    speaker: None,
+                })
+                .collect(),
+            ..MistralTranscriptionResponse::default()
+        };
+
+        let error = parse_mistral_response(response).expect_err("segment limit must be enforced");
+        assert!(error.to_string().contains("segment limit"));
+    }
+
+    #[test]
+    fn a_response_with_too_many_distinct_speakers_is_rejected() {
+        let response = MistralTranscriptionResponse {
+            segments: (0..=MAX_RESPONSE_SPEAKERS)
+                .map(|index| MistralSegment {
+                    text: "a".to_string(),
+                    start: None,
+                    end: None,
+                    speaker: Some(serde_json::Value::String(format!("speaker_{index}"))),
+                })
+                .collect(),
+            ..MistralTranscriptionResponse::default()
+        };
+
+        let error = parse_mistral_response(response).expect_err("speaker limit must be enforced");
+        assert!(error.to_string().contains("speaker limit"));
     }
 
     #[test]

@@ -28,6 +28,10 @@ use std::path::{Path, PathBuf};
 
 pub type SpeakerAlias = (Option<String>, Option<String>, i64);
 
+const MAX_DICTIONARY_ENTRIES: i64 = 1_000;
+const MAX_DICTIONARY_SPOKEN_FORM_BYTES: usize = 256;
+const MAX_DICTIONARY_REPLACEMENT_BYTES: usize = 4_096;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeakerAliasUpsert {
     pub speaker_id: String,
@@ -3033,7 +3037,11 @@ impl Database {
                     recordings.imported_source_name,
                     recordings.pause_spans,
                     recordings.video_service,
-                    recordings.attendees
+                    recordings.attendees,
+                    recordings.transcript_complete,
+                    recordings.transcript_degraded_reason,
+                    recordings.transcript_incomplete_acknowledged_at,
+                    recordings.capture_degraded_summary
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
@@ -3112,6 +3120,12 @@ impl Database {
                         .and_then(|value| serde_json::from_str(&value).ok())
                         .unwrap_or_default(),
                 ),
+                transcript_complete: row.get::<_, i64>(27)? != 0,
+                transcript_degraded_reason: row.get(28)?,
+                transcript_incomplete_acknowledged_at: row
+                    .get::<_, Option<String>>(29)?
+                    .and_then(|value| value.parse().ok()),
+                capture_degraded_summary: row.get(30)?,
             })
         })?;
 
@@ -3154,7 +3168,11 @@ impl Database {
                     recordings.imported_source_name,
                     recordings.pause_spans,
                     recordings.video_service,
-                    recordings.attendees
+                    recordings.attendees,
+                    recordings.transcript_complete,
+                    recordings.transcript_degraded_reason,
+                    recordings.transcript_incomplete_acknowledged_at,
+                    recordings.capture_degraded_summary
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE recordings.id = ?1",
@@ -3223,6 +3241,12 @@ impl Database {
                         .and_then(|value| serde_json::from_str(&value).ok())
                         .unwrap_or_default(),
                 ),
+                transcript_complete: row.get::<_, i64>(27)? != 0,
+                transcript_degraded_reason: row.get(28)?,
+                transcript_incomplete_acknowledged_at: row
+                    .get::<_, Option<String>>(29)?
+                    .and_then(|value| value.parse().ok()),
+                capture_degraded_summary: row.get(30)?,
             })
         });
 
@@ -5361,28 +5385,38 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT id, spoken_form, replacement, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at
              FROM dictation_dictionary_entries
-             ORDER BY spoken_form ASC, created_at ASC",
+             WHERE length(CAST(spoken_form AS BLOB)) <= ?1
+               AND length(CAST(replacement AS BLOB)) <= ?2
+             ORDER BY spoken_form ASC, created_at ASC
+             LIMIT ?3",
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok(DictationDictionaryEntry {
-                id: row.get(0)?,
-                spoken_form: row.get(1)?,
-                replacement: row.get(2)?,
-                app_scope: row.get(3)?,
-                case_sensitive: row.get::<_, i64>(4)? != 0,
-                enabled: row.get::<_, i64>(5)? != 0,
-                category_scope: row.get(6)?,
-                created_at: row
-                    .get::<_, String>(7)?
-                    .parse()
-                    .unwrap_or_else(|_| Utc::now()),
-                updated_at: row
-                    .get::<_, String>(8)?
-                    .parse()
-                    .unwrap_or_else(|_| Utc::now()),
-            })
-        })?;
+        let rows = stmt.query_map(
+            params![
+                MAX_DICTIONARY_SPOKEN_FORM_BYTES as i64,
+                MAX_DICTIONARY_REPLACEMENT_BYTES as i64,
+                MAX_DICTIONARY_ENTRIES
+            ],
+            |row| {
+                Ok(DictationDictionaryEntry {
+                    id: row.get(0)?,
+                    spoken_form: row.get(1)?,
+                    replacement: row.get(2)?,
+                    app_scope: row.get(3)?,
+                    case_sensitive: row.get::<_, i64>(4)? != 0,
+                    enabled: row.get::<_, i64>(5)? != 0,
+                    category_scope: row.get(6)?,
+                    created_at: row
+                        .get::<_, String>(7)?
+                        .parse()
+                        .unwrap_or_else(|_| Utc::now()),
+                    updated_at: row
+                        .get::<_, String>(8)?
+                        .parse()
+                        .unwrap_or_else(|_| Utc::now()),
+                })
+            },
+        )?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
@@ -5395,9 +5429,23 @@ impl Database {
         if spoken_form.is_empty() {
             anyhow::bail!("Dictionary spoken form cannot be empty");
         }
+        if spoken_form.len() > MAX_DICTIONARY_SPOKEN_FORM_BYTES {
+            anyhow::bail!("Dictionary spoken form is too long");
+        }
         let replacement = request.replacement.trim();
         if replacement.is_empty() {
             anyhow::bail!("Dictionary replacement cannot be empty");
+        }
+        if replacement.len() > MAX_DICTIONARY_REPLACEMENT_BYTES {
+            anyhow::bail!("Dictionary replacement is too long");
+        }
+        let entry_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM dictation_dictionary_entries",
+            [],
+            |row| row.get(0),
+        )?;
+        if entry_count >= MAX_DICTIONARY_ENTRIES {
+            anyhow::bail!("Dictionary entry limit reached");
         }
 
         let now = Utc::now();
@@ -5457,6 +5505,9 @@ impl Database {
         if spoken_form.is_empty() {
             anyhow::bail!("Dictionary spoken form cannot be empty");
         }
+        if spoken_form.len() > MAX_DICTIONARY_SPOKEN_FORM_BYTES {
+            anyhow::bail!("Dictionary spoken form is too long");
+        }
 
         let replacement = request
             .replacement
@@ -5466,6 +5517,9 @@ impl Database {
             .to_string();
         if replacement.is_empty() {
             anyhow::bail!("Dictionary replacement cannot be empty");
+        }
+        if replacement.len() > MAX_DICTIONARY_REPLACEMENT_BYTES {
+            anyhow::bail!("Dictionary replacement is too long");
         }
 
         let app_scope = match &request.app_scope {
@@ -7374,6 +7428,10 @@ mod tests {
             pause_spans: Vec::new(),
             video_service: None,
             attendees: Vec::new(),
+            transcript_complete: true,
+            transcript_degraded_reason: None,
+            transcript_incomplete_acknowledged_at: None,
+            capture_degraded_summary: None,
         };
         let transcript = Transcript {
             id: format!("{id}-transcript"),
@@ -8417,6 +8475,10 @@ mod tests {
             attendees: Vec::new(),
             pause_spans: Vec::new(),
             video_service: None,
+            transcript_complete: true,
+            transcript_degraded_reason: None,
+            transcript_incomplete_acknowledged_at: None,
+            capture_degraded_summary: None,
         }
     }
 
@@ -8948,11 +9010,30 @@ mod tests {
         db.complete_recording_with_transcript_state("clean", "completed", true, None)
             .unwrap();
 
+        let degraded = db.get_recording("degraded").unwrap().unwrap();
         assert_eq!(
-            db.get_recording("degraded").unwrap().unwrap().status,
-            "completed",
+            degraded.status, "completed",
             "a degraded transcript is still a completed meeting"
         );
+        assert!(!degraded.transcript_complete);
+        assert_eq!(
+            degraded.transcript_degraded_reason.as_deref(),
+            Some("chunk 41 of 60 failed")
+        );
+        let listed = db
+            .get_recordings(None)
+            .unwrap()
+            .into_iter()
+            .find(|recording| recording.id == "degraded")
+            .unwrap();
+        assert!(!listed.transcript_complete);
+        let response = serde_json::to_value(listed).unwrap();
+        assert_eq!(response["transcriptComplete"], false);
+        assert_eq!(
+            response["transcriptDegradedReason"],
+            "chunk 41 of 60 failed"
+        );
+        assert!(response.get("transcript_complete").is_none());
         assert_eq!(
             db.recording_ids_with_unacknowledged_incomplete_transcripts()
                 .unwrap(),
@@ -8977,6 +9058,12 @@ mod tests {
             Some("chunk 41 of 60 failed")
         );
         assert!(acknowledged.acknowledged_at.is_some());
+        assert!(db
+            .get_recording("degraded")
+            .unwrap()
+            .unwrap()
+            .transcript_incomplete_acknowledged_at
+            .is_some());
 
         // Acknowledging something that is not true is refused.
         assert!(db.acknowledge_incomplete_transcript("clean").is_err());
@@ -9033,6 +9120,14 @@ mod tests {
             Some(
                 "The microphone delivered nothing for about 320s of this 3600s meeting".to_string()
             )
+        );
+        assert_eq!(
+            db.get_recording(&recording.id)
+                .unwrap()
+                .unwrap()
+                .capture_degraded_summary
+                .as_deref(),
+            Some("The microphone delivered nothing for about 320s of this 3600s meeting")
         );
 
         // A later clean finalize clears the caveat rather than leaving a stale one.
@@ -11749,6 +11844,30 @@ mod tests {
 
         db.delete_dictation_dictionary_entry(&created.id).unwrap();
         assert!(db.list_dictation_dictionary_entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_dictation_dictionary_entry_rejects_oversized_fields() {
+        let mut db = in_memory_db();
+        let result = db.create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+            spoken_form: "a".repeat(MAX_DICTIONARY_SPOKEN_FORM_BYTES + 1),
+            replacement: "replacement".to_string(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        });
+        assert!(result.is_err());
+
+        let result = db.create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+            spoken_form: "word".to_string(),
+            replacement: "a".repeat(MAX_DICTIONARY_REPLACEMENT_BYTES + 1),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        });
+        assert!(result.is_err());
     }
 
     #[test]

@@ -549,7 +549,7 @@ fn shutdown_interruption_leaves_processing_meeting_for_startup_recovery() {
 }
 
 #[test]
-fn export_root_renderer_settings_cannot_replace_privileged_identity() {
+fn renderer_settings_cannot_replace_privileged_privacy_state() {
     let current = settings::PrivacySettings {
         export_root: Some(PathBuf::from("/legacy/private/export")),
         export_location_id: Some("approved-location".to_string()),
@@ -565,6 +565,7 @@ fn export_root_renderer_settings_cannot_replace_privileged_identity() {
         export_location_id: Some("renderer-id".to_string()),
         export_location_label: Some("Renderer label".to_string()),
         export_location_approved: true,
+        // Models a debounced snapshot captured before vault migration.
         vault_initialized: false,
         vault_salt: Some("renderer-salt".to_string()),
         ..settings::PrivacySettings::default()
@@ -1308,19 +1309,23 @@ fn hands_free_monitor_should_run_only_when_enabled_and_session_idle() {
     // keeps idle CPU/mic-hot behavior unchanged for users who don't opt in.
     assert!(!hands_free_monitor_should_run(
         false,
-        DictationSessionState::Idle
+        DictationSessionState::Idle,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         false,
-        DictationSessionState::Starting
+        DictationSessionState::Starting,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         false,
-        DictationSessionState::Primed
+        DictationSessionState::Primed,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         false,
-        DictationSessionState::Recording
+        DictationSessionState::Recording,
+        false
     ));
 
     // Setting on, but a session is already starting or recording: the monitor must
@@ -1330,21 +1335,30 @@ fn hands_free_monitor_should_run_only_when_enabled_and_session_idle() {
     // stepping on an in-progress one.
     assert!(!hands_free_monitor_should_run(
         true,
-        DictationSessionState::Starting
+        DictationSessionState::Starting,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         true,
-        DictationSessionState::Primed
+        DictationSessionState::Primed,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         true,
-        DictationSessionState::Recording
+        DictationSessionState::Recording,
+        false
     ));
 
     // Setting on and genuinely idle: the monitor should run.
     assert!(hands_free_monitor_should_run(
         true,
-        DictationSessionState::Idle
+        DictationSessionState::Idle,
+        false
+    ));
+    assert!(!hands_free_monitor_should_run(
+        true,
+        DictationSessionState::Idle,
+        true
     ));
 }
 
@@ -1944,6 +1958,10 @@ fn sample_recording(
         attendees: Vec::new(),
         pause_spans: Vec::new(),
         video_service: None,
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
     }
 }
 
@@ -2435,6 +2453,14 @@ fn extract_company_candidates_finds_title_and_suffix_patterns() {
 }
 
 #[test]
+fn relationship_snippet_uses_original_unicode_offsets() {
+    assert_eq!(
+        find_entity_snippet("İİİİİ. ACME is a customer.", "acme").as_deref(),
+        Some("ACME is a customer.")
+    );
+}
+
+#[test]
 fn build_relationship_memory_aggregates_people_and_companies() {
     let now = chrono::Utc::now();
     let recording = sample_recording(
@@ -2604,6 +2630,7 @@ fn meeting_transcripts_ignore_destination_scoped_dictionary_entries() {
     let entries = vec![
         dictionary_entry_fixture("widget", "Widget Pro", Some("Slack"), None),
         dictionary_entry_fixture("today", "TODAY", None, Some("email")),
+        dictionary_entry_fixture("Ship", "Dispatch", None, Some("other")),
     ];
 
     enrich_meeting_transcript(&mut transcript, &entries);
@@ -3492,6 +3519,16 @@ fn sanitize_dictation_output_treats_nospeech_token_as_empty() {
 }
 
 #[test]
+fn sanitize_dictation_output_preserves_words_used_by_non_speech_markers() {
+    for transcript in ["Music.", "No noise.", "Audio speech"] {
+        assert_eq!(
+            sanitize_dictation_output(transcript, transcript),
+            transcript
+        );
+    }
+}
+
+#[test]
 fn low_information_dictation_detection_flags_common_hallucinations() {
     assert!(looks_low_information_dictation("you"));
     assert!(!looks_low_information_dictation("thank you"));
@@ -3811,6 +3848,41 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
     );
     assert!(both.contains("Nothing was selected"));
     assert!(both.contains(DICTATION_FORMAT_FAILED_WARNING));
+}
+
+#[test]
+fn empty_delete_command_results_are_delivered_to_the_selection() {
+    assert!(should_insert_dictation_result(
+        "",
+        Some("delete_phrase"),
+        false,
+        false,
+    ));
+    assert!(should_insert_dictation_result(
+        "",
+        Some("delete_selection"),
+        false,
+        false,
+    ));
+    assert!(!should_insert_dictation_result("", None, false, false));
+    assert!(!should_insert_dictation_result(
+        "",
+        Some("rewrite_shorter"),
+        false,
+        false,
+    ));
+    assert!(!should_insert_dictation_result(
+        "",
+        Some("delete_phrase"),
+        true,
+        false,
+    ));
+    assert!(should_insert_dictation_result(
+        "",
+        Some("delete_phrase"),
+        true,
+        true,
+    ));
 }
 
 #[test]
@@ -4147,11 +4219,35 @@ fn the_native_paste_probes_the_focused_field_right_before_it_stages_the_clipboar
         .find("copy_to_clipboard(text)")
         .expect("the dispatcher must stage the clipboard");
     let keystroke = body
-        .find("dispatch_command_keystroke(9)")
+        .find("send_native_paste_key()")
         .expect("the dispatcher must send Cmd+V");
     assert!(reactivate < probe, "reactivate before probing");
     assert!(probe < stage, "probe before the clipboard is touched");
     assert!(stage < keystroke, "stage before Cmd+V");
+}
+
+#[test]
+fn macos_paste_confirms_system_events_but_preserves_clipboard_for_cgevent_fallback() {
+    let source = include_str!("text_insert.rs");
+    let sender = top_level_item(source, "fn send_native_paste_key(");
+    let system_events = sender
+        .find("Command::new(\"osascript\")")
+        .expect("paste must try the observable System Events path");
+    let core_graphics = sender
+        .find("dispatch_command_keystroke(9)")
+        .expect("paste must retain the CoreGraphics fallback");
+    assert!(
+        system_events < core_graphics,
+        "System Events must run before the unconfirmable CoreGraphics fallback"
+    );
+    assert!(sender.contains("PasteDispatchStatus::Confirmed"));
+    assert!(sender.contains("PasteDispatchStatus::FallbackDispatched"));
+
+    let dispatcher = top_level_item(source, "fn dispatch_paste_from_clipboard(");
+    assert!(
+        dispatcher.contains("status == PasteDispatchStatus::Confirmed"),
+        "the old clipboard must only be restored after a confirmed paste"
+    );
 }
 
 #[test]
@@ -4727,19 +4823,20 @@ fn custom_mode_matches_domain_before_app() {
 }
 
 #[test]
-fn windows_sendkeys_script_is_built_without_activation_by_default() {
-    let script = build_windows_sendkeys_script("^v", None);
+fn windows_sendkeys_script_activates_and_revalidates_the_captured_window() {
+    let script = build_windows_sendkeys_script("^v", Some("windows-hwnd-pid:1234:5678")).unwrap();
     assert!(script.contains("System.Windows.Forms"));
     assert!(script.contains("SendWait('^v')"));
     assert!(!script.contains("AppActivate"));
+    assert!(script.contains("SetForegroundWindow"));
+    assert!(script.contains("GetForegroundWindow"));
+    assert!(script.contains("$target = [IntPtr]::new(1234)"));
+    assert!(script.contains("$expectedPid = [uint32]5678"));
 }
 
 #[test]
-fn windows_sendkeys_script_escapes_target_app_names() {
-    let script = build_windows_sendkeys_script("^v", Some("Bob's Editor"));
-    assert!(script.contains("Microsoft.VisualBasic"));
-    assert!(script.contains("AppActivate('Bob''s Editor')"));
-    assert!(script.contains("SendWait('^v')"));
+fn windows_sendkeys_script_rejects_an_untrusted_target_identity() {
+    assert!(build_windows_sendkeys_script("^v", Some("Bob's Editor")).is_err());
 }
 
 #[test]
@@ -5531,6 +5628,10 @@ fn history_details_enrichment_reports_lineage_audio_and_a_real_raw_transcript() 
         analysis_failure: None,
         pause_spans: Vec::new(),
         video_service: None,
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        transcript_incomplete_acknowledged_at: None,
+        capture_degraded_summary: None,
         attendees: Vec::new(),
     };
     let entry = models::Recording {
@@ -6005,6 +6106,15 @@ fn dictation_retention_cutoff_behaves_as_expected() {
 }
 
 #[test]
+fn dictation_persistence_honors_no_save_and_immediate_retention() {
+    assert!(should_persist_dictation(true, "never"));
+    assert!(should_persist_dictation(true, "24h"));
+    assert!(!should_persist_dictation(false, "never"));
+    assert!(!should_persist_dictation(false, "24h"));
+    assert!(!should_persist_dictation(true, "immediate"));
+}
+
+#[test]
 fn recent_delivery_falls_back_when_current_target_is_unknown() {
     let now = chrono::Utc::now();
     let delivery = RecentDictationDelivery {
@@ -6012,6 +6122,7 @@ fn recent_delivery_falls_back_when_current_target_is_unknown() {
         app_target: Some("Slack".to_string()),
         app_bundle_id: None,
         delivered_at: now,
+        undo_eligible: true,
     };
 
     assert!(recent_delivery_matches_target(&delivery, None, None));
@@ -6035,6 +6146,7 @@ fn recent_delivery_freshness_window_expires() {
         app_target: Some("Slack".to_string()),
         app_bundle_id: None,
         delivered_at: now - chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS),
+        undo_eligible: true,
     };
     let stale_delivery = RecentDictationDelivery {
         delivered_at: now - chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS + 1),
@@ -6055,6 +6167,111 @@ fn recent_delivery_freshness_window_expires() {
         None,
         now
     ));
+}
+
+#[test]
+fn undo_requires_confirmed_insert_and_unchanged_known_target() {
+    let now = chrono::Utc::now();
+    let delivery = RecentDictationDelivery {
+        text: "ship it tomorrow".to_string(),
+        app_target: Some("Slack".to_string()),
+        app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+        delivered_at: now,
+        undo_eligible: true,
+    };
+
+    assert!(recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "auto",
+        now,
+    ));
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Notes"),
+        Some("com.apple.Notes"),
+        "auto",
+        now,
+    ));
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "clipboard_only",
+        now,
+    ));
+
+    let unconfirmed = RecentDictationDelivery {
+        undo_eligible: false,
+        ..delivery
+    };
+    assert!(!recent_delivery_authorizes_undo(
+        &unconfirmed,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "auto",
+        now,
+    ));
+}
+
+#[test]
+fn undo_fails_closed_when_a_recorded_bundle_id_is_unavailable() {
+    let now = chrono::Utc::now();
+    let delivery = RecentDictationDelivery {
+        text: "ship it tomorrow".to_string(),
+        app_target: Some("Slack".to_string()),
+        app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+        delivered_at: now,
+        undo_eligible: true,
+    };
+
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        None,
+        Some("Slack"),
+        None,
+        "auto",
+        now,
+    ));
+}
+
+#[test]
+fn undo_rejects_delivery_timestamps_from_the_future() {
+    let now = chrono::Utc::now();
+    let delivery = RecentDictationDelivery {
+        text: "ship it tomorrow".to_string(),
+        app_target: Some("Slack".to_string()),
+        app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+        delivered_at: now + chrono::Duration::seconds(1),
+        undo_eligible: true,
+    };
+
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "auto",
+        now,
+    ));
+}
+
+#[test]
+fn replacement_insertion_requires_its_requested_undo_to_succeed() {
+    assert!(replacement_insertion_is_authorized(false, false));
+    assert!(replacement_insertion_is_authorized(true, true));
+    assert!(!replacement_insertion_is_authorized(true, false));
 }
 
 #[test]

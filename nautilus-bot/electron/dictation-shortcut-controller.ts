@@ -232,6 +232,7 @@ export const DICTATION_HOLD_WATCHDOG_MS = 5 * 60 * 1000;
  */
 export type DictationShortcutStartOptions = {
   modeOverride?: { preset: string; customModeId: string | null };
+  handsFreeTrigger?: boolean;
 };
 
 type DictationShortcutSignalInput = {
@@ -244,6 +245,7 @@ type DictationShortcutSignalInput = {
 
 export type DictationShortcutSignalRuntime = {
   handleSignal: (input: DictationShortcutSignalInput) => Promise<void>;
+  startHandsFree: (startOptions: DictationShortcutStartOptions) => Promise<void>;
   onPhase: (phase: string) => void;
   dispose: () => void;
 };
@@ -290,6 +292,10 @@ export function createDictationShortcutSignalRuntime(deps: {
   let startGeneration = 0;
   let activeStartGeneration: number | null = null;
   let pendingHoldReleaseGeneration: number | null = null;
+  let pendingHandsFreeStopGeneration: number | null = null;
+  let pendingHandsFreeStopGestureEpochMs: number | null = null;
+  let liveShortcutStartGeneration: number | null = null;
+  const invalidatedStartGenerations = new Set<number>();
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearWatchdog = (): void => {
@@ -321,6 +327,30 @@ export function createDictationShortcutSignalRuntime(deps: {
     const decision = resolveDictationShortcutDecision({ phase, ...input });
     const holdToTalkWithRelease =
       input.behavior === "hold_to_talk" && input.capability === "press_and_release";
+
+    // The cached phase can still be idle while a start is in flight or after
+    // its ack. Resolve the second hands-free press against tracked state first.
+    if (input.signal === "pressed" && input.behavior === "hands_free") {
+      if (activeStartGeneration !== null) {
+        pendingHandsFreeStopGeneration = activeStartGeneration;
+        pendingHandsFreeStopGestureEpochMs = stopGestureEpochMs;
+        return;
+      }
+      if (liveShortcutStartGeneration !== null) {
+        liveShortcutStartGeneration = null;
+        deps.log?.("dictation shortcut stop_dictation", {
+          phase,
+          behavior: input.behavior,
+          capability: input.capability,
+          stopReason: "hands_free_toggle",
+        });
+        await deps.invoke("stop_dictation", {
+          stopReason: "hands_free_toggle",
+          stopGestureEpochMs,
+        });
+        return;
+      }
+    }
 
     if (decision.action === "ignore") {
       if (input.signal === "released" && holdToTalkWithRelease) {
@@ -367,6 +397,10 @@ export function createDictationShortcutSignalRuntime(deps: {
       ) {
         pendingHoldReleaseGeneration = null;
       }
+      if (pendingHandsFreeStopGeneration !== null && pendingHandsFreeStopGeneration !== generation) {
+        pendingHandsFreeStopGeneration = null;
+        pendingHandsFreeStopGestureEpochMs = null;
+      }
       let started = false;
       try {
         await deps.invoke(
@@ -383,6 +417,31 @@ export function createDictationShortcutSignalRuntime(deps: {
         if (!started && pendingHoldReleaseGeneration === generation) {
           pendingHoldReleaseGeneration = null;
         }
+        if (!started && pendingHandsFreeStopGeneration === generation) {
+          pendingHandsFreeStopGeneration = null;
+          pendingHandsFreeStopGestureEpochMs = null;
+        }
+      }
+      if (invalidatedStartGenerations.delete(generation)) {
+        return;
+      }
+      liveShortcutStartGeneration = input.behavior === "hands_free" ? generation : null;
+      if (pendingHandsFreeStopGeneration === generation) {
+        const pendingStopGestureEpochMs = pendingHandsFreeStopGestureEpochMs ?? stopGestureEpochMs;
+        pendingHandsFreeStopGeneration = null;
+        pendingHandsFreeStopGestureEpochMs = null;
+        liveShortcutStartGeneration = null;
+        deps.log?.("dictation shortcut stop_dictation", {
+          phase: deps.getPhase(),
+          behavior: input.behavior,
+          capability: input.capability,
+          stopReason: "hands_free_toggle",
+        });
+        await deps.invoke("stop_dictation", {
+          stopReason: "hands_free_toggle",
+          stopGestureEpochMs: pendingStopGestureEpochMs,
+        });
+        return;
       }
       if (holdToTalkWithRelease && pendingHoldReleaseGeneration === generation) {
         pendingHoldReleaseGeneration = null;
@@ -402,6 +461,7 @@ export function createDictationShortcutSignalRuntime(deps: {
     }
 
     clearWatchdog();
+    liveShortcutStartGeneration = null;
 
     if (decision.action === "stop") {
       deps.log?.("dictation shortcut stop_dictation", {
@@ -448,11 +508,39 @@ export function createDictationShortcutSignalRuntime(deps: {
     ) {
       clearWatchdog();
     }
+    if (phase !== "preparing" && phase !== "primed" && phase !== "recording") {
+      liveShortcutStartGeneration = null;
+      if (activeStartGeneration !== null) {
+        invalidatedStartGenerations.add(activeStartGeneration);
+        if (pendingHoldReleaseGeneration === activeStartGeneration) {
+          pendingHoldReleaseGeneration = null;
+        }
+        if (pendingHandsFreeStopGeneration === activeStartGeneration) {
+          pendingHandsFreeStopGeneration = null;
+          pendingHandsFreeStopGestureEpochMs = null;
+        }
+        activeStartGeneration = null;
+      }
+    }
   };
 
   return {
     handleSignal,
+    startHandsFree: (startOptions) =>
+      handleSignal({
+        behavior: "hands_free",
+        capability: "press_only",
+        signal: "pressed",
+        startOptions,
+      }),
     onPhase,
-    dispose: clearWatchdog,
+    dispose: () => {
+      clearWatchdog();
+      if (activeStartGeneration !== null) {
+        invalidatedStartGenerations.add(activeStartGeneration);
+        activeStartGeneration = null;
+      }
+      liveShortcutStartGeneration = null;
+    },
   };
 }

@@ -1257,9 +1257,16 @@ pub(crate) fn find_entity_snippet(text: &str, entity_name: &str) -> Option<Strin
         return None;
     }
 
-    let lower = normalized_text.to_lowercase();
-    let entity_lower = entity_name.to_lowercase();
-    let index = lower.find(&entity_lower).unwrap_or(0);
+    // Obtain the match offset from the original text. Unicode lowercasing can
+    // change a string's byte length, so an offset from a lowercased copy is not
+    // necessarily a valid UTF-8 boundary in `normalized_text`.
+    let index = regex::RegexBuilder::new(&regex::escape(entity_name))
+        .case_insensitive(true)
+        .build()
+        .ok()
+        .and_then(|pattern| pattern.find(normalized_text))
+        .map(|matched| matched.start())
+        .unwrap_or(0);
     let start = normalized_text[..index]
         .rfind(['.', '\n'])
         .map(|value| value + 1)

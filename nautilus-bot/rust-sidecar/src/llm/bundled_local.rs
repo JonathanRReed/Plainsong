@@ -756,7 +756,13 @@ mod runtime {
 
         let (device, backend) = select_device();
         let weights_path = model_dir.join(WEIGHTS_FILE);
-        let mut file = std::fs::File::open(&weights_path)
+        let weights_pin = artifacts()
+            .into_iter()
+            .find(|entry| entry.local_name == WEIGHTS_FILE)
+            .ok_or_else(|| anyhow!("Missing integrity pin for {WEIGHTS_FILE}"))?;
+        let verified_weights =
+            crate::download::open_verified_model_artifact(&weights_path, weights_pin.sha256)?;
+        let mut file = std::fs::File::open(verified_weights.load_path())
             .with_context(|| format!("Failed to open {}", weights_path.display()))?;
         let content = candle_core::quantized::gguf_file::Content::read(&mut file)
             .map_err(|error| anyhow!("Failed to read {}: {error}", weights_path.display()))?;
@@ -764,7 +770,13 @@ mod runtime {
             .map_err(|error| anyhow!("Failed to load {MODEL_DISPLAY_NAME} weights: {error}"))?;
 
         let tokenizer_path = model_dir.join(TOKENIZER_FILE);
-        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+        let tokenizer_pin = artifacts()
+            .into_iter()
+            .find(|entry| entry.local_name == TOKENIZER_FILE)
+            .ok_or_else(|| anyhow!("Missing integrity pin for {TOKENIZER_FILE}"))?;
+        let verified_tokenizer =
+            crate::download::open_verified_model_artifact(&tokenizer_path, tokenizer_pin.sha256)?;
+        let tokenizer = tokenizers::Tokenizer::from_file(verified_tokenizer.load_path())
             .map_err(|error| anyhow!("Failed to load {MODEL_DISPLAY_NAME} tokenizer: {error}"))?;
 
         // Resolved from the shipped tokenizer rather than hard-coded ids, so

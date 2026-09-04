@@ -25,7 +25,7 @@ use crate::recording_audio::{
 };
 use crate::recording_pause::{PauseLedger, PauseSpan};
 use crate::settings;
-use crate::sidecar_handle::SidecarHandle;
+use crate::sidecar_handle::{AppEmitter, SidecarHandle};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample};
@@ -1255,6 +1255,11 @@ impl AudioCapture {
         if self.is_dictating.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("Dictation already in progress"));
         }
+        if self.is_recording() {
+            return Err(anyhow::anyhow!(
+                "Cannot start dictation while a meeting recording is active"
+            ));
+        }
 
         while self.dictation_buffer.pop().is_some() {}
         self.dictation_buffered_samples.store(0, Ordering::SeqCst);
@@ -1915,11 +1920,17 @@ impl AudioCapture {
         &mut self,
         plan: RecordingCapturePlan,
         options: RecordingOptions,
+        preferred_input_device: Option<&settings::AudioInputDevicePreference>,
         event_handle: Option<SidecarHandle>,
     ) -> Result<String> {
         self.ensure_microphone_preparation_retry_is_safe(options.mic)?;
         if self.active_recording.is_some() {
             return Err(anyhow::anyhow!("A recording session is already active"));
+        }
+        if self.is_dictating.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!(
+                "Cannot start recording while dictation is active"
+            ));
         }
         if SYSTEM_AUDIO_TEST_ACTIVE.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!(
@@ -1958,10 +1969,18 @@ impl AudioCapture {
         let paused = Arc::new(AtomicBool::new(false));
         let recorded_frames = Arc::new(AtomicU64::new(0));
         let preferred_mic_device = if options.mic {
-            Some(
-                self.resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
-                    .0,
-            )
+            let (device, resolved_input) = match preferred_input_device {
+                Some(preference) => self.resolve_input_device(Some(preference))?,
+                None => {
+                    self.resolve_input_device_by_id(options.preferred_input_device_id.as_deref())?
+                }
+            };
+            if let (Some(handle), Some(advisory)) =
+                (event_handle.as_ref(), resolved_input.advisory.as_deref())
+            {
+                handle.emit_event("audio-input-advisory", advisory.to_string());
+            }
+            Some(device)
         } else {
             None
         };
@@ -2612,8 +2631,8 @@ impl AudioCapture {
     /// point is that the mic is never opened for this purpose when the setting is off, so
     /// idle CPU/battery behavior for users who don't enable hands-free is unaffected.
     ///
-    /// No-op (returns `Ok(())`) if the monitor is already running or a dictation session is
-    /// currently active (the monitor and a live dictation capture must never run at once).
+    /// No-op (returns `Ok(())`) if the monitor is already running, a dictation session is
+    /// currently active, or a meeting owns the capture device.
     pub fn start_hands_free_monitor(
         &mut self,
         preference: Option<&settings::AudioInputDevicePreference>,
@@ -2624,10 +2643,9 @@ impl AudioCapture {
         if self.hands_free_monitor_active.load(Ordering::SeqCst) {
             return Ok(());
         }
-        if self.is_dictating.load(Ordering::SeqCst) {
-            // A real dictation session owns listening duties right now; the monitor
-            // stays off until it's stopped and idle again (see `stop_dictation`'s
-            // caller in lib.rs, which restarts the monitor once the session ends).
+        if self.is_dictating.load(Ordering::SeqCst) || self.is_recording() {
+            // A real dictation or meeting session owns listening duties right now;
+            // reconciliation restarts the monitor once capture ends.
             return Ok(());
         }
 

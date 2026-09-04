@@ -1,6 +1,6 @@
 use crate::dictation_parity::{
-    apply_contextual_phrase_replacement, DictionaryRule, SnippetRule, VocabularyTermCandidate,
-    VocabularyTermKind,
+    apply_contextual_phrase_replacement, category_scope_matches, snippet_app_scope_matches,
+    DictionaryRule, SnippetRule, VocabularyTermCandidate, VocabularyTermKind,
 };
 use crate::models::{DictationDictionaryEntry, DictationSnippet};
 use crate::text::format::DictationAppCategory;
@@ -30,6 +30,9 @@ pub struct DictationPipelineInput<'a> {
     /// arrives as a plain bool rather than being read from settings here.
     pub numbers_as_digits: bool,
     pub recent_inserted_text: Option<&'a str>,
+    /// Backtrack phrases are destructive commands and must follow the user's
+    /// command-mode policy rather than being recognized as ordinary text.
+    pub command_mode_enabled: bool,
     /// Resolved destination-app category (via `resolve_dictation_app_category`
     /// or the settings-aware `resolve_dictation_app_category_with_overrides`),
     /// used both to scope dictionary/snippet entries whose `category_scope`
@@ -76,8 +79,10 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
         text = normalized_text;
     }
 
-    if let Some(backtrack_resolution) =
-        resolve_backtrack_command(text.as_str(), input.recent_inserted_text)
+    if let Some(backtrack_resolution) = input
+        .command_mode_enabled
+        .then(|| resolve_backtrack_command(text.as_str(), input.recent_inserted_text))
+        .flatten()
     {
         command_applied = Some(backtrack_resolution.command_key.to_string());
         pipeline_stage_keys.push("backtrack".to_string());
@@ -110,7 +115,12 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
     // a number inside a trigger ("two factor auth" -> "2 factor auth") would
     // stop the snippet firing at all.
     if input.numbers_as_digits && command_applied.is_none() && !text.trim().is_empty() {
-        let protected_phrases = itn_protected_phrases(input.dictionary_entries, input.snippets);
+        let protected_phrases = itn_protected_phrases(
+            input.dictionary_entries,
+            input.snippets,
+            input.app_target,
+            input.destination_category,
+        );
         let normalized_numbers =
             crate::text::itn::inverse_text_normalize_protecting(text.as_str(), &protected_phrases);
         if normalized_numbers != text {
@@ -342,12 +352,13 @@ pub fn vocabulary_candidates_from_entries(
 /// auth") would be rewritten out of existence and the snippet would never
 /// fire.
 ///
-/// Scope is deliberately ignored for both: over-protecting a phrase only ever
-/// leaves the user's own words alone, while under-protecting one loses a
-/// correction or an expansion.
+/// Snippet scope must match here exactly as it does during expansion. Otherwise
+/// an inapplicable trigger can split a number phrase while never expanding.
 fn itn_protected_phrases(
     entries: &[DictationDictionaryEntry],
     snippets: &[DictationSnippet],
+    app_target: Option<&str>,
+    destination_category: DictationAppCategory,
 ) -> Vec<String> {
     entries
         .iter()
@@ -356,7 +367,14 @@ fn itn_protected_phrases(
         .chain(
             snippets
                 .iter()
-                .filter(|snippet| snippet.enabled)
+                .filter(|snippet| {
+                    snippet.enabled
+                        && snippet_app_scope_matches(snippet.app_scope.as_deref(), app_target)
+                        && category_scope_matches(
+                            snippet.category_scope.as_deref(),
+                            destination_category,
+                        )
+                })
                 .map(|snippet| snippet.trigger.trim().to_string()),
         )
         .filter(|phrase| !phrase.is_empty())
@@ -496,6 +514,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -519,6 +538,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -537,6 +557,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -559,6 +580,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -586,6 +608,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -609,6 +632,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: true,
             recent_inserted_text: Some("we need two servers"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -633,6 +657,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: true,
             recent_inserted_text: Some("we need twenty five servers"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -656,6 +681,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -682,10 +708,53 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
         assert_eq!(result.text, "turn on 2 factor auth");
+        assert_eq!(result.snippet_applied_count, 0);
+    }
+
+    #[test]
+    fn pipeline_does_not_protect_an_app_scoped_snippet_in_another_app() {
+        let mut scoped = snippet("two", "second");
+        scoped.app_scope = Some("Firefox".to_string());
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "twenty two people",
+            dictionary_entries: &[],
+            snippets: &[scoped],
+            app_target: Some("Terminal"),
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: None,
+            command_mode_enabled: true,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "22 people");
+        assert_eq!(result.snippet_applied_count, 0);
+    }
+
+    #[test]
+    fn pipeline_does_not_protect_a_category_scoped_snippet_elsewhere() {
+        let mut scoped = snippet("two", "second");
+        scoped.category_scope = Some("email".to_string());
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "twenty two people",
+            dictionary_entries: &[],
+            snippets: &[scoped],
+            app_target: Some("Notes"),
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: true,
+            recent_inserted_text: None,
+            command_mode_enabled: true,
+            destination_category: DictationAppCategory::Notes,
+        });
+
+        assert_eq!(result.text, "22 people");
         assert_eq!(result.snippet_applied_count, 0);
     }
 
@@ -702,6 +771,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: true,
             recent_inserted_text: Some("we need twenty five servers"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -720,6 +790,7 @@ mod tests {
             smart_formatting_enabled: true,
             numbers_as_digits: true,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -738,6 +809,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it today"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -752,6 +824,27 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_keeps_backtrack_phrase_as_text_when_command_mode_is_disabled() {
+        let result = apply_dictation_pipeline(DictationPipelineInput {
+            text: "scratch that",
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: false,
+            numbers_as_digits: false,
+            recent_inserted_text: Some("ship it today"),
+            command_mode_enabled: false,
+            destination_category: DictationAppCategory::Other,
+        });
+
+        assert_eq!(result.text, "scratch that");
+        assert!(result.command_applied.is_none());
+        assert!(!result.recent_insert_reused);
+        assert!(!result.undo_previous_insert);
+    }
+
+    #[test]
     fn pipeline_replaces_last_insert_for_actually_comma_backtrack() {
         let result = apply_dictation_pipeline(DictationPipelineInput {
             text: "actually, ship it Monday",
@@ -762,6 +855,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it Friday"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -786,6 +880,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -810,6 +905,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -834,6 +930,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it today"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -857,6 +954,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("sam is ready"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -879,6 +977,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -906,6 +1005,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("前のテキスト"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -936,6 +1036,7 @@ mod tests {
             smart_formatting_enabled: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         });
 
@@ -1049,6 +1150,7 @@ mod fixture_evals {
             smart_formatting_enabled: true,
             numbers_as_digits,
             recent_inserted_text: None,
+            command_mode_enabled: true,
             destination_category: DictationAppCategory::Other,
         })
     }
@@ -1142,6 +1244,7 @@ mod fixture_evals {
                 smart_formatting_enabled: false,
                 numbers_as_digits: true,
                 recent_inserted_text: None,
+                command_mode_enabled: true,
                 destination_category: DictationAppCategory::Other,
             });
             assert_eq!(result.text, expected, "case {id}");

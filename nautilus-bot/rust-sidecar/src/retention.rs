@@ -21,6 +21,14 @@ pub(crate) fn normalize_dictation_retention_preset(value: &str) -> &'static str 
     }
 }
 
+/// Whether a completed dictation may be written to durable history.
+///
+/// "Immediate" retention is implemented as no persistence rather than a
+/// write followed by cleanup, so the user's words never enter the database.
+pub(crate) fn should_persist_dictation(save_to_inbox: bool, retention_preset: &str) -> bool {
+    save_to_inbox && normalize_dictation_retention_preset(retention_preset) != "immediate"
+}
+
 pub(crate) fn normalize_meeting_audio_storage_mode(value: &str) -> &'static str {
     match value {
         "transcript_only" => "transcript_only",

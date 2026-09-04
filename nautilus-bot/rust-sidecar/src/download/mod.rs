@@ -12,7 +12,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const WHISPER_MODEL_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
-const MODEL_INTEGRITY_RECEIPT_VERSION: &str = "plainsong-model-integrity-v1";
+const MODEL_INTEGRITY_RECEIPT_VERSION: &str = "plainsong-model-integrity-v2";
 const MAX_GENERIC_MODEL_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Download manager for ASR models
@@ -253,8 +253,9 @@ static MODEL_INTEGRITY_MAC_KEY: std::sync::OnceLock<
 /// Fetches the keychain-held MAC key for model-integrity receipts, generating
 /// and persisting a fresh one on first use.
 ///
-/// Receipts are plaintext sibling files (hash + size + mtime) that let a
-/// relaunch skip re-hashing multi-gigabyte models. Without a MAC, anything
+/// Receipts are plaintext sibling files (hash plus file identity and change
+/// metadata) that let a relaunch skip re-hashing multi-gigabyte models.
+/// Without a MAC, anything
 /// that can write into the models directory can swap a model file and hand-
 /// write a receipt that reproduces the exact same format -- the format and
 /// even the app's own pinned digests are public (open source). Keying the
@@ -332,6 +333,41 @@ fn compute_receipt_mac(payload: &[u8]) -> Result<String> {
 
 fn model_integrity_receipt_contents(path: &Path, expected_sha256: &str) -> Result<String> {
     let metadata = std::fs::metadata(path)?;
+    model_integrity_receipt_contents_for_metadata(&metadata, expected_sha256)
+}
+
+#[cfg(unix)]
+fn model_integrity_receipt_contents_for_metadata(
+    metadata: &std::fs::Metadata,
+    expected_sha256: &str,
+) -> Result<String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let modified_nanos = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("Model modification time predates the Unix epoch")?
+        .as_nanos();
+    let payload = format!(
+        "{}\nsha256={}\nsize={}\nmodified_nanos={}\ndevice={}\ninode={}\nchanged_seconds={}\nchanged_nanos={}\n",
+        MODEL_INTEGRITY_RECEIPT_VERSION,
+        expected_sha256,
+        metadata.len(),
+        modified_nanos,
+        metadata.dev(),
+        metadata.ino(),
+        metadata.ctime(),
+        metadata.ctime_nsec()
+    );
+    let mac = compute_receipt_mac(payload.as_bytes())?;
+    Ok(format!("{payload}mac={mac}\n"))
+}
+
+#[cfg(not(unix))]
+fn model_integrity_receipt_contents_for_metadata(
+    metadata: &std::fs::Metadata,
+    expected_sha256: &str,
+) -> Result<String> {
     let modified_nanos = metadata
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)
@@ -348,6 +384,51 @@ fn model_integrity_receipt_contents(path: &Path, expected_sha256: &str) -> Resul
     Ok(format!("{payload}mac={mac}\n"))
 }
 
+/// Keeps the verified file description alive while a model library loads it.
+/// On Unix the load path names that open description, so a concurrent rename
+/// cannot redirect the loader to different bytes after the receipt check.
+pub(crate) struct VerifiedModelArtifact {
+    _file: std::fs::File,
+    load_path: PathBuf,
+}
+
+impl VerifiedModelArtifact {
+    pub(crate) fn load_path(&self) -> &Path {
+        &self.load_path
+    }
+}
+
+pub(crate) fn open_verified_model_artifact(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<VerifiedModelArtifact> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        anyhow::bail!("Model artifact is not a regular file: {}", path.display());
+    }
+    let expected_receipt =
+        model_integrity_receipt_contents_for_metadata(&metadata, expected_sha256)?;
+    let receipt = std::fs::read_to_string(model_integrity_receipt_path(path))?;
+    if receipt != expected_receipt {
+        anyhow::bail!(
+            "Model artifact has not passed integrity verification: {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    let load_path = {
+        use std::os::fd::AsRawFd;
+        PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
+    };
+    #[cfg(not(unix))]
+    let load_path = path.to_path_buf();
+    Ok(VerifiedModelArtifact {
+        _file: file,
+        load_path,
+    })
+}
+
 /// Every call site pins a real digest; `Some("")` is a programmer error (an
 /// accidentally-empty struct field, not a deliberate "not yet pinned" state)
 /// and is rejected loudly in debug/test builds rather than silently treated
@@ -362,8 +443,8 @@ fn assert_pinned_digest_is_never_empty(expected_sha256: Option<&str>) {
 }
 
 /// Returning `false` here (rather than a `Result`) is deliberate: this is
-/// the fast-path "is the cached receipt still good" check, used broadly for
-/// simple boolean gating, and its callers already have a safe fallback --
+/// used broadly for simple boolean gating, and its callers already have a
+/// safe fallback --
 /// `verify_or_record_model_integrity` falls through to a full re-hash of
 /// the file, which succeeds independently of the keychain and correctly
 /// re-confirms a genuinely valid file as trusted. So a keychain hiccup here
@@ -2536,6 +2617,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn integrity_receipt_rejects_same_size_replacement_with_restored_mtime() {
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity-replay")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create integrity test directory");
+        let model_path = test_dir.join("model.onnx");
+        tokio::fs::write(&model_path, b"original model bytes")
+            .await
+            .expect("write model");
+        let digest = calculate_sha256(&model_path).await.expect("hash model");
+
+        assert!(verify_or_record_model_integrity(&model_path, Some(&digest))
+            .await
+            .expect("verify model"));
+        let original_mtime = std::fs::metadata(&model_path)
+            .expect("model metadata")
+            .modified()
+            .expect("model modification time");
+
+        tokio::fs::write(&model_path, b"replaced model bytes")
+            .await
+            .expect("replace model with same-size bytes");
+        std::fs::File::options()
+            .write(true)
+            .open(&model_path)
+            .expect("open replacement")
+            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .expect("restore modification time");
+
+        assert!(!is_model_artifact_trusted(&model_path, Some(&digest)));
+
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_handle_loads_checked_inode_after_path_swap() {
+        use std::io::Read;
+
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity-load-race")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create test directory");
+        let model_path = test_dir.join("model.bin");
+        tokio::fs::write(&model_path, b"verified bytes")
+            .await
+            .expect("write model");
+        let digest = calculate_sha256(&model_path).await.expect("hash model");
+        verify_or_record_model_integrity(&model_path, Some(&digest))
+            .await
+            .expect("verify model");
+
+        let verified =
+            open_verified_model_artifact(&model_path, &digest).expect("open verified handle");
+        let replacement = test_dir.join("replacement.bin");
+        tokio::fs::write(&replacement, b"attacker bytes")
+            .await
+            .expect("write replacement");
+        tokio::fs::rename(&replacement, &model_path)
+            .await
+            .expect("swap path");
+
+        let mut loaded = String::new();
+        std::fs::File::open(verified.load_path())
+            .expect("reopen verified descriptor")
+            .read_to_string(&mut loaded)
+            .expect("read verified bytes");
+        assert_eq!(loaded, "verified bytes");
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    }
+
+    #[tokio::test]
     async fn startup_integrity_migration_upgrades_exact_legacy_artifacts_only() {
         let test_dir = std::env::temp_dir()
             .join("plainsong-model-integrity-migration")
@@ -2685,7 +2842,7 @@ mod tests {
         // Forging a receipt requires reproducing the exact bytes
         // `model_integrity_receipt_contents` would compute -- including the
         // MAC, which needs the keychain-held key. A receipt written with the
-        // right plaintext fields (version/sha256/size/modified_nanos) but
+        // attacker-known plaintext fields but
         // without a matching `mac=` line -- exactly what someone with only
         // filesystem access to the models directory could produce by reading
         // this module's public source -- must be rejected.

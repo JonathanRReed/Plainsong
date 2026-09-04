@@ -37,4 +37,20 @@ describe("packaged macOS smoke harness", () => {
       expect(source, script).toContain("setTimeout(() => resolve(null), 15000)");
     }
   });
+
+  it("never searches unrelated TextEdit documents during recovery-shortcut cleanup", () => {
+    const source = fs.readFileSync(
+      path.resolve(process.cwd(), "scripts/capture-packaged-macos-recovery-shortcuts.mjs"),
+      "utf8",
+    );
+    const cleanup = source.slice(
+      source.indexOf("function closeDisposableDocument"),
+      source.indexOf("function focusedElementRole"),
+    );
+
+    expect(cleanup).toContain(`if (text of document 1) is \${asString(expectedText)} then`);
+    expect(cleanup).toContain("close document 1 saving no");
+    expect(cleanup).not.toContain("repeat with i from (count of documents)");
+    expect(cleanup).not.toContain("contains ${asString(expectedText)}");
+  });
 });
