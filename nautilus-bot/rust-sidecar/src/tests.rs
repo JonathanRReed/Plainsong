@@ -6005,6 +6005,15 @@ fn dictation_retention_cutoff_behaves_as_expected() {
 }
 
 #[test]
+fn dictation_persistence_honors_no_save_and_immediate_retention() {
+    assert!(should_persist_dictation(true, "never"));
+    assert!(should_persist_dictation(true, "24h"));
+    assert!(!should_persist_dictation(false, "never"));
+    assert!(!should_persist_dictation(false, "24h"));
+    assert!(!should_persist_dictation(true, "immediate"));
+}
+
+#[test]
 fn recent_delivery_falls_back_when_current_target_is_unknown() {
     let now = chrono::Utc::now();
     let delivery = RecentDictationDelivery {
