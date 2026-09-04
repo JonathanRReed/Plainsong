@@ -25,6 +25,7 @@ import {
   compareStrings,
   formatDate,
   formatDateTime,
+  formatNumber,
   formatTime,
 } from "@/lib/format-locale";
 
@@ -174,6 +175,15 @@ describe("format-locale uses the locale the bridge supplies", () => {
     expect(compareStrings("öl", "zebra")).toBeLessThan(0);
     setAppLocale("sv-SE");
     expect(compareStrings("öl", "zebra")).toBeGreaterThan(0);
+  });
+
+  it("formats numbers in the injected locale", () => {
+    setAppLocale("en-US");
+    const american = formatNumber(12_345);
+    setAppLocale("de-DE");
+
+    expect(american).toBe("12,345");
+    expect(formatNumber(12_345)).toBe("12.345");
   });
 
   it("falls back to en-US when the bridge is absent", () => {

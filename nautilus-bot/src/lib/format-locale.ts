@@ -58,6 +58,7 @@ const TIME_PARTS = {
 const dateFormatters = new Map<string, Intl.DateTimeFormat>();
 const timeFormatters = new Map<string, Intl.DateTimeFormat>();
 const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
+const numberFormatters = new Map<string, Intl.NumberFormat>();
 const collators = new Map<string, Intl.Collator>();
 
 function cached<T>(cache: Map<string, T>, locale: string, build: () => T): T {
@@ -109,6 +110,16 @@ export function formatDateTime(value: Date | string | number): string {
   return cached(dateTimeFormatters, locale, () =>
     new Intl.DateTimeFormat(locale, { ...DATE_PARTS, ...TIME_PARTS }),
   ).format(date);
+}
+
+/** A number in the user's own locale. Replaces `Number.toLocaleString()`. */
+export function formatNumber(value: number): string {
+  const locale = appLocale();
+  return cached(
+    numberFormatters,
+    locale,
+    () => new Intl.NumberFormat(locale),
+  ).format(value);
 }
 
 /**

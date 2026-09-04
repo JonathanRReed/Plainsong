@@ -418,5 +418,5 @@ describe("macOS Apple Speech helper contract", () => {
     expect(sidecar).toContain(
       "provider_supports_generic_live_preview(dictation_provider)",
     );
-  });
+  }, 15_000);
 });

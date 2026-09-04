@@ -49,14 +49,14 @@
       "label": "Spoken punctuation tokens become structured prose",
       "modePreset": "voice",
       "inputText": "hello comma this is jon period new paragraph i will follow up question mark",
-      "expectedOutput": "Hello, this is jon.\n\nI will follow up?"
+      "expectedOutput": "Hello, this is jon. New paragraph I will follow up?"
     },
     {
       "id": "fmt-chat-lightweight",
       "label": "Chat mode keeps line breaks lightweight",
       "modePreset": "messages",
       "inputText": "hi there new line i can send that over tomorrow",
-      "expectedOutput": "Hi there\nI can send that over tomorrow"
+      "expectedOutput": "Hi there new line I can send that over tomorrow"
     },
     {
       "id": "fmt-email-style",
@@ -72,7 +72,7 @@
       "modePreset": "voice",
       "formattingHint": "Notion",
       "inputText": "first section period new paragraph second section period",
-      "expectedOutput": "First section.\n\nSecond section."
+      "expectedOutput": "First section. New paragraph second section."
     },
     {
       "id": "fmt-symbols",

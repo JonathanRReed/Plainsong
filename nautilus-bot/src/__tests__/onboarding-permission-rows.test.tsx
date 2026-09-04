@@ -27,6 +27,8 @@ vi.mock("@/lib/backend/asr", () => ({
 
 vi.mock("@/lib/backend/ai", () => ({
   getOllamaStatus: vi.fn(async () => true),
+  listOllamaModelCatalog: vi.fn(async () => []),
+  getCuratedOllamaModelCatalog: vi.fn(async () => []),
 }));
 
 vi.mock("@/lib/backend/dictation", () => ({

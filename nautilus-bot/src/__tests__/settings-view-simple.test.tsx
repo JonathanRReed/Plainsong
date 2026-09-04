@@ -206,6 +206,8 @@ vi.mock("@/lib/backend", () => ({
     conflicts: [],
   })),
   getOllamaStatus: vi.fn(async () => true),
+  listOllamaModelCatalog: vi.fn(async () => []),
+  getCuratedOllamaModelCatalog: vi.fn(async () => []),
   getSecurityStatus: vi.fn(async () => ({
     vaultInitialized: false,
     vaultUnlocked: false,
