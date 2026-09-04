@@ -158,9 +158,6 @@ pub(crate) fn admit_dictation_samples(
 /// Bytes a mono 16-bit WAV track consumes per second at 48 kHz, the rate every
 /// mixed meeting session lands on.
 pub const MEETING_WAV_BYTES_PER_SECOND_PER_TRACK: u64 = 48_000 * 2;
-const VAULT_STREAM_HEADER_BYTES: u64 = 21;
-const VAULT_STREAM_FRAME_PLAINTEXT_BYTES: u64 = 1024 * 1024;
-const VAULT_STREAM_FRAME_OVERHEAD_BYTES: u64 = 4 + 16;
 /// Recording time a meeting must have room for before it is allowed to start.
 ///
 /// Refusing here is recoverable and honest; running out mid-meeting is not — the
@@ -321,16 +318,9 @@ pub fn meeting_vault_staging_bytes(track_plaintext_bytes: &[u64]) -> u64 {
     track_plaintext_bytes
         .iter()
         .fold(0_u64, |total, plaintext| {
-            // The stream always writes one trailing frame, including for empty input.
-            let frames = plaintext
-                .checked_div(VAULT_STREAM_FRAME_PLAINTEXT_BYTES)
-                .unwrap_or(0)
-                .saturating_add(1);
-            total.saturating_add(
-                plaintext
-                    .saturating_add(VAULT_STREAM_HEADER_BYTES)
-                    .saturating_add(frames.saturating_mul(VAULT_STREAM_FRAME_OVERHEAD_BYTES)),
-            )
+            total.saturating_add(crate::crypto::ProjectKeyManager::streaming_ciphertext_len(
+                *plaintext,
+            ))
         })
 }
 
