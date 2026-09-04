@@ -104,6 +104,14 @@ pub(crate) fn should_deliver_dictation_text(delivery_mode: models::DictationDeli
     delivery_mode == models::DictationDeliveryMode::System
 }
 
+pub(crate) fn should_insert_dictation_result(
+    final_text: &str,
+    command_applied: Option<&str>,
+) -> bool {
+    !final_text.trim().is_empty()
+        || matches!(command_applied, Some("delete_selection" | "delete_phrase"))
+}
+
 /// Resolve the on-disk path to the Silero VAD ONNX model, but only when
 /// `vad_backend` actually calls for it -- when the energy-threshold backend
 /// is selected, skip touching the filesystem/download-manager entirely and
@@ -2080,7 +2088,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
             }
         }
 
-        if !final_text.is_empty() {
+        if should_insert_dictation_result(&final_text, command_applied.as_deref()) {
             let insert_started_at = std::time::Instant::now();
             insertion_dispatched_ms = Some(
                 stop_signal_instant

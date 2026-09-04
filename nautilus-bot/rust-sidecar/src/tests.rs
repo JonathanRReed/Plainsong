@@ -3799,7 +3799,6 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
     assert!(!should_deliver_dictation_text(
         models::DictationDeliveryMode::Preview
     ));
-
     // Every warning is kept, not just the first one.
     let both = dictation_done_message(
         "pasted",
@@ -3811,6 +3810,14 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
     );
     assert!(both.contains("Nothing was selected"));
     assert!(both.contains(DICTATION_FORMAT_FAILED_WARNING));
+}
+
+#[test]
+fn empty_delete_command_results_are_delivered_to_the_selection() {
+    assert!(should_insert_dictation_result("", Some("delete_phrase")));
+    assert!(should_insert_dictation_result("", Some("delete_selection")));
+    assert!(!should_insert_dictation_result("", None));
+    assert!(!should_insert_dictation_result("", Some("rewrite_shorter")));
 }
 
 #[test]
