@@ -577,6 +577,9 @@ pub struct AudioCapture {
     /// the old thread's parking loop or its callbacks, so a stale stream can
     /// never push interleaved samples into a new session's buffer.
     dictation_capture_stop: Option<Arc<AtomicBool>>,
+    /// Session that owns the mutable dictation capture slots above. Cleanup
+    /// from an older request must never stop a replacement capture.
+    dictation_capture_session_id: Option<u64>,
     /// Mono samples currently held in `dictation_buffer` for the active session.
     /// The queue itself has no cheap length, and the capture callback must decide
     /// whether it is still under the session ceiling without walking it, so the
@@ -974,6 +977,7 @@ impl AudioCapture {
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
             dictation_capture_stop: None,
+            dictation_capture_session_id: None,
             dictation_buffered_samples: Arc::new(AtomicU64::new(0)),
             dictation_max_duration_reached: Arc::new(AtomicBool::new(false)),
             dictation_partial_buffer: Arc::new(std::sync::Mutex::new(
@@ -1431,6 +1435,7 @@ impl AudioCapture {
         // this session setting `is_dictating` back to true.
         let capture_stop = Arc::new(AtomicBool::new(true));
         self.dictation_capture_stop = Some(Arc::clone(&capture_stop));
+        self.dictation_capture_session_id = Some(session_id);
 
         let buffer = Arc::clone(&self.dictation_buffer);
         let buffered_samples = Arc::clone(&self.dictation_buffered_samples);
@@ -1711,6 +1716,7 @@ impl AudioCapture {
     fn retire_dictation_preparation_thread(&mut self) {
         self.is_dictating.store(false, Ordering::SeqCst);
         self.signal_capture_stop();
+        self.dictation_capture_session_id = None;
         if let Some(handle) = self.dictation_thread.take() {
             if let Err(error) = join_thread_with_timeout(
                 handle,
@@ -1834,6 +1840,7 @@ impl AudioCapture {
         tracing::info!("Stopping dictation capture...");
         self.is_dictating.store(false, Ordering::SeqCst);
         self.signal_capture_stop();
+        self.dictation_capture_session_id = None;
         self.clear_dictation_vad_gate();
 
         if let Some(handle) = self.dictation_thread.take() {
@@ -1940,7 +1947,18 @@ impl AudioCapture {
         Ok(wav_data)
     }
 
+    pub fn stop_dictation_for_session(&mut self, expected_session_id: u64) -> Result<Vec<u8>> {
+        if self.dictation_capture_session_id != Some(expected_session_id) {
+            return Err(anyhow::anyhow!(
+                "Dictation audio session {} is no longer active",
+                expected_session_id
+            ));
+        }
+        self.stop_dictation()
+    }
+
     pub fn abort_dictation(&mut self) {
+        self.dictation_capture_session_id = None;
         self.is_dictating.store(false, Ordering::SeqCst);
         self.signal_capture_stop();
         self.clear_dictation_vad_gate();
@@ -1963,6 +1981,16 @@ impl AudioCapture {
             partial.samples.clear();
             partial.total_samples = 0;
         }
+    }
+
+    /// Abort only when the caller still owns the live capture. Returns false
+    /// for stale cleanup so a replacement session remains untouched.
+    pub fn abort_dictation_for_session(&mut self, expected_session_id: u64) -> bool {
+        if self.dictation_capture_session_id != Some(expected_session_id) {
+            return false;
+        }
+        self.abort_dictation();
+        true
     }
 
     /// Whether the session that just ended was cut short by the maximum-length
@@ -3986,7 +4014,7 @@ mod dictation_capture_lifecycle_tests {
     use super::{admit_dictation_samples, AudioCapture};
     use crate::audio::vad::{EnergyThresholdVadGate, VadConfig, VadGate};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier, Mutex};
 
     /// The per-session capture stop flag must be signalled (and the handle
     /// dropped) by both stop paths, so an old capture thread parked on it can
@@ -4009,6 +4037,50 @@ mod dictation_capture_lifecycle_tests {
             audio.dictation_capture_stop.is_none(),
             "the handle must be dropped so a new session mints a fresh flag"
         );
+        assert!(!audio.is_dictating.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stale_abort_does_not_stop_replacement_capture() {
+        let audio = Arc::new(Mutex::new(AudioCapture::new()));
+        let replacement_flag = Arc::new(AtomicBool::new(true));
+        let replacement_ready = Arc::new(Barrier::new(2));
+        let stale_audio = Arc::clone(&audio);
+        let stale_ready = Arc::clone(&replacement_ready);
+        let stale = std::thread::spawn(move || {
+            stale_ready.wait();
+            stale_audio
+                .lock()
+                .expect("audio lock")
+                .abort_dictation_for_session(1)
+        });
+
+        {
+            let mut audio = audio.lock().expect("audio lock");
+            audio.dictation_capture_session_id = Some(2);
+            audio.dictation_capture_stop = Some(Arc::clone(&replacement_flag));
+            audio.is_dictating.store(true, Ordering::SeqCst);
+        }
+        replacement_ready.wait();
+
+        assert!(!stale.join().expect("stale cleanup task"));
+        let audio = audio.lock().expect("audio lock");
+        assert_eq!(audio.dictation_capture_session_id, Some(2));
+        assert!(replacement_flag.load(Ordering::SeqCst));
+        assert!(audio.is_dictating.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn matching_abort_stops_owned_capture() {
+        let mut audio = AudioCapture::new();
+        let session_flag = Arc::new(AtomicBool::new(true));
+        audio.dictation_capture_session_id = Some(7);
+        audio.dictation_capture_stop = Some(Arc::clone(&session_flag));
+        audio.is_dictating.store(true, Ordering::SeqCst);
+
+        assert!(audio.abort_dictation_for_session(7));
+        assert_eq!(audio.dictation_capture_session_id, None);
+        assert!(!session_flag.load(Ordering::SeqCst));
         assert!(!audio.is_dictating.load(Ordering::SeqCst));
     }
 
