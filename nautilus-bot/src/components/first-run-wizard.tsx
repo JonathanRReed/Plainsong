@@ -394,10 +394,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [meetingDownloadPercent, setMeetingDownloadPercent] = useState<number | null>(null);
   const meetingDownloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
   const modelInteractionStartedRef = useRef(false);
-  // Captures whatever dictation provider was already persisted at mount, so
+  // Captures whatever dictation route was already persisted at mount, so
   // ensureDefaultModelDownloading can tell "nothing configured yet" apart
   // from "user already has a different, working route" -- see its comment.
   const initialDictationProviderRef = useRef<string | null>(null);
+  const initialDictationModelIdRef = useRef<string | null>(null);
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
   // Hold-to-talk and hands-free are real, working modes configured from
@@ -519,6 +520,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               : "ollama",
         );
         initialDictationProviderRef.current = settings.transcription.dictationProvider ?? null;
+        initialDictationModelIdRef.current = settings.transcription.dictationModelId ?? null;
         if (settings.transcription.dictationProvider === "moonshine") {
           setSelectedModelId("moonshine-base");
         } else if (settings.transcription.dictationProvider === "parakeet") {
@@ -955,16 +957,16 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // macos_apple_speech, a cloud provider). Someone who opens "Fix dictation
   // setup" for an unrelated reason (a hotkey conflict, say) and just clicks
   // through this step must not have their working provider silently
-  // downgraded/overwritten. Both "parakeet" (the current default) and
-  // "whisper" (the default for every install that predates this default
-  // change -- i.e. the entire pre-upgrade user base) count as "still on a
-  // default route" here, not as a deliberate non-default choice.
+  // downgraded/overwritten. Parakeet is the current default, while only
+  // whisper/base.en is the legacy default; other Whisper models may be a
+  // deliberate user choice and must be preserved.
   const ensureDefaultModelDownloading = useCallback(() => {
     const existingProvider = initialDictationProviderRef.current;
+    const existingModelId = initialDictationModelIdRef.current;
     const hasExistingNonDefaultRoute =
       Boolean(existingProvider) &&
       existingProvider !== "parakeet" &&
-      existingProvider !== "whisper";
+      !(existingProvider === "whisper" && existingModelId === "base.en");
     if (hasExistingNonDefaultRoute) {
       return;
     }
