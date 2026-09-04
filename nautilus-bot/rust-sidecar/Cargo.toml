@@ -122,7 +122,7 @@ hmac = "0.13"
 rand = "0.10"
 async-trait = "0.1"
 hex = "0.4"
-argon2 = "0.5"
+argon2 = "0.6"
 aes-gcm = "0.11"
 zeroize = "1.8"
 # keyring 3.x ships NO platform credential store unless a backend feature is

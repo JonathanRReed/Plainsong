@@ -9,7 +9,6 @@ import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   isExpectedSidecarStdinClose,
   retryOnceAfterMicrophonePreparationTimeout,
-  shouldRestartTerminatedSidecar,
   SIDECAR_SHUTDOWN_MESSAGE,
 } from "./sidecar-recovery-policy";
 
@@ -239,7 +238,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "open_calendar_privacy_settings",
   "open_permission_settings",
   "open_recording_audio",
-  "pause_recording",
+  "pause_meeting_capture",
   "prepare_meeting_brief",
   "preview_support_bundle",
   "prepare_recording_playback",
@@ -264,7 +263,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "request_dictation_permissions",
   "register_capture_admission",
   "reset_app_state",
-  "resume_recording",
+  "resume_meeting_capture",
   "restore_backup_default",
   "retranscribe_recording",
   "retry_meeting_analysis",
@@ -334,6 +333,7 @@ export class IpcBridge {
   private pendingTerminationReason: SidecarTerminationReason | null = null;
   private senderValidator: SenderValidator | null = null;
   private shuttingDown = false;
+  private quitPending = false;
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly maxRestarts = 5;
@@ -449,23 +449,12 @@ export class IpcBridge {
       // A recycle we initiated knows why it killed the process; anything else
       // is classified from how the process actually died. A signal means
       // something killed it, no signal means it went away on its own.
-      const initiatedByThisProcess = this.pendingTerminationReason !== null;
       const reason =
         this.pendingTerminationReason ?? (signal ? "killed" : "crash");
       this.pendingTerminationReason = null;
-      const restart = shouldRestartTerminatedSidecar({
-        signal,
-        initiatedByThisProcess,
-      });
-      if (!restart) {
-        console.log(
-          `[sidecar] not restarting: ${signal} came from outside this process, so the app is being torn down`,
-        );
-      }
       this.handleSidecarTermination(
         reason,
         `Sidecar process exited (code=${code}, signal=${signal})`,
-        restart,
       );
     });
 
@@ -503,14 +492,9 @@ export class IpcBridge {
   // the string and had to match on its wording to tell a crash from a failed
   // spawn, which broke silently whenever the wording changed.
   //
-  // `restart` is false only when the caller has established that the sidecar
-  // died because the whole process group is going down (see
-  // shouldRestartTerminatedSidecar). Pending requests are still rejected and
-  // the renderer is still told the sidecar is gone.
   private handleSidecarTermination(
     reason: SidecarTerminationReason,
     message: string,
-    restart = true,
   ): void {
     this.sidecarHealthy = false;
     this.eventCallback?.("sidecar-runtime-changed", {
@@ -526,18 +510,18 @@ export class IpcBridge {
       this.restartTimer = null;
     }
 
-    if (restart && !this.shuttingDown && this.restartAttempts < this.maxRestarts) {
+    if (!this.shuttingDown && !this.quitPending && this.restartAttempts < this.maxRestarts) {
       const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
       this.restartAttempts++;
       console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
       this.restartTimer = setTimeout(() => {
         this.restartTimer = null;
-        if (this.shuttingDown) {
+        if (this.shuttingDown || this.quitPending) {
           return;
         }
         this.spawnSidecar();
       }, delay);
-    } else if (restart && this.restartAttempts >= this.maxRestarts) {
+    } else if (this.restartAttempts >= this.maxRestarts) {
       console.error("[sidecar] max restarts reached, giving up");
     }
     // Reject all pending requests with a clear error message
@@ -738,6 +722,7 @@ export class IpcBridge {
       return;
     }
     this.shuttingDown = true;
+    this.quitPending = true;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -764,6 +749,14 @@ export class IpcBridge {
           this.process.kill("SIGTERM");
         }
       }, 3000);
+    }
+  }
+
+  setQuitPending(pending: boolean): void {
+    this.quitPending = pending;
+    if (pending && this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
     }
   }
 }

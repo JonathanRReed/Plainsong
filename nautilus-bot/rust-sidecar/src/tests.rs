@@ -555,7 +555,6 @@ fn renderer_settings_cannot_replace_privileged_privacy_state() {
         export_location_id: Some("approved-location".to_string()),
         export_location_label: Some("Exports".to_string()),
         export_location_approved: true,
-        encrypt_recordings: true,
         vault_initialized: true,
         vault_salt: Some("sidecar-owned-salt".to_string()),
         ..settings::PrivacySettings::default()
@@ -567,7 +566,6 @@ fn renderer_settings_cannot_replace_privileged_privacy_state() {
         export_location_label: Some("Renderer label".to_string()),
         export_location_approved: true,
         // Models a debounced snapshot captured before vault migration.
-        encrypt_recordings: false,
         vault_initialized: false,
         vault_salt: Some("renderer-salt".to_string()),
         ..settings::PrivacySettings::default()
@@ -582,7 +580,6 @@ fn renderer_settings_cannot_replace_privileged_privacy_state() {
         current.export_location_label
     );
     assert!(incoming.export_location_approved);
-    assert!(incoming.encrypt_recordings);
     assert!(incoming.vault_initialized);
     assert_eq!(incoming.vault_salt.as_deref(), Some("sidecar-owned-salt"));
 }
@@ -2608,6 +2605,7 @@ fn meeting_transcripts_ignore_destination_scoped_dictionary_entries() {
     let entries = vec![
         dictionary_entry_fixture("widget", "Widget Pro", Some("Slack"), None),
         dictionary_entry_fixture("today", "TODAY", None, Some("email")),
+        dictionary_entry_fixture("Ship", "Dispatch", None, Some("other")),
     ];
 
     enrich_meeting_transcript(&mut transcript, &entries);

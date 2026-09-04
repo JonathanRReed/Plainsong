@@ -53,8 +53,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   average. What is kept is a numeric voice signature, not audio: it cannot be
   played back, it is excluded from exports and from the `plainsong` command
   and its MCP server, it never leaves the machine, and it is included in a
-  local backup like the rest of the database. Settings lists every remembered
-  voice with per-voice delete and Delete all, both audit-logged. An optional
+  local backup like the rest of the database. A signature is written only for
+  a speaker you name, one Plainsong offers to name and you confirm, or one it
+  names through the optional automatic-match setting. Unnamed clusters stay in
+  memory until you quit. Turning the feature off stops new collection but does
+  not delete existing remembered voices. Settings lists every remembered voice
+  with per-voice delete and Delete all, both audit-logged. An optional
   second switch applies a name without asking when the match clears a stricter
   threshold; the transcript marks such a name "auto" until it is confirmed,
   and a name you typed is never overwritten. Matching never crosses
@@ -611,13 +615,12 @@ evidence is stale and must be recaptured before this becomes a candidate.
   send is now treated as the app going away; SIGKILL, a non-zero exit and a
   recycle Plainsong initiated itself still get their replacement.
 - Remembered voices now store what Settings says they store. A per-meeting
-  voice signature is written only for a speaker who is given a name — by you,
-  or by "Apply a confident match without asking" — instead of for every
-  speaker in the room. Other speakers' numbers are held in memory while
-  Plainsong is open and never written down, so an unnamed voice leaves nothing
-  behind; the visible cost, now documented, is that reopening a meeting after
-  a restart offers no suggestions for speakers nobody named until speaker
-  identification runs again.
+  voice signature is written only for a speaker who is given a name, by you or
+  by "Apply a confident match without asking", instead of for every speaker in
+  the room. Other speakers' numbers are held in memory while Plainsong is open
+  and never written down, so an unnamed voice leaves nothing behind. Turning
+  the feature off stops new collection but does not delete existing remembered
+  voices; use Forget or Delete all to remove those.
 - Renaming a speaker works again on meetings recorded before "Remember voices"
   was turned on. The rename editor offered to remember a voice Plainsong had
   no signature for, defaulted that offer to on, and the save was then refused
@@ -1031,8 +1034,9 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - The Word export no longer italicises identifiers: `file_name_here` keeps
   its underscores, because `_` now marks emphasis only at a word boundary.
 - An action item whose owner the meeting called by their first name is no
-  longer dropped when the speaker alias or the transcript spells the name out
-  in full ("Priya" against "Priya Raman", "Jon" against "Jonathan").
+  longer dropped when the speaker alias spells the name out in full ("Priya"
+  against "Priya Raman"). Transcript words must match exactly: capitalization
+  alone no longer lets a fabricated owner such as "Mark" match "Marketing".
 - Following the audio no longer re-renders the whole Meetings view about four
   times a second, and the up and down arrow keys inside the transcript no
   longer move the reading position while a control in it has focus.

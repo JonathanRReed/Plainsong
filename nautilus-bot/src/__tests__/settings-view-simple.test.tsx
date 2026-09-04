@@ -1963,6 +1963,56 @@ describe("SettingsView performance behavior", () => {
     expect(screen.queryByText(/read-only/)).toBeNull();
   });
 
+  it("serializes rapid saved-prompt writes through the settings scheduler", async () => {
+    const backend = await import("@/lib/backend");
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("AI & Keys"));
+    fireEvent.click(await screen.findByRole("button", { name: "Manage prompts" }));
+    const dialog = await screen.findByRole("dialog");
+    const saveSettings = vi.mocked(backend.saveSettings);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText("Saving…")).toBeNull());
+
+    let finishFirstSave: (() => void) | undefined;
+    saveSettings.mockClear();
+    saveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishFirstSave = resolve;
+        }),
+    );
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Hide Decisions made" }),
+    );
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Hide Open questions" }),
+    );
+    await act(async () => Promise.resolve());
+    expect(saveSettings).toHaveBeenCalledTimes(1);
+
+    finishFirstSave?.();
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    const finalWrite = saveSettings.mock.calls[1]?.[0];
+    expect(
+      finalWrite?.ai?.savedPrompts?.filter((prompt) => prompt.hidden),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "Decisions made" }),
+        expect.objectContaining({ name: "Open questions" }),
+      ]),
+    );
+  });
+
   // ── Translate to English (roadmap item B7a) ────────────────────────────
   it("refuses translate-to-English on an English-only whisper model and says why", async () => {
     render(
