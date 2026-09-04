@@ -51,6 +51,9 @@ export const ALLOWED_EXTERNAL_HOSTS: readonly string[] = [
   "elevenlabs.io",
   // Deepgram Nova → rust-sidecar/src/asr/deepgram.rs
   "developers.deepgram.com",
+  // Mistral Voxtral → rust-sidecar/src/asr/mistral_voxtral.rs
+  "console.mistral.ai",
+  "docs.mistral.ai",
   // Gemini Transcribe → rust-sidecar/src/asr/gemini_transcribe.rs
   "ai.google.dev",
   // macOS Apple Speech / Windows SDK dictation provider docs

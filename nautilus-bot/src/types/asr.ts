@@ -183,6 +183,7 @@ export type AsrProviderType =
   | "cohere_local"
   | "qwen3_asr"
   | "deepgram"
+  | "mistral_voxtral"
   | "gemini_transcribe"
   // The transcribe.cpp spike route. The sidecar only reports it when it was
   // built with `--features asr-transcribe-cpp` (off by default and absent from

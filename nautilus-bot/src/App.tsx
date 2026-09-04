@@ -25,11 +25,10 @@ import { ToastProvider, useToast } from "@/components/toast";
 import { AppCommandPalette } from "@/components/app-command-palette";
 import { matchNavShortcut } from "@/lib/nav-shortcuts";
 import {
-  MEETING_ONBOARDING_STORAGE_KEY,
-  ONBOARDING_STORAGE_KEY,
   OPEN_ONBOARDING_EVENT,
   type OnboardingMode,
 } from "@/lib/onboarding";
+import { useOnboardingGate } from "@/features/onboarding/use-onboarding-gate";
 import {
   OPEN_MAIN_VIEW_EVENT,
   OPEN_RECORDING_WORKSPACE_EVENT as OPEN_RECORDING_WORKSPACE_CUSTOM_EVENT,
@@ -216,7 +215,16 @@ function AppRuntimeListeners() {
   return null;
 }
 
-function App() {
+/**
+ * Everything inside the providers, so the first-run gate can read the same
+ * live readiness the rest of the app does.
+ *
+ * The gate used to live in `App` above `ProductReadinessProvider` and consult
+ * one localStorage boolean. That boolean is shared with every development
+ * build through the Electron user-data directory, so an installed copy read
+ * "already onboarded" off months of dev runs and never showed the wizard.
+ */
+function AppShell() {
   const [activeView, setActiveView] = useState<ViewId>("dictation");
   const [pendingRecordingWorkspaceId, setPendingRecordingWorkspaceId] = useState<string | null>(
     null
@@ -228,9 +236,22 @@ function App() {
   const navigationFocusReadyRef = useRef(false);
 
   // UI overlays
-  const [wizardMode, setWizardMode] = useState<
-    OnboardingMode | "unresolved" | null
-  >("unresolved");
+  const { decision: onboardingGate, recordCompleted, recordDeferred } =
+    useOnboardingGate();
+  // A wizard the reader asked for by hand (Settings, Home, Setup), which
+  // outranks the gate's own answer.
+  const [requestedWizardMode, setRequestedWizardMode] =
+    useState<OnboardingMode | null>(null);
+  // Setup opens at most once per launch on its own. Finishing the wizard with
+  // something still missing (a skipped model download, a permission left off)
+  // would otherwise put the gate straight back into "show" the moment
+  // readiness refreshed, which is a modal the reader cannot get out of.
+  const [setupClosedThisSession, setSetupClosedThisSession] = useState(false);
+  const wizardMode: OnboardingMode | null =
+    requestedWizardMode ??
+    (onboardingGate.action === "show" && !setupClosedThisSession
+      ? onboardingGate.mode
+      : null);
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof performance === "undefined") return;
@@ -257,17 +278,42 @@ function App() {
     mainRef.current?.focus({ preventScroll: true });
   }, [activeView]);
 
+  // The reader closed setup and something is still missing — a model download
+  // they skipped, a permission they left off. Record that as a deferral
+  // against exactly what remains, so the next launch is quiet about it and
+  // still speaks up if something else breaks. Without this, finishing the
+  // wizard without finishing setup reopens it on every single launch.
+  const deferredResidualRef = useRef<string | null>(null);
+  const gateUnmetSignature = onboardingGate.unmet.join(",");
   useEffect(() => {
-    try {
-      const alreadyOnboarded =
-        localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
-      setWizardMode(alreadyOnboarded ? null : "full");
-    } catch {
-      // If storage is unavailable, fail into onboarding instead of flashing a
-      // workspace whose setup state has not been established.
-      setWizardMode("full");
+    if (!setupClosedThisSession || onboardingGate.action !== "show") {
+      return;
     }
-  }, []);
+    if (deferredResidualRef.current === gateUnmetSignature) {
+      return;
+    }
+    deferredResidualRef.current = gateUnmetSignature;
+    void recordDeferred().catch((error) => {
+      deferredResidualRef.current = null;
+      console.warn("[onboarding] could not record the deferred setup state:", error);
+    });
+  }, [
+    gateUnmetSignature,
+    onboardingGate.action,
+    recordDeferred,
+    setupClosedThisSession,
+  ]);
+
+  // One line per launch decision, so a support bundle can say why the wizard
+  // did or did not appear. State only — never anything the reader wrote.
+  useEffect(() => {
+    if (onboardingGate.action === "wait") {
+      return;
+    }
+    console.info(
+      `[onboarding] ${onboardingGate.action}: ${onboardingGate.reason}`,
+    );
+  }, [onboardingGate.action, onboardingGate.reason]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -300,7 +346,7 @@ function App() {
   useEffect(() => {
     const handleOpenOnboarding = (event: Event) => {
       const detail = (event as CustomEvent<{ mode?: OnboardingMode }>).detail;
-      setWizardMode(detail?.mode ?? "full");
+      setRequestedWizardMode(detail?.mode ?? "full");
     };
 
     window.addEventListener(OPEN_ONBOARDING_EVENT, handleOpenOnboarding as EventListener);
@@ -408,37 +454,41 @@ function App() {
   const handleWizardComplete = (result?: {
     markOnboardingComplete?: boolean;
     meetingsCompleted?: boolean;
+    deferred?: boolean;
   }) => {
-    try {
-      if (result?.markOnboardingComplete ?? wizardMode === "full") {
-        localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
-      }
-      if (result?.meetingsCompleted) {
-        localStorage.setItem(MEETING_ONBOARDING_STORAGE_KEY, "true");
-      }
-    } catch {
-      // Completion markers are best-effort state, not a reason to keep the wizard open.
-    }
-    setWizardMode(null);
+    const completed = result?.markOnboardingComplete ?? wizardMode === "full";
+    // Closed with setup unfinished. Recorded so "Skip setup for now" means
+    // something durable: the gate stays quiet about exactly what the reader
+    // declined, and speaks up again when something new breaks.
+    const write = result?.deferred
+      ? recordDeferred()
+      : completed
+        ? recordCompleted(result?.meetingsCompleted === true)
+        : null;
+    void write?.catch((error) => {
+      // Losing the record costs a repeat of this wizard, which is a great deal
+      // better than a wizard that will not close.
+      console.warn("[onboarding] could not record the setup state:", error);
+    });
+    setSetupClosedThisSession(true);
+    setRequestedWizardMode(null);
   };
 
-  if (wizardMode === "unresolved") {
+  if (onboardingGate.action === "wait") {
     return (
-      <ThemeProvider>
-        <div
-          className="flex h-screen items-center justify-center bg-background text-foreground"
-          role="status"
-          aria-live="polite"
-          aria-label="Checking first-run setup"
-        >
-          <div className="flex flex-col items-center gap-3 text-center">
-            <span className="neume" aria-hidden="true" />
-            <p className="font-serif text-sm text-muted-foreground">
-              Checking your setup...
-            </p>
-          </div>
+      <div
+        className="flex h-screen items-center justify-center bg-background text-foreground"
+        role="status"
+        aria-live="polite"
+        aria-label="Checking first-run setup"
+      >
+        <div className="flex flex-col items-center gap-3 text-center">
+          <span className="neume" aria-hidden="true" />
+          <p className="font-serif text-sm text-muted-foreground">
+            Checking your setup...
+          </p>
         </div>
-      </ThemeProvider>
+      </div>
     );
   }
 
@@ -446,66 +496,73 @@ function App() {
   const activeViewLabel = VIEW_LABELS[activeView] ?? VIEW_LABELS.dashboard;
 
   return (
+    <>
+      <AppCommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} />
+      <div className="app-shell flex h-screen bg-background text-foreground">
+        <a
+          href="#main-content"
+          className="sr-only z-[100] rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+        >
+          Skip to workspace
+        </a>
+        <Sidebar
+          activeView={activeView}
+          onViewChange={(v) => setActiveView(v as ViewId)}
+          isCollapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+        />
+
+        <main
+          id="main-content"
+          ref={mainRef}
+          tabIndex={-1}
+          aria-label={`${activeViewLabel} workspace`}
+          className="app-main-surface min-w-0 flex-1 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+        >
+          <Suspense
+            fallback={
+              <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+                <span className="neume" aria-hidden="true" />
+                <p className="font-serif text-sm text-muted-foreground">
+                  Loading workspace...
+                </p>
+              </div>
+            }
+          >
+            <ActiveView />
+          </Suspense>
+        </main>
+        <span
+          className="sr-only"
+          role="status"
+          aria-live="polite"
+          aria-label="Current workspace"
+        >
+          {activeViewLabel} workspace
+        </span>
+      </div>
+
+      {/* Opened by the first-run gate, or by hand from Settings, Home or Setup. */}
+      {wizardMode && (
+        <FirstRunWizard mode={wizardMode} onComplete={handleWizardComplete} />
+      )}
+    </>
+  );
+}
+
+function App() {
+  return (
     <ThemeProvider>
       <ToastProvider>
         <AppRuntimeListeners />
-        <AppCommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} />
         <TooltipProvider>
           <ErrorBoundary>
             <RecordingProvider>
               <DataCacheProvider>
+                {/* Above the shell now, because the first-run gate reads the
+                    same readiness the rest of the app does. */}
                 <ProductReadinessProvider>
-                  <div className="app-shell flex h-screen bg-background text-foreground">
-                    <a
-                      href="#main-content"
-                      className="sr-only z-[100] rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
-                    >
-                      Skip to workspace
-                    </a>
-                    <Sidebar
-                      activeView={activeView}
-                      onViewChange={(v) => setActiveView(v as ViewId)}
-                      isCollapsed={sidebarCollapsed}
-                      onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-                    />
-
-                    <main
-                      id="main-content"
-                      ref={mainRef}
-                      tabIndex={-1}
-                      aria-label={`${activeViewLabel} workspace`}
-                      className="app-main-surface min-w-0 flex-1 overflow-hidden focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
-                    >
-                      <Suspense
-                        fallback={
-                          <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
-                            <span className="neume" aria-hidden="true" />
-                            <p className="font-serif text-sm text-muted-foreground">
-                              Loading workspace...
-                            </p>
-                          </div>
-                        }
-                      >
-                        <ActiveView />
-                      </Suspense>
-                    </main>
-                    <span
-                      className="sr-only"
-                      role="status"
-                      aria-live="polite"
-                      aria-label="Current workspace"
-                    >
-                      {activeViewLabel} workspace
-                    </span>
-                  </div>
-
-                  {/* First-run wizard (shown once on first launch) */}
-                  {wizardMode && (
-                    <FirstRunWizard
-                      mode={wizardMode}
-                      onComplete={handleWizardComplete}
-                    />
-                  )}
+                  <AppShell />
                 </ProductReadinessProvider>
               </DataCacheProvider>
             </RecordingProvider>

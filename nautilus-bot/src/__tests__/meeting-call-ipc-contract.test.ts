@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { getCommandTimeoutMs } from "../../electron/ipc-command-policy";
+import { dispatcher } from "./sidecar-source";
 
 /**
  * The renderer↔sidecar contract for pause/resume and live-call detection.
@@ -14,7 +15,8 @@ import { getCommandTimeoutMs } from "../../electron/ipc-command-policy";
  */
 const repoRoot = path.resolve(__dirname, "..", "..");
 const bridge = readFileSync(path.join(repoRoot, "electron/ipc-bridge.ts"), "utf8");
-const sidecar = readFileSync(path.join(repoRoot, "rust-sidecar/src/lib.rs"), "utf8");
+// The router: the only file that can hold an arm the renderer can reach.
+const sidecar = dispatcher();
 const backend = readFileSync(path.join(repoRoot, "src/lib/backend.ts"), "utf8");
 
 const COMMANDS = [

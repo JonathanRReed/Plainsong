@@ -10,6 +10,7 @@ import type { AsrProviderType, MeetingTranscriptDetails } from "@/types";
  */
 const PROVIDER_DIARIZER_NAMES: Partial<Record<AsrProviderType, string>> = {
   deepgram: "Deepgram",
+  mistral_voxtral: "Mistral Voxtral",
   gemini_transcribe: "Gemini",
 };
 

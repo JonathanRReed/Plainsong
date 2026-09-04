@@ -754,8 +754,8 @@ impl BackupManager {
         let Some(provider_value) = provider.as_ref() else {
             checks.push(fail_check(
                 "provider_selected",
-                "Cloud provider selected",
-                "No cloud provider configured.",
+                "Cloud storage service selected",
+                "No cloud storage service is chosen, so there is nowhere to upload to.",
             ));
             let ready = checks
                 .iter()
@@ -794,8 +794,8 @@ impl BackupManager {
 
         checks.push(pass_check(
             "provider_selected",
-            "Cloud provider selected",
-            &format!("Using provider {:?}", provider_value),
+            "Cloud storage service selected",
+            &format!("Uploads go to {:?}", provider_value),
         ));
 
         match validate_cloud_folder(&resolved_cloud.cloud_folder) {

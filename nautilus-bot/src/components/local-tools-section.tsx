@@ -15,9 +15,14 @@ interface LocalToolsSectionProps {
 }
 
 /**
- * Settings > General > Local tools: the one switch behind the `plainsong`
- * command, its read-only MCP server, and `plainsong://` links, plus the
- * "Install command-line tool" action.
+ * Settings > General > Command line and MCP access: the one switch behind the
+ * `plainsong` command, its read-only MCP server, and `plainsong://` links, plus
+ * the "Install command-line tool" action.
+ *
+ * The heading used to read "Local tools", which made "local" mean a third thing
+ * on a tab where it already meant "on this Mac" (processing) and "prefer local"
+ * (engine routing). The settings key is still `automation.localToolsEnabled`;
+ * only the words a reader sees changed. See `src/lib/settings-vocabulary.ts`.
  *
  * The install row reports state, cause and next action in one line each
  * (DESIGN.md, State Design): installed / not installed / pointing at an older
@@ -103,7 +108,7 @@ export function LocalToolsSection({ enabled, onEnabledChange }: LocalToolsSectio
   return (
     <div className="pt-4 border-t space-y-4">
       <div className="space-y-1">
-        <p className="section-heading">Local tools</p>
+        <p className="section-heading">Command line and MCP access</p>
         <p className="text-sm text-muted-foreground">
           Apps you run on this Mac, such as a terminal or an AI assistant, can read your
           meeting notes and transcripts. Nothing leaves the machine unless that app sends it.
@@ -112,8 +117,8 @@ export function LocalToolsSection({ enabled, onEnabledChange }: LocalToolsSectio
 
       <SettingsSwitch
         className="py-0"
-        label="Allow local tools"
-        description="Lets the plainsong command, its read-only MCP server, and plainsong:// links work. Off by default. They can read your meetings and dictations and trigger a recording gesture; they cannot change or delete anything."
+        label="Allow the plainsong command and MCP server"
+        description="Off by default. Turning it on lets the plainsong command, its read-only MCP server, and plainsong:// links read your meetings and dictations and start a recording; none of them can change or delete anything."
         checked={enabled}
         onCheckedChange={onEnabledChange}
       />

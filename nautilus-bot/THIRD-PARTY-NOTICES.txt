@@ -7,7 +7,7 @@ Regenerate from nautilus-bot/ with:
 Application package: plainsong@0.9.0-beta.3
 Rust dependency packages: 532
 npm production dependency packages: 79
-Downloadable model artifacts: 20
+Downloadable model artifacts: 22
 
 The dependency indexes retain declared license identifiers and repository URLs
 even when no license file is available in the installed package or Cargo cache.
@@ -233,7 +233,7 @@ pinned in the source, and stored in the user's own models directory. The
 terms are the upstream project's, not Plainsong's, and are reproduced here
 because several differ from the license of the code that runs them.
 
-Model artifacts: 20
+Model artifacts: 22
 Artifacts whose upstream declares no license: 2 (ERes2NetV2 speaker embedding (int8), pyannote community-1 bundle (speakrs export))
 
 S1-mini by Superwhisper (GGUF)
@@ -311,6 +311,24 @@ Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0)
   Files: nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf
   Pinned in: rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)
   Note: NVIDIA ships this model under OpenMDW-1.1 rather than the CC-BY-4.0 of the Parakeet weights beside it. It is downloadable only behind the optional transcribe.cpp runtime and is not selectable as a route, so nothing redistributes it.
+
+Voxtral Mini 3B 2507 (GGUF Q4_K_M)
+  Used for: Measuring Mistral's open-weights Voxtral against the shipped Parakeet default on this hardware, from `benchmark-latency`. It is never offered as a transcription route: see artifacts/qa/model-selection-2026-09-03.md.
+  License: Apache-2.0
+  Repository: https://huggingface.co/handy-computer/Voxtral-Mini-3B-2507-gguf
+  Revision: 5690205813042c07cbaa86d2a9dcc585fcd31304
+  Files: Voxtral-Mini-3B-2507-Q4_K_M.gguf
+  Pinned in: rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)
+  Note: A GGUF conversion of Mistral's mistralai/Voxtral-Mini-3B-2507. The GGUF repository's own card metadata declares apache-2.0, matching the source weights, verified 2026-09-03. Downloadable only behind the optional transcribe.cpp runtime and not selectable as a route, so nothing redistributes it.
+
+Voxtral Mini 4B Realtime 2602 (GGUF Q4_K_M)
+  Used for: Measuring Mistral's open-weights streaming Voxtral against the shipped streaming route on this hardware, from `benchmark-latency`. It is never offered as a transcription route.
+  License: Apache-2.0
+  Repository: https://huggingface.co/handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf
+  Revision: b3e1c979e3775cbd0a49a65878a0ec7f06789ed7
+  Files: Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf
+  Pinned in: rust-sidecar/src/asr/transcribe_cpp.rs (MODEL_SPECS)
+  Note: A GGUF conversion of Mistral's mistralai/Voxtral-Mini-4B-Realtime-2602, apache-2.0 on both the source and the conversion, verified 2026-09-03. Downloadable only behind the optional transcribe.cpp runtime and not selectable as a route.
 
 Moonshine (ONNX)
   Used for: Low-latency English speech recognition, tiny and base.

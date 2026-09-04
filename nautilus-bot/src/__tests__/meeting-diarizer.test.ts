@@ -25,6 +25,9 @@ describe("describeMeetingDiarizer", () => {
     expect(describeMeetingDiarizer(details({ diarizer: "gemini_transcribe" }))).toBe(
       "Speakers by Gemini",
     );
+    expect(describeMeetingDiarizer(details({ diarizer: "mistral_voxtral" }))).toBe(
+      "Speakers by Mistral Voxtral",
+    );
   });
 
   it("names Plainsong for a locally diarized meeting, whatever embedding model ran", () => {

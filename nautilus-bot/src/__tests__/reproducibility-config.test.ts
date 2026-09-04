@@ -80,7 +80,10 @@ describe("reproducible package and release configuration", () => {
     const sourceGate = readRepoFile("scripts/capture-source-gates.mjs");
 
     expect(vitestConfig).toContain('pool: "threads"');
-    expect(vitestConfig).toContain("maxWorkers: 4");
+    expect(vitestConfig).toContain("maxWorkers: process.env.CI ? 2 : 4");
+    expect(vitestConfig).toContain(
+      "testTimeout: process.env.CI ? 15_000 : 5_000",
+    );
     expect(sourceGate).toContain("vite(?:st)?\\.config");
   });
 

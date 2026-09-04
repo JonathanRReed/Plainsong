@@ -160,14 +160,19 @@ using sensitive content.
   meeting has no microphone and system-audio sides, so speaker separation is
   whatever diarization can infer from one mixed track.
 - Speaker labels from a cloud provider only cover a whole meeting when the
-  whole meeting fit in one request. Deepgram and Gemini are the only providers
+  whole meeting fit in one request. Deepgram, Gemini and Mistral Voxtral are
+  the only providers
   here that return speakers, and each numbers them per request — "speaker 0" in
   one request is not promised to be the same person as "speaker 0" in the next.
   Plainsong sends the whole recording in one request where the provider allows
-  it (Deepgram up to two hours, Gemini up to thirty minutes). The Gemini
+  it (Deepgram up to two hours, Mistral up to two hours, Gemini up to thirty
+  minutes). The Gemini
   figure is Google's own cap for a diarized request; the Deepgram one is
   Plainsong's, because Deepgram publishes no duration limit -- only a 2 GB
-  request size, which two hours of a meeting recording stays well inside. Past that, or when the single request fails,
+  request size, which two hours of a meeting recording stays well inside. The
+  Mistral one is Plainsong's too: Mistral allows three hours per request but
+  only 1 GB per file, and three hours of a 48 kHz meeting is 1.04 GB, so a
+  three-hour ceiling would never be the limit that applied. Past that, or when the single request fails,
   the meeting is transcribed in ninety-second chunks and Plainsong's own
   diarizer labels the speakers instead. The meeting header always names which
   one ran; it is never inferred from the transcription provider.
@@ -175,16 +180,21 @@ using sensitive content.
   no overlap handling, so simultaneous speech and rapid turn-taking are where
   it loses. It is the only option for a locally transcribed meeting: no local
   speech model returns speaker labels.
-- The same diarizer cannot report a speaker turn shorter than five seconds. It
-  merges its two-second windows into turns and discards any turn under that
-  length as noise, so a quick exchange is either stretched to five seconds or
-  left without a speaker. Measured on a five-minute synthetic conversation with
-  three-second turns: 59% of frames get the wrong speaker and 121 of 300
-  seconds come back unattributed. Conversations with longer turns are much
-  better — the same measurement with five-second turns is 16% — but nothing in
-  the app tells you which kind of meeting you just recorded. The numbers, and
-  why a fix has to change the turn minimum rather than the windows, are in
-  `artifacts/qa/diarization-segmentation-2026-09-02.md`.
+- The same diarizer cannot report a speaker turn shorter than three seconds. It
+  merges its two-second windows into turns and drops any turn no two windows
+  agree on, because a single window's label is uncorroborated — without that
+  rule a two-person meeting comes back with sixteen speakers. So an
+  interjection shorter than about three seconds is left without a speaker
+  rather than given the wrong one. This floor was five seconds through beta.2,
+  which cost far more: on a five-minute synthetic conversation with
+  three-second turns, 59% of frames got the wrong speaker and 121 of 300
+  seconds came back unattributed. At three seconds the same fixture is 24% and
+  nothing is unattributed. Across 24 synthetic fixtures and both speaker
+  models, average frame error is 17% and the right number of speakers is found
+  in 45 of 48 runs. Two-second turns are still beyond it: expect 32% to 60%
+  frame error there, and nothing in the app tells you which kind of meeting you
+  just recorded. Numbers in
+  `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
 - Never use the beta to record a confidential conversation without the consent
   required by your organization and location.
 - Plainsong does not post the consent notice into the meeting chat for you.
@@ -246,7 +256,10 @@ using sensitive content.
   name "auto" until you confirm it, and a name you typed is never overwritten.
 - Notifications use macOS Notification Center. The first one Plainsong shows
   is what makes macOS ask whether to allow them; if you decline, none appear
-  and the in-app surfaces carry the same information.
+  and the in-app surfaces carry the same information. macOS does not report
+  that answer back to an app, so this is the one permission the setup screen
+  cannot show a state for -- it says so there rather than guessing, and offers
+  the Notifications pane so you can check or change it yourself.
 
 ## Updates and rollback
 

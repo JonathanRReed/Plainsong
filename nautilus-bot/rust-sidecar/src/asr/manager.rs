@@ -1885,6 +1885,41 @@ fn runtime_diagnostics_for_provider(
                 },
             }
         }
+        AsrProviderType::MistralVoxtral => {
+            let has_key = has_provider_secret_or_env("mistral", "MISTRAL_API_KEY");
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "Mistral Voxtral Mini Transcribe 2 cloud API ready. Returns speaker labels \
+                     and segment timestamps at $0.003/min; a request that asks for timestamps \
+                     cannot also carry a language, so meetings auto-detect it."
+                        .to_string()
+                } else {
+                    "Set MISTRAL_API_KEY to enable Mistral Voxtral cloud.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["MISTRAL_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some(
+                            "Get an API key from https://console.mistral.ai and set it in Settings -> API Keys."
+                                .to_string(),
+                        )
+                    },
+                },
+            }
+        }
         AsrProviderType::Deepgram => {
             let has_key = has_provider_secret_or_env("deepgram", "DEEPGRAM_API_KEY");
             RuntimeDiagnosticsInternal {

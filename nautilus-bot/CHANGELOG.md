@@ -13,14 +13,26 @@ changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
 evidence is stale and must be recaptured before this becomes a candidate.
 
 ### Documented
-- Plainsong's own speaker separation cannot report a turn shorter than five
-  seconds: it discards any turn under that length as noise. On a five-minute
-  synthetic conversation with three-second turns that costs 59% of frames and
-  leaves 121 of 300 seconds unattributed. Nothing changed in the app; this is a
-  measurement of what it already did, now written into KNOWN-LIMITATIONS with
-  the evidence in `artifacts/qa/diarization-segmentation-2026-09-02.md`.
+- Plainsong's own speaker separation could not report a turn shorter than five
+  seconds: it discarded any turn under that length as noise. On a five-minute
+  synthetic conversation with three-second turns that cost 59% of frames and
+  left 121 of 300 seconds unattributed. First measured in
+  `artifacts/qa/diarization-segmentation-2026-09-02.md`; the floor has since
+  been corrected, see Fixed below, and KNOWN-LIMITATIONS describes what is
+  true now rather than this.
 
 ### Added
+- Mistral Voxtral as a cloud transcription route (BYOK). Voxtral Mini
+  Transcribe 2 at $0.003/min — the cheapest route in Plainsong that returns
+  speaker labels, and cheaper and more accurate than Deepgram Nova-3 on
+  Artificial Analysis's own board (3.59% against 5.18%, fetched 2026-09-03).
+  13 languages, segment timestamps, and up to 100 of your dictionary terms
+  sent as context bias. Mistral's API refuses a language and timestamps on the
+  same request, so meetings detect the language and dictation sends the one
+  you chose; the route copy says so. Settings › API Keys now offers a Mistral
+  slot, which the app has accepted in the keychain for some time with no way
+  to enter it. Evidence and the comparison that chose this route over running
+  Voxtral locally: `artifacts/qa/model-selection-2026-09-03.md`.
 - A second, fully offline route for Cohere Transcribe: the same 03-2026 model
   Plainsong already calls over Cohere's API, downloaded as int4 ONNX (2.0 GiB)
   and run on this machine with no key and no upload. Experimental and never a
@@ -369,6 +381,41 @@ evidence is stale and must be recaptured before this becomes a candidate.
   the answer.
 
 ### Changed
+- **Every control in Settings now says what it does, in one sentence, and no
+  word means two things.** A first-time reader reported being "either kinda
+  confused or not being shown what something does or things having multiple
+  meanings". Thirty-one controls had a label and nothing under it — "While
+  dictating", "Method", "Meeting audio", every retention picker — or a
+  description that named a mechanism rather than a consequence. Each now
+  carries one plain sentence, wired to its control with `aria-describedby` so
+  a screen reader hears it and `src/__tests__/settings-view-simple.test.tsx`
+  can prove it is there: the description is a required prop on the settings
+  row primitives, so a control cannot ship without one. Seven overloaded words
+  were retired for a single settled term — a "custom mode" is a **profile**
+  everywhere now, an "analysis provider" or "cloud provider" is a **service**,
+  a "route" is a **speech engine**, "Local tools" is **command line and MCP
+  access**, and a bare "model" always carries its job ("speech model", "AI
+  model"). The map is committed in `src/lib/settings-vocabulary.ts` and
+  `src/__tests__/settings-vocabulary.test.ts` fails if a word is reused for a
+  second concept or a retired phrase comes back — including in the sidecar's
+  user-facing strings. The full control-by-control inventory, with the settings
+  key and what the code does with it, is
+  `docs/settings-inventory-2026-09-03.md`.
+- **The cloud-AI consent switch has one home.** Two switches wrote
+  `privacy.remoteProcessingEnabled`, one on Privacy & Security and one on AI &
+  Keys, each with a different description; a reader could not tell whether that
+  was one consent or two. The switch lives on Privacy & Security, where it now
+  says the whole consequence, and AI & Keys reports its state and sends you
+  there.
+- **The meetings ordering control moved to the meetings list it reorders.** It
+  was called "Meeting quality policy" and stood on the Transcription tab's
+  diagnostics card, two tabs from the meetings engine list, where it read like
+  a second engine picker. It is now "Which meeting engine to offer first",
+  directly above that list on Models, and says plainly that it only reorders.
+- Auto-delete for dictations now says what it actually removes — the dictation's
+  text in History as well as its audio, because
+  `enforce_dictation_retention_policy` deletes the whole recording row — and
+  says that the same control also stands in Dictation.
 - **The installed application is 86 MB smaller** — 384 MB down to 297 MB on an
   unsigned `electron:pack` build — without removing anything the app can do.
   Two things were shipping that nothing could reach. Chromium's user-interface
@@ -504,6 +551,55 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- First-run setup never appeared for anyone who had run an earlier Plainsong
+  build, and Plainsong now decides whether to show it from whether the app
+  actually works rather than from a flag. The flag was
+  `nautilus_onboarding_complete` in the renderer's localStorage, which lives in
+  the Electron user-data directory that every development build shares with the
+  packaged app: install the signed DMG onto a Mac that had ever opened
+  Plainsong and it read "already onboarded" off months of old runs, skipped the
+  wizard in silence, and left the reader to find and grant every macOS
+  permission themselves. Setup state is now a durable, inspectable record in
+  `settings.json` (`onboarding`: when setup finished, on which version, and
+  which grants were visible at the time), written only by the sidecar. But the
+  record does not decide either: on every launch Plainsong checks whether
+  dictation can actually run — microphone permission, a dictation model on
+  disk, and Accessibility when the configured insertion mode needs it — and
+  offers setup when it cannot, so a permission revoked in September gets help
+  rather than a stranded app. A profile still carrying the old flag is believed
+  only where the app is demonstrably working, and the record is written for it
+  then. "Skip setup for now" is now recorded as a deferral against exactly what
+  was missing, so it stays quiet about that and speaks up again when something
+  else breaks; Settings › General › Setup › "Show setup again" reopens it at
+  any time. The same fix covers the write-only
+  `nautilus_meeting_onboarding_complete` flag. Evidence, captured against the
+  packaged app on a fresh data directory and on one carrying the legacy flag:
+  `artifacts/qa/onboarding-first-run-2026-09-03.md`.
+- The first-run permissions step now explains each macOS grant instead of
+  listing four switch names. All six Plainsong asks for are there — Microphone,
+  Accessibility (plus the keyboard fallback granted from the same list),
+  Screen & System Audio, Speech Recognition, Calendar and Notifications — and
+  each row says in one sentence what Plainsong does with it, in another what
+  still works without it, shows whether it is on right now, and offers a button
+  to that exact System Settings pane. The state re-checks when the window comes
+  back, so a switch flipped in System Settings updates here without a relaunch.
+  Optional grants are marked and never drawn as faults, and Notifications says
+  plainly that Plainsong cannot read that answer — macOS decides it the first
+  time a notification is shown and does not report it back — rather than
+  guessing at "not granted".
+- Speaker separation can now report a turn as short as three seconds, where it
+  used to need five. The old floor deleted most of an ordinary conversation:
+  on a five-minute recording with three-second turns it got 59% of frames wrong
+  and left 121 of 300 seconds with no speaker; the same recording is now 24%
+  wrong with nothing unattributed. Averaged over 24 synthetic fixtures (turn
+  lengths from 2 to 8 seconds, two and three speakers, with and without pauses)
+  and both speaker models, frame error falls from 38% to 17%, unattributed
+  speech from 86 seconds in 300 to 3.5, and the right number of speakers is
+  found in 45 of 48 runs instead of 33. The floor is not removed, because a
+  turn no two windows agree on is noise — without it a two-person meeting comes
+  back with sixteen speakers. Turns shorter than three seconds are still left
+  without a speaker rather than given the wrong one. Evidence:
+  `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
 - Quitting Plainsong no longer schedules a sidecar it is about to throw away.
   When the whole process group is signalled — a macOS logout or restart, or a
   QA harness stopping the app — the sidecar can die before Electron's own quit
@@ -1047,6 +1143,18 @@ evidence is stale and must be recaptured before this becomes a candidate.
   not as having "gone silent," which previously read as a muting problem.
 
 ### Removed
+- The "Compatibility & Runtime Tuning" panel in Settings › Transcription ›
+  Downloads & Diagnostics: Mode (auto/manual), Fallback policy, "Allow MLX
+  acceleration routes", "Windows Foundry Local", and the manual engine
+  priority list. None of them could change anything on a shipped build.
+  `effective_provider_selection` discards `optimization` and `mlx_enabled`
+  outright (the MLX route was deleted), `fallback_policy` is normalized on load
+  and read by no decision, and `select_requested_engine` only ever returns a
+  Windows engine — behind `cfg(target_os = "windows")`, in a product whose own
+  KNOWN-LIMITATIONS puts Windows outside the beta. The settings keys still load
+  from existing files and no default changed; only the controls that could not
+  do anything were removed. `Repair local cache`, the benchmark, and the
+  per-engine diagnostics cards stay.
 - The never-reachable "post the consent notice into the meeting chat for
   you" automation for Zoom and Google Meet. Its keystroke senders sat behind
   a gate that was hard-wired to off because nothing could prove the meeting

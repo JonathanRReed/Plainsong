@@ -93,6 +93,7 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "groq",
   "deepgram",
   "gemini_transcribe",
+  "mistral_voxtral",
   "cohere_transcribe",
 ];
 
@@ -119,17 +120,20 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     // speaker labels with the transcript.
     "deepgram",
     "gemini_transcribe",
+    "mistral_voxtral",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
     "cohere_transcribe",
   ],
-  // Deepgram and Gemini lead the cloud order for meetings because they are the
-  // only two routes that return speaker labels with the transcript; every
-  // other cloud route still pays for a local diarization pass afterwards.
+  // Deepgram, Gemini and Mistral Voxtral lead the cloud order for meetings
+  // because they are the only three routes that return speaker labels with the
+  // transcript; every other cloud route still pays for a local diarization
+  // pass afterwards.
   best_available: [
     "deepgram",
     "gemini_transcribe",
+    "mistral_voxtral",
     "openai_cloud",
     "elevenlabs_scribe",
     "groq",
@@ -438,6 +442,9 @@ function routeSummary(
   }
   if (providerType === "gemini_transcribe") {
     return "Lowest published word error rate of the cloud routes, with speaker labels and word timestamps. Its API refuses your dictionary on the same request, so meetings get speakers and dictation gets the dictionary. Billed to your Google key at $0.005/min.";
+  }
+  if (providerType === "mistral_voxtral") {
+    return "Cheapest cloud route here with speaker labels, at $0.003/min, in 13 languages. Mistral's API refuses a language and timestamps on the same request, so meetings detect the language and dictation sends the one you chose. Billed to your Mistral key.";
   }
   if (providerType === "macos_apple_speech") {
     return capabilityBadge === "Best for dictation"
