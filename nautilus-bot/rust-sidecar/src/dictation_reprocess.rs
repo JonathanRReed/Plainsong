@@ -318,6 +318,7 @@ pub(crate) async fn reprocess_dictation_impl(
             mode_preset: base_preset.as_str(),
             smart_formatting_enabled: true,
             recent_inserted_text: None,
+            command_mode_enabled: false,
             destination_category,
             numbers_as_digits,
         },
