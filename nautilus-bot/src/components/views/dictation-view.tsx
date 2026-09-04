@@ -1939,7 +1939,7 @@ export function DictationView() {
         const nextCopyToClipboard =
           settings.transcription.dictationCopyToClipboard ?? false;
         const nextCommandModeEnabled =
-          settings.transcription.dictationCommandModeEnabled ?? true;
+          settings.transcription.dictationCommandModeEnabled ?? false;
         const nextRoutePreference =
           settings.transcription.dictationRoutePreference === "cloud"
             ? "cloud"
