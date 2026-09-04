@@ -1514,6 +1514,9 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 smart_formatting_enabled: true,
                 numbers_as_digits: resolve_dictation_numbers_as_digits(&settings_snapshot),
                 recent_inserted_text,
+                command_mode_enabled: settings_snapshot
+                    .transcription
+                    .dictation_command_mode_enabled,
                 destination_category,
             },
         );
@@ -2103,7 +2106,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 )
             });
             if undo_authorized {
-                match send_native_undo_key() {
+                match send_native_undo_key(app_target.as_deref(), app_bundle_id.as_deref()) {
                     Ok(()) => {
                         undo_performed = true;
                         outcome = "undone".to_string();

@@ -652,6 +652,7 @@ async fn run_fixture_benchmark(
             // baseline measures what that preset actually runs.
             numbers_as_digits: false,
             recent_inserted_text: None,
+            command_mode_enabled: false,
             destination_category: DictationAppCategory::Other,
         });
         let format_off_ms = format_off_started.elapsed().as_millis() as u64;
@@ -668,6 +669,7 @@ async fn run_fixture_benchmark(
             // text normalization included.
             numbers_as_digits: true,
             recent_inserted_text: None,
+            command_mode_enabled: false,
             destination_category: DictationAppCategory::Other,
         });
         let format_on_ms = format_on_started.elapsed().as_millis() as u64;
