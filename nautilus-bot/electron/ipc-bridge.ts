@@ -333,6 +333,7 @@ export class IpcBridge {
   private pendingTerminationReason: SidecarTerminationReason | null = null;
   private senderValidator: SenderValidator | null = null;
   private shuttingDown = false;
+  private quitPending = false;
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly maxRestarts = 5;
@@ -509,13 +510,13 @@ export class IpcBridge {
       this.restartTimer = null;
     }
 
-    if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
+    if (!this.shuttingDown && !this.quitPending && this.restartAttempts < this.maxRestarts) {
       const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
       this.restartAttempts++;
       console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
       this.restartTimer = setTimeout(() => {
         this.restartTimer = null;
-        if (this.shuttingDown) {
+        if (this.shuttingDown || this.quitPending) {
           return;
         }
         this.spawnSidecar();
@@ -721,6 +722,7 @@ export class IpcBridge {
       return;
     }
     this.shuttingDown = true;
+    this.quitPending = true;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -747,6 +749,14 @@ export class IpcBridge {
           this.process.kill("SIGTERM");
         }
       }, 3000);
+    }
+  }
+
+  setQuitPending(pending: boolean): void {
+    this.quitPending = pending;
+    if (pending && this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
     }
   }
 }
