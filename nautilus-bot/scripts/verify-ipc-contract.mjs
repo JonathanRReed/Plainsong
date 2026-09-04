@@ -116,6 +116,9 @@ const intentionallyUnreachableSidecarCommands = new Set([
   // recent renderer gesture and selects the active recording from main-owned
   // state. Renderers can name only the corresponding meeting-capture aliases.
   "pause_recording",
+  // Direct packaged-QA sidecar command. It requires an explicit harness-only
+  // environment flag and is never accepted from an Electron renderer.
+  "qa_smoke_test_cursor_insert",
   "record_automation_audit_event",
   "resume_recording",
   "start_recording",

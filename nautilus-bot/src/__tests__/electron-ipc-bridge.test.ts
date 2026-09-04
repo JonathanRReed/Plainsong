@@ -20,6 +20,7 @@ import {
 describe("privileged storage command admission", () => {
   it("does not expose the system-wide insertion smoke test to the renderer", () => {
     expect(isRendererCommandAllowed("smoke_test_cursor_insert")).toBe(false);
+    expect(isRendererCommandAllowed("qa_smoke_test_cursor_insert")).toBe(false);
   });
 
   it("allows native picker requests but never raw privileged approval commands", () => {
