@@ -57,11 +57,48 @@ mod catalog_contract_tests {
             Some(model.expected_manifest_digest.unwrap())
         ));
     }
+
+    #[test]
+    fn pull_stream_parser_accepts_a_final_unterminated_record() {
+        let mut parser = PullStreamParser::default();
+        assert!(
+            parser
+                .push(b"{\"status\":\"pulling\"}\n{\"status\":\"success\"}")
+                .unwrap()
+                .len()
+                == 1
+        );
+        let final_records = parser.finish().unwrap();
+        assert_eq!(final_records[0]["status"], "success");
+    }
+
+    #[test]
+    fn pull_stream_parser_rejects_an_oversized_unterminated_record() {
+        let mut parser = PullStreamParser::default();
+        let oversized = vec![b'x'; OLLAMA_PULL_RECORD_LIMIT + 1];
+        assert!(parser
+            .push(&oversized)
+            .unwrap_err()
+            .to_string()
+            .contains("too large"));
+    }
+
+    #[test]
+    fn pull_stream_parser_rejects_invalid_final_json() {
+        let mut parser = PullStreamParser::default();
+        parser.push(b"{not-json").unwrap();
+        assert!(parser
+            .finish()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid pull progress"));
+    }
 }
 
 const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
 const OLLAMA_SHOW_TIMEOUT: Duration = Duration::from_secs(3);
 const OLLAMA_METADATA_TTL: Duration = Duration::from_secs(10 * 60);
+const OLLAMA_PULL_RECORD_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CuratedOllamaModel {
@@ -148,6 +185,60 @@ fn digest_is_ready(model: &CuratedOllamaModel, installed_digest: Option<&str>) -
         Some(expected) => installed_digest == Some(expected),
         None => installed_digest.is_some(),
     }
+}
+
+#[derive(Default)]
+struct PullStreamParser {
+    pending: Vec<u8>,
+}
+
+impl PullStreamParser {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<Value>> {
+        self.pending.extend_from_slice(chunk);
+        let mut records = Vec::new();
+        while let Some(newline) = self.pending.iter().position(|byte| *byte == b'\n') {
+            if newline > OLLAMA_PULL_RECORD_LIMIT {
+                anyhow::bail!("Ollama pull progress record is too large");
+            }
+            let mut record = self.pending.drain(..=newline).collect::<Vec<_>>();
+            record.pop();
+            if let Some(value) = parse_pull_record(&record)? {
+                records.push(value);
+            }
+        }
+        if self.pending.len() > OLLAMA_PULL_RECORD_LIMIT {
+            anyhow::bail!("Ollama pull progress record is too large");
+        }
+        Ok(records)
+    }
+
+    fn finish(self) -> Result<Vec<Value>> {
+        parse_pull_record(&self.pending).map(|value| value.into_iter().collect())
+    }
+}
+
+fn parse_pull_record(record: &[u8]) -> Result<Option<Value>> {
+    let record = record.strip_suffix(b"\r").unwrap_or(record);
+    if record.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    serde_json::from_slice(record)
+        .map(Some)
+        .context("Ollama returned invalid pull progress")
+}
+
+fn report_pull_update<F>(update: Value, progress: &F) -> Result<()>
+where
+    F: Fn(u64, Option<u64>),
+{
+    if let Some(error) = update.get("error").and_then(Value::as_str) {
+        anyhow::bail!("Ollama pull failed: {}", error);
+    }
+    progress(
+        update.get("completed").and_then(Value::as_u64).unwrap_or(0),
+        update.get("total").and_then(Value::as_u64),
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -271,8 +362,11 @@ impl OllamaClient {
             anyhow::bail!("Ollama pull error {}: {}", status, body);
         }
         let mut stream = response.bytes_stream();
-        let mut pending = String::new();
+        let mut parser = PullStreamParser::default();
         loop {
+            if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("Ollama model installation cancelled");
+            }
             let chunk = tokio::select! {
                 _ = cancel_notify.notified() => anyhow::bail!("Ollama model installation cancelled"),
                 chunk = stream.next() => chunk,
@@ -281,26 +375,12 @@ impl OllamaClient {
             if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
                 anyhow::bail!("Ollama model installation cancelled");
             }
-            pending.push_str(
-                std::str::from_utf8(&chunk.context("Failed to read Ollama pull response")?)
-                    .context("Ollama returned invalid UTF-8")?,
-            );
-            while let Some(newline) = pending.find('\n') {
-                let line = pending[..newline].trim().to_string();
-                pending.drain(..=newline);
-                if line.is_empty() {
-                    continue;
-                }
-                let update: Value =
-                    serde_json::from_str(&line).context("Ollama returned invalid pull progress")?;
-                if let Some(error) = update.get("error").and_then(Value::as_str) {
-                    anyhow::bail!("Ollama pull failed: {}", error);
-                }
-                progress(
-                    update.get("completed").and_then(Value::as_u64).unwrap_or(0),
-                    update.get("total").and_then(Value::as_u64),
-                );
+            for update in parser.push(&chunk.context("Failed to read Ollama pull response")?)? {
+                report_pull_update(update, &progress)?;
             }
+        }
+        for update in parser.finish()? {
+            report_pull_update(update, &progress)?;
         }
         let entry = self
             .catalog()

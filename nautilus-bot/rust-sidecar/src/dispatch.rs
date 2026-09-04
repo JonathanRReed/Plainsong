@@ -836,7 +836,9 @@ pub async fn dispatch_command(
         "cancel_ollama_model_install" => {
             let was_active = state.ollama_pull_active.load(Ordering::SeqCst);
             state.ollama_pull_cancelled.store(true, Ordering::SeqCst);
-            state.ollama_pull_cancel_notify.notify_waiters();
+            if was_active {
+                state.ollama_pull_cancel_notify.notify_one();
+            }
             Ok(serde_json::json!({ "cancelled": was_active }))
         }
         "list_ollama_cloud_models" => {
