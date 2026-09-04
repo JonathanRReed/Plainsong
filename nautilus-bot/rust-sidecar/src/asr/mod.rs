@@ -1714,6 +1714,10 @@ impl AsrProviderType {
                         .to_string(),
                 },
                 ModelOption {
+                    id: "nova-2".to_string(),
+                    label: "Nova-2 (legacy general model)".to_string(),
+                },
+                ModelOption {
                     id: "nova-3-medical".to_string(),
                     label: "Nova-3 Medical (clinical vocabulary)".to_string(),
                 },
