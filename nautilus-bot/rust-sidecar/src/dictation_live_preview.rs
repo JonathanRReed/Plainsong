@@ -372,15 +372,27 @@ pub(crate) async fn await_live_preview_task(
 /// Called on every dictation stop path before transcription starts. Waits, but
 /// never forever: a preview that will not put itself down must not take the
 /// user's words with it.
-pub(crate) async fn stop_dictation_live_preview(state: &AppState) {
-    let control = { state.dictation_live_preview.lock().await.take() };
+/// Stop the preview only when it still belongs to `expected_session_id`.
+/// A stale stop failure must not take a replacement session's preview slot.
+pub(crate) async fn stop_dictation_live_preview_for_session(
+    state: &AppState,
+    expected_session_id: u64,
+) -> bool {
+    let control = {
+        let mut slot = state.dictation_live_preview.lock().await;
+        if slot.as_ref().map(|control| control.session_id) != Some(expected_session_id) {
+            return false;
+        }
+        slot.take()
+    };
     let Some(control) = control else {
-        return;
+        return false;
     };
     control
         .stop
         .store(true, std::sync::atomic::Ordering::SeqCst);
     await_live_preview_task(control.task, control.session_id).await;
+    true
 }
 
 /// Open a streaming session from whichever streaming engine this build has.

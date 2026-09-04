@@ -1522,7 +1522,7 @@ fn dictation_insertion_never_reads_a_streaming_partial() {
     }
     // The one thing it may say about the preview is "stop".
     assert!(
-        body.contains("stop_dictation_live_preview(state).await;"),
+        body.contains("stop_dictation_live_preview_for_session(state, session_id).await;"),
         "the stop path must close the live preview before the batch decode"
     );
 }
@@ -1533,7 +1533,7 @@ fn dictation_insertion_never_reads_a_streaming_partial() {
 fn the_live_preview_is_closed_before_the_final_transcription_starts() {
     let body = owned_stop_dictation_body();
     let close = body
-        .find("stop_dictation_live_preview(state).await;")
+        .find("stop_dictation_live_preview_for_session(state, session_id).await;")
         .expect("the stop path must close the live preview");
     let transcribe = body
         .find("transcribe_bytes_for_dictation")
@@ -3665,6 +3665,64 @@ fn dictation_session_runtime_reset_returns_to_idle_from_every_state() {
             assert!(start_options.lock().await.captured_context_text.is_none());
         });
     }
+}
+
+#[test]
+fn scoped_dictation_session_reset_clears_only_the_owned_session() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("current-thread runtime");
+    let runtime_state = Mutex::new(DictationSessionState::Recording);
+    let tracker = Mutex::new(DictationSessionTracker {
+        active_session_id: Some(7),
+        stopping_session_id: Some(7),
+        started_at: Some(std::time::Instant::now()),
+        started_at_epoch_ms: Some(1_700_000_000_000),
+        startup_latency_ms: Some(120),
+        acknowledged_at_epoch_ms: Some(1_700_000_000_010),
+        capture_ready_at_epoch_ms: Some(1_700_000_000_020),
+        first_stable_partial_at_epoch_ms: Some(1_700_000_000_030),
+        stop_requested_at: Some(std::time::Instant::now()),
+        final_transcript_at_epoch_ms: Some(1_700_000_000_040),
+        insertion_completed_at_epoch_ms: Some(1_700_000_000_050),
+        insertion_mode_at_start: Some(DictationInsertionMode::ClipboardOnly),
+        copy_to_clipboard_at_start: Some(true),
+        ..Default::default()
+    });
+    let start_options = Mutex::new(models::DictationStartOptions {
+        captured_context_text: Some("stale selection".to_string()),
+        ..Default::default()
+    });
+
+    let reset = runtime.block_on(reset_dictation_session_runtime_if_current(
+        &runtime_state,
+        &tracker,
+        &start_options,
+        7,
+    ));
+
+    assert!(reset);
+    runtime.block_on(async {
+        assert_eq!(*runtime_state.lock().await, DictationSessionState::Idle);
+        let tracker = tracker.lock().await;
+        assert!(tracker.active_session_id.is_none());
+        assert!(tracker.stopping_session_id.is_none());
+        assert!(tracker.started_at.is_none());
+        assert!(tracker.started_at_epoch_ms.is_none());
+        assert!(tracker.startup_latency_ms.is_none());
+        assert!(tracker.acknowledged_at_epoch_ms.is_none());
+        assert!(tracker.capture_ready_at_epoch_ms.is_none());
+        assert!(tracker.first_stable_partial_at_epoch_ms.is_none());
+        assert!(tracker.stop_requested_at.is_none());
+        assert!(tracker.final_transcript_at_epoch_ms.is_none());
+        assert!(tracker.insertion_completed_at_epoch_ms.is_none());
+        assert_eq!(
+            tracker.insertion_mode_at_start,
+            Some(DictationInsertionMode::ClipboardOnly)
+        );
+        assert_eq!(tracker.copy_to_clipboard_at_start, Some(true));
+        assert!(start_options.lock().await.captured_context_text.is_none());
+    });
 }
 
 /// Source of `stop_dictation_for_sidecar` from the point where the active

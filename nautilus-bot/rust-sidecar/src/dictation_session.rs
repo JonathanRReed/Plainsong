@@ -333,28 +333,33 @@ pub(crate) async fn start_dictation_for_sidecar(
     let model_warm_state = match startup_result {
         Ok(model_warm_state) => model_warm_state,
         Err(error) => {
-            reset_dictation_session_runtime(
+            let cleaned_current_session = reset_dictation_session_runtime_if_current(
                 &state.dictation_runtime_state,
                 &state.dictation_session_tracker,
                 &state.dictation_start_options,
+                session_id,
             )
             .await;
-            if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-                overlay.phase = "error".to_string();
-                overlay.message = Some(error.clone());
-                overlay.model_readiness = Some("error".to_string());
-                overlay.capture_ready = false;
+            if cleaned_current_session {
+                if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+                    if overlay.session_id == Some(session_id) {
+                        overlay.phase = "error".to_string();
+                        overlay.message = Some(error.clone());
+                        overlay.model_readiness = Some("error".to_string());
+                        overlay.capture_ready = false;
+                    }
+                }
+                handle.emit_event(
+                    "dictation-state-changed",
+                    serde_json::json!({
+                        "phase": "error",
+                        "sessionId": session_id,
+                        "message": error,
+                        "modelReadiness": "error",
+                        "captureReady": false,
+                    }),
+                );
             }
-            handle.emit_event(
-                "dictation-state-changed",
-                serde_json::json!({
-                    "phase": "error",
-                    "sessionId": session_id,
-                    "message": error,
-                    "modelReadiness": "error",
-                    "captureReady": false,
-                }),
-            );
             return Err(error);
         }
     };
@@ -571,6 +576,33 @@ pub(crate) async fn start_dictation_for_sidecar(
         }
     }
 
+    // Starting capture is synchronous but force-stop runs on another request
+    // task. Publish Recording only while this start still owns the session.
+    // If cancellation won immediately after capture opened, close the stream
+    // we just created instead of resurrecting an untracked microphone.
+    let owns_session = {
+        let tracker = state.dictation_session_tracker.lock().await;
+        if tracker.active_session_id == Some(session_id) {
+            let mut runtime_state = state.dictation_runtime_state.lock().await;
+            if *runtime_state == DictationSessionState::Primed {
+                *runtime_state = DictationSessionState::Recording;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+    if !owns_session {
+        state
+            .audio_capture
+            .lock()
+            .await
+            .abort_dictation_for_session(session_id);
+        return Err("Dictation start was cancelled".to_string());
+    }
+
     // Spawn the UI-only live-preview task. Both engines emit live-preview text
     // and NEITHER feeds the final transcript: the only thing they write is a
     // `partialText` field on `dictation-state-changed`. Best-effort; they
@@ -708,10 +740,6 @@ pub(crate) async fn start_dictation_for_sidecar(
     }
 
     {
-        let mut runtime_state = state.dictation_runtime_state.lock().await;
-        *runtime_state = DictationSessionState::Recording;
-    }
-    {
         let mut tracker = state.dictation_session_tracker.lock().await;
         if tracker.active_session_id == Some(session_id) && tracker.startup_latency_ms.is_none() {
             tracker.startup_latency_ms = tracker.started_at.map(|started_at| {
@@ -795,6 +823,34 @@ pub(crate) async fn reset_dictation_session_runtime(
     }
 }
 
+pub(crate) async fn reset_dictation_session_runtime_if_current(
+    runtime_state: &Mutex<DictationSessionState>,
+    session_tracker: &Mutex<DictationSessionTracker>,
+    start_options: &Mutex<models::DictationStartOptions>,
+    expected_session_id: u64,
+) -> bool {
+    let mut tracker = session_tracker.lock().await;
+    if tracker.active_session_id != Some(expected_session_id) {
+        return false;
+    }
+    let mut runtime_state = runtime_state.lock().await;
+    let mut start_options = start_options.lock().await;
+    *runtime_state = DictationSessionState::Idle;
+    tracker.active_session_id = None;
+    tracker.stopping_session_id = None;
+    tracker.started_at = None;
+    tracker.started_at_epoch_ms = None;
+    tracker.startup_latency_ms = None;
+    tracker.acknowledged_at_epoch_ms = None;
+    tracker.capture_ready_at_epoch_ms = None;
+    tracker.first_stable_partial_at_epoch_ms = None;
+    tracker.stop_requested_at = None;
+    tracker.final_transcript_at_epoch_ms = None;
+    tracker.insertion_completed_at_epoch_ms = None;
+    *start_options = models::DictationStartOptions::default();
+    true
+}
+
 /// Session metadata every terminal dictation-stop error event carries.
 /// Captured once so each failure site reports the same shape.
 pub(crate) struct DictationStopFailureContext {
@@ -824,25 +880,34 @@ pub(crate) async fn fail_dictation_stop(
     fallback_reason: Option<String>,
     message: String,
 ) -> String {
-    // Every terminal stop failure comes through here, so this is where a
-    // preview that outlived its session is guaranteed to be closed.
-    stop_dictation_live_preview(state).await;
-    reset_dictation_session_runtime(
+    // A cancelled stop may finish after another session has started. Its
+    // failure belongs only to the old session and must not stop the new
+    // preview, clear its tracker, or replace its overlay with an error.
+    let cleaned_current_session = reset_dictation_session_runtime_if_current(
         &state.dictation_runtime_state,
         &state.dictation_session_tracker,
         &state.dictation_start_options,
+        context.session_id,
     )
     .await;
+    if !cleaned_current_session {
+        return message;
+    }
+    // Every terminal stop failure comes through here, so this is where a
+    // preview that outlived its session is guaranteed to be closed.
+    stop_dictation_live_preview_for_session(state, context.session_id).await;
 
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-        overlay.phase = "error".to_string();
-        overlay.message = Some(message.clone());
-        overlay.requested_provider = Some(context.requested_provider.to_string());
-        overlay.actual_provider = Some(context.actual_provider.to_string());
-        overlay.requested_model_id = context.requested_model_id.clone();
-        overlay.actual_model_id = context.actual_model_id.clone();
-        overlay.fallback_reason = fallback_reason.clone();
-        overlay.target_app = context.app_target.clone();
+        if overlay.session_id == Some(context.session_id) {
+            overlay.phase = "error".to_string();
+            overlay.message = Some(message.clone());
+            overlay.requested_provider = Some(context.requested_provider.to_string());
+            overlay.actual_provider = Some(context.actual_provider.to_string());
+            overlay.requested_model_id = context.requested_model_id.clone();
+            overlay.actual_model_id = context.actual_model_id.clone();
+            overlay.fallback_reason = fallback_reason.clone();
+            overlay.target_app = context.app_target.clone();
+        }
     }
     handle.emit_event(
         "dictation-state-changed",
@@ -1165,21 +1230,24 @@ pub(crate) async fn stop_dictation_for_sidecar(
     ))
     .await;
 
-    let (audio_bytes, hit_max_duration) = {
+    let audio_stop_result = {
         let mut audio = state.audio_capture.lock().await;
         let hit_max_duration = audio.dictation_hit_max_duration();
-        match audio.stop_dictation() {
-            Ok(audio_bytes) => (audio_bytes, hit_max_duration),
-            Err(error) => {
-                return Err(fail_dictation_stop(
-                    state,
-                    handle,
-                    &failure_context,
-                    None,
-                    format!("Failed to stop dictation audio: {}", error),
-                )
-                .await);
-            }
+        audio
+            .stop_dictation_for_session(session_id)
+            .map(|audio_bytes| (audio_bytes, hit_max_duration))
+    };
+    let (audio_bytes, hit_max_duration) = match audio_stop_result {
+        Ok(result) => result,
+        Err(error) => {
+            return Err(fail_dictation_stop(
+                state,
+                handle,
+                &failure_context,
+                None,
+                format!("Failed to stop dictation audio: {}", error),
+            )
+            .await);
         }
     };
     // Put the live preview down before anything asks the GPU for the final
@@ -1187,7 +1255,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // the streaming recognizer holds its model's compute lease until its
     // session is closed -- which this awaits. The preview never fed the
     // transcript; this only stops it competing with the decode that does.
-    stop_dictation_live_preview(state).await;
+    stop_dictation_live_preview_for_session(state, session_id).await;
 
     let audio_finalized_ms = Some(elapsed_since_stop());
     if hit_max_duration {
@@ -1466,7 +1534,14 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 }
             }
 
-            let ai_selection = dictation_session_ai_selection(&settings_snapshot)?;
+            let ai_selection = match dictation_session_ai_selection(&settings_snapshot) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    return Err(
+                        fail_dictation_stop(state, handle, &failure_context, None, error).await,
+                    );
+                }
+            };
             match execute_dictation_command_action(
                 state,
                 &command_key,
@@ -2912,20 +2987,36 @@ mod dictation_idle_reset_tests {
         // preview would keep its recognizer -- and its model -- alive after
         // the session it belonged to had already ended in an error.
         assert!(
-            body.contains("stop_dictation_live_preview(state).await;"),
+            body.contains(
+                "stop_dictation_live_preview_for_session(state, context.session_id).await;"
+            ),
             "the terminal error path must close the live preview; a failed stop otherwise \
              leaves the streaming engine loaded with no session to end it"
         );
         let close = body
-            .find("stop_dictation_live_preview(state).await;")
+            .find("stop_dictation_live_preview_for_session(state, context.session_id).await;")
             .expect("the error path must close the live preview");
         let reset = body
-            .find("reset_dictation_session_runtime(")
+            .find("reset_dictation_session_runtime_if_current(")
             .expect("the error path must reset the session runtime");
         assert!(
-            close < reset,
-            "the preview must be closed before the session runtime is reset, so nothing is \
-             still feeding a session that no longer exists"
+            reset < close,
+            "session ownership must be checked before scoped preview cleanup"
+        );
+    }
+
+    #[test]
+    fn audio_guard_is_released_before_stop_failure_cleanup() {
+        const SOURCE: &str = include_str!("dictation_session.rs");
+        let start = SOURCE
+            .find("let audio_stop_result = {")
+            .expect("scoped audio stop result");
+        let body = &SOURCE[start..];
+        let guard_end = body.find("};").expect("audio guard end");
+        let failure = body.find("fail_dictation_stop(").expect("failure cleanup");
+        assert!(
+            guard_end < failure,
+            "failure cleanup must run after the audio guard is dropped"
         );
     }
 }
