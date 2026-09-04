@@ -232,6 +232,7 @@ export const DICTATION_HOLD_WATCHDOG_MS = 5 * 60 * 1000;
  */
 export type DictationShortcutStartOptions = {
   modeOverride?: { preset: string; customModeId: string | null };
+  handsFreeTrigger?: boolean;
 };
 
 type DictationShortcutSignalInput = {
@@ -244,6 +245,7 @@ type DictationShortcutSignalInput = {
 
 export type DictationShortcutSignalRuntime = {
   handleSignal: (input: DictationShortcutSignalInput) => Promise<void>;
+  startHandsFree: (startOptions: DictationShortcutStartOptions) => Promise<void>;
   onPhase: (phase: string) => void;
   dispose: () => void;
 };
@@ -292,6 +294,7 @@ export function createDictationShortcutSignalRuntime(deps: {
   let pendingHandsFreeStopGeneration: number | null = null;
   let pendingHandsFreeStopGestureEpochMs: number | null = null;
   let liveShortcutStartGeneration: number | null = null;
+  const invalidatedStartGenerations = new Set<number>();
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearWatchdog = (): void => {
@@ -324,28 +327,31 @@ export function createDictationShortcutSignalRuntime(deps: {
     const holdToTalkWithRelease =
       input.behavior === "hold_to_talk" && input.capability === "press_and_release";
 
-    if (decision.action === "ignore") {
-      if (input.signal === "pressed" && input.behavior === "hands_free") {
-        if (activeStartGeneration !== null) {
-          // The microphone may already be live while start_dictation is in flight.
-          pendingHandsFreeStopGeneration = activeStartGeneration;
-          pendingHandsFreeStopGestureEpochMs = stopGestureEpochMs;
-        } else if (liveShortcutStartGeneration !== null) {
-          // The start ack can arrive before its phase event, leaving a live
-          // session looking idle/primed to this controller.
-          liveShortcutStartGeneration = null;
-          deps.log?.("dictation shortcut stop_dictation", {
-            phase,
-            behavior: input.behavior,
-            capability: input.capability,
-            stopReason: "hands_free_toggle",
-          });
-          await deps.invoke("stop_dictation", {
-            stopReason: "hands_free_toggle",
-            stopGestureEpochMs,
-          });
-        }
+    // The cached phase can still be idle while a start is in flight or after
+    // its ack. Resolve the second hands-free press against tracked state first.
+    if (input.signal === "pressed" && input.behavior === "hands_free") {
+      if (activeStartGeneration !== null) {
+        pendingHandsFreeStopGeneration = activeStartGeneration;
+        pendingHandsFreeStopGestureEpochMs = stopGestureEpochMs;
+        return;
       }
+      if (liveShortcutStartGeneration !== null) {
+        liveShortcutStartGeneration = null;
+        deps.log?.("dictation shortcut stop_dictation", {
+          phase,
+          behavior: input.behavior,
+          capability: input.capability,
+          stopReason: "hands_free_toggle",
+        });
+        await deps.invoke("stop_dictation", {
+          stopReason: "hands_free_toggle",
+          stopGestureEpochMs,
+        });
+        return;
+      }
+    }
+
+    if (decision.action === "ignore") {
       if (input.signal === "released" && holdToTalkWithRelease) {
         if (activeStartGeneration !== null) {
           // Rapid tap: the release arrived while start_dictation was still in
@@ -414,6 +420,9 @@ export function createDictationShortcutSignalRuntime(deps: {
           pendingHandsFreeStopGeneration = null;
           pendingHandsFreeStopGestureEpochMs = null;
         }
+      }
+      if (invalidatedStartGenerations.delete(generation)) {
+        return;
       }
       liveShortcutStartGeneration = input.behavior === "hands_free" ? generation : null;
       if (pendingHandsFreeStopGeneration === generation) {
@@ -495,14 +504,39 @@ export function createDictationShortcutSignalRuntime(deps: {
     ) {
       clearWatchdog();
     }
-    if (phase === "idle" || phase === "done" || phase === "error") {
+    if (phase !== "preparing" && phase !== "primed" && phase !== "recording") {
       liveShortcutStartGeneration = null;
+      if (activeStartGeneration !== null) {
+        invalidatedStartGenerations.add(activeStartGeneration);
+        if (pendingHoldReleaseGeneration === activeStartGeneration) {
+          pendingHoldReleaseGeneration = null;
+        }
+        if (pendingHandsFreeStopGeneration === activeStartGeneration) {
+          pendingHandsFreeStopGeneration = null;
+          pendingHandsFreeStopGestureEpochMs = null;
+        }
+        activeStartGeneration = null;
+      }
     }
   };
 
   return {
     handleSignal,
+    startHandsFree: (startOptions) =>
+      handleSignal({
+        behavior: "hands_free",
+        capability: "press_only",
+        signal: "pressed",
+        startOptions,
+      }),
     onPhase,
-    dispose: clearWatchdog,
+    dispose: () => {
+      clearWatchdog();
+      if (activeStartGeneration !== null) {
+        invalidatedStartGenerations.add(activeStartGeneration);
+        activeStartGeneration = null;
+      }
+      liveShortcutStartGeneration = null;
+    },
   };
 }

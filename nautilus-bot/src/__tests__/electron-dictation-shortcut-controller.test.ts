@@ -353,6 +353,55 @@ describe("createDictationShortcutSignalRuntime", () => {
     });
   });
 
+  it("does not revive a hands-free start after its session already ended", async () => {
+    const harness = createHarness();
+
+    const firstPress = harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+    harness.setPhase("error");
+    harness.finishStartBeforePhaseEvent();
+    await firstPress;
+
+    const secondPress = harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "start_dictation",
+    ]);
+    harness.finishStart();
+    await secondPress;
+  });
+
+  it("drops the hands-free marker as soon as the session begins stopping", async () => {
+    const harness = createHarness();
+
+    const firstPress = harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+    harness.finishStartBeforePhaseEvent();
+    await firstPress;
+    harness.setPhase("stopping");
+    await harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual(["start_dictation"]);
+  });
+
+  it("tracks externally triggered hands-free starts through the same toggle lifecycle", async () => {
+    const harness = createHarness();
+
+    const externalStart = harness.runtime.startHandsFree({ handsFreeTrigger: true });
+    await harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+    harness.finishStart();
+    await externalStart;
+
+    expect(harness.invocations).toEqual([
+      { command: "start_dictation", args: { options: { handsFreeTrigger: true } } },
+      {
+        command: "stop_dictation",
+        args: {
+          stopReason: "hands_free_toggle",
+          stopGestureEpochMs: expect.any(Number),
+        },
+      },
+    ]);
+  });
+
   it("stops a tap whose release lands after the start ack but before the recording phase event", async () => {
     const harness = createHarness();
 

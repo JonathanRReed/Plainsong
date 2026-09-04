@@ -2198,9 +2198,7 @@ async function handleDictationVadSignal(payload: unknown): Promise<void> {
     // be seeded from the monitor's pre-roll ring. The sidecar stops the monitor
     // on every start, so the ring is always fresh; without the flag a hotkey
     // press would splice the two seconds before the press onto the transcript.
-    await ipcBridge.invoke("start_dictation", {
-      options: { handsFreeTrigger: true },
-    });
+    await dictationShortcutSignalRuntime.startHandsFree({ handsFreeTrigger: true });
     return;
   }
 }
