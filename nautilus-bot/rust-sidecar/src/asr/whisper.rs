@@ -152,12 +152,10 @@ impl WhisperProvider {
             }
         }
 
-        if !crate::download::is_whisper_model_artifact_trusted(&self.model_id, &self.model_path) {
-            anyhow::bail!(
-                "Whisper model '{}' has not passed Plainsong integrity verification. Re-download it from Settings.",
-                self.model_id
-            );
-        }
+        let digest = crate::download::whisper_model_expected_sha256(&self.model_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown Whisper model: {}", self.model_id))?;
+        let verified_model = crate::download::open_verified_model_artifact(&self.model_path, &digest)
+            .with_context(|| format!("Whisper model '{}' has not passed Plainsong integrity verification. Re-download it from Settings.", self.model_id))?;
 
         tracing::info!("Loading Whisper model from {:?}", self.model_path);
 
@@ -182,7 +180,7 @@ impl WhisperProvider {
         }
 
         let ctx = Arc::new(
-            whisper_rs::WhisperContext::new_with_params(&self.model_path, params)
+            whisper_rs::WhisperContext::new_with_params(verified_model.load_path(), params)
                 .context("Failed to load Whisper model")?,
         );
 

@@ -332,9 +332,17 @@ fn compute_receipt_mac(payload: &[u8]) -> Result<String> {
 }
 
 fn model_integrity_receipt_contents(path: &Path, expected_sha256: &str) -> Result<String> {
+    let metadata = std::fs::metadata(path)?;
+    model_integrity_receipt_contents_for_metadata(&metadata, expected_sha256)
+}
+
+#[cfg(unix)]
+fn model_integrity_receipt_contents_for_metadata(
+    metadata: &std::fs::Metadata,
+    expected_sha256: &str,
+) -> Result<String> {
     use std::os::unix::fs::MetadataExt;
 
-    let metadata = std::fs::metadata(path)?;
     let modified_nanos = metadata
         .modified()?
         .duration_since(std::time::UNIX_EPOCH)
@@ -353,6 +361,72 @@ fn model_integrity_receipt_contents(path: &Path, expected_sha256: &str) -> Resul
     );
     let mac = compute_receipt_mac(payload.as_bytes())?;
     Ok(format!("{payload}mac={mac}\n"))
+}
+
+#[cfg(not(unix))]
+fn model_integrity_receipt_contents_for_metadata(
+    metadata: &std::fs::Metadata,
+    expected_sha256: &str,
+) -> Result<String> {
+    let modified_nanos = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("Model modification time predates the Unix epoch")?
+        .as_nanos();
+    let payload = format!(
+        "{}\nsha256={}\nsize={}\nmodified_nanos={}\n",
+        MODEL_INTEGRITY_RECEIPT_VERSION,
+        expected_sha256,
+        metadata.len(),
+        modified_nanos
+    );
+    let mac = compute_receipt_mac(payload.as_bytes())?;
+    Ok(format!("{payload}mac={mac}\n"))
+}
+
+/// Keeps the verified file description alive while a model library loads it.
+/// On Unix the load path names that open description, so a concurrent rename
+/// cannot redirect the loader to different bytes after the receipt check.
+pub(crate) struct VerifiedModelArtifact {
+    _file: std::fs::File,
+    load_path: PathBuf,
+}
+
+impl VerifiedModelArtifact {
+    pub(crate) fn load_path(&self) -> &Path {
+        &self.load_path
+    }
+}
+
+pub(crate) fn open_verified_model_artifact(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<VerifiedModelArtifact> {
+    let file = std::fs::File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        anyhow::bail!("Model artifact is not a regular file: {}", path.display());
+    }
+    let expected_receipt =
+        model_integrity_receipt_contents_for_metadata(&metadata, expected_sha256)?;
+    let receipt = std::fs::read_to_string(model_integrity_receipt_path(path))?;
+    if receipt != expected_receipt {
+        anyhow::bail!(
+            "Model artifact has not passed integrity verification: {}",
+            path.display()
+        );
+    }
+    #[cfg(unix)]
+    let load_path = {
+        use std::os::fd::AsRawFd;
+        PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
+    };
+    #[cfg(not(unix))]
+    let load_path = path.to_path_buf();
+    Ok(VerifiedModelArtifact {
+        _file: file,
+        load_path,
+    })
 }
 
 /// Every call site pins a real digest; `Some("")` is a programmer error (an
@@ -2576,6 +2650,45 @@ mod tests {
 
         assert!(!is_model_artifact_trusted(&model_path, Some(&digest)));
 
+        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_handle_loads_checked_inode_after_path_swap() {
+        use std::io::Read;
+
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-integrity-load-race")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir)
+            .await
+            .expect("create test directory");
+        let model_path = test_dir.join("model.bin");
+        tokio::fs::write(&model_path, b"verified bytes")
+            .await
+            .expect("write model");
+        let digest = calculate_sha256(&model_path).await.expect("hash model");
+        verify_or_record_model_integrity(&model_path, Some(&digest))
+            .await
+            .expect("verify model");
+
+        let verified =
+            open_verified_model_artifact(&model_path, &digest).expect("open verified handle");
+        let replacement = test_dir.join("replacement.bin");
+        tokio::fs::write(&replacement, b"attacker bytes")
+            .await
+            .expect("write replacement");
+        tokio::fs::rename(&replacement, &model_path)
+            .await
+            .expect("swap path");
+
+        let mut loaded = String::new();
+        std::fs::File::open(verified.load_path())
+            .expect("reopen verified descriptor")
+            .read_to_string(&mut loaded)
+            .expect("read verified bytes");
+        assert_eq!(loaded, "verified bytes");
         tokio::fs::remove_dir_all(&test_dir).await.ok();
     }
 
