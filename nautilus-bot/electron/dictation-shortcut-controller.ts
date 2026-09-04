@@ -289,6 +289,9 @@ export function createDictationShortcutSignalRuntime(deps: {
   let startGeneration = 0;
   let activeStartGeneration: number | null = null;
   let pendingHoldReleaseGeneration: number | null = null;
+  let pendingHandsFreeStopGeneration: number | null = null;
+  let pendingHandsFreeStopGestureEpochMs: number | null = null;
+  let liveShortcutStartGeneration: number | null = null;
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearWatchdog = (): void => {
@@ -322,6 +325,27 @@ export function createDictationShortcutSignalRuntime(deps: {
       input.behavior === "hold_to_talk" && input.capability === "press_and_release";
 
     if (decision.action === "ignore") {
+      if (input.signal === "pressed" && input.behavior === "hands_free") {
+        if (activeStartGeneration !== null) {
+          // The microphone may already be live while start_dictation is in flight.
+          pendingHandsFreeStopGeneration = activeStartGeneration;
+          pendingHandsFreeStopGestureEpochMs = stopGestureEpochMs;
+        } else if (liveShortcutStartGeneration !== null) {
+          // The start ack can arrive before its phase event, leaving a live
+          // session looking idle/primed to this controller.
+          liveShortcutStartGeneration = null;
+          deps.log?.("dictation shortcut stop_dictation", {
+            phase,
+            behavior: input.behavior,
+            capability: input.capability,
+            stopReason: "hands_free_toggle",
+          });
+          await deps.invoke("stop_dictation", {
+            stopReason: "hands_free_toggle",
+            stopGestureEpochMs,
+          });
+        }
+      }
       if (input.signal === "released" && holdToTalkWithRelease) {
         if (activeStartGeneration !== null) {
           // Rapid tap: the release arrived while start_dictation was still in
@@ -366,6 +390,10 @@ export function createDictationShortcutSignalRuntime(deps: {
       ) {
         pendingHoldReleaseGeneration = null;
       }
+      if (pendingHandsFreeStopGeneration !== null && pendingHandsFreeStopGeneration !== generation) {
+        pendingHandsFreeStopGeneration = null;
+        pendingHandsFreeStopGestureEpochMs = null;
+      }
       let started = false;
       try {
         await deps.invoke(
@@ -382,6 +410,28 @@ export function createDictationShortcutSignalRuntime(deps: {
         if (!started && pendingHoldReleaseGeneration === generation) {
           pendingHoldReleaseGeneration = null;
         }
+        if (!started && pendingHandsFreeStopGeneration === generation) {
+          pendingHandsFreeStopGeneration = null;
+          pendingHandsFreeStopGestureEpochMs = null;
+        }
+      }
+      liveShortcutStartGeneration = input.behavior === "hands_free" ? generation : null;
+      if (pendingHandsFreeStopGeneration === generation) {
+        const pendingStopGestureEpochMs = pendingHandsFreeStopGestureEpochMs ?? stopGestureEpochMs;
+        pendingHandsFreeStopGeneration = null;
+        pendingHandsFreeStopGestureEpochMs = null;
+        liveShortcutStartGeneration = null;
+        deps.log?.("dictation shortcut stop_dictation", {
+          phase: deps.getPhase(),
+          behavior: input.behavior,
+          capability: input.capability,
+          stopReason: "hands_free_toggle",
+        });
+        await deps.invoke("stop_dictation", {
+          stopReason: "hands_free_toggle",
+          stopGestureEpochMs: pendingStopGestureEpochMs,
+        });
+        return;
       }
       if (holdToTalkWithRelease && pendingHoldReleaseGeneration === generation) {
         pendingHoldReleaseGeneration = null;
@@ -401,6 +451,7 @@ export function createDictationShortcutSignalRuntime(deps: {
     }
 
     clearWatchdog();
+    liveShortcutStartGeneration = null;
 
     if (decision.action === "stop") {
       deps.log?.("dictation shortcut stop_dictation", {
@@ -443,6 +494,9 @@ export function createDictationShortcutSignalRuntime(deps: {
       phase !== "recording"
     ) {
       clearWatchdog();
+    }
+    if (phase === "idle" || phase === "done" || phase === "error") {
+      liveShortcutStartGeneration = null;
     }
   };
 

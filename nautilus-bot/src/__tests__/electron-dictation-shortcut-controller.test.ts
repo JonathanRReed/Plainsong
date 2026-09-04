@@ -221,6 +221,10 @@ describe("createDictationShortcutSignalRuntime", () => {
     behavior: "hold_to_talk",
     capability: "press_and_release",
   } as const;
+  const handsFree = {
+    behavior: "hands_free",
+    capability: "press_only",
+  } as const;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -307,6 +311,44 @@ describe("createDictationShortcutSignalRuntime", () => {
     ]);
     expect(harness.invocations[1]?.args).toEqual({
       stopReason: "release",
+      stopGestureEpochMs: expect.any(Number),
+    });
+  });
+
+  it("stops a rapid hands-free toggle whose second press lands before start resolves", async () => {
+    const harness = createHarness();
+
+    const firstPress = harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+    await harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+    expect(harness.invocations.map((entry) => entry.command)).toEqual(["start_dictation"]);
+
+    harness.finishStart();
+    await firstPress;
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "stop_dictation",
+    ]);
+    expect(harness.invocations[1]?.args).toEqual({
+      stopReason: "hands_free_toggle",
+      stopGestureEpochMs: expect.any(Number),
+    });
+  });
+
+  it("stops a hands-free toggle after the start ack but before its phase event", async () => {
+    const harness = createHarness();
+
+    const firstPress = harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+    harness.finishStartBeforePhaseEvent();
+    await firstPress;
+    await harness.runtime.handleSignal({ ...handsFree, signal: "pressed" });
+
+    expect(harness.invocations.map((entry) => entry.command)).toEqual([
+      "start_dictation",
+      "stop_dictation",
+    ]);
+    expect(harness.invocations[1]?.args).toEqual({
+      stopReason: "hands_free_toggle",
       stopGestureEpochMs: expect.any(Number),
     });
   });
