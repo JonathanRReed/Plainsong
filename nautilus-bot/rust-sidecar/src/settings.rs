@@ -1510,6 +1510,8 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             value => value.to_string(),
         },
         "deepgram" => match model_id.trim() {
+            "nova-2" => "nova-2".to_string(),
+            "nova-3-medical" => "nova-3-medical".to_string(),
             "" => "nova-3".to_string(),
             value => value.to_string(),
         },
@@ -3651,6 +3653,14 @@ mod tests {
             "gemini-3.5-transcribe"
         );
         assert_eq!(normalize_transcription_model_id("deepgram", ""), "nova-3");
+        assert_eq!(
+            normalize_transcription_model_id("deepgram", "nova-2"),
+            "nova-2"
+        );
+        assert_eq!(
+            normalize_transcription_model_id("deepgram", "nova-3-medical"),
+            "nova-3-medical"
+        );
     }
 
     #[test]

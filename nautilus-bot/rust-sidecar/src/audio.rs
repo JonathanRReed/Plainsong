@@ -158,6 +158,9 @@ pub(crate) fn admit_dictation_samples(
 /// Bytes a mono 16-bit WAV track consumes per second at 48 kHz, the rate every
 /// mixed meeting session lands on.
 pub const MEETING_WAV_BYTES_PER_SECOND_PER_TRACK: u64 = 48_000 * 2;
+const VAULT_STREAM_HEADER_BYTES: u64 = 21;
+const VAULT_STREAM_FRAME_PLAINTEXT_BYTES: u64 = 1024 * 1024;
+const VAULT_STREAM_FRAME_OVERHEAD_BYTES: u64 = 4 + 16;
 /// Recording time a meeting must have room for before it is allowed to start.
 ///
 /// Refusing here is recoverable and honest; running out mid-meeting is not — the
@@ -173,8 +176,6 @@ pub const MEETING_LOW_SPACE_WARN_SECONDS: u64 = 10 * 60;
 /// audio already captured. Stopping here trades the last minute of a meeting
 /// for keeping the rest.
 ///
-/// Scoped to capture only. Vault encryption at stop writes a full second copy
-/// of the bundle and needs headroom of its own, which nothing checks yet.
 pub const MEETING_CRITICAL_SPACE_STOP_SECONDS: u64 = 60;
 
 /// Free bytes one meeting needs to record for `seconds`.
@@ -207,6 +208,9 @@ pub struct RecordingCaptureHealth {
     /// How many WAV tracks this session writes, so the polling loop can size the
     /// free-space thresholds to what the meeting actually consumes.
     pub track_count: u64,
+    /// Exact bytes needed to stage encrypted copies of the session's current
+    /// plaintext WAV files.
+    pub vault_staging_bytes: u64,
     /// Whether the user has paused capture. Frames are being dropped on
     /// purpose, so nothing below may be read as a fault or as silence.
     pub paused: bool,
@@ -313,10 +317,46 @@ pub enum MeetingSpacePressure {
     Critical,
 }
 
-pub fn meeting_space_pressure(available_bytes: u64, track_count: u64) -> MeetingSpacePressure {
-    if available_bytes <= meeting_headroom_bytes(track_count, MEETING_CRITICAL_SPACE_STOP_SECONDS) {
+pub fn meeting_vault_staging_bytes(track_plaintext_bytes: &[u64]) -> u64 {
+    track_plaintext_bytes
+        .iter()
+        .fold(0_u64, |total, plaintext| {
+            // The stream always writes one trailing frame, including for empty input.
+            let frames = plaintext
+                .checked_div(VAULT_STREAM_FRAME_PLAINTEXT_BYTES)
+                .unwrap_or(0)
+                .saturating_add(1);
+            total.saturating_add(
+                plaintext
+                    .saturating_add(VAULT_STREAM_HEADER_BYTES)
+                    .saturating_add(frames.saturating_mul(VAULT_STREAM_FRAME_OVERHEAD_BYTES)),
+            )
+        })
+}
+
+pub fn meeting_space_pressure_with_vault_reserve(
+    available_bytes: u64,
+    track_count: u64,
+    vault_staging_bytes: u64,
+    vault_enabled: bool,
+) -> MeetingSpacePressure {
+    let encryption_reserve = if vault_enabled {
+        vault_staging_bytes
+    } else {
+        0
+    };
+    if available_bytes
+        <= encryption_reserve.saturating_add(meeting_headroom_bytes(
+            track_count,
+            MEETING_CRITICAL_SPACE_STOP_SECONDS,
+        ))
+    {
         MeetingSpacePressure::Critical
-    } else if available_bytes <= meeting_headroom_bytes(track_count, MEETING_LOW_SPACE_WARN_SECONDS)
+    } else if available_bytes
+        <= encryption_reserve.saturating_add(meeting_headroom_bytes(
+            track_count,
+            MEETING_LOW_SPACE_WARN_SECONDS,
+        ))
     {
         MeetingSpacePressure::Low
     } else {
@@ -324,11 +364,32 @@ pub fn meeting_space_pressure(available_bytes: u64, track_count: u64) -> Meeting
     }
 }
 
+pub fn meeting_space_pressure(available_bytes: u64, track_count: u64) -> MeetingSpacePressure {
+    meeting_space_pressure_with_vault_reserve(available_bytes, track_count, 0, false)
+}
+
 /// `Some(needed_bytes)` when a volume with this much free space must not be
 /// asked to hold a meeting writing `track_count` tracks.
-pub fn meeting_start_space_shortfall(available_bytes: u64, track_count: u64) -> Option<u64> {
-    let needed = meeting_headroom_bytes(track_count, MEETING_START_MIN_HEADROOM_SECONDS);
+pub fn meeting_start_space_shortfall_with_vault_reserve(
+    available_bytes: u64,
+    track_count: u64,
+    vault_enabled: bool,
+) -> Option<u64> {
+    let capture = meeting_headroom_bytes(track_count, MEETING_START_MIN_HEADROOM_SECONDS);
+    // Vault finalization stages ciphertext beside the plaintext before deleting
+    // the latter, so admission must provide room for both full-size copies.
+    let needed = if vault_enabled {
+        let per_track_capture = meeting_headroom_bytes(1, MEETING_START_MIN_HEADROOM_SECONDS);
+        let track_sizes = vec![per_track_capture; track_count.max(1) as usize];
+        capture.saturating_add(meeting_vault_staging_bytes(&track_sizes))
+    } else {
+        capture
+    };
     (available_bytes < needed).then_some(needed)
+}
+
+pub fn meeting_start_space_shortfall(available_bytes: u64, track_count: u64) -> Option<u64> {
+    meeting_start_space_shortfall_with_vault_reserve(available_bytes, track_count, false)
 }
 
 /// Record the first writer failure for a session.
@@ -947,7 +1008,11 @@ impl AudioCapture {
     ///
     /// Fails open: a platform or filesystem that cannot report free space must
     /// not block the meeting. An unmeasurable disk is not a full disk.
-    fn ensure_recording_start_has_disk_headroom(&self, plan: &RecordingCapturePlan) -> Result<()> {
+    fn ensure_recording_start_has_disk_headroom(
+        &self,
+        plan: &RecordingCapturePlan,
+        vault_enabled: bool,
+    ) -> Result<()> {
         let Some(directory) = plan.primary_path.parent() else {
             return Ok(());
         };
@@ -966,7 +1031,9 @@ impl AudioCapture {
         // a three-track "me and them" bundle, so the requirement is what this
         // meeting will actually write rather than the worst case.
         let track_count = plan.paths().count() as u64;
-        let Some(needed) = meeting_start_space_shortfall(available, track_count) else {
+        let Some(needed) =
+            meeting_start_space_shortfall_with_vault_reserve(available, track_count, vault_enabled)
+        else {
             return Ok(());
         };
         anyhow::bail!(
@@ -1003,6 +1070,14 @@ impl AudioCapture {
                 .ok()
                 .and_then(|slot| slot.clone()),
             track_count: session.track_count(),
+            vault_staging_bytes: meeting_vault_staging_bytes(
+                &std::iter::once(&session.audio_path)
+                    .chain(session.mic_audio_path.iter())
+                    .chain(session.system_audio_path.iter())
+                    .filter_map(|path| std::fs::metadata(path).ok())
+                    .map(|metadata| metadata.len())
+                    .collect::<Vec<_>>(),
+            ),
             paused: session.paused.load(Ordering::Relaxed),
             inactivity: match session.mixed_capture.as_ref() {
                 Some(mixed) => mixed.source_inactivity(),
@@ -1950,6 +2025,7 @@ impl AudioCapture {
         options: RecordingOptions,
         preferred_input_device: Option<&settings::AudioInputDevicePreference>,
         event_handle: Option<SidecarHandle>,
+        vault_enabled: bool,
     ) -> Result<String> {
         self.ensure_microphone_preparation_retry_is_safe(options.mic)?;
         if self.active_recording.is_some() {
@@ -1978,7 +2054,7 @@ impl AudioCapture {
             ));
         }
 
-        self.ensure_recording_start_has_disk_headroom(&plan)?;
+        self.ensure_recording_start_has_disk_headroom(&plan, vault_enabled)?;
 
         let id = plan.recording_id.clone();
         let audio_path = plan.primary_path.clone();
@@ -3449,11 +3525,13 @@ mod recording_writer_tests {
 #[cfg(test)]
 mod recording_capture_health_tests {
     use super::{
-        meeting_headroom_bytes, meeting_space_pressure, meeting_start_space_shortfall,
-        run_wav_writer_thread, silence_auto_stop_due, silence_auto_stop_warning_due,
-        silence_auto_stop_warning_minutes, write_aligned_wav_files, MeetingSpacePressure,
-        RecordingCaptureHealth, SourceInactivity, MEETING_CRITICAL_SPACE_STOP_SECONDS,
-        MEETING_LOW_SPACE_WARN_SECONDS, MEETING_START_MIN_HEADROOM_SECONDS,
+        meeting_headroom_bytes, meeting_space_pressure, meeting_space_pressure_with_vault_reserve,
+        meeting_start_space_shortfall, meeting_start_space_shortfall_with_vault_reserve,
+        meeting_vault_staging_bytes, run_wav_writer_thread, silence_auto_stop_due,
+        silence_auto_stop_warning_due, silence_auto_stop_warning_minutes, write_aligned_wav_files,
+        MeetingSpacePressure, RecordingCaptureHealth, SourceInactivity,
+        MEETING_CRITICAL_SPACE_STOP_SECONDS, MEETING_LOW_SPACE_WARN_SECONDS,
+        MEETING_START_MIN_HEADROOM_SECONDS,
     };
     use std::sync::{Arc, Mutex};
 
@@ -3600,6 +3678,69 @@ mod recording_capture_health_tests {
         assert_eq!(meeting_headroom_bytes(0, 60), meeting_headroom_bytes(1, 60));
     }
 
+    #[test]
+    fn vault_thresholds_reserve_space_for_the_encrypted_copy() {
+        let capture = meeting_headroom_bytes(MIC_ONLY_TRACKS, MEETING_START_MIN_HEADROOM_SECONDS);
+        let vault_start_need = capture + meeting_vault_staging_bytes(&[capture]);
+        assert_eq!(
+            meeting_start_space_shortfall_with_vault_reserve(
+                vault_start_need - 1,
+                MIC_ONLY_TRACKS,
+                true,
+            ),
+            Some(vault_start_need)
+        );
+        assert_eq!(
+            meeting_start_space_shortfall_with_vault_reserve(
+                vault_start_need,
+                MIC_ONLY_TRACKS,
+                true,
+            ),
+            None
+        );
+
+        let plaintext = meeting_headroom_bytes(MIC_ONLY_TRACKS, 29 * 60);
+        let critical_capture =
+            meeting_headroom_bytes(MIC_ONLY_TRACKS, MEETING_CRITICAL_SPACE_STOP_SECONDS);
+        assert_eq!(
+            meeting_space_pressure_with_vault_reserve(
+                meeting_vault_staging_bytes(&[plaintext]) + critical_capture,
+                MIC_ONLY_TRACKS,
+                meeting_vault_staging_bytes(&[plaintext]),
+                true,
+            ),
+            MeetingSpacePressure::Critical,
+            "the meeting must stop while its plaintext and encrypted staging copy still fit"
+        );
+        assert_eq!(
+            meeting_space_pressure(
+                meeting_vault_staging_bytes(&[plaintext]) + critical_capture,
+                MIC_ONLY_TRACKS,
+            ),
+            MeetingSpacePressure::Ok,
+            "non-vault meetings must retain the capture-only threshold"
+        );
+    }
+
+    #[test]
+    fn vault_staging_reserve_matches_stream_boundaries_exactly() {
+        const FRAME: u64 = 1024 * 1024;
+        assert_eq!(meeting_vault_staging_bytes(&[0]), 21 + 4 + 16);
+        assert_eq!(
+            meeting_vault_staging_bytes(&[FRAME - 1]),
+            FRAME - 1 + 21 + 20
+        );
+        assert_eq!(meeting_vault_staging_bytes(&[FRAME]), FRAME + 21 + 40);
+        assert_eq!(
+            meeting_vault_staging_bytes(&[FRAME + 1]),
+            FRAME + 1 + 21 + 40
+        );
+        assert_eq!(
+            meeting_vault_staging_bytes(&[FRAME, 0]),
+            FRAME + (2 * 21) + (3 * 20)
+        );
+    }
+
     fn quiet_health(
         mic: Option<f32>,
         system: Option<f32>,
@@ -3609,6 +3750,7 @@ mod recording_capture_health_tests {
             writer_failure: None,
             capture_failure: None,
             track_count: 1,
+            vault_staging_bytes: 0,
             paused: false,
             inactivity: SourceInactivity {
                 mic_seconds: mic,
