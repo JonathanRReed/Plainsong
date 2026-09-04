@@ -11,6 +11,93 @@
 
 use super::*;
 
+async fn publish_dictation_start_error_if_idle<E: crate::sidecar_handle::AppEmitter>(
+    tracker: &tokio::sync::Mutex<DictationSessionTracker>,
+    emitter: &E,
+    error: &str,
+) {
+    let tracker = tracker.lock().await;
+    if tracker.active_session_id.is_none() {
+        emitter.emit_event(
+            "dictation-state-changed",
+            serde_json::json!({
+                "phase": "error",
+                "message": error,
+            }),
+        );
+    }
+}
+
+#[cfg(test)]
+mod dictation_start_error_race_tests {
+    use super::publish_dictation_start_error_if_idle;
+    use crate::sidecar_handle::AppEmitter;
+    use crate::DictationSessionTracker;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::{Barrier, Mutex};
+
+    #[derive(Clone, Default)]
+    struct TestEmitter(Arc<StdMutex<Vec<String>>>);
+
+    impl AppEmitter for TestEmitter {
+        fn emit_event<P: serde::Serialize + Clone + Send>(&self, _event: &str, payload: P) {
+            let payload = serde_json::to_value(payload).expect("serialize event");
+            self.0
+                .lock()
+                .expect("event lock")
+                .push(payload["phase"].as_str().expect("phase").to_string());
+        }
+    }
+
+    #[test]
+    fn stale_start_error_never_publishes_after_replacement_start() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            for _ in 0..64 {
+                let tracker = Arc::new(Mutex::new(DictationSessionTracker::default()));
+                let emitter = TestEmitter::default();
+                let barrier = Arc::new(Barrier::new(2));
+
+                let stale_tracker = Arc::clone(&tracker);
+                let stale_emitter = emitter.clone();
+                let stale_barrier = Arc::clone(&barrier);
+                let stale = tokio::spawn(async move {
+                    stale_barrier.wait().await;
+                    publish_dictation_start_error_if_idle(
+                        stale_tracker.as_ref(),
+                        &stale_emitter,
+                        "old start failed",
+                    )
+                    .await;
+                });
+
+                let replacement_tracker = Arc::clone(&tracker);
+                let replacement_emitter = emitter.clone();
+                let replacement_barrier = Arc::clone(&barrier);
+                let replacement = tokio::spawn(async move {
+                    replacement_barrier.wait().await;
+                    replacement_tracker.lock().await.active_session_id = Some(2);
+                    replacement_emitter.emit_event(
+                        "dictation-state-changed",
+                        serde_json::json!({ "phase": "preparing", "sessionId": 2 }),
+                    );
+                });
+
+                stale.await.expect("stale task");
+                replacement.await.expect("replacement task");
+                let phases = emitter.0.lock().expect("event lock").clone();
+                assert_ne!(phases, ["preparing", "error"]);
+                assert_eq!(phases.last().map(String::as_str), Some("preparing"));
+            }
+        });
+    }
+}
+
 /// Dispatch a JSON-RPC command by name to the appropriate handler function.
 /// Used by the sidecar binary's stdin loop.
 ///
@@ -61,21 +148,13 @@ pub async fn dispatch_command(
                     // time out on its own. A cancelled start has already
                     // emitted idle, and a stale start must not demote a newer
                     // session with an unscoped error event.
-                    if error != "Dictation start was cancelled"
-                        && state
-                            .dictation_session_tracker
-                            .lock()
-                            .await
-                            .active_session_id
-                            .is_none()
-                    {
-                        handle.emit_event(
-                            "dictation-state-changed",
-                            serde_json::json!({
-                                "phase": "error",
-                                "message": error,
-                            }),
-                        );
+                    if error != "Dictation start was cancelled" {
+                        publish_dictation_start_error_if_idle(
+                            &state.dictation_session_tracker,
+                            handle,
+                            &error,
+                        )
+                        .await;
                     }
                     Err(error)
                 }
@@ -114,32 +193,42 @@ pub async fn dispatch_command(
             // ownership token after opening capture, so either cancellation
             // aborts the stream or startup observes that it lost ownership
             // and aborts its own newly-created stream.
-            {
-                let mut tracker = state.dictation_session_tracker.lock().await;
-                let active_session_id = tracker
-                    .active_session_id
-                    .ok_or_else(|| "No active dictation session to force-stop".to_string())?;
-                if let Some(expected) = expected_session_id {
-                    if expected != active_session_id {
-                        return Err(format!(
-                            "Stale force-stop for dictation session {} ignored (active session is {})",
-                            expected, active_session_id
-                        ));
-                    }
+            let mut tracker = state.dictation_session_tracker.lock().await;
+            let active_session_id = tracker
+                .active_session_id
+                .ok_or_else(|| "No active dictation session to force-stop".to_string())?;
+            if let Some(expected) = expected_session_id {
+                if expected != active_session_id {
+                    return Err(format!(
+                        "Stale force-stop for dictation session {} ignored (active session is {})",
+                        expected, active_session_id
+                    ));
                 }
-                tracker.active_session_id = None;
-                tracker.stopping_session_id = None;
-                tracker.started_at = None;
             }
             let mut audio = state.audio_capture.lock().await;
-            audio.abort_dictation();
+            audio.abort_dictation_for_session(active_session_id);
             drop(audio);
             let mut runtime_state = state.dictation_runtime_state.lock().await;
             *runtime_state = DictationSessionState::Idle;
             drop(runtime_state);
+            *state.dictation_start_options.lock().await = models::DictationStartOptions::default();
             if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-                *overlay = DictationOverlayState::default();
+                if overlay.session_id == Some(active_session_id) {
+                    *overlay = DictationOverlayState::default();
+                }
             }
+            tracker.active_session_id = None;
+            tracker.stopping_session_id = None;
+            tracker.started_at = None;
+            tracker.started_at_epoch_ms = None;
+            tracker.startup_latency_ms = None;
+            tracker.acknowledged_at_epoch_ms = None;
+            tracker.capture_ready_at_epoch_ms = None;
+            tracker.first_stable_partial_at_epoch_ms = None;
+            tracker.stop_requested_at = None;
+            tracker.final_transcript_at_epoch_ms = None;
+            tracker.insertion_completed_at_epoch_ms = None;
+            drop(tracker);
             handle.emit_event("dictation-state-changed", serde_json::json!({ "phase": "idle", "stopReason": "force-stop", "outcome": "aborted" }));
             handle.window_command("hide-dictation-overlay", &serde_json::Value::Null);
             reconcile_hands_free_monitor(state.as_ref(), handle).await;

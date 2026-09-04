@@ -1522,7 +1522,7 @@ fn dictation_insertion_never_reads_a_streaming_partial() {
     }
     // The one thing it may say about the preview is "stop".
     assert!(
-        body.contains("stop_dictation_live_preview(state).await;"),
+        body.contains("stop_dictation_live_preview_for_session(state, session_id).await;"),
         "the stop path must close the live preview before the batch decode"
     );
 }
@@ -1533,7 +1533,7 @@ fn dictation_insertion_never_reads_a_streaming_partial() {
 fn the_live_preview_is_closed_before_the_final_transcription_starts() {
     let body = owned_stop_dictation_body();
     let close = body
-        .find("stop_dictation_live_preview(state).await;")
+        .find("stop_dictation_live_preview_for_session(state, session_id).await;")
         .expect("the stop path must close the live preview");
     let transcribe = body
         .find("transcribe_bytes_for_dictation")

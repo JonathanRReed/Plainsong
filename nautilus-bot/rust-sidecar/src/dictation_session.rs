@@ -595,7 +595,11 @@ pub(crate) async fn start_dictation_for_sidecar(
         }
     };
     if !owns_session {
-        state.audio_capture.lock().await.abort_dictation();
+        state
+            .audio_capture
+            .lock()
+            .await
+            .abort_dictation_for_session(session_id);
         return Err("Dictation start was cancelled".to_string());
     }
 
@@ -891,7 +895,7 @@ pub(crate) async fn fail_dictation_stop(
     }
     // Every terminal stop failure comes through here, so this is where a
     // preview that outlived its session is guaranteed to be closed.
-    stop_dictation_live_preview(state).await;
+    stop_dictation_live_preview_for_session(state, context.session_id).await;
 
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         if overlay.session_id == Some(context.session_id) {
@@ -1224,7 +1228,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     let (audio_bytes, hit_max_duration) = {
         let mut audio = state.audio_capture.lock().await;
         let hit_max_duration = audio.dictation_hit_max_duration();
-        match audio.stop_dictation() {
+        match audio.stop_dictation_for_session(session_id) {
             Ok(audio_bytes) => (audio_bytes, hit_max_duration),
             Err(error) => {
                 return Err(fail_dictation_stop(
@@ -1243,7 +1247,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // the streaming recognizer holds its model's compute lease until its
     // session is closed -- which this awaits. The preview never fed the
     // transcript; this only stops it competing with the decode that does.
-    stop_dictation_live_preview(state).await;
+    stop_dictation_live_preview_for_session(state, session_id).await;
 
     let audio_finalized_ms = Some(
         stop_signal_instant
@@ -1526,7 +1530,14 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 }
             }
 
-            let ai_selection = dictation_session_ai_selection(&settings_snapshot)?;
+            let ai_selection = match dictation_session_ai_selection(&settings_snapshot) {
+                Ok(selection) => selection,
+                Err(error) => {
+                    return Err(
+                        fail_dictation_stop(state, handle, &failure_context, None, error).await,
+                    );
+                }
+            };
             match execute_dictation_command_action(
                 state,
                 &command_key,
@@ -2987,20 +2998,21 @@ mod dictation_idle_reset_tests {
         // preview would keep its recognizer -- and its model -- alive after
         // the session it belonged to had already ended in an error.
         assert!(
-            body.contains("stop_dictation_live_preview(state).await;"),
+            body.contains(
+                "stop_dictation_live_preview_for_session(state, context.session_id).await;"
+            ),
             "the terminal error path must close the live preview; a failed stop otherwise \
              leaves the streaming engine loaded with no session to end it"
         );
         let close = body
-            .find("stop_dictation_live_preview(state).await;")
+            .find("stop_dictation_live_preview_for_session(state, context.session_id).await;")
             .expect("the error path must close the live preview");
         let reset = body
-            .find("reset_dictation_session_runtime(")
+            .find("reset_dictation_session_runtime_if_current(")
             .expect("the error path must reset the session runtime");
         assert!(
-            close < reset,
-            "the preview must be closed before the session runtime is reset, so nothing is \
-             still feeding a session that no longer exists"
+            reset < close,
+            "session ownership must be checked before scoped preview cleanup"
         );
     }
 }
