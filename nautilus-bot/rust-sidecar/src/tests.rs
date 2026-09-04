@@ -3819,6 +3819,7 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
     assert!(!should_deliver_dictation_text(
         models::DictationDeliveryMode::Preview
     ));
+
     // Every warning is kept, not just the first one.
     let both = dictation_done_message(
         "pasted",
