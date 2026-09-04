@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { BrowserWindow } from "electron";
 import { describe, expect, it, vi } from "vitest";
-import { getCommandTimeoutMs } from "../../electron/ipc-command-policy";
+import { getCommandTimeoutMs, getCommandWorkKey } from "../../electron/ipc-command-policy";
 import {
   isExpectedSidecarStdinClose,
   MICROPHONE_RECOVERY_MESSAGE,
@@ -197,6 +197,15 @@ describe("getCommandTimeoutMs", () => {
     );
     expect(getCommandTimeoutMs("summarize_recording_grounded")).toBeGreaterThan(
       getCommandTimeoutMs("download_asr_models"),
+    );
+  });
+
+  it("treats meeting briefs as event-scoped analysis work", () => {
+    expect(getCommandTimeoutMs("prepare_meeting_brief")).toBe(
+      getCommandTimeoutMs("summarize_recording_grounded"),
+    );
+    expect(getCommandWorkKey("prepare_meeting_brief", { eventId: " event-1 " })).toBe(
+      "prepare_meeting_brief:event-1",
     );
   });
 });
