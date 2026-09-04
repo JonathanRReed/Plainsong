@@ -3601,14 +3601,10 @@ async fn save_settings_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
     mut settings: settings::Settings,
 ) -> Result<serde_json::Value, String> {
-    let (privileged_privacy, previous_shortcuts) = {
+    let previous_shortcuts = {
         let manager = state.settings_manager.lock().await;
-        (
-            manager.settings().privacy.clone(),
-            manager.settings().shortcuts.clone(),
-        )
+        manager.settings().shortcuts.clone()
     };
-    preserve_privileged_privacy_settings(&privileged_privacy, &mut settings.privacy);
     // Keeps the legacy `toggleDictation` key and the binding table telling the
     // same story whichever one the writer edited; see the function's doc for
     // which side wins when.
@@ -3772,6 +3768,13 @@ async fn save_settings_for_sidecar(
 
     {
         let mut settings_manager = state.settings_manager.lock().await;
+        // Read security-owned values under the same lock as the replacement.
+        // Otherwise a vault migration can commit after an earlier snapshot and
+        // have its salt erased by this delayed save.
+        preserve_privileged_privacy_settings(
+            &settings_manager.settings().privacy,
+            &mut settings.privacy,
+        );
         // Preserve this under the same lock as the replacement. Onboarding can
         // be recorded while this save awaits ASR work, so a snapshot taken at
         // the start of the request could roll a newer record back here.

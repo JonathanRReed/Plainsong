@@ -549,7 +549,7 @@ fn shutdown_interruption_leaves_processing_meeting_for_startup_recovery() {
 }
 
 #[test]
-fn export_root_renderer_settings_cannot_replace_privileged_identity() {
+fn renderer_settings_cannot_replace_privileged_privacy_state() {
     let current = settings::PrivacySettings {
         export_root: Some(PathBuf::from("/legacy/private/export")),
         export_location_id: Some("approved-location".to_string()),
@@ -565,6 +565,7 @@ fn export_root_renderer_settings_cannot_replace_privileged_identity() {
         export_location_id: Some("renderer-id".to_string()),
         export_location_label: Some("Renderer label".to_string()),
         export_location_approved: true,
+        // Models a debounced snapshot captured before vault migration.
         vault_initialized: false,
         vault_salt: Some("renderer-salt".to_string()),
         ..settings::PrivacySettings::default()
