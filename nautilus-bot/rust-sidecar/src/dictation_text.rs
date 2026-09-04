@@ -139,40 +139,13 @@ pub(crate) fn strip_non_speech_placeholder(text: &str) -> String {
         return String::new();
     }
 
-    // Some ASR providers emit placeholder-like text for silence, e.g. "[blank audio]".
-    // Treat outputs composed entirely of these tokens as empty.
-    const NON_SPEECH_TOKENS: &[&str] = &[
-        "blank",
-        "audio",
-        "blankaudio",
-        "blank_audio",
-        "nospeech",
-        "no",
-        "speech",
-        "silence",
-        "inaudible",
-        "unintelligible",
-        "noise",
-        "music",
-    ];
-
-    let canonical: String = trimmed
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect();
-
-    let words: Vec<&str> = canonical.split_whitespace().collect();
-    if words.is_empty() {
-        return String::new();
-    }
-
-    if words.iter().all(|word| NON_SPEECH_TOKENS.contains(word)) {
+    // Match only complete provider markers. Their component words can be legitimate
+    // dictation and must not be treated as silence on their own.
+    const NON_SPEECH_PLACEHOLDERS: &[&str] = &["[blank audio]", "<|nospeech|>"];
+    if NON_SPEECH_PLACEHOLDERS
+        .iter()
+        .any(|placeholder| trimmed.eq_ignore_ascii_case(placeholder))
+    {
         return String::new();
     }
 
