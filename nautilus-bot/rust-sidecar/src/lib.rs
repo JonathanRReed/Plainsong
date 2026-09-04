@@ -2283,7 +2283,6 @@ async fn selected_analysis_runtime(
 ) -> Result<llm::ProviderRuntime, String> {
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state, lane).await?;
-    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
     if lane == settings::AiLane::Meetings {
         enforce_meeting_lane_provider_policy(provider)?;
     }
@@ -2295,6 +2294,29 @@ async fn selected_analysis_runtime(
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
         })
+        .unwrap_or_else(|| provider.default_model())
+        .to_string();
+    analysis_runtime_for_provider(
+        state,
+        provider,
+        remote_processing_enabled,
+        Some(&selected_model),
+        request_timeout,
+    )
+    .await
+}
+
+async fn analysis_runtime_for_provider(
+    state: &AppState,
+    provider: AnalysisProvider,
+    remote_processing_enabled: bool,
+    model: Option<&str>,
+    request_timeout: Option<Duration>,
+) -> Result<llm::ProviderRuntime, String> {
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+    let selected_model = model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| provider.default_model())
         .to_string();
     let api_key = if provider.is_remote() {
