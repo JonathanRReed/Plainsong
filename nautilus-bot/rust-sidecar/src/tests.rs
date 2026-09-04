@@ -3493,6 +3493,16 @@ fn sanitize_dictation_output_treats_nospeech_token_as_empty() {
 }
 
 #[test]
+fn sanitize_dictation_output_preserves_words_used_by_non_speech_markers() {
+    for transcript in ["Music.", "No noise.", "Audio speech"] {
+        assert_eq!(
+            sanitize_dictation_output(transcript, transcript),
+            transcript
+        );
+    }
+}
+
+#[test]
 fn low_information_dictation_detection_flags_common_hallucinations() {
     assert!(looks_low_information_dictation("you"));
     assert!(!looks_low_information_dictation("thank you"));
