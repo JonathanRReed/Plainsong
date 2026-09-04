@@ -3407,6 +3407,7 @@ fn preserve_privileged_privacy_settings(
     incoming.export_location_id = current.export_location_id.clone();
     incoming.export_location_label = current.export_location_label.clone();
     incoming.export_location_approved = current.export_location_approved;
+    incoming.encrypt_recordings = current.encrypt_recordings;
     incoming.vault_initialized = current.vault_initialized;
     incoming.vault_salt = current.vault_salt.clone();
 }
@@ -3519,15 +3520,13 @@ async fn save_settings_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
     mut settings: settings::Settings,
 ) -> Result<serde_json::Value, String> {
-    let (privileged_privacy, previous_shortcuts, previous_onboarding) = {
+    let (previous_shortcuts, previous_onboarding) = {
         let manager = state.settings_manager.lock().await;
         (
-            manager.settings().privacy.clone(),
             manager.settings().shortcuts.clone(),
             manager.settings().onboarding.clone(),
         )
     };
-    preserve_privileged_privacy_settings(&privileged_privacy, &mut settings.privacy);
     // The first-run record is the sidecar's, not the renderer's. Every settings
     // write from the renderer is a read-modify-write of the whole document, so
     // one built from a stale or hand-made `Settings` literal -- or a forged
@@ -3698,6 +3697,13 @@ async fn save_settings_for_sidecar(
 
     {
         let mut settings_manager = state.settings_manager.lock().await;
+        // Read security-owned values under the same lock as the replacement.
+        // Otherwise a vault migration can commit after an earlier snapshot and
+        // have its salt or encryption policy erased by this delayed save.
+        preserve_privileged_privacy_settings(
+            &settings_manager.settings().privacy,
+            &mut settings.privacy,
+        );
         *settings_manager.settings_mut() = settings;
         settings_manager.save().map_err(|e| e.to_string())?;
         emit_settings_changed(handle, settings_manager.settings());
