@@ -1,4 +1,10 @@
 import {
+  ELECTRON_MODULE_ENTRY_AT,
+  formatLaunchMilestone,
+  parseRendererLaunchMilestone,
+  type LaunchMilestoneName,
+} from "./launch-milestones";
+import {
   app,
   BrowserWindow,
   dialog,
@@ -12,11 +18,13 @@ import {
   session,
   Tray,
   type IpcMainInvokeEvent,
+  type IpcMainEvent,
 } from "electron/main";
 import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
 import {
   createReadStream,
+  appendFileSync,
   existsSync,
   lstatSync,
   readFileSync,
@@ -178,6 +186,43 @@ import {
   type CliInstallResult,
   type ExistingLinkPath,
 } from "./cli-install";
+
+const launchStartedAt = ELECTRON_MODULE_ENTRY_AT;
+const recordedLaunchMilestones = new Set<LaunchMilestoneName>();
+const launchMetricsFileArgument = process.argv.find((argument) =>
+  argument.startsWith("--plainsong-launch-metrics-file="),
+);
+const launchMetricsFile =
+  process.env.PLAINSONG_QA_MODE === "1"
+    ? launchMetricsFileArgument?.slice("--plainsong-launch-metrics-file=".length)
+    : undefined;
+
+function recordLaunchMilestone(
+  name: LaunchMilestoneName,
+  source: "main" | "renderer" = "main",
+  rendererElapsedMs?: number,
+): void {
+  if (recordedLaunchMilestones.has(name)) return;
+  recordedLaunchMilestones.add(name);
+  const elapsedMs = Number(process.hrtime.bigint() - launchStartedAt) / 1_000_000;
+  const line = formatLaunchMilestone({
+      name,
+      elapsedMs: Math.round(elapsedMs * 1000) / 1000,
+      wallTimeMs: Date.now(),
+      source,
+      ...(rendererElapsedMs === undefined ? {} : { rendererElapsedMs }),
+    });
+  console.log(line);
+  if (launchMetricsFile) {
+    try {
+      appendFileSync(launchMetricsFile, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      console.warn("[launch] could not append milestone receipt", error);
+    }
+  }
+}
+
+recordLaunchMilestone("electron-module-entry");
 
 // Packaging is the only thing that decides development mode. This used to also
 // honour `NODE_ENV=development`, which meant an ambient environment variable
@@ -2844,6 +2889,7 @@ function createMainWindow(): BrowserWindow {
       additionalArguments: [...rendererAdditionalArguments()],
     },
   });
+  recordLaunchMilestone("window-created");
   configureWindowSecurity(win);
 
   win.on("closed", () => {
@@ -2898,6 +2944,10 @@ function createMainWindow(): BrowserWindow {
       console.log(RENDERER_READY_LOG_MESSAGE);
     },
   );
+
+  win.webContents.once("did-finish-load", () => {
+    recordLaunchMilestone("did-finish-load");
+  });
 
   if (isDev) {
     win.webContents.on("did-start-loading", () => {
@@ -3090,6 +3140,27 @@ ipcMain.handle("window:get-label", (event) => {
   return getWindowLabel(win);
 });
 
+ipcMain.on("launch:renderer-milestone", (event: IpcMainEvent, value: unknown) => {
+  const frameUrl = trustedSenderFrameUrl(event);
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!isTrustedRendererOrigin(frameUrl) || !win || getWindowLabel(win) !== "main") {
+    console.warn("[security] rejected renderer launch milestone", { url: frameUrl });
+    return;
+  }
+  const milestone = parseRendererLaunchMilestone(value);
+  if (!milestone) {
+    console.warn("[launch] rejected malformed renderer milestone");
+    return;
+  }
+  recordLaunchMilestone(milestone.name, "renderer", milestone.rendererElapsedMs);
+  if (
+    milestone.name === "workspace-or-wizard-interactive" &&
+    process.argv.includes("--plainsong-quit-after-launch-metrics")
+  ) {
+    setImmediate(() => app.quit());
+  }
+});
+
 
 // ── plainsong:// deep links ─────────────────────────────────────────────────
 
@@ -3273,6 +3344,7 @@ async function bootstrap() {
   });
 
   await app.whenReady();
+  recordLaunchMilestone("app-ready");
 
   if (app.isPackaged) {
     // Pairs with `protocols:` in electron-builder.yml (CFBundleURLTypes).
@@ -3343,6 +3415,8 @@ async function bootstrap() {
   }
 
   ipcBridge = new IpcBridge(sidecarPath);
+  ipcBridge.onSpawned(() => recordLaunchMilestone("sidecar-spawned"));
+  ipcBridge.onFirstResponse(() => recordLaunchMilestone("sidecar-first-response"));
   ipcBridge.onValidateSender(isTrustedRendererOrigin);
   ipcBridge.onLocalCommand(handleLocalCommand);
   configureAutoUpdater(autoUpdater);

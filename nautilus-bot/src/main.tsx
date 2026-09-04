@@ -26,6 +26,30 @@ if (overlayMode) {
   document.body.style.background = "transparent";
 }
 
+if (!overlayMode && typeof performance !== "undefined") {
+  const reportFirstContentfulPaint = (): void => {
+    const paint = performance.getEntriesByName("first-contentful-paint", "paint")[0];
+    if (paint) {
+      window.electronAPI?.reportLaunchMilestone(
+        "renderer-first-contentful-paint",
+        paint.startTime,
+      );
+      return;
+    }
+    const observer = new PerformanceObserver((entries, activeObserver) => {
+      const firstPaint = entries.getEntries().find((entry) => entry.name === "first-contentful-paint");
+      if (!firstPaint) return;
+      window.electronAPI?.reportLaunchMilestone(
+        "renderer-first-contentful-paint",
+        firstPaint.startTime,
+      );
+      activeObserver.disconnect();
+    });
+    observer.observe({ type: "paint", buffered: true });
+  };
+  reportFirstContentfulPaint();
+}
+
 if (import.meta.env.DEV && typeof performance !== "undefined") {
   performance.mark("app-bootstrap-start");
   console.debug("[perf] app-bootstrap-start");
