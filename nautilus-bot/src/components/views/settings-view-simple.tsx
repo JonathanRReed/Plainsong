@@ -3513,7 +3513,7 @@ export function SettingsView() {
                   <Button
                     onClick={async () => {
                       const confirmed = window.confirm(
-                        "Allow transcript text to be sent to a cloud AI for summaries and answers?",
+                        "Allow cloud AI to receive meeting transcripts and dictated text, including captured app context, for summaries, answers, and writing assistance?",
                       );
                       if (!confirmed) {
                         return;
@@ -4765,22 +4765,23 @@ export function SettingsView() {
                       <div className="space-y-0.5">
                         <Label className="flex items-center gap-2">
                           <Cloud className="h-4 w-4" />
-                          Use cloud AI for summaries and answers
+                          Allow cloud AI processing
                         </Label>
                         <p
                           id="remote-processing-description"
                           className="text-sm text-muted-foreground"
                         >
-                          Off means only Ollama on this Mac may write
-                          summaries, answers and action items, and every other
-                          service is refused. On means the transcript text goes
-                          to whichever service you picked in Models, which
-                          bills you for it. Speech engines are a separate
-                          choice and this does not affect them.
+                          Allows the service selected in Models to receive
+                          meeting transcripts and dictated text for summaries,
+                          answers, action items, Smart Format, and Power
+                          Rewrite. Dictation requests may also include captured
+                          selected text or app context and the destination app's
+                          name. The service may bill you. Speech engines are a
+                          separate choice and this does not affect them.
                         </p>
                       </div>
                       <Switch
-                        aria-label="Use cloud AI for summaries and answers"
+                        aria-label="Allow cloud AI processing"
                         aria-describedby="remote-processing-description"
                         checked={settings.privacy.remoteProcessingEnabled}
                         onCheckedChange={(checked) =>
@@ -5949,7 +5950,7 @@ export function SettingsView() {
                         <p className="text-sm leading-6 text-muted-foreground">
                           {settings.privacy.remoteProcessingEnabled
                             ? "Any service you pick in Models may receive your transcripts. Turn it back off under Privacy & Security."
-                            : "Only Ollama on this Mac may write summaries and answers. Every other service is refused until you allow it under Privacy & Security."}
+                            : "Only Ollama on this Mac may receive meeting transcripts, dictated text, or captured app context. Every other service is refused until you allow it under Privacy & Security."}
                         </p>
                       </div>
                       <Button
