@@ -275,8 +275,10 @@ impl ProjectKeyManager {
         let full_frames = plaintext_len / STREAM_FRAME_LEN as u64;
         // Always one trailing frame, even for empty input: it is what carries
         // the end-of-stream marker.
-        let frames = full_frames + 1;
-        STREAM_HEADER_LEN as u64 + frames * (4 + TAG_LEN as u64) + plaintext_len
+        let frames = full_frames.saturating_add(1);
+        (STREAM_HEADER_LEN as u64)
+            .saturating_add(frames.saturating_mul(4 + TAG_LEN as u64))
+            .saturating_add(plaintext_len)
     }
 
     /// Whether a payload's leading bytes identify the streaming format.
@@ -407,6 +409,11 @@ mod tests {
                 "projected size must match the bytes actually written for {length}"
             );
         }
+        assert_eq!(
+            ProjectKeyManager::streaming_ciphertext_len(u64::MAX),
+            u64::MAX,
+            "unrepresentable projections must fail closed at the largest size"
+        );
     }
 
     #[test]
