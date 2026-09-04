@@ -350,13 +350,12 @@ impl IntelligentPunctuator {
             word_count += 1;
 
             // Add paragraph break every N words
-            if word_count >= self.config.words_per_paragraph {
-                // Check if this is a natural break point
-                if word.ends_with('.') || word.ends_with('!') || word.ends_with('?') {
-                    result.push('\n');
-                    result.push('\n');
-                    word_count = 0;
-                }
+            if word_count >= self.config.words_per_paragraph
+                && (word.ends_with('.') || word.ends_with('!') || word.ends_with('?'))
+            {
+                result.push('\n');
+                result.push('\n');
+                word_count = 0;
             } else if i < words.len() - 1 {
                 result.push(' ');
             }
@@ -1159,6 +1158,29 @@ mod tests {
         let result = punctuator.punctuate(input);
         assert!(result.contains("First sentence"));
         assert!(result.contains("Second sentence"));
+    }
+
+    #[test]
+    fn paragraph_break_threshold_preserves_spaces_until_a_natural_break() {
+        let punctuator = IntelligentPunctuator::new(PunctuationConfig {
+            capitalize_sentences: false,
+            add_periods: false,
+            add_commas: false,
+            detect_questions: false,
+            paragraph_breaks: true,
+            words_per_paragraph: 3,
+            format_numbers: false,
+            expand_contractions: false,
+        });
+
+        assert_eq!(
+            punctuator.add_paragraph_breaks("one two three four five"),
+            "one two three four five"
+        );
+        assert_eq!(
+            punctuator.add_paragraph_breaks("one two three four. five"),
+            "one two three four.\n\nfive"
+        );
     }
 
     #[test]
