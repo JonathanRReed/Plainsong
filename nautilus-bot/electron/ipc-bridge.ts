@@ -40,6 +40,7 @@ type EventCallback = (eventName: string, payload: unknown) => void;
 type WindowCommandCallback = (command: string, payload: unknown) => void;
 type CommandResolvedCallback = (command: string, args: unknown, result: unknown) => void;
 type TerminatedCallback = (reason: string) => void;
+type LifecycleCallback = () => void;
 
 /**
  * Marks a meeting-start error as carrying a typed code (see
@@ -338,6 +339,9 @@ export class IpcBridge {
   private readonly maxRestarts = 5;
   private readonly inFlightWorkKeys = new Set<string>();
   private sidecarHealthy = false;
+  private spawnedCallback: LifecycleCallback | null = null;
+  private firstResponseCallback: LifecycleCallback | null = null;
+  private firstResponseSeen = false;
 
   constructor(sidecarPath: string, spawnProcess: typeof spawn = spawn) {
     this.sidecarPath = sidecarPath;
@@ -396,12 +400,21 @@ export class IpcBridge {
     this.terminatedCallback = cb;
   }
 
+  onSpawned(cb: LifecycleCallback): void {
+    this.spawnedCallback = cb;
+  }
+
+  onFirstResponse(cb: LifecycleCallback): void {
+    this.firstResponseCallback = cb;
+  }
+
   start(): void {
     this.spawnSidecar();
     this.registerIpcHandler();
   }
 
   private spawnSidecar(): void {
+    this.firstResponseSeen = false;
     console.log(`[sidecar] spawning: ${this.sidecarPath}`);
 
     this.process = this.spawnProcess(this.sidecarPath, [], {
@@ -468,6 +481,7 @@ export class IpcBridge {
 
     this.process.on("spawn", () => {
       console.log("[sidecar] connected");
+      this.spawnedCallback?.();
       // Deliberately NOT resetting restartAttempts here. 'spawn' only means the
       // process was created, so a sidecar that starts and then immediately dies
       // reset the counter on every cycle and restarted forever. The counter is
@@ -537,6 +551,10 @@ export class IpcBridge {
   }
 
   private handleSidecarMessage(msg: JsonRpcResponse): void {
+    if (!this.firstResponseSeen) {
+      this.firstResponseSeen = true;
+      this.firstResponseCallback?.();
+    }
     if (!this.sidecarHealthy) {
       this.sidecarHealthy = true;
       this.eventCallback?.("sidecar-runtime-changed", { ready: true });

@@ -234,6 +234,7 @@ function AppShell() {
   const firstViewMarked = useRef(false);
   const mainRef = useRef<HTMLElement>(null);
   const navigationFocusReadyRef = useRef(false);
+  const interactiveMarkedRef = useRef(false);
 
   // UI overlays
   const { decision: onboardingGate, recordCompleted, recordDeferred } =
@@ -252,6 +253,17 @@ function AppShell() {
     (onboardingGate.action === "show" && !setupClosedThisSession
       ? onboardingGate.mode
       : null);
+
+  useEffect(() => {
+    if (onboardingGate.action === "wait" || interactiveMarkedRef.current) return;
+    interactiveMarkedRef.current = true;
+    requestAnimationFrame(() => {
+      window.electronAPI?.reportLaunchMilestone(
+        "workspace-or-wizard-interactive",
+        performance.now(),
+      );
+    });
+  }, [onboardingGate.action]);
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof performance === "undefined") return;
@@ -551,6 +563,15 @@ function AppShell() {
 }
 
 function App() {
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      window.electronAPI?.reportLaunchMilestone(
+        "renderer-post-commit-frame",
+        performance.now(),
+      );
+    });
+  }, []);
+
   return (
     <ThemeProvider>
       <ToastProvider>
