@@ -36,8 +36,13 @@ const QA_ONLY_PATH_OVERRIDES = new Set([
 
 type SidecarProcessEnv = Record<string, string | undefined>;
 
-export function buildSidecarEnv(source: SidecarProcessEnv): SidecarProcessEnv {
-  const env: SidecarProcessEnv = { PATH: SIDECAR_SYSTEM_PATH };
+export function buildSidecarEnv(
+  source: SidecarProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): SidecarProcessEnv {
+  const env: SidecarProcessEnv = {
+    PATH: platform === "win32" ? source.PATH : SIDECAR_SYSTEM_PATH,
+  };
   const qaModeEnabled = source.PLAINSONG_QA_MODE === "1";
   for (const [key, value] of Object.entries(source)) {
     if (

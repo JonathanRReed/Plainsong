@@ -4269,6 +4269,14 @@ fn privileged_macos_helpers_never_resolve_through_path() {
 }
 
 #[test]
+fn rclone_resolution_keeps_windows_path_lookup_platform_gated() {
+    let source = include_str!("backup.rs");
+    assert!(source.contains("#[cfg(windows)]\nfn rclone_executable()"));
+    assert!(source.contains("PathBuf::from(\"rclone.exe\")"));
+    assert!(source.contains("#[cfg(not(windows))]\nfn rclone_executable()"));
+}
+
+#[test]
 fn dictation_result_is_durable_before_delivery_begins() {
     // A paste can cross process and accessibility boundaries. The only
     // recoverable transcript must therefore be committed before the first

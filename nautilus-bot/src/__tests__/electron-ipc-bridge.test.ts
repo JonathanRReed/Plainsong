@@ -207,10 +207,17 @@ describe("buildSidecarEnv", () => {
   });
 
   it("does not pass a hostile inherited PATH to the privileged sidecar", () => {
-    const env = buildSidecarEnv({ PATH: "/tmp/hostile-bin:/usr/bin" });
+    const env = buildSidecarEnv({ PATH: "/tmp/hostile-bin:/usr/bin" }, "darwin");
 
     expect(env.PATH).toBe("/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin");
     expect(env.PATH).not.toContain("/tmp/hostile-bin");
+  });
+
+  it("preserves Windows PATH for platform-provided helper lookup", () => {
+    const windowsPath = "C:\\Program Files\\rclone;C:\\Windows\\System32";
+    const env = buildSidecarEnv({ PATH: windowsPath }, "win32");
+
+    expect(env.PATH).toBe(windowsPath);
   });
 });
 

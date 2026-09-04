@@ -2489,6 +2489,7 @@ async fn list_rclone_remotes() -> std::result::Result<Vec<String>, String> {
     Ok(stdout.lines().map(|line| line.to_string()).collect())
 }
 
+#[cfg(not(windows))]
 fn rclone_executable() -> std::result::Result<PathBuf, String> {
     let configured = std::env::var_os("PLAINSONG_RCLONE_PATH");
     let candidates = [
@@ -2497,6 +2498,14 @@ fn rclone_executable() -> std::result::Result<PathBuf, String> {
         PathBuf::from("/usr/bin/rclone"),
     ];
     resolve_rclone_executable(configured.as_deref(), &candidates)
+}
+
+#[cfg(windows)]
+fn rclone_executable() -> std::result::Result<PathBuf, String> {
+    if let Some(configured) = std::env::var_os("PLAINSONG_RCLONE_PATH") {
+        return resolve_rclone_executable(Some(configured.as_os_str()), &[]);
+    }
+    Ok(PathBuf::from("rclone.exe"))
 }
 
 fn resolve_rclone_executable(
