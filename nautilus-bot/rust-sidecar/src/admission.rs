@@ -125,6 +125,7 @@ fn classify_command(command: &str) -> CommandClass {
         | "ask_memory"
         | "extract_action_items"
         | "extract_action_items_grounded"
+        | "prepare_meeting_brief"
         // Re-runs ASR and possibly an LLM pass over kept dictation audio, so
         // it shares the analysis budget and the per-target duplicate guard.
         | "reprocess_dictation"
@@ -166,19 +167,21 @@ fn duplicate_work_key(command: &str, params: &Value) -> Option<String> {
                 .unwrap_or_else(|| command.to_string())
         }
         CommandClass::Benchmark => "benchmark".to_string(),
-        CommandClass::Analysis => string_param(params, &["runId", "recordingId", "historyId"])
-            .or_else(|| {
-                params
-                    .get("recordingIds")
-                    .and_then(Value::as_array)
-                    .map(|ids| {
-                        ids.iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    })
-            })
-            .unwrap_or_else(|| command.to_string()),
+        CommandClass::Analysis => {
+            string_param(params, &["runId", "recordingId", "historyId", "eventId"])
+                .or_else(|| {
+                    params
+                        .get("recordingIds")
+                        .and_then(Value::as_array)
+                        .map(|ids| {
+                            ids.iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                })
+                .unwrap_or_else(|| command.to_string())
+        }
         CommandClass::Backup => {
             string_param(params, &["backupId"]).unwrap_or_else(|| command.to_string())
         }
@@ -493,6 +496,32 @@ mod tests {
             .err()
             .expect("concurrent retry for the same recording must be rejected");
         assert!(error.starts_with("SIDECAR_DUPLICATE:"));
+    }
+
+    #[test]
+    fn a_meeting_brief_is_admitted_as_analysis_work_per_event() {
+        let admission = AdmissionController::default();
+        let _first = admission
+            .admit(
+                "prepare_meeting_brief",
+                &serde_json::json!({"eventId": "event-1"}),
+            )
+            .expect("first brief");
+        let error = admission
+            .admit(
+                "prepare_meeting_brief",
+                &serde_json::json!({"eventId": "event-1"}),
+            )
+            .err()
+            .expect("concurrent brief for the same event must be rejected");
+        assert!(error.starts_with("SIDECAR_DUPLICATE:"));
+
+        admission
+            .admit(
+                "prepare_meeting_brief",
+                &serde_json::json!({"eventId": "event-2"}),
+            )
+            .expect("a different event can use another analysis slot");
     }
 
     #[test]

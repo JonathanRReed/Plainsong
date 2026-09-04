@@ -228,6 +228,15 @@ describe("getCommandTimeoutMs", () => {
       getCommandTimeoutMs("download_asr_models"),
     );
   });
+
+  it("treats meeting briefs as event-scoped analysis work", () => {
+    expect(getCommandTimeoutMs("prepare_meeting_brief")).toBe(
+      getCommandTimeoutMs("summarize_recording_grounded"),
+    );
+    expect(getCommandWorkKey("prepare_meeting_brief", { eventId: " event-1 " })).toBe(
+      "prepare_meeting_brief:event-1",
+    );
+  });
 });
 
 describe("sidecar fault recovery policy", () => {

@@ -10,6 +10,7 @@ const ANALYSIS_COMMANDS = new Set<string>([
   "ask_memory",
   "extract_action_items",
   "extract_action_items_grounded",
+  "prepare_meeting_brief",
   // Re-runs the whole meeting analysis pass (summary, action items, title), so
   // it needs the analysis timeout. Membership here also gives it a
   // recordingId-scoped work key, which is what stops a second retry from
@@ -197,7 +198,7 @@ export function getCommandWorkKey(command: string, args?: unknown): string | nul
     return `reprocess_dictation:${stringArgument(args, ["historyId"]) ?? command}`;
   }
   if (ANALYSIS_COMMANDS.has(command)) {
-    const target = stringArgument(args, ["runId", "recordingId"]) ?? command;
+    const target = stringArgument(args, ["runId", "recordingId", "eventId"]) ?? command;
     return `${command}:${target}`;
   }
   if (
