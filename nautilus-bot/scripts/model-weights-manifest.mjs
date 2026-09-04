@@ -129,6 +129,23 @@ export const MODEL_WEIGHTS = [
     pinnedIn: "rust-sidecar/src/asr/parakeet.rs (PARAKEET_V3_*)",
   },
   {
+    name: "Parakeet TDT 0.6b v2 (sherpa-onnx int8 export)",
+    usedFor: "English speech recognition on the high-throughput local route.",
+    repository:
+      "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+    revision: "1ab9323565ddb038682214b292f588070a538ce2",
+    license: "CC-BY-4.0",
+    note:
+      "Attribution is a condition of use, not a courtesy: this notice, shipped with the app, is how it is met. Derived from NVIDIA's nvidia/parakeet-tdt-0.6b-v2.",
+    files: [
+      "encoder.int8.onnx",
+      "decoder.int8.onnx",
+      "joiner.int8.onnx",
+      "tokens.txt",
+    ],
+    pinnedIn: "rust-sidecar/src/asr/parakeet.rs (PARAKEET_V2_*)",
+  },
+  {
     name: "Parakeet TDT CTC 110m (legacy export)",
     usedFor:
       "Speech recognition for installs that still carry the earlier Parakeet download.",

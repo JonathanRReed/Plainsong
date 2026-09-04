@@ -1623,6 +1623,10 @@ impl AsrProviderType {
                     label: "Parakeet TDT 0.6B v3 (25 EU languages, recommended)".to_string(),
                 },
                 ModelOption {
+                    id: "parakeet-tdt-0.6b-v2".to_string(),
+                    label: "Parakeet TDT 0.6B v2 (English only)".to_string(),
+                },
+                ModelOption {
                     id: "parakeet-tdt-ctc-110m".to_string(),
                     label: "Parakeet TDT CTC 110M legacy (English only)".to_string(),
                 },
