@@ -252,10 +252,9 @@ export function notificationForSidecarEvent(
         return {
           kind: "meeting_notes_failed",
           title: "Meeting notes failed",
-          body: oneSentence(
-            stringField(payload, "error"),
-            "Plainsong could not write the summary; open the meeting to retry.",
-          ),
+          // Sidecar errors can contain provider-controlled response bodies. Keep
+          // them out of OS notifications, whose previews may be publicly visible.
+          body: "Plainsong could not write the summary; open the meeting to retry.",
           focus: meetingFocus(recordingId),
           dedupeKey: `meeting_notes_failed:${recordingId}`,
         };

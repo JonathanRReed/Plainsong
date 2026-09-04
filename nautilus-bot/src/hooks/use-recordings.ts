@@ -35,6 +35,8 @@ export function useRecordings(projectId?: string) {
     void fetchRecordings();
   }, [fetchRecordings]);
 
+  const refetch = useCallback(() => fetchRecordings(true), [fetchRecordings]);
+
   useEffect(() => {
     let disposed = false;
     let unlistenStatus: (() => void) | undefined;
@@ -101,6 +103,6 @@ export function useRecordings(projectId?: string) {
     isLoading,
     hasLoaded,
     error,
-    refetch: () => fetchRecordings(true),
+    refetch,
   };
 }

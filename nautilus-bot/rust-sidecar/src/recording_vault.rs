@@ -1105,17 +1105,11 @@ pub(crate) async fn encrypt_finalized_recording_audio(
     if !vault_initialized {
         return Ok(());
     }
-    let key = {
-        let vault_state = state.vault_state.lock().await;
-        if !vault_state.unlocked {
-            return Err(
-                "Vault locked before the finalized recording bundle could be encrypted".to_string(),
-            );
-        }
-        vault_state.recording_key.ok_or_else(|| {
-            "Vault key became unavailable before recording encryption was journaled".to_string()
-        })?
-    };
+    // Journal before consulting the runtime key. If the vault locks between
+    // finalization and this call, the plaintext asset must not remain a normal
+    // ready asset that lock/shutdown can overlook. An open operation both
+    // records the unfinished protection work and prevents a subsequent vault
+    // lock until unlock/recovery completes it.
     let operation = state
         .db
         .lock()
@@ -1125,6 +1119,17 @@ pub(crate) async fn encrypt_finalized_recording_audio(
     // No operation means there was nothing plaintext left to encrypt.
     let Some(operation) = operation else {
         return Ok(());
+    };
+    let key = {
+        let vault_state = state.vault_state.lock().await;
+        if !vault_state.unlocked {
+            return Err(
+                "Vault locked before the finalized recording bundle could be encrypted".to_string(),
+            );
+        }
+        vault_state.recording_key.ok_or_else(|| {
+            "Vault key became unavailable after recording encryption was journaled".to_string()
+        })?
     };
     if let Err(error) = encrypt_recording_audio_operation(state, operation, &key, handle).await {
         let mut db = state.db.lock().await;

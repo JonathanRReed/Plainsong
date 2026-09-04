@@ -28,6 +28,7 @@ export default defineConfig({
     setupFiles: ["./src/__tests__/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
     pool: "threads",
-    maxWorkers: 4,
+    maxWorkers: process.env.CI ? 2 : 4,
+    testTimeout: process.env.CI ? 15_000 : 5_000,
   },
 });
