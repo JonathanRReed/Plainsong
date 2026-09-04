@@ -884,6 +884,9 @@ pub(crate) async fn start_recording_for_sidecar(
 
     let preparation_result = {
         let mut audio = state.audio_capture.lock().await;
+        // The idle hands-free stream must yield before meeting capture opens the
+        // microphone. Dictation admission independently rejects the active meeting.
+        audio.stop_hands_free_monitor();
         audio.start_recording(
             plan.clone(),
             options.clone(),
@@ -892,6 +895,7 @@ pub(crate) async fn start_recording_for_sidecar(
         )
     };
     if let Err(error) = preparation_result {
+        reconcile_hands_free_monitor(state.as_ref(), handle).await;
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         // Opening the capture devices is where a missing or busy input device
@@ -919,6 +923,7 @@ pub(crate) async fn start_recording_for_sidecar(
             let mut audio = state.audio_capture.lock().await;
             audio.abort_prepared_recording();
         }
+        reconcile_hands_free_monitor(state.as_ref(), handle).await;
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         let code = if meeting_start_failure_is_out_of_space(&message) {
             MeetingStartErrorCode::DiskFull
@@ -939,6 +944,7 @@ pub(crate) async fn start_recording_for_sidecar(
         audio.activate_recording(&recording_id)
     };
     if let Err(error) = activation_result {
+        reconcile_hands_free_monitor(state.as_ref(), handle).await;
         let message = error.to_string();
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
         let code = if meeting_start_failure_is_out_of_space(&message) {
@@ -1735,6 +1741,9 @@ pub(crate) async fn stop_recording_for_sidecar(
             );
         }
     }
+    // Restart idle listening only after capture has actually ended; reconciliation
+    // also keeps it off when a failed stop left the meeting active.
+    reconcile_hands_free_monitor(state.as_ref(), handle).await;
     result
 }
 

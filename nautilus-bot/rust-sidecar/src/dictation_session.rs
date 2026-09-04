@@ -214,10 +214,13 @@ pub(crate) async fn start_dictation_for_sidecar(
         if *runtime_state != DictationSessionState::Idle {
             return Err("Dictation is already active".to_string());
         }
-        let has_mic = {
+        let (has_mic, meeting_recording) = {
             let audio = state.audio_capture.lock().await;
-            audio.has_microphone_input()
+            (audio.has_microphone_input(), audio.is_recording())
         };
+        if meeting_recording {
+            return Err("Cannot start dictation while a meeting recording is active".to_string());
+        }
         if !has_mic {
             return Err(
                 "No microphone available. Please connect a microphone and grant permission."

@@ -1309,19 +1309,23 @@ fn hands_free_monitor_should_run_only_when_enabled_and_session_idle() {
     // keeps idle CPU/mic-hot behavior unchanged for users who don't opt in.
     assert!(!hands_free_monitor_should_run(
         false,
-        DictationSessionState::Idle
+        DictationSessionState::Idle,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         false,
-        DictationSessionState::Starting
+        DictationSessionState::Starting,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         false,
-        DictationSessionState::Primed
+        DictationSessionState::Primed,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         false,
-        DictationSessionState::Recording
+        DictationSessionState::Recording,
+        false
     ));
 
     // Setting on, but a session is already starting or recording: the monitor must
@@ -1331,21 +1335,30 @@ fn hands_free_monitor_should_run_only_when_enabled_and_session_idle() {
     // stepping on an in-progress one.
     assert!(!hands_free_monitor_should_run(
         true,
-        DictationSessionState::Starting
+        DictationSessionState::Starting,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         true,
-        DictationSessionState::Primed
+        DictationSessionState::Primed,
+        false
     ));
     assert!(!hands_free_monitor_should_run(
         true,
-        DictationSessionState::Recording
+        DictationSessionState::Recording,
+        false
     ));
 
     // Setting on and genuinely idle: the monitor should run.
     assert!(hands_free_monitor_should_run(
         true,
-        DictationSessionState::Idle
+        DictationSessionState::Idle,
+        false
+    ));
+    assert!(!hands_free_monitor_should_run(
+        true,
+        DictationSessionState::Idle,
+        true
     ));
 }
 
