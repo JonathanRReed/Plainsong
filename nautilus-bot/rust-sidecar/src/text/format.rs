@@ -350,13 +350,12 @@ impl IntelligentPunctuator {
             word_count += 1;
 
             // Add paragraph break every N words
-            if word_count >= self.config.words_per_paragraph {
-                // Check if this is a natural break point
-                if word.ends_with('.') || word.ends_with('!') || word.ends_with('?') {
-                    result.push('\n');
-                    result.push('\n');
-                    word_count = 0;
-                }
+            if word_count >= self.config.words_per_paragraph
+                && (word.ends_with('.') || word.ends_with('!') || word.ends_with('?'))
+            {
+                result.push('\n');
+                result.push('\n');
+                word_count = 0;
             } else if i < words.len() - 1 {
                 result.push(' ');
             }
@@ -411,7 +410,7 @@ impl Default for IntelligentPunctuator {
 /// ("the trial period", "a dash of", "the colon", "a quote from"). These
 /// only convert to symbols when the surrounding words don't look like
 /// ordinary prose (see `spoken_token_guard_rejects`); the unambiguous forms
-/// ("full stop", "question mark", "new paragraph", ...) are always
+/// ("full stop", "question mark", ...) are always
 /// converted.
 fn spoken_token_is_ambiguous(phrase: &str) -> bool {
     matches!(
@@ -512,11 +511,6 @@ fn replace_spoken_token(input: &str, phrase: &str, replacement: &str) -> String 
 
 fn normalize_spoken_punctuation(text: &str) -> String {
     let replacements = [
-        ("new paragraph", "\n\n"),
-        ("new line", "\n"),
-        ("newline", "\n"),
-        ("bullet point", "\n- "),
-        ("bullet", "\n- "),
         ("dash", " - "),
         ("open parenthesis", "("),
         ("close parenthesis", ")"),
@@ -1162,6 +1156,29 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_break_threshold_preserves_spaces_until_a_natural_break() {
+        let punctuator = IntelligentPunctuator::new(PunctuationConfig {
+            capitalize_sentences: false,
+            add_periods: false,
+            add_commas: false,
+            detect_questions: false,
+            paragraph_breaks: true,
+            words_per_paragraph: 3,
+            format_numbers: false,
+            expand_contractions: false,
+        });
+
+        assert_eq!(
+            punctuator.add_paragraph_breaks("one two three four five"),
+            "one two three four five"
+        );
+        assert_eq!(
+            punctuator.add_paragraph_breaks("one two three four. five"),
+            "one two three four.\n\nfive"
+        );
+    }
+
+    #[test]
     fn coordinating_conjunctions_do_not_start_new_sentences() {
         // Regression: the punctuator must not turn ordinary compound speech into
         // broken sentences (e.g. "...store and bought milk" -> "...store. And bought milk").
@@ -1192,17 +1209,32 @@ mod tests {
 
     #[test]
     fn smart_format_dictation_replaces_spoken_punctuation_tokens() {
-        let input = "hello comma this is jon period new paragraph i will follow up question mark";
+        let input = "hello comma this is jon period i will follow up question mark";
         let result = smart_format_dictation_text_for_app(input, "voice", None);
         assert!(result.contains("Hello, this is jon."));
-        assert!(result.contains("\n\nI will follow up?"));
+        assert!(result.contains("I will follow up?"));
     }
 
     #[test]
-    fn smart_format_dictation_keeps_message_mode_lightweight() {
-        let input = "hi there new line i can send that over tomorrow";
-        let result = smart_format_dictation_text_for_app(input, "messages", None);
-        assert_eq!(result, "Hi there\nI can send that over tomorrow");
+    fn smart_format_dictation_does_not_synthesize_control_characters() {
+        for phrase in [
+            "new line",
+            "newline",
+            "new paragraph",
+            "bullet",
+            "bullet point",
+        ] {
+            let input = format!("echo unsafe {phrase} harmless");
+            let result = smart_format_dictation_text_for_app(&input, "messages", None);
+            assert!(
+                result.contains(phrase),
+                "spoken phrase was not preserved: {result:?}"
+            );
+            assert!(
+                !result.contains('\r') && !result.contains('\n'),
+                "ordinary dictation synthesized a line break: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -1220,10 +1252,11 @@ mod tests {
     }
 
     #[test]
-    fn smart_format_dictation_adds_structure_for_document_apps() {
+    fn smart_format_dictation_preserves_spoken_structure_for_document_apps() {
         let input = "first section period new paragraph second section period";
         let result = smart_format_dictation_text_for_app(input, "voice", Some("Notion"));
-        assert!(result.contains("\n\n"));
+        assert!(result.to_ascii_lowercase().contains("new paragraph"));
+        assert!(!result.contains('\n'));
         assert!(result.ends_with('.'));
     }
 
@@ -1235,10 +1268,11 @@ mod tests {
     }
 
     #[test]
-    fn smart_format_dictation_uses_document_style_for_browser_domain_hints() {
+    fn smart_format_dictation_preserves_spoken_structure_for_browser_domain_hints() {
         let input = "first section period new paragraph second section period";
         let result = smart_format_dictation_text_for_app(input, "voice", Some("docs.google.com"));
-        assert!(result.contains("\n\n"));
+        assert!(result.to_ascii_lowercase().contains("new paragraph"));
+        assert!(!result.contains('\n'));
         assert!(result.ends_with('.'));
     }
 
@@ -1253,11 +1287,11 @@ mod tests {
     }
 
     #[test]
-    fn smart_format_dictation_supports_bullets_and_parentheses() {
-        let input = "bullet review pricing open paren with finance close paren new line bullet send follow up";
+    fn smart_format_dictation_supports_parentheses_without_synthesizing_bullets() {
+        let input = "bullet review pricing open paren with finance close paren";
         let result = smart_format_dictation_text_for_app(input, "notes", Some("Notion"));
-        assert!(result.contains("- Review pricing (with finance)"));
-        assert!(result.contains("\n- Send follow up"));
+        assert_eq!(result, "Bullet review pricing (with finance)");
+        assert!(!result.contains('\n'));
     }
 
     #[test]
@@ -1473,7 +1507,7 @@ mod tests {
             smart_format_dictation_text_for_app(input, "voice", Some("Visual Studio Code"));
         // CodeEditor is passthrough for local punctuation formatting: no
         // paragraph-break normalization is applied like it would be for Notes.
-        assert_eq!(result, "First section.\n\nSecond section.");
+        assert_eq!(result, "First section. New paragraph second section.");
     }
 
     #[test]
