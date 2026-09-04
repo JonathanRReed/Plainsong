@@ -297,27 +297,6 @@ fn name_tokens(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// The words of a line that are shaped like names: capitalized, and returned
-/// lowercased so they can be compared with `name_tokens`. Used only to decide
-/// whether a shortened first name may stand for a longer one, which is why the
-/// bar is "the transcript wrote it as a name", not "the transcript said it".
-fn capitalized_tokens(value: &str) -> Vec<String> {
-    value
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| {
-            token
-                .chars()
-                .next()
-                .is_some_and(|first| first.is_uppercase())
-        })
-        .map(|token| token.to_lowercase())
-        .collect()
-}
-
-/// The shortest owner token that may stand as a prefix of a longer name.
-/// Two characters ("Al", "Jo") match far too much to be evidence of anything.
-const MIN_PREFIX_OWNER_CHARS: usize = 3;
-
 /// Whether an owner the model proposed is actually supported.
 ///
 /// The model is told to fill `assignee` only from what the transcript states,
@@ -327,10 +306,7 @@ const MIN_PREFIX_OWNER_CHARS: usize = 3;
 /// - every word of it appears in a speaker alias the person set — "Priya"
 ///   against the alias "Priya Raman" is the same person, and dropping it lost
 ///   a correct owner; or
-/// - every word of it appears in the text of a line the item cites; or
-/// - it is a single word of at least three characters that begins a
-///   capitalized word in a cited line — "Jon" where the transcript says
-///   "Jonathan", the shortening people actually speak.
+/// - every word of it appears in the text of a line the item cites.
 ///
 /// Anything else is dropped: an invented owner on a real task is worse than no
 /// owner, because it reads as a commitment somebody made.
@@ -356,17 +332,7 @@ pub(crate) fn owner_is_supported(
     }) {
         return true;
     }
-    let [single] = owner_tokens.as_slice() else {
-        return false;
-    };
-    if single.chars().count() < MIN_PREFIX_OWNER_CHARS {
-        return false;
-    }
-    citations.iter().any(|citation| {
-        capitalized_tokens(&citation.text)
-            .iter()
-            .any(|token| token.len() > single.len() && token.starts_with(single.as_str()))
-    })
+    false
 }
 
 fn meaningful_tokens(value: &str) -> HashSet<String> {
@@ -2522,7 +2488,7 @@ mod tests {
     }
 
     #[test]
-    fn a_first_name_matches_the_alias_and_the_transcript_that_spell_it_out() {
+    fn a_first_name_matches_an_alias_but_not_a_longer_citation_word() {
         // The alias is the full name the person set; the model answers with the
         // first name, which is what the meeting actually called them.
         assert!(owner_is_supported(
@@ -2530,15 +2496,19 @@ mod tests {
             &[cited("I will send the deck.")],
             &["Priya Raman".to_string()]
         ));
-        // And the shortening people speak, against a name the transcript writes
-        // in full.
-        assert!(owner_is_supported(
+        // A prefix alone is ambiguous: capitalization cannot distinguish a
+        // person's name from an ordinary word or another proper noun.
+        assert!(!owner_is_supported(
             "Jon",
             &[cited("Jonathan takes the migration.")],
             &[]
         ));
-        // Still nobody: a prefix has to be of a name, not of any word, and a
-        // two-letter fragment matches too much to be evidence.
+        assert!(!owner_is_supported(
+            "Mark",
+            &[cited("Marketing will prepare the campaign.")],
+            &[]
+        ));
+        // Other partial and mismatched names remain unsupported too.
         assert!(!owner_is_supported(
             "Pri",
             &[cited("We will send the deck on Friday.")],

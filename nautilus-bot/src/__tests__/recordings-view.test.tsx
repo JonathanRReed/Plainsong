@@ -3870,6 +3870,115 @@ describe("RecordingsView", () => {
 });
 
 describe("RecordingsView remembered voices", () => {
+  it("keeps suggestions when the selected recording object refreshes with the same ID", async () => {
+    backend.suggestSpeakerVoices.mockResolvedValue({
+      enabled: true,
+      clusters: [
+        {
+          speakerId: "speaker_0",
+          appliedProfileId: null,
+          matchState: null,
+          suggestion: { profileId: "p-dana", displayName: "Dana", percent: 91 },
+        },
+      ],
+      nameOptions: ["Dana"],
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await screen.findByLabelText("Goals notes");
+    await waitFor(() => {
+      expect(
+        transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion,
+      ).toMatchObject({ profileId: "p-dana" });
+    });
+
+    backend.suggestSpeakerVoices.mockRejectedValue(
+      new Error("suggestion service unavailable"),
+    );
+    fireEvent.change(screen.getByLabelText("Goals notes"), {
+      target: { value: "Keep the same remembered voice" },
+    });
+    await waitFor(() => {
+      expect(backend.updateRecordingNotes).toHaveBeenCalledWith(
+        "r1",
+        "Goals\nKeep the same remembered voice",
+      );
+    });
+
+    expect(backend.suggestSpeakerVoices).toHaveBeenCalledTimes(1);
+    expect(
+      transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion,
+    ).toMatchObject({ profileId: "p-dana" });
+    expect(transcriptViewerProps.current?.speakerNameOptions).toEqual(["Dana"]);
+  });
+
+  it("ignores a suggestion response from the previously open meeting", async () => {
+    const firstResponse = deferred<Awaited<ReturnType<typeof backend.suggestSpeakerVoices>>>();
+    recordings = [
+      recordings[0],
+      {
+        ...recordings[0],
+        id: "r2",
+        title: "Planning review",
+        audioPath: "/tmp/planning-review.wav",
+      },
+    ];
+    backend.getRecording.mockImplementation(async (recordingId) => ({
+      ...recordings.find((recording) => recording.id === recordingId)!,
+      summary: "Test summary",
+      actionItems: [],
+    }));
+    backend.suggestSpeakerVoices.mockImplementation(async (recordingId) => {
+      if (recordingId === "r1") {
+        return firstResponse.promise;
+      }
+      return {
+        enabled: true,
+        clusters: [
+          {
+            speakerId: "speaker_0",
+            appliedProfileId: null,
+            matchState: null,
+            suggestion: { profileId: "p-ravi", displayName: "Ravi", percent: 94 },
+          },
+        ],
+        nameOptions: ["Ravi"],
+      };
+    });
+
+    render(<RecordingsView />);
+    fireEvent.click(screen.getByText("Weekly sync"));
+    await waitFor(() =>
+      expect(backend.suggestSpeakerVoices).toHaveBeenCalledWith("r1"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "All meetings" }));
+    fireEvent.click(screen.getByText("Planning review"));
+    await waitFor(() =>
+      expect(transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion)
+        .toMatchObject({ profileId: "p-ravi" }),
+    );
+
+    await act(async () => {
+      firstResponse.resolve({
+        enabled: true,
+        clusters: [
+          {
+            speakerId: "speaker_0",
+            appliedProfileId: null,
+            matchState: null,
+            suggestion: { profileId: "p-dana", displayName: "Dana", percent: 91 },
+          },
+        ],
+        nameOptions: ["Dana"],
+      });
+    });
+
+    expect(transcriptViewerProps.current?.speakerVoices?.speaker_0?.suggestion)
+      .toMatchObject({ profileId: "p-ravi" });
+    expect(transcriptViewerProps.current?.speakerNameOptions).toEqual(["Ravi"]);
+  });
+
   /**
    * Renaming has to work on a meeting that was diarized before "Remember
    * voices" was ever turned on. Such a meeting has no signature for any of its

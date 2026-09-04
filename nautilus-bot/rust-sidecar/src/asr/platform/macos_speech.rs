@@ -1636,6 +1636,9 @@ where
     take_install_cancellation();
     let helper = resolve_helper_binary_path()?;
     let mut command = TokioCommand::new(&helper);
+    // Sidecar cancellation aborts the owning task. Ensure that dropping this
+    // future also terminates the helper instead of orphaning an OS download.
+    command.kill_on_drop(true);
     command.arg("--install-assets");
     let requested_locale = locale
         .map(str::trim)

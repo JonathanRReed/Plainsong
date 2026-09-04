@@ -139,40 +139,13 @@ pub(crate) fn strip_non_speech_placeholder(text: &str) -> String {
         return String::new();
     }
 
-    // Some ASR providers emit placeholder-like text for silence, e.g. "[blank audio]".
-    // Treat outputs composed entirely of these tokens as empty.
-    const NON_SPEECH_TOKENS: &[&str] = &[
-        "blank",
-        "audio",
-        "blankaudio",
-        "blank_audio",
-        "nospeech",
-        "no",
-        "speech",
-        "silence",
-        "inaudible",
-        "unintelligible",
-        "noise",
-        "music",
-    ];
-
-    let canonical: String = trimmed
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect();
-
-    let words: Vec<&str> = canonical.split_whitespace().collect();
-    if words.is_empty() {
-        return String::new();
-    }
-
-    if words.iter().all(|word| NON_SPEECH_TOKENS.contains(word)) {
+    // Match only complete provider markers. Their component words can be legitimate
+    // dictation and must not be treated as silence on their own.
+    const NON_SPEECH_PLACEHOLDERS: &[&str] = &["[blank audio]", "<|nospeech|>"];
+    if NON_SPEECH_PLACEHOLDERS
+        .iter()
+        .any(|placeholder| trimmed.eq_ignore_ascii_case(placeholder))
+    {
         return String::new();
     }
 
@@ -332,6 +305,11 @@ pub(crate) fn enrich_meeting_transcript(
     dictionary_entries: &[models::DictationDictionaryEntry],
 ) {
     let mut cleaned_segments: Vec<models::TranscriptSegment> = Vec::new();
+    let unscoped_entries = dictionary_entries
+        .iter()
+        .filter(|entry| entry.app_scope.is_none() && entry.category_scope.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
 
     for segment in transcript.segments.drain(..) {
         let cleaned_text = sanitize_meeting_segment_text(&segment.text);
@@ -340,12 +318,12 @@ pub(crate) fn enrich_meeting_transcript(
         }
         // Correct before the merge below, so a taught term is matched inside one
         // segment rather than across a join that may not exist yet.
-        let cleaned_text = if dictionary_entries.is_empty() {
+        let cleaned_text = if unscoped_entries.is_empty() {
             cleaned_text
         } else {
             crate::dictation_pipeline::apply_learned_dictionary(
                 cleaned_text.as_str(),
-                dictionary_entries,
+                &unscoped_entries,
                 None,
                 text::format::DictationAppCategory::Other,
             )
@@ -580,8 +558,9 @@ pub(crate) fn recent_delivery_is_fresh(
     delivery: &RecentDictationDelivery,
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
-    now.signed_duration_since(delivery.delivered_at)
-        <= chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS)
+    let age = now.signed_duration_since(delivery.delivered_at);
+    age >= chrono::Duration::zero()
+        && age <= chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS)
 }
 
 pub(crate) fn recent_delivery_matches_target_and_is_fresh(
@@ -592,6 +571,48 @@ pub(crate) fn recent_delivery_matches_target_and_is_fresh(
 ) -> bool {
     recent_delivery_matches_target(delivery, app_target, app_bundle_id)
         && recent_delivery_is_fresh(delivery, now)
+}
+
+/// A destructive voice command may only undo a confirmed Plainsong insertion
+/// when the dictation session and the immediately focused application both
+/// identify the exact target that received it. Unknown targets fail closed.
+pub(crate) fn recent_delivery_authorizes_undo(
+    delivery: &RecentDictationDelivery,
+    session_app: Option<&str>,
+    session_bundle_id: Option<&str>,
+    focused_app: Option<&str>,
+    focused_bundle_id: Option<&str>,
+    insertion_mode: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if insertion_mode == "clipboard_only"
+        || !delivery.undo_eligible
+        || !recent_delivery_is_fresh(delivery, now)
+    {
+        return false;
+    }
+
+    let strict_target_matches = |app: Option<&str>, bundle_id: Option<&str>| match (
+        delivery.app_bundle_id.as_deref(),
+        bundle_id,
+    ) {
+        (Some(delivery_id), Some(target_id)) => delivery_id.eq_ignore_ascii_case(target_id),
+        (Some(_), None) => false,
+        _ => match (delivery.app_target.as_deref(), app) {
+            (Some(delivery_app), Some(target_app)) => delivery_app.eq_ignore_ascii_case(target_app),
+            _ => false,
+        },
+    };
+
+    strict_target_matches(session_app, session_bundle_id)
+        && strict_target_matches(focused_app, focused_bundle_id)
+}
+
+pub(crate) fn replacement_insertion_is_authorized(
+    undo_requested: bool,
+    undo_performed: bool,
+) -> bool {
+    !undo_requested || undo_performed
 }
 
 pub(crate) fn infer_learned_correction_result(
@@ -1016,6 +1037,16 @@ pub(crate) fn apply_dictation_session_mode_override(
         if let Some(model_id) = mode.dictation_model_id.as_deref() {
             transcription.dictation_model_id = model_id.to_string();
         }
+        // A named-profile binding must carry the profile's AI lane into the
+        // per-session snapshot just like selecting that profile in Settings
+        // does. Otherwise translation and formatting can fall through to the
+        // globally selected provider and disclose this session's text there.
+        if let Some(provider) = mode.ai_provider.as_deref() {
+            settings.privacy.dictation_ai.provider = provider.to_string();
+        }
+        if let Some(model_id) = mode.ai_model_id.as_deref() {
+            settings.privacy.dictation_ai.model_id = Some(model_id.to_string());
+        }
         if let Some(language) = mode.language_override.as_deref() {
             options.language_override = Some(language.to_string());
         }
@@ -1046,6 +1077,20 @@ pub(crate) fn dictation_translate_to_english_enabled(settings: &settings::Settin
         Some(mode) => mode.translate_to_english,
         None => settings.transcription.dictation_translate_to_english,
     }
+}
+
+pub(crate) fn dictation_session_ai_selection(
+    settings: &settings::Settings,
+) -> Result<(AnalysisProvider, bool, String), String> {
+    let lane = settings.privacy.ai_lane(settings::AiLane::Dictation);
+    let provider = AnalysisProvider::from_settings_value(&lane.provider)?;
+    let model = lane
+        .model_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| provider.default_model())
+        .to_string();
+    Ok((provider, settings.privacy.remote_processing_enabled, model))
 }
 
 /// How translate-to-English runs for the model that will transcribe.
@@ -1194,11 +1239,12 @@ only the translated English text with no preamble or notes.";
 #[allow(clippy::items_after_test_module)]
 mod dictation_translation_route_tests {
     use super::{
-        clear_untranslatable_dictation_translate_flags, resolve_dictation_translation_route,
+        apply_dictation_session_mode_override, clear_untranslatable_dictation_translate_flags,
+        dictation_session_ai_selection, resolve_dictation_translation_route,
         DictationTranslationRoute, DICTATION_TRANSLATE_TO_ENGLISH_PROMPT,
     };
     use crate::asr::AsrProviderType;
-    use crate::settings;
+    use crate::{models, settings};
 
     fn transcription_on(provider: &str, model_id: &str) -> settings::TranscriptionSettings {
         settings::TranscriptionSettings {
@@ -1223,6 +1269,38 @@ mod dictation_translation_route_tests {
             dictation_model_id: model_id.map(str::to_string),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn named_custom_mode_override_carries_its_ai_lane_into_the_session_snapshot() {
+        let mut settings = settings::Settings::default();
+        settings.privacy.dictation_ai.provider = "openai".to_string();
+        settings.privacy.dictation_ai.model_id = Some("cloud-model".to_string());
+        settings.transcription.dictation_custom_modes = vec![settings::DictationCustomMode {
+            id: "local-profile".to_string(),
+            name: "Local profile".to_string(),
+            ai_provider: Some("ollama".to_string()),
+            ai_model_id: Some("local-model".to_string()),
+            ..Default::default()
+        }];
+        let mut options = models::DictationStartOptions {
+            mode_override: Some(models::DictationSessionModeOverride {
+                preset: "custom".to_string(),
+                custom_mode_id: Some("local-profile".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        apply_dictation_session_mode_override(&mut settings, &mut options);
+
+        assert_eq!(settings.privacy.dictation_ai.provider, "ollama");
+        assert_eq!(
+            settings.privacy.dictation_ai.model_id.as_deref(),
+            Some("local-model")
+        );
+        let (provider, _, model) = dictation_session_ai_selection(&settings).unwrap();
+        assert_eq!(provider, crate::llm::Provider::Ollama);
+        assert_eq!(model, "local-model");
     }
 
     #[test]
@@ -1592,16 +1670,6 @@ pub(crate) async fn prepare_dictation_formatting_request(
     state: &AppState,
     dictation_options: &models::DictationStartOptions,
 ) -> Result<PreparedDictationFormatting, String> {
-    let (provider, remote_processing_enabled, _, settings_model) =
-        selected_analysis_provider_and_settings(state, settings::AiLane::Dictation).await?;
-    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
-
-    let selected_model = settings_model
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| provider.default_model())
-        .to_string();
-
     let active_app = if dictation_options.context_app_name.is_some() {
         dictation_options.context_app_name.clone()
     } else {
@@ -1616,6 +1684,15 @@ pub(crate) async fn prepare_dictation_formatting_request(
     // here too.
     let mut session_options = dictation_options.clone();
     apply_dictation_session_mode_override(&mut settings, &mut session_options);
+    let lane = settings.privacy.ai_lane(settings::AiLane::Dictation);
+    let provider = AnalysisProvider::from_settings_value(&lane.provider)?;
+    enforce_remote_provider_policy(provider, settings.privacy.remote_processing_enabled)?;
+    let selected_model = lane
+        .model_id
+        .as_deref()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| provider.default_model())
+        .to_string();
 
     let resolved_app_category = settings::resolve_dictation_app_category_with_overrides_and_hint(
         &settings.transcription,
@@ -1701,9 +1778,13 @@ pub(crate) async fn execute_dictation_formatting_request(
     transcript: &str,
 ) -> Result<String, String> {
     let timeout = analysis_timeouts(prepared.provider).request;
-    let runtime = selected_analysis_runtime(
+    let runtime = analysis_runtime_for_provider(
         state,
-        settings::AiLane::Dictation,
+        prepared.provider,
+        {
+            let settings = state.settings_manager.lock().await;
+            settings.settings().privacy.remote_processing_enabled
+        },
         Some(prepared.selected_model.as_str()),
         Some(timeout),
     )
@@ -1733,40 +1814,52 @@ pub(crate) async fn run_custom_dictation_transform_with_selected_provider(
     input: &str,
     system_prompt: &str,
 ) -> Result<(String, AnalysisProvider, String), String> {
-    let transcript = input.trim();
-    if transcript.is_empty() {
-        return Err("Text cannot be empty".to_string());
-    }
-
     let (provider, remote_processing_enabled, _, settings_model) =
         selected_analysis_provider_and_settings(state, settings::AiLane::Dictation).await?;
-    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
-    // Every caller of this function supplies a free-text transform prompt (a
-    // custom mode's own prompt, or a dictation command's), and neither
-    // on-device provider will act on one. The bundled model has no channel
-    // for a prompt at all -- its only steering is the three-axis control
-    // line. Apple's could follow one, but its client deliberately always
-    // sends *our* instructions and never the caller's assembled system
-    // prompt, because that string is also how the dictation path carries the
-    // fenced captured-context blob, and `instructions` is the higher-trust
-    // channel. Either way, running here would quietly do generic cleanup
-    // while reporting that the requested transform ran. Refusing sends the
-    // caller to its deterministic local transform instead.
-    if provider.is_zero_setup_local() {
-        return Err(custom_transform_unsupported_error(provider));
-    }
-
     let selected_model = settings_model
         .as_deref()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| provider.default_model())
         .to_string();
-
-    let timeout = analysis_timeouts(provider).request;
-    let runtime = selected_analysis_runtime(
+    run_custom_dictation_transform_with_provider(
         state,
-        settings::AiLane::Dictation,
-        Some(&selected_model),
+        input,
+        system_prompt,
+        provider,
+        &selected_model,
+        remote_processing_enabled,
+    )
+    .await
+}
+
+pub(crate) async fn run_custom_dictation_transform_with_provider(
+    state: &AppState,
+    input: &str,
+    system_prompt: &str,
+    provider: AnalysisProvider,
+    selected_model: &str,
+    remote_processing_enabled: bool,
+) -> Result<(String, AnalysisProvider, String), String> {
+    let transcript = input.trim();
+    if transcript.is_empty() {
+        return Err("Text cannot be empty".to_string());
+    }
+    enforce_remote_provider_policy(provider, remote_processing_enabled)?;
+    if provider.is_zero_setup_local() {
+        return Err(custom_transform_unsupported_error(provider));
+    }
+    let selected_model = selected_model.trim();
+    let selected_model = if selected_model.is_empty() {
+        provider.default_model()
+    } else {
+        selected_model
+    };
+    let timeout = analysis_timeouts(provider).request;
+    let runtime = analysis_runtime_for_provider(
+        state,
+        provider,
+        remote_processing_enabled,
+        Some(selected_model),
         Some(timeout),
     )
     .await?;
@@ -1788,11 +1881,13 @@ pub(crate) async fn run_custom_dictation_transform_with_selected_provider(
         .await
         .map_err(|error| error.to_string())?
         .text;
-
     let cleaned = sanitize_dictation_output(raw_output.trim(), transcript);
     if cleaned.trim().is_empty() {
         return Err("Reprocess returned an empty response".to_string());
     }
-
-    Ok((cleaned.trim().to_string(), provider, selected_model))
+    Ok((
+        cleaned.trim().to_string(),
+        provider,
+        selected_model.to_string(),
+    ))
 }

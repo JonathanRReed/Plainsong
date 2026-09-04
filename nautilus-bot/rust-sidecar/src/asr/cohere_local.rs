@@ -646,12 +646,27 @@ fn load_runtime(model_dir: &Path) -> Result<CohereLocalRuntime> {
         head_dim: usize,
     }
 
+    let verified = |local_name: &str| {
+        let sha256 = cohere_local_repo_files()
+            .into_iter()
+            .find(|(_, _, _, candidate, _)| *candidate == local_name)
+            .map(|(_, _, _, _, sha256)| sha256)
+            .ok_or_else(|| anyhow::anyhow!("Missing integrity pin for {local_name}"))?;
+        crate::download::open_verified_model_artifact(&model_dir.join(local_name), sha256)
+    };
+    let preprocessor_file = verified(LOCAL_PREPROCESSOR)?;
+    let generation_file = verified(LOCAL_GENERATION_CONFIG)?;
+    let config_file = verified(LOCAL_CONFIG)?;
+    let tokenizer_file = verified(LOCAL_TOKENIZER)?;
+    let encoder_file = verified(LOCAL_ENCODER)?;
+    let decoder_file = verified(LOCAL_DECODER)?;
+
     // The front end below hard-codes the export's numbers. Read them back and
     // refuse a mismatch rather than computing features the encoder was not
     // exported for -- a silently wrong mel is the failure mode that took the
     // Qwen3 lane a full end-to-end run to find.
     let preprocessor: PreprocessorConfig = serde_json::from_str(
-        &std::fs::read_to_string(model_dir.join(LOCAL_PREPROCESSOR))
+        &std::fs::read_to_string(preprocessor_file.load_path())
             .context("Failed to read Cohere Transcribe preprocessor_config.json")?,
     )
     .context("Failed to parse Cohere Transcribe preprocessor_config.json")?;
@@ -678,13 +693,13 @@ fn load_runtime(model_dir: &Path) -> Result<CohereLocalRuntime> {
     }
 
     let generation: GenerationConfig = serde_json::from_str(
-        &std::fs::read_to_string(model_dir.join(LOCAL_GENERATION_CONFIG))
+        &std::fs::read_to_string(generation_file.load_path())
             .context("Failed to read Cohere Transcribe generation_config.json")?,
     )
     .context("Failed to parse Cohere Transcribe generation_config.json")?;
 
     let config_value: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(model_dir.join(LOCAL_CONFIG))
+        &std::fs::read_to_string(config_file.load_path())
             .context("Failed to read Cohere Transcribe config.json")?,
     )
     .context("Failed to parse Cohere Transcribe config.json")?;
@@ -695,7 +710,7 @@ fn load_runtime(model_dir: &Path) -> Result<CohereLocalRuntime> {
     }))
     .context("Cohere Transcribe config.json is missing the decoder cache shape")?;
 
-    let tokenizer = tokenizers::Tokenizer::from_file(model_dir.join(LOCAL_TOKENIZER))
+    let tokenizer = tokenizers::Tokenizer::from_file(tokenizer_file.load_path())
         .map_err(|error| anyhow::anyhow!("Failed to load Cohere Transcribe tokenizer: {error}"))?;
 
     // CoreML is not registered for either graph. The encoder is int4
@@ -703,9 +718,9 @@ fn load_runtime(model_dir: &Path) -> Result<CohereLocalRuntime> {
     // decoder is a merged graph whose control flow CoreML rejects outright --
     // the same two reasons the Qwen3 decoders bypass it. Both run on the CPU
     // provider and the route copy says so rather than implying Metal.
-    let encoder = crate::ort_utils::build_session_no_coreml(&model_dir.join(LOCAL_ENCODER), Ok)
+    let encoder = crate::ort_utils::build_session_no_coreml(encoder_file.load_path(), Ok)
         .context("Failed to load the Cohere Transcribe encoder")?;
-    let decoder = crate::ort_utils::build_session_no_coreml(&model_dir.join(LOCAL_DECODER), Ok)
+    let decoder = crate::ort_utils::build_session_no_coreml(decoder_file.load_path(), Ok)
         .context("Failed to load the Cohere Transcribe decoder")?;
 
     let mel_filters = crate::audio::mel::create_mel_filterbank_slaney(
