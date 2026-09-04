@@ -504,6 +504,14 @@ describe("SettingsView performance behavior", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows spoken commands as disabled when the setting is absent", async () => {
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    fireEvent.click(await screen.findByText("Transcription"));
+
+    expect(await screen.findByRole("switch", { name: "Spoken commands" })).not.toBeChecked();
+  });
+
   it("invalidates ASR runtime probes before refreshing permission diagnostics", async () => {
     const backend = await import("@/lib/backend");
     render(<ToastProvider><SettingsView /></ToastProvider>);

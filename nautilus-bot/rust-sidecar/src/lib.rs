@@ -809,6 +809,10 @@ struct RecentDictationDelivery {
     app_target: Option<String>,
     app_bundle_id: Option<String>,
     delivered_at: chrono::DateTime<chrono::Utc>,
+    /// Only a positively confirmed cursor insertion can own an undo entry.
+    /// Clipboard copies and best-effort paste dispatches remain available for
+    /// retry, but must never authorize a system-wide undo keystroke.
+    undo_eligible: bool,
 }
 
 const RECENT_DICTATION_DELIVERY_WINDOW_SECS: i64 = 45;

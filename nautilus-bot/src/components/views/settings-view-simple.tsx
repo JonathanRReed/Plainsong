@@ -2718,7 +2718,7 @@ export function SettingsView() {
               label="Spoken commands"
               description={'Say things like "command undo that" or "command uppercase selection" and Plainsong acts on them instead of typing them.'}
               checked={
-                settings.transcription.dictationCommandModeEnabled ?? true
+                settings.transcription.dictationCommandModeEnabled ?? false
               }
               onCheckedChange={(checked) =>
                 void updateSettings({

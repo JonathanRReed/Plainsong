@@ -6048,6 +6048,7 @@ fn recent_delivery_falls_back_when_current_target_is_unknown() {
         app_target: Some("Slack".to_string()),
         app_bundle_id: None,
         delivered_at: now,
+        undo_eligible: true,
     };
 
     assert!(recent_delivery_matches_target(&delivery, None, None));
@@ -6071,6 +6072,7 @@ fn recent_delivery_freshness_window_expires() {
         app_target: Some("Slack".to_string()),
         app_bundle_id: None,
         delivered_at: now - chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS),
+        undo_eligible: true,
     };
     let stale_delivery = RecentDictationDelivery {
         delivered_at: now - chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS + 1),
@@ -6091,6 +6093,111 @@ fn recent_delivery_freshness_window_expires() {
         None,
         now
     ));
+}
+
+#[test]
+fn undo_requires_confirmed_insert_and_unchanged_known_target() {
+    let now = chrono::Utc::now();
+    let delivery = RecentDictationDelivery {
+        text: "ship it tomorrow".to_string(),
+        app_target: Some("Slack".to_string()),
+        app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+        delivered_at: now,
+        undo_eligible: true,
+    };
+
+    assert!(recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "auto",
+        now,
+    ));
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Notes"),
+        Some("com.apple.Notes"),
+        "auto",
+        now,
+    ));
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "clipboard_only",
+        now,
+    ));
+
+    let unconfirmed = RecentDictationDelivery {
+        undo_eligible: false,
+        ..delivery
+    };
+    assert!(!recent_delivery_authorizes_undo(
+        &unconfirmed,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "auto",
+        now,
+    ));
+}
+
+#[test]
+fn undo_fails_closed_when_a_recorded_bundle_id_is_unavailable() {
+    let now = chrono::Utc::now();
+    let delivery = RecentDictationDelivery {
+        text: "ship it tomorrow".to_string(),
+        app_target: Some("Slack".to_string()),
+        app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+        delivered_at: now,
+        undo_eligible: true,
+    };
+
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        None,
+        Some("Slack"),
+        None,
+        "auto",
+        now,
+    ));
+}
+
+#[test]
+fn undo_rejects_delivery_timestamps_from_the_future() {
+    let now = chrono::Utc::now();
+    let delivery = RecentDictationDelivery {
+        text: "ship it tomorrow".to_string(),
+        app_target: Some("Slack".to_string()),
+        app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
+        delivered_at: now + chrono::Duration::seconds(1),
+        undo_eligible: true,
+    };
+
+    assert!(!recent_delivery_authorizes_undo(
+        &delivery,
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        Some("Slack"),
+        Some("com.tinyspeck.slackmacgap"),
+        "auto",
+        now,
+    ));
+}
+
+#[test]
+fn replacement_insertion_requires_its_requested_undo_to_succeed() {
+    assert!(replacement_insertion_is_authorized(false, false));
+    assert!(replacement_insertion_is_authorized(true, true));
+    assert!(!replacement_insertion_is_authorized(true, false));
 }
 
 #[test]
