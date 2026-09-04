@@ -15,6 +15,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use tokio::process::Command;
@@ -2303,7 +2304,8 @@ async fn sync_to_rclone(
         .ok_or_else(|| anyhow::anyhow!("Invalid backup path"))?;
     let destination = format!("{remote}:{folder}/{backup_id}");
 
-    let output = Command::new("rclone")
+    let rclone = rclone_executable().map_err(anyhow::Error::msg)?;
+    let output = Command::new(rclone)
         .arg("copy")
         .arg(source)
         .arg(&destination)
@@ -2456,7 +2458,7 @@ fn fail_check(id: &str, label: &str, message: &str) -> CloudSetupCheck {
 }
 
 async fn rclone_version() -> std::result::Result<String, String> {
-    let version = Command::new("rclone")
+    let version = Command::new(rclone_executable()?)
         .arg("version")
         .output()
         .await
@@ -2474,7 +2476,7 @@ async fn rclone_version() -> std::result::Result<String, String> {
 }
 
 async fn list_rclone_remotes() -> std::result::Result<Vec<String>, String> {
-    let remotes = Command::new("rclone")
+    let remotes = Command::new(rclone_executable()?)
         .arg("listremotes")
         .output()
         .await
@@ -2485,6 +2487,63 @@ async fn list_rclone_remotes() -> std::result::Result<Vec<String>, String> {
     }
     let stdout = String::from_utf8_lossy(&remotes.stdout);
     Ok(stdout.lines().map(|line| line.to_string()).collect())
+}
+
+fn rclone_executable() -> std::result::Result<PathBuf, String> {
+    let configured = std::env::var_os("PLAINSONG_RCLONE_PATH");
+    let candidates = [
+        PathBuf::from("/opt/homebrew/bin/rclone"),
+        PathBuf::from("/usr/local/bin/rclone"),
+        PathBuf::from("/usr/bin/rclone"),
+    ];
+    resolve_rclone_executable(configured.as_deref(), &candidates)
+}
+
+fn resolve_rclone_executable(
+    configured: Option<&OsStr>,
+    candidates: &[PathBuf],
+) -> std::result::Result<PathBuf, String> {
+    if let Some(configured) = configured {
+        let configured = Path::new(configured);
+        if !configured.is_absolute() {
+            return Err("PLAINSONG_RCLONE_PATH must be an absolute path".to_string());
+        }
+        return validate_rclone_executable(configured);
+    }
+
+    candidates
+        .iter()
+        .find_map(|candidate| validate_rclone_executable(candidate).ok())
+        .ok_or_else(|| {
+            "rclone is not available. Install it in /opt/homebrew/bin or /usr/local/bin, or set PLAINSONG_RCLONE_PATH to its absolute path."
+                .to_string()
+        })
+}
+
+fn validate_rclone_executable(path: &Path) -> std::result::Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| format!("rclone executable does not exist: {}", path.display()))?;
+    let metadata = canonical
+        .metadata()
+        .map_err(|error| format!("Could not inspect rclone executable: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "rclone executable is not a regular file: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(format!(
+                "rclone executable is not executable: {}",
+                canonical.display()
+            ));
+        }
+    }
+    Ok(canonical)
 }
 
 #[cfg(test)]
@@ -2501,6 +2560,39 @@ mod tests {
             .expect("system time before epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("nautilus-backup-test-{name}-{suffix}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rclone_resolution_ignores_path_and_accepts_explicit_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = unique_test_dir("rclone-executable");
+        fs::create_dir_all(&root).expect("create rclone test root");
+        let executable = root.join("custom-rclone");
+        fs::write(&executable, b"#!/bin/sh\nexit 0\n").expect("write fake rclone");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("make fake rclone executable");
+
+        assert_eq!(
+            resolve_rclone_executable(Some(executable.as_os_str()), &[])
+                .expect("resolve explicit rclone"),
+            executable.canonicalize().expect("canonical fake rclone")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rclone_resolution_rejects_non_executable_and_directory() {
+        let root = unique_test_dir("rclone-invalid");
+        fs::create_dir_all(&root).expect("create rclone test root");
+        let plain_file = root.join("plain-rclone");
+        fs::write(&plain_file, b"not executable").expect("write plain file");
+
+        assert!(resolve_rclone_executable(Some(plain_file.as_os_str()), &[]).is_err());
+        assert!(resolve_rclone_executable(Some(root.as_os_str()), &[]).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

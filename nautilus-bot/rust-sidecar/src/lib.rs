@@ -2383,7 +2383,7 @@ JSON.stringify({
 });
 "#;
 
-    let output = std::process::Command::new("osascript")
+    let output = std::process::Command::new("/usr/bin/osascript")
         .args(["-l", "JavaScript", "-e", script])
         .output()
         .ok()?;
@@ -2770,7 +2770,7 @@ else
 end if
 "#;
 
-    let output = std::process::Command::new("osascript")
+    let output = std::process::Command::new("/usr/bin/osascript")
         .arg("-e")
         .arg(script)
         .output()

@@ -3,7 +3,6 @@ const SIDECAR_ENV_ALLOWLIST = new Set([
   "USER",
   "USERNAME",
   "LOGNAME",
-  "PATH",
   "SHELL",
   "TMPDIR",
   "TEMP",
@@ -23,9 +22,12 @@ const SIDECAR_ENV_ALLOWLIST = new Set([
   "PLAINSONG_QA_MODE",
   "PLAINSONG_PYTHON",
   "PLAINSONG_ASR_RUNNER",
+  "PLAINSONG_RCLONE_PATH",
   "PLAINSONG_WINDOWS_FOUNDRY_READY",
   "PLAINSONG_MLX_STUB_READY",
 ]);
+
+const SIDECAR_SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
 
 const QA_ONLY_PATH_OVERRIDES = new Set([
   "PLAINSONG_CONFIG_DIR",
@@ -35,7 +37,7 @@ const QA_ONLY_PATH_OVERRIDES = new Set([
 type SidecarProcessEnv = Record<string, string | undefined>;
 
 export function buildSidecarEnv(source: SidecarProcessEnv): SidecarProcessEnv {
-  const env: SidecarProcessEnv = {};
+  const env: SidecarProcessEnv = { PATH: SIDECAR_SYSTEM_PATH };
   const qaModeEnabled = source.PLAINSONG_QA_MODE === "1";
   for (const [key, value] of Object.entries(source)) {
     if (

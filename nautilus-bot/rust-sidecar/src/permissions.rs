@@ -486,7 +486,7 @@ pub(crate) fn open_permission_settings_impl(section: &str) -> Result<(), String>
             _ => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
         };
 
-        let status = std::process::Command::new("open")
+        let status = std::process::Command::new("/usr/bin/open")
             .arg(target)
             .status()
             .map_err(|e| format!("Failed to open System Settings: {}", e))?;
@@ -509,7 +509,7 @@ pub(crate) fn open_installed_nautilus_app_impl() -> Result<(), String> {
         let app_path = installed_nautilus_app_bundle_path()
             .ok_or_else(|| "Installed Plainsong.app was not found in /Applications.".to_string())?;
 
-        let status = std::process::Command::new("open")
+        let status = std::process::Command::new("/usr/bin/open")
             .arg(app_path)
             .status()
             .map_err(|e| format!("Failed to open installed Plainsong.app: {}", e))?;

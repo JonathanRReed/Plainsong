@@ -125,7 +125,7 @@ pub(crate) fn request_accessibility_permission() -> bool {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn reset_tcc_service(service: &str, bundle_id: &str) -> Result<(), String> {
-    let output = std::process::Command::new("tccutil")
+    let output = std::process::Command::new("/usr/bin/tccutil")
         .args(["reset", service, bundle_id])
         .output()
         .map_err(|error| format!("Failed to launch tccutil: {}", error))?;
@@ -1249,7 +1249,7 @@ pub(crate) fn reactivate_target_application(
         return Ok(());
     }
 
-    let mut command = std::process::Command::new("open");
+    let mut command = std::process::Command::new("/usr/bin/open");
     if let Some(bundle_id) = trimmed_bundle_id {
         command.args(["-b", bundle_id]);
     } else if let Some(name) = trimmed_name {
@@ -1351,7 +1351,7 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::{Command, Stdio};
-        let mut pbcopy = Command::new("pbcopy")
+        let mut pbcopy = Command::new("/usr/bin/pbcopy")
             .stdin(Stdio::piped())
             .spawn()
             .map_err(|e| format!("Failed to launch pbcopy: {}", e))?;
@@ -1405,7 +1405,7 @@ pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn read_clipboard_text() -> Result<String, String> {
-    let output = std::process::Command::new("pbpaste")
+    let output = std::process::Command::new("/usr/bin/pbpaste")
         .output()
         .map_err(|e| format!("Failed to launch pbpaste: {}", e))?;
     if !output.status.success() {
@@ -1563,7 +1563,7 @@ enum PasteDispatchStatus {
 
 #[cfg(target_os = "macos")]
 fn send_native_paste_key() -> Result<PasteDispatchStatus, String> {
-    let system_events_error = match std::process::Command::new("osascript")
+    let system_events_error = match std::process::Command::new("/usr/bin/osascript")
         .arg("-e")
         .arg("tell application \"System Events\" to keystroke \"v\" using command down")
         .output()
