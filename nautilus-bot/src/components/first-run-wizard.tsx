@@ -1137,9 +1137,16 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     setSaveError(null);
     setSaveErrorContext(null);
     try {
-      if (aiNotesChoice === "ollama") {
+      if (aiNotesChoice === "ollama" || aiNotesChoice === "none") {
         const settings = await getSettings();
-        if (settings.privacy.meetingsAi.provider !== "ollama") {
+        if (aiNotesChoice === "none") {
+          // These Rust-backed settings are the authoritative gates used by
+          // post-transcription processing. The renderer-only preference below
+          // cannot prevent either transcript analysis or title generation.
+          settings.transcription.enableAutoAnalysis = false;
+          settings.transcription.meetingAutoNameEnabled = false;
+          await saveSettings(settings);
+        } else if (settings.privacy.meetingsAi.provider !== "ollama") {
           // A provider change invalidates the model id with it: a model name
           // from OpenAI means nothing to Ollama, and null asks for the
           // provider's own default rather than a name that cannot resolve.
