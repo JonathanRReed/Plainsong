@@ -111,6 +111,17 @@ fn numbered_item(line: &str) -> Option<String> {
 /// as the literal character the writer typed.
 fn parse_runs(text: &str) -> Vec<Run> {
     let chars: Vec<char> = text.chars().collect();
+    // Record whether a boundary-valid closing underscore exists later in the
+    // line. Building this suffix table once keeps unmatched opener candidates
+    // from each rescanning the remainder of an attacker-controlled line.
+    let mut underscore_closer_after = vec![false; chars.len()];
+    let mut has_underscore_closer = false;
+    for index in (0..chars.len()).rev() {
+        underscore_closer_after[index] = has_underscore_closer;
+        if chars[index] == '_' && underscore_closes_at(&chars, index) {
+            has_underscore_closer = true;
+        }
+    }
     let mut runs: Vec<Run> = Vec::new();
     let mut buffer = String::new();
     let mut bold = false;
@@ -159,7 +170,7 @@ fn parse_runs(text: &str) -> Vec<Run> {
             let closes = if italic {
                 underscore_closes_at(&chars, index)
             } else {
-                underscore_opens_at(&chars, index)
+                underscore_opens_at(&chars, index, underscore_closer_after[index])
             };
             if closes {
                 flush(&mut buffer, &mut runs, bold, italic, code);
@@ -183,13 +194,12 @@ fn has_pair(haystack: &[char], needle: &[char; 2]) -> bool {
 /// treats it. Without this, `file_name_here` lost both underscores and came
 /// out of the export in italics: any later `_` was taken as the partner of the
 /// first, whatever it was attached to.
-fn underscore_opens_at(chars: &[char], index: usize) -> bool {
+fn underscore_opens_at(chars: &[char], index: usize, has_closer_after: bool) -> bool {
     let before = index.checked_sub(1).map(|previous| chars[previous]);
     let after = chars.get(index + 1).copied();
     before.is_none_or(|character| !character.is_alphanumeric() && character != '_')
         && after.is_some_and(|character| !character.is_whitespace() && character != '_')
-        && (index + 1..chars.len())
-            .any(|candidate| chars[candidate] == '_' && underscore_closes_at(chars, candidate))
+        && has_closer_after
 }
 
 fn underscore_closes_at(chars: &[char], index: usize) -> bool {
@@ -482,6 +492,17 @@ mod tests {
         assert!(trailing
             .iter()
             .any(|run| run.text.contains("snake_case_name")));
+    }
+
+    #[test]
+    fn unmatched_underscore_openers_are_processed_in_linear_time() {
+        // Every underscore looks like an opener, but none is a valid closer.
+        // Keep this large enough to catch accidental per-opener suffix scans.
+        let text = "_a ".repeat(20_000);
+        let runs = parse_runs(&text);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, text);
+        assert!(!runs[0].italic);
     }
 
     #[test]

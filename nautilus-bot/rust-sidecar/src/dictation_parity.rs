@@ -203,7 +203,10 @@ fn replace_case_insensitive_all(
     (re.replace_all(haystack, replacement).to_string(), applied)
 }
 
-fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&str>) -> bool {
+pub(crate) fn snippet_app_scope_matches(
+    snippet_scope: Option<&str>,
+    app_target: Option<&str>,
+) -> bool {
     let Some(scope) = snippet_scope
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -224,7 +227,7 @@ fn snippet_app_scope_matches(snippet_scope: Option<&str>, app_target: Option<&st
 /// (e.g. a typo'd CSV value that predates import validation) matches
 /// nothing, rather than silently mapping to `Other` and firing in every
 /// unclassified app.
-fn category_scope_matches(
+pub(crate) fn category_scope_matches(
     category_scope: Option<&str>,
     destination_category: DictationAppCategory,
 ) -> bool {

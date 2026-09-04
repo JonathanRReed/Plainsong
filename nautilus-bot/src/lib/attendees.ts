@@ -11,7 +11,8 @@
  * and a summary lane pointed at a cloud provider would otherwise carry it
  * there for no benefit at all -- a model does not answer better for knowing
  * someone's employer domain. `attendeeNamesForContext` is the only function
- * that produces prompt-bound text, and it drops `email` on the floor.
+ * that produces prompt-bound text, and it drops both `email` and any
+ * address-shaped display-name fallback on the floor.
  */
 
 export interface MeetingAttendee {
@@ -164,15 +165,17 @@ export function removeAttendee(
  * The names, and only the names, for a grounded prompt's "Attendees:" line.
  *
  * Addresses are dropped here rather than at the call site so there is exactly
- * one place to check. Order is preserved; duplicates cannot occur because the
- * list was sanitized on the way in.
+ * one place to check. EventKit can use an address as the display name when it
+ * has no real name, so checking only the separate `email` field is not a
+ * sufficient privacy boundary. Order is preserved; duplicates cannot occur
+ * because the list was sanitized on the way in.
  */
 export function attendeeNamesForContext(
   attendees: readonly MeetingAttendee[] | null | undefined,
 ): string[] {
   return (attendees ?? [])
     .map((attendee) => normalizeAttendeeText(attendee.name))
-    .filter(Boolean);
+    .filter((name) => name.length > 0 && !name.includes("@"));
 }
 
 /**
