@@ -171,6 +171,10 @@ function stringArgument(args: unknown, names: string[]): string | null {
 }
 
 export function getCommandWorkKey(command: string, args?: unknown): string | null {
+  if (command === "install_apple_speech_language") {
+    const locale = stringArgument(args, ["locale"]) ?? command;
+    return `${command}:${locale}`;
+  }
   if (command.startsWith("download_")) {
     const target =
       stringArgument(args, ["modelName", "modelId", "providerType", "assetId"]) ??

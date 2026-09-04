@@ -117,7 +117,8 @@ fn classify_command(command: &str) -> CommandClass {
         | "download_diarization_model"
         | "download_platform_assets"
         | "download_silero_vad_model"
-        | "download_whisper_model" => CommandClass::Download,
+        | "download_whisper_model"
+        | "install_apple_speech_language" => CommandClass::Download,
         "benchmark_asr_providers" | "benchmark_asr_providers_bytes" => CommandClass::Benchmark,
         "analyze_recording"
         | "analyze_recordings"
@@ -151,10 +152,11 @@ fn string_param(params: &Value, names: &[&str]) -> Option<String> {
 fn duplicate_work_key(command: &str, params: &Value) -> Option<String> {
     let class = classify_command(command);
     let target = match class {
-        CommandClass::Download => {
-            string_param(params, &["modelName", "modelId", "providerType", "assetId"])
-                .unwrap_or_else(|| command.to_string())
-        }
+        CommandClass::Download => string_param(
+            params,
+            &["modelName", "modelId", "providerType", "assetId", "locale"],
+        )
+        .unwrap_or_else(|| command.to_string()),
         CommandClass::Benchmark => "benchmark".to_string(),
         CommandClass::Analysis => string_param(params, &["runId", "recordingId", "historyId"])
             .or_else(|| {
@@ -427,6 +429,38 @@ mod tests {
             )
             .expect("different model can use the second slot");
         drop(first);
+    }
+
+    #[test]
+    fn apple_language_installs_are_bounded_and_deduplicated_by_locale() {
+        let admission = AdmissionController::default();
+        let _english = admission
+            .admit(
+                "install_apple_speech_language",
+                &serde_json::json!({"locale": "en_US"}),
+            )
+            .expect("first language install");
+        let duplicate = admission
+            .admit(
+                "install_apple_speech_language",
+                &serde_json::json!({"locale": "en_US"}),
+            )
+            .expect_err("duplicate language install must be rejected");
+        assert!(duplicate.starts_with("SIDECAR_DUPLICATE:"));
+
+        let _french = admission
+            .admit(
+                "install_apple_speech_language",
+                &serde_json::json!({"locale": "fr_FR"}),
+            )
+            .expect("a second language can use the remaining download slot");
+        let capacity = admission
+            .admit(
+                "install_apple_speech_language",
+                &serde_json::json!({"locale": "de_DE"}),
+            )
+            .expect_err("a third concurrent install must be rejected");
+        assert!(capacity.starts_with("SIDECAR_BUSY: model download"));
     }
 
     #[test]
