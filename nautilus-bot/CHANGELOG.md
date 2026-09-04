@@ -2,15 +2,13 @@
 
 All notable changes to Plainsong are documented in this file.
 
-## [Unreleased] - 0.9.0-beta.3 (in progress)
+## [Unreleased] - 0.9.0-beta.4 (candidate work in progress)
 
-Two audited fix waves merged on top of the `0.9.0-beta.2` integration
-candidate: Electron security hardening, meeting data-integrity fixes, model
-currency, sidecar robustness, and a renderer UX pass on Dictation and
-Meetings recovery. `package.json` has not been bumped and no `0.9.0-beta.3`
-package has been built; this section is a source-level record of what
-changed underneath `0.9.0-beta.2`. See `LAUNCH.md` for which qualification
-evidence is stale and must be recaptured before this becomes a candidate.
+Beta 4 combines the audited beta 3 source work with the final private-beta
+hardening pass. The source version and numeric macOS build version are now
+`0.9.0-beta.4` and `900304`. Release qualification still depends on the exact
+signed candidate being notarized, stapled, installed, and exercised on Apple
+Silicon. See `LAUNCH.md` for that boundary.
 
 ### Documented
 - Plainsong's own speaker separation could not report a turn shorter than five
@@ -22,6 +20,21 @@ evidence is stale and must be recaptured before this becomes a candidate.
   true now rather than this.
 
 ### Added
+- A verified local Ollama catalog for GPT-OSS 20B, DeepSeek R1 Distill,
+  Ministral 3 8B, Llama 3 8B, Mistral 7B v0.2, Llama 3.2 3B, and Phi-2 3B.
+  Pulls are allowlisted and manifest-pinned, preserve arbitrary models already
+  installed by the user, support cancellation, and keep Meta license acceptance
+  explicit.
+- NVIDIA Parakeet TDT 0.6B v2 as a separate English-only local model. Its
+  revision, byte lengths, hashes, blank token, and ONNX decoder/joiner shapes
+  are pinned. V2 remains experimental and dictation-only until the full bundle
+  has a real-audio Plainsong receipt. V3 remains the recommended meeting and
+  multilingual route.
+- Deepgram Nova 2 as a BYOK cloud transcription option beside Nova 3 and Nova
+  Medical.
+- Typed launch milestones and a LaunchServices cold-start receipt. Timing and
+  trust are separate gates; release qualification requires Developer ID
+  signing, arm64, notarization, stapling, and Gatekeeper acceptance.
 - Mistral Voxtral as a cloud transcription route (BYOK). Voxtral Mini
   Transcribe 2 at $0.003/min — the cheapest route in Plainsong that returns
   speaker labels, and cheaper and more accurate than Deepgram Nova-3 on
@@ -555,6 +568,16 @@ evidence is stale and must be recaptured before this becomes a candidate.
   files that still carry it load cleanly and are rewritten without it.
 
 ### Fixed
+- Sidecar helper execution now uses absolute macOS utility paths and a
+  restricted environment. Temporary transcription audio is created with
+  owner-only permissions and removed by scoped cleanup guards.
+- Dictation cancellation is scoped to the active session and no longer risks
+  a tracker-to-audio lock inversion during replacement starts or force-stop.
+- Meeting capture admission now reserves the exact encrypted vault staging
+  size from the cipher format instead of duplicating its constants.
+- Local model pulls reject truncated streams, bound buffered output, cover the
+  final catalog request with cancellation, and prevent stale requests from
+  overwriting a newer installed-model state.
 - First-run setup never appeared for anyone who had run an earlier Plainsong
   build, and Plainsong now decides whether to show it from whether the app
   actually works rather than from a flag. The flag was

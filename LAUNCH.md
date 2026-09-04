@@ -1,14 +1,39 @@
 # Plainsong limited beta launch checklist
 
-Release target: `0.9.0-beta.2`
+Release target: `0.9.0-beta.4`
 
-Last reconciled: August 27, 2026
+Last reconciled: September 4, 2026
 
 This checklist is the release boundary for the private integration candidate.
 Dictation and Meetings are both supported product pillars. Source readiness,
 packaged candidate readiness, and distribution are separate states.
 
-## Evidence staleness since the 0.9.0-beta.2 qualification
+## Beta 4 current boundary
+
+- Private source only. The repository, release, binaries, update feed, and the
+  unreleased Reaper integration stay private.
+- Apple Silicon macOS only. Intel and Windows are not release targets for this
+  beta.
+- Local processing is the default. Cloud transcription is an explicit BYOK
+  choice, with the provider and data boundary shown before use.
+- The 75 inherited pull requests were reviewed individually: 73 merged and two
+  closed as superseded. New beta 4 integration pull requests are reviewed and
+  must also be resolved before release.
+- Source audit is green for known JavaScript and Rust vulnerabilities. The one
+  remaining Rust audit warning is the unmaintained transitive `paste` crate in
+  the local Candle stack; there is no bounded direct replacement in this beta.
+- A Developer ID signed diagnostic build recorded first UI at 890 ms and an
+  interactive workspace or wizard at 1,237 ms under high load. It was not
+  notarized or stapled, so it is not release evidence and does not yet qualify
+  for the Half-Bounce Club.
+- The exact beta 4 candidate must pass source gates, Developer ID signing,
+  notarization, stapling, Gatekeeper assessment, clean installation, dictation
+  and meeting smoke tests, updater validation, and a fresh launch receipt.
+
+## Historical beta 2 evidence, not valid for beta 4
+
+The sections below preserve the beta 2 record so its measurements remain
+auditable. They must not be read as evidence for beta 4.
 
 Everything under "Current verdict" and "Exact packaged candidate gate" below
 describes the source and package as they stood on **August 23, 2026**. Two
@@ -53,7 +78,7 @@ full, evidence-checked list. `package.json` has not been bumped and no
   job was to say plainly what is stale, not to produce new green checkmarks
   for claims nobody has re-run.
 
-## Current verdict
+## Historical beta 2 verdict
 
 The integrated `0.9.0-beta.2` source baseline passes IPC, dead-code, TypeScript,
 Vitest (868 tests), renderer and Electron builds, Rust formatting, Clippy, and

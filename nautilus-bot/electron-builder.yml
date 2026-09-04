@@ -11,11 +11,11 @@ copyright: Copyright © 2026 Jonathan Reed
 #
 # The number is `encodeBundleBuildVersion(version)` from
 # scripts/lib/bundle-build-version.mjs, which packs the version into one integer
-# and ranks a prerelease below the release it precedes (0.9.0-beta.2 → 900302,
+# and ranks a prerelease below the release it precedes (0.9.0-beta.4 → 900304,
 # and the 0.9.0 that follows → 900999). This file is static YAML, so it is
 # applied by hand and pinned to package.json by a unit test: a version bump that
 # forgets it fails there rather than in a shipped bundle.
-buildVersion: "900303"
+buildVersion: "900304"
 
 # Electron ships these fuses permissive by default, which would make a notarized
 # Plainsong a reusable gadget: `ELECTRON_RUN_AS_NODE=1` on the signed binary runs

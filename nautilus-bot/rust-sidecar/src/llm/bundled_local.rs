@@ -740,8 +740,7 @@ mod runtime {
         }
         static PROBED: OnceLock<&'static str> = OnceLock::new();
         PROBED.get_or_init(|| {
-            let (device, backend) = select_device();
-            drop(device);
+            let (_device, backend) = select_device();
             backend
         })
     }
