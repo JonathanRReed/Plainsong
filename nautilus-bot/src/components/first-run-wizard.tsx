@@ -520,7 +520,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               : "ollama",
         );
         initialDictationProviderRef.current = settings.transcription.dictationProvider ?? null;
-        initialDictationModelIdRef.current = settings.transcription.dictationModelId ?? null;
+        initialDictationModelIdRef.current =
+          settings.transcription.dictationModelId ??
+          settings.transcription.selectedModelId ??
+          null;
         if (settings.transcription.dictationProvider === "moonshine") {
           setSelectedModelId("moonshine-base");
         } else if (settings.transcription.dictationProvider === "parakeet") {
@@ -962,11 +965,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // deliberate user choice and must be preserved.
   const ensureDefaultModelDownloading = useCallback(() => {
     const existingProvider = initialDictationProviderRef.current;
-    const existingModelId = initialDictationModelIdRef.current;
+    const existingModelId = initialDictationModelIdRef.current?.trim() ?? "";
+    const hasCustomWhisperModel =
+      existingProvider === "whisper" &&
+      existingModelId.length > 0 &&
+      existingModelId !== "base.en";
     const hasExistingNonDefaultRoute =
       Boolean(existingProvider) &&
       existingProvider !== "parakeet" &&
-      !(existingProvider === "whisper" && existingModelId === "base.en");
+      (existingProvider !== "whisper" || hasCustomWhisperModel);
     if (hasExistingNonDefaultRoute) {
       return;
     }
