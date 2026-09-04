@@ -3927,7 +3927,7 @@ async fn reset_app_state_for_sidecar(
 }
 
 /// Whether the hands-free idle-time monitor should be running, given the setting and
-/// the current dictation session state. Pure decision table, factored out of
+/// the current dictation and meeting session state. Pure decision table, factored out of
 /// `reconcile_hands_free_monitor` so the guard logic ("can't run alongside an active
 /// session; never runs at all unless the setting is on") is unit-testable without
 /// needing a full `AppState`/audio device.
@@ -3938,9 +3938,13 @@ async fn reset_app_state_for_sidecar(
 ///   real dictation capture stream owns the microphone and the monitor must not race
 ///   it for the same device, and a session is already starting/active so there is
 ///   nothing for the monitor to trigger anyway.
-/// - Setting on + session `Idle` → should run.
-fn hands_free_monitor_should_run(enabled: bool, session_state: DictationSessionState) -> bool {
-    enabled && session_state == DictationSessionState::Idle
+/// - Setting on + session `Idle` + no meeting recording → should run.
+fn hands_free_monitor_should_run(
+    enabled: bool,
+    session_state: DictationSessionState,
+    meeting_recording: bool,
+) -> bool {
+    enabled && session_state == DictationSessionState::Idle && !meeting_recording
 }
 
 /// Reconcile the hands-free *idle-time* monitor (see
@@ -4294,7 +4298,7 @@ async fn reconcile_hands_free_monitor(
 
     let mut audio = state.audio_capture.lock().await;
 
-    if !hands_free_monitor_should_run(hands_free_enabled, session_state) {
+    if !hands_free_monitor_should_run(hands_free_enabled, session_state, audio.is_recording()) {
         audio.stop_hands_free_monitor();
         if !hands_free_enabled {
             // The monitor is off for good here, not just yielding the microphone
