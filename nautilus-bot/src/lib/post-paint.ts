@@ -3,7 +3,7 @@ type ScheduleTask = (callback: () => void) => number;
 
 export function scheduleAfterPaint(
   callback: () => void,
-  requestFrame: RequestFrame = requestAnimationFrame,
+  requestFrame: RequestFrame = window.requestAnimationFrame.bind(window),
   scheduleTask: ScheduleTask = (task) => window.setTimeout(task, 0),
 ): void {
   requestFrame(() => {

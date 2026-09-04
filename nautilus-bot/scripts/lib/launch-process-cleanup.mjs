@@ -8,10 +8,14 @@ export function findProfileProcessGroups(electronProfile) {
   });
   if (result.status !== 0) return [];
   const marker = `--user-data-dir=${electronProfile}`;
+  const markerPattern = new RegExp(
+    `(?:^|\\s)${marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=\\s|$)`,
+  );
   const groups = new Set();
   for (const line of result.stdout.split(/\r?\n/)) {
     const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
-    if (match?.[3].includes(marker)) groups.add(Number(match[2]));
+    if (match?.[3] && markerPattern.test(match[3]))
+      groups.add(Number(match[2]));
   }
   return [...groups].filter(
     (group) => Number.isSafeInteger(group) && group > 1,

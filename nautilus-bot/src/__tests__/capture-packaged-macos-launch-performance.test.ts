@@ -17,7 +17,9 @@ describe("packaged macOS launch-performance receipt", () => {
     expect(source).toContain('"--args",');
     expect(source).toMatch(/"--env",\s*`PLAINSONG_QA_MODE=1`/);
     expect(source).toMatch(/"--env",\s*`PLAINSONG_DATA_DIR=\$\{dataRoot\}`/);
-    expect(source).toMatch(/"--env",\s*`PLAINSONG_CONFIG_DIR=\$\{configRoot\}`/);
+    expect(source).toMatch(
+      /"--env",\s*`PLAINSONG_CONFIG_DIR=\$\{configRoot\}`/,
+    );
     expect(source).not.toContain('"-a", appPath');
     expect(source).toContain("--plainsong-launch-metrics-file=");
     expect(source).toContain(
@@ -32,8 +34,10 @@ describe("packaged macOS launch-performance receipt", () => {
   });
 
   it("targets the main renderer and measures painted and interactive DOM states", () => {
-    expect(source).toContain('cdp.send("Target.getTargets")');
-    expect(source).toContain('cdp.send("Target.attachToTarget", {');
+    expect(source).toMatch(
+      /cdp\.send\("Target\.getTargets",\s*\{\},\s*deadline\)/,
+    );
+    expect(source).toMatch(/cdp\.send\(\s*"Target\.attachToTarget",\s*\{/);
     expect(source).toContain('!target.url.includes("overlay")');
     expect(source).toContain(
       'performance.getEntriesByName("first-contentful-paint")',
@@ -107,5 +111,22 @@ describe("packaged macOS launch-performance receipt", () => {
       "Warm measurements require an existing candidate-stamped --profile-root",
     );
     expect(source).toContain("stamp.appBundleSha256 !== appBundleSha256");
+  });
+
+  it("rejects an existing named fresh profile before creating directories", () => {
+    expect(source).toContain("Fresh measurements require a new --profile-root");
+    expect(source.indexOf('profileCondition === "fresh"')).toBeLessThan(
+      source.indexOf("fs.mkdirSync(directory"),
+    );
+  });
+
+  it("hashes fresh candidates after timing and stamps only successful priming runs", () => {
+    expect(source).toContain("let appBundleSha256 = null");
+    expect(source.indexOf("await childCompletion")).toBeLessThan(
+      source.lastIndexOf("await sha256Bundle(appPath)"),
+    );
+    expect(source).toContain(
+      'profileCondition === "fresh" && interactiveMs !== null',
+    );
   });
 });

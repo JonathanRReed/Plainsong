@@ -27,4 +27,29 @@ describe("scheduleAfterPaint", () => {
     tasks.shift()?.();
     expect(calls).toEqual(["reported"]);
   });
+
+  it("binds the browser frame scheduler when using the default", () => {
+    const frames: FrameRequestCallback[] = [];
+    const fakeWindow = {
+      requestAnimationFrame(this: unknown, callback: FrameRequestCallback) {
+        expect(this).toBe(fakeWindow);
+        frames.push(callback);
+        return frames.length;
+      },
+      setTimeout,
+    };
+    const original = globalThis.window;
+    Object.assign(globalThis, { window: fakeWindow });
+    fakeWindow.requestAnimationFrame = function (callback) {
+      expect(this).toBe(fakeWindow);
+      frames.push(callback);
+      return frames.length;
+    };
+    try {
+      scheduleAfterPaint(() => undefined);
+      expect(frames).toHaveLength(1);
+    } finally {
+      Object.assign(globalThis, { window: original });
+    }
+  });
 });

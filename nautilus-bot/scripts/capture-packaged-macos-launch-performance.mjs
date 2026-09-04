@@ -33,17 +33,6 @@ const diagnosticAllowUnqualified = args.includes(
 );
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-if (process.platform !== "darwin") {
-  throw new Error(
-    "The packaged macOS launch-performance gate only runs on macOS.",
-  );
-}
-if (!fs.existsSync(appPath) || !["fresh", "warm"].includes(profileCondition)) {
-  throw new Error(
-    "Pass an existing --app and --profile-condition fresh or warm.",
-  );
-}
-
 function commandResult(command, commandArgs) {
   const result = spawnSync(command, commandArgs, { encoding: "utf8" });
   return {
@@ -88,7 +77,7 @@ async function sha256Bundle(root) {
   return digest.digest("hex");
 }
 
-class Cdp {
+export class Cdp {
   constructor(input, output) {
     this.input = input;
     this.output = output;
@@ -97,6 +86,9 @@ class Cdp {
     this.sessionId = null;
     let buffered = "";
     output.setEncoding("utf8");
+    const rejectPending = () => this.rejectAll("CDP response pipe closed");
+    output.once("close", rejectPending);
+    output.once("error", rejectPending);
     output.on("data", (chunk) => {
       buffered += chunk;
       const frames = buffered.split("\0");
@@ -108,24 +100,45 @@ class Cdp {
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
+    clearTimeout(pending.timer);
     if (message.error) pending.reject(new Error(message.error.message));
     else pending.resolve(message.result);
   }
-  send(method, params = {}) {
+  rejectAll(message) {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    this.pending.clear();
+  }
+  send(method, params = {}, deadline = Date.now() + timeoutMs) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        reject(new Error(`CDP ${method} exceeded its deadline`));
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`CDP ${method} exceeded its deadline`));
+      }, remainingMs);
+      this.pending.set(id, { resolve, reject, timer });
       const message = { id, method, params };
       if (this.sessionId) message.sessionId = this.sessionId;
       this.input.write(`${JSON.stringify(message)}\0`);
     });
   }
-  async evaluate(expression) {
-    const result = await this.send("Runtime.evaluate", {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
+  async evaluate(expression, deadline) {
+    const result = await this.send(
+      "Runtime.evaluate",
+      {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      deadline,
+    );
     if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
     return result.result.value;
   }
@@ -133,7 +146,7 @@ class Cdp {
 
 async function attachToMainRenderer(cdp, deadline) {
   while (Date.now() < deadline) {
-    const { targetInfos } = await cdp.send("Target.getTargets");
+    const { targetInfos } = await cdp.send("Target.getTargets", {}, deadline);
     const page = targetInfos.find(
       (target) =>
         target.type === "page" &&
@@ -142,10 +155,14 @@ async function attachToMainRenderer(cdp, deadline) {
         !target.url.startsWith("devtools://"),
     );
     if (page) {
-      const { sessionId } = await cdp.send("Target.attachToTarget", {
-        targetId: page.targetId,
-        flatten: true,
-      });
+      const { sessionId } = await cdp.send(
+        "Target.attachToTarget",
+        {
+          targetId: page.targetId,
+          flatten: true,
+        },
+        deadline,
+      );
       cdp.sessionId = sessionId;
       return;
     }
@@ -190,11 +207,11 @@ async function verifyRendererDomOverPrivatePipe(executable, profileRoot) {
   const deadline = Date.now() + timeoutMs;
   try {
     await attachToMainRenderer(cdp, deadline);
-    await cdp.send("Runtime.enable");
+    await cdp.send("Runtime.enable", {}, deadline);
     while (Date.now() < deadline) {
-      const observation = await cdp.evaluate(OBSERVE_EXPRESSION);
+      const observation = await cdp.evaluate(OBSERVE_EXPRESSION, deadline);
       if (observation.workspaceVisible || observation.wizardVisible) {
-        await cdp.send("Browser.close").catch(() => undefined);
+        await cdp.send("Browser.close", {}, deadline).catch(() => undefined);
         return observation;
       }
       await delay(20);
@@ -210,7 +227,27 @@ async function verifyRendererDomOverPrivatePipe(executable, profileRoot) {
 }
 
 async function main() {
-  const appBundleSha256 = await sha256Bundle(appPath);
+  if (process.platform !== "darwin") {
+    throw new Error(
+      "The packaged macOS launch-performance gate only runs on macOS.",
+    );
+  }
+  if (
+    !fs.existsSync(appPath) ||
+    !["fresh", "warm"].includes(profileCondition)
+  ) {
+    throw new Error(
+      "Pass an existing --app and --profile-condition fresh or warm.",
+    );
+  }
+  if (
+    profileCondition === "fresh" &&
+    requestedProfileRoot &&
+    fs.existsSync(requestedProfileRoot)
+  ) {
+    throw new Error("Fresh measurements require a new --profile-root.");
+  }
+  let appBundleSha256 = null;
   if (
     profileCondition === "warm" &&
     (!requestedProfileRoot || !fs.existsSync(requestedProfileRoot))
@@ -225,6 +262,7 @@ async function main() {
     : fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-launch-performance-"));
   const profileStampPath = path.join(profileRoot, PROFILE_STAMP_FILE);
   if (profileCondition === "warm") {
+    appBundleSha256 = await sha256Bundle(appPath);
     let stamp;
     try {
       stamp = JSON.parse(fs.readFileSync(profileStampPath, "utf8"));
@@ -358,6 +396,7 @@ async function main() {
     `${stdout}\n${stderr}\n${chromiumOutput}\n${mainMilestoneOutput}`
       .split(/\r?\n/)
       .filter((line) => line.includes("[launch-milestone] "));
+  if (appBundleSha256 === null) appBundleSha256 = await sha256Bundle(appPath);
   const codesignDisplay = commandResult("/usr/bin/codesign", [
     "-dv",
     "--verbose=4",
@@ -469,7 +508,7 @@ async function main() {
       staplerValidation,
     },
   };
-  if (profileCondition === "fresh") {
+  if (profileCondition === "fresh" && interactiveMs !== null) {
     fs.writeFileSync(
       profileStampPath,
       `${JSON.stringify({ appBundleSha256 }, null, 2)}\n`,
@@ -482,7 +521,9 @@ async function main() {
   process.exitCode = report.pass ? 0 : 1;
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

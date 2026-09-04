@@ -7,6 +7,7 @@ import {
   useState,
   type ComponentType,
   type ErrorInfo,
+  type MutableRefObject,
   type ReactNode,
 } from "react";
 import { listen } from "@/lib/electron";
@@ -216,6 +217,24 @@ function AppRuntimeListeners() {
   return null;
 }
 
+function LaunchInteractiveReporter({
+  marked,
+}: {
+  marked: MutableRefObject<boolean>;
+}) {
+  useEffect(() => {
+    if (marked.current) return;
+    marked.current = true;
+    scheduleAfterPaint(() => {
+      window.electronAPI?.reportLaunchMilestone(
+        "workspace-or-wizard-interactive",
+        performance.now(),
+      );
+    });
+  }, [marked]);
+  return null;
+}
+
 /**
  * Everything inside the providers, so the first-run gate can read the same
  * live readiness the rest of the app does.
@@ -254,17 +273,6 @@ function AppShell() {
     (onboardingGate.action === "show" && !setupClosedThisSession
       ? onboardingGate.mode
       : null);
-
-  useEffect(() => {
-    if (onboardingGate.action === "wait" || interactiveMarkedRef.current) return;
-    interactiveMarkedRef.current = true;
-    scheduleAfterPaint(() => {
-      window.electronAPI?.reportLaunchMilestone(
-        "workspace-or-wizard-interactive",
-        performance.now(),
-      );
-    });
-  }, [onboardingGate.action]);
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof performance === "undefined") return;
@@ -543,6 +551,9 @@ function AppShell() {
             }
           >
             <ActiveView />
+            {!wizardMode && (
+              <LaunchInteractiveReporter marked={interactiveMarkedRef} />
+            )}
           </Suspense>
         </main>
         <span
@@ -557,7 +568,10 @@ function AppShell() {
 
       {/* Opened by the first-run gate, or by hand from Settings, Home or Setup. */}
       {wizardMode && (
-        <FirstRunWizard mode={wizardMode} onComplete={handleWizardComplete} />
+        <>
+          <FirstRunWizard mode={wizardMode} onComplete={handleWizardComplete} />
+          <LaunchInteractiveReporter marked={interactiveMarkedRef} />
+        </>
       )}
     </>
   );

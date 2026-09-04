@@ -42,4 +42,29 @@ describe("packaged launch process cleanup", () => {
       fs.rmSync(profileRoot, { recursive: true, force: true });
     }
   });
+
+  it("does not match a longer profile argument with the same prefix", async () => {
+    const profileRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "plainsong-cleanup-prefix-"),
+    );
+    const profile = path.join(profileRoot, "electron-profile");
+    const other = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)", `--user-data-dir=${profile}-other`],
+      { detached: true, stdio: "ignore" },
+    );
+    other.unref();
+    try {
+      await delay(100);
+      expect(findProfileProcessGroups(profile)).toEqual([]);
+      expect(findProfileProcessGroups(`${profile}-other`)).toContain(
+        other.pid!,
+      );
+    } finally {
+      try {
+        process.kill(-other.pid!, "SIGKILL");
+      } catch {}
+      fs.rmSync(profileRoot, { recursive: true, force: true });
+    }
+  });
 });
