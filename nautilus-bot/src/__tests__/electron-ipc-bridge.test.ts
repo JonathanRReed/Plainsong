@@ -155,7 +155,7 @@ describe("buildSidecarEnv", () => {
   it("passes only runtime variables needed by the sidecar", () => {
     const env = buildSidecarEnv({
       HOME: "/Users/test",
-      PATH: "/usr/bin",
+      PATH: "/tmp/hostile-bin:/usr/bin",
       RUST_LOG: "info",
       OPENAI_API_KEY: "sk-test-secret",
       ELEVENLABS_API_KEY: "xi-test-secret",
@@ -175,7 +175,7 @@ describe("buildSidecarEnv", () => {
 
     expect(env).toMatchObject({
       HOME: "/Users/test",
-      PATH: "/usr/bin",
+      PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
       RUST_LOG: "info",
       PLAINSONG_QA_MODE: "1",
       PLAINSONG_CONFIG_DIR: "/tmp/nautilus-config",
@@ -201,9 +201,23 @@ describe("buildSidecarEnv", () => {
       PLAINSONG_DATA_DIR: "/tmp/nautilus",
     });
 
-    expect(env.PATH).toBe("/usr/bin");
+    expect(env.PATH).toBe("/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin");
     expect(env.PLAINSONG_CONFIG_DIR).toBeUndefined();
     expect(env.PLAINSONG_DATA_DIR).toBeUndefined();
+  });
+
+  it("does not pass a hostile inherited PATH to the privileged sidecar", () => {
+    const env = buildSidecarEnv({ PATH: "/tmp/hostile-bin:/usr/bin" }, "darwin");
+
+    expect(env.PATH).toBe("/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin");
+    expect(env.PATH).not.toContain("/tmp/hostile-bin");
+  });
+
+  it("preserves Windows PATH for platform-provided helper lookup", () => {
+    const windowsPath = "C:\\Program Files\\rclone;C:\\Windows\\System32";
+    const env = buildSidecarEnv({ PATH: windowsPath }, "win32");
+
+    expect(env.PATH).toBe(windowsPath);
   });
 });
 

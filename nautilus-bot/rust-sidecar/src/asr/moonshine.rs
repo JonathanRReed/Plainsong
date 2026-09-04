@@ -775,14 +775,16 @@ impl AsrProvider for MoonshineProvider {
             // Write trimmed audio to temp file
             let temp_path = std::env::temp_dir()
                 .join(format!("moonshine_trimmed_{}.wav", uuid::Uuid::new_v4()));
-            {
+            let temp_guard = {
                 let spec = hound::WavSpec {
                     channels: 1,
                     sample_rate: 16000,
                     bits_per_sample: 16,
                     sample_format: hound::SampleFormat::Int,
                 };
-                let mut writer = hound::WavWriter::create(&temp_path, spec)
+                let (file, temp_guard) =
+                    crate::recording_audio::create_secure_temporary_audio(&temp_path)?;
+                let mut writer = hound::WavWriter::new(file, spec)
                     .context("Failed to create temp WAV for Moonshine")?;
                 for sample in &samples {
                     let int_sample = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
@@ -791,7 +793,8 @@ impl AsrProvider for MoonshineProvider {
                         .context("Failed to write sample")?;
                 }
                 writer.finalize().context("Failed to finalize temp WAV")?;
-            }
+                temp_guard
+            };
             let temp_path_for_cleanup = temp_path.clone();
             let model_id_for_run = self.model_id.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -800,6 +803,7 @@ impl AsrProvider for MoonshineProvider {
             .await
             .context("Moonshine inference task panicked");
             let _ = std::fs::remove_file(&temp_path_for_cleanup);
+            drop(temp_guard);
             result??
         } else {
             let audio_path_owned = audio_path.to_path_buf();
@@ -841,10 +845,9 @@ impl AsrProvider for MoonshineProvider {
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_path =
             std::env::temp_dir().join(format!("moonshine_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Moonshine")?;
-        let result = self.transcribe(&temp_path).await;
-        let _ = std::fs::remove_file(&temp_path);
-        result
+        let temp = crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
+            .context("failed to write temp wav for Moonshine")?;
+        self.transcribe(temp.path()).await
     }
 
     fn download_status(&self) -> DownloadStatus {
