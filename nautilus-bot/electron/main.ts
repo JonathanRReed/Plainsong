@@ -2982,9 +2982,11 @@ app.on("before-quit", (event) => {
   if (!isQuitting && activeMeetingRecordingId && ipcBridge) {
     event.preventDefault();
     isQuitting = true;
+    ipcBridge.setQuitPending(true);
     void finalizeActiveMeetingBeforeQuit().then((result) => {
       if (result.status === "failed") {
         isQuitting = false;
+        ipcBridge?.setQuitPending(false);
         const reason =
           result.error instanceof Error
             ? result.error.message

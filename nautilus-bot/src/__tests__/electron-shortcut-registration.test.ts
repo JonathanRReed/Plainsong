@@ -293,13 +293,17 @@ describe("settings shortcut refresh wiring", () => {
 
   it("does not touch global shortcuts when a duplicate instance quits before ready", () => {
     const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+    const beforeQuitStart = mainSource.indexOf('app.on("before-quit"');
+    const quitHandlerStart = mainSource.indexOf('app.on("quit"', beforeQuitStart);
+    expect(beforeQuitStart).toBeGreaterThan(-1);
+    expect(quitHandlerStart).toBeGreaterThan(beforeQuitStart);
+    const beforeQuitHandler = mainSource.slice(beforeQuitStart, quitHandlerStart);
 
-    expect(mainSource).toMatch(
-      // The window is generous because `before-quit` also has to finalize an
-      // active meeting before the normal teardown runs; the guard being
-      // asserted here is the `app.isReady()` check, not its distance from the
-      // handler's first line.
-      /app\.on\("before-quit"[\s\S]{0,1600}if \(app\.isReady\(\)\) \{\s*globalShortcut\.unregisterAll\(\)/,
+    expect(beforeQuitHandler).toMatch(
+      /if \(app\.isReady\(\)\) \{\s*globalShortcut\.unregisterAll\(\)/,
+    );
+    expect(beforeQuitHandler.indexOf("finalizeActiveMeetingBeforeQuit()")).toBeLessThan(
+      beforeQuitHandler.indexOf("globalShortcut.unregisterAll()"),
     );
   });
 
