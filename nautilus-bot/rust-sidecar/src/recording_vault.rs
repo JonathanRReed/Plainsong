@@ -1105,17 +1105,11 @@ pub(crate) async fn encrypt_finalized_recording_audio(
     if !vault_initialized {
         return Ok(());
     }
-    let key = {
-        let vault_state = state.vault_state.lock().await;
-        if !vault_state.unlocked {
-            return Err(
-                "Vault locked before the finalized recording bundle could be encrypted".to_string(),
-            );
-        }
-        vault_state.recording_key.ok_or_else(|| {
-            "Vault key became unavailable before recording encryption was journaled".to_string()
-        })?
-    };
+    // Journal before consulting the runtime key. If the vault locks between
+    // finalization and this call, the plaintext asset must not remain a normal
+    // ready asset that lock/shutdown can overlook. An open operation both
+    // records the unfinished protection work and prevents a subsequent vault
+    // lock until unlock/recovery completes it.
     let operation = state
         .db
         .lock()
@@ -1125,6 +1119,17 @@ pub(crate) async fn encrypt_finalized_recording_audio(
     // No operation means there was nothing plaintext left to encrypt.
     let Some(operation) = operation else {
         return Ok(());
+    };
+    let key = {
+        let vault_state = state.vault_state.lock().await;
+        if !vault_state.unlocked {
+            return Err(
+                "Vault locked before the finalized recording bundle could be encrypted".to_string(),
+            );
+        }
+        vault_state.recording_key.ok_or_else(|| {
+            "Vault key became unavailable after recording encryption was journaled".to_string()
+        })?
     };
     if let Err(error) = encrypt_recording_audio_operation(state, operation, &key, handle).await {
         let mut db = state.db.lock().await;
@@ -1511,9 +1516,9 @@ pub(crate) enum RuntimeAudioResolveMode {
     /// Post-processing, diarization and export: every ready track, each one
     /// re-decoded and re-hashed against what the database recorded.
     Full,
-    /// Playback: the primary mix alone, and a temporary this process just
-    /// decrypted from an authenticated stream is checked by header and length
-    /// instead of by decoding and hashing every sample.
+    /// Playback: the primary mix alone. A temporary this process just
+    /// decrypted from an authenticated stream is checked by header, length,
+    /// and hash, but is not decoded sample by sample.
     ///
     /// Serving only the primary is not a shortcut — `prepare_recording_playback`
     /// never used any other track. Resolving all three on a dual-track meeting
@@ -1652,6 +1657,26 @@ pub(crate) fn resolve_recording_audio_bundle_in_directory(
                         {
                             return Err(format!(
                                 "Recording '{}' '{}' audio plaintext length does not match stored metadata",
+                                bundle.recording_id,
+                                asset.role.as_str()
+                            ));
+                        }
+                        let plaintext_sha256 = recording_audio::compute_file_sha256(&temp_path)
+                            .map_err(|error| {
+                                format!(
+                                    "Could not hash decrypted recording '{}' '{}' audio: {}",
+                                    bundle.recording_id,
+                                    asset.role.as_str(),
+                                    error
+                                )
+                            })?;
+                        if asset
+                            .plaintext_sha256
+                            .as_deref()
+                            .is_some_and(|expected| expected != plaintext_sha256)
+                        {
+                            return Err(format!(
+                                "Recording '{}' '{}' audio plaintext hash does not match stored metadata",
                                 bundle.recording_id,
                                 asset.role.as_str()
                             ));

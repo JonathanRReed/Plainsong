@@ -66,7 +66,7 @@ describe("reproducible package and release configuration", () => {
     };
 
     expect(packageJson.packageManager).toBe("bun@1.3.14");
-    expect(packageJson.devDependencies.knip).toBe("6.32.2");
+    expect(packageJson.devDependencies.knip).toBe("6.33.0");
     expect(packageJson.scripts["gate:dead-code"]).toContain(
       "bunx --no-install knip",
     );
@@ -80,7 +80,10 @@ describe("reproducible package and release configuration", () => {
     const sourceGate = readRepoFile("scripts/capture-source-gates.mjs");
 
     expect(vitestConfig).toContain('pool: "threads"');
-    expect(vitestConfig).toContain("maxWorkers: 4");
+    expect(vitestConfig).toContain("maxWorkers: process.env.CI ? 2 : 4");
+    expect(vitestConfig).toContain(
+      "testTimeout: process.env.CI ? 15_000 : 5_000",
+    );
     expect(sourceGate).toContain("vite(?:st)?\\.config");
   });
 

@@ -168,13 +168,6 @@ const backendMocks = vi.hoisted(() => ({
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
   requestAppleSpeechPermission: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => {}),
-  smokeTestCursorInsert: vi.fn(async () => ({
-    text: "Plainsong insert test",
-    targetApp: "Notes",
-    pasted: true,
-    copied: false,
-    error: null,
-  })),
   testSystemAudioCapture: vi.fn(async () => ({
     capability: {
       backend: "core_audio_process_tap",
@@ -233,9 +226,6 @@ vi.mock("@/lib/backend/asr", () => ({
   downloadAsrModels: backendMocks.downloadAsrModels,
   refreshAsrRuntimeProbes: backendMocks.refreshAsrRuntimeProbes,
   repairLocalModelCache: backendMocks.repairLocalModelCache,
-}));
-vi.mock("@/lib/backend/dictation", () => ({
-  smokeTestCursorInsert: backendMocks.smokeTestCursorInsert,
 }));
 vi.mock("@/lib/backend/recordings", () => ({
   testSystemAudioCapture: backendMocks.testSystemAudioCapture,
@@ -554,19 +544,6 @@ describe("SetupView", () => {
     await waitFor(() => {
       expect(backendMocks.testSystemAudioCapture).toHaveBeenCalledTimes(1);
       expect(screen.getByText(/System audio test: Verified/i)).toBeInTheDocument();
-    });
-  });
-
-  it("runs the insert-permission smoke test from setup", async () => {
-    render(<SetupView />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Test insert permissions" }));
-
-    await waitFor(() => {
-      expect(backendMocks.smokeTestCursorInsert).toHaveBeenCalledWith("Plainsong insert test");
-      expect(
-        screen.getByText(/Insert permissions test: Sent a test insert to Notes/i)
-      ).toBeInTheDocument();
     });
   });
 

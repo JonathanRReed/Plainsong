@@ -298,9 +298,15 @@ impl MeetingSource for ReadOnlyStore {
     }
 
     fn export_meeting(&self, id: &str, format: ExportFormat) -> Result<Option<String>> {
-        let Some(recording) = self.db.get_recording(id)? else {
+        let Some(mut recording) = self.db.get_recording(id)? else {
             return Ok(None);
         };
+        // Local-tool exports are returned directly to an automation client;
+        // unlike an export the reader creates in the app, they must not expose
+        // the contact addresses retained for attendee matching.
+        for attendee in &mut recording.attendees {
+            attendee.email = None;
+        }
         let transcript = self.db.get_transcript(id)?;
         let format = match format {
             ExportFormat::Markdown => crate::export::ExportFormat::Markdown,
@@ -561,6 +567,43 @@ mod tests {
             .export_meeting("missing", ExportFormat::Text)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn local_tool_exports_include_attendee_names_but_never_addresses() {
+        const ATTENDEE_EMAIL: &str = "dana.private@example.com";
+        let dir = crate::test_fs::TempDir::new("local-tools-attendee-privacy");
+        let path = dir.path().join("plainsong.db");
+        {
+            let mut db = Database::open_at_path(&path, None).unwrap();
+            db.create_recording(&recording("m1", "meeting", 9)).unwrap();
+            db.update_recording_attendees(
+                "m1",
+                vec![crate::models::MeetingAttendee {
+                    name: "Dana Okafor".to_string(),
+                    email: Some(ATTENDEE_EMAIL.to_string()),
+                    is_organizer: true,
+                }],
+            )
+            .unwrap();
+        }
+        let store = ReadOnlyStore::open_at(&path, None).unwrap();
+
+        for format in [
+            ExportFormat::Markdown,
+            ExportFormat::Text,
+            ExportFormat::Json,
+        ] {
+            let document = store.export_meeting("m1", format).unwrap().unwrap();
+            assert!(
+                document.contains("Dana Okafor"),
+                "local export should preserve attendee names: {document}"
+            );
+            assert!(
+                !document.contains(ATTENDEE_EMAIL),
+                "local export disclosed an attendee address: {document}"
+            );
+        }
     }
 
     /// Voiceprints are excluded from every local automation surface.

@@ -18,6 +18,48 @@ pub(crate) fn validate_shortcut_settings(
     settings::validate_dictation_bindings(&shortcuts.dictation_bindings)
 }
 
+pub(crate) async fn qa_smoke_test_cursor_insert_impl(
+    state: &AppState,
+    text: Option<String>,
+) -> Result<serde_json::Value, String> {
+    if std::env::var_os("PLAINSONG_PACKAGED_QA_APP_MATRIX").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return Err("Packaged app-matrix insertion is disabled".to_string());
+    }
+    let sample = text
+        .unwrap_or_else(|| "Plainsong app matrix insertion test".to_string())
+        .trim()
+        .to_string();
+    if sample.is_empty() {
+        return Err("App-matrix insertion text cannot be empty".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    let target = {
+        let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
+        (app_name, app_bundle_id)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let target = (get_frontmost_app_name(), None);
+
+    let outcome = paste_text_systemwide(
+        &state.accessibility_trust_observed,
+        &sample,
+        true,
+        target.0.as_deref(),
+        target.1.as_deref(),
+    );
+    Ok(serde_json::json!({
+        "text": sample,
+        "targetApp": target.0,
+        "targetBundleId": target.1,
+        "pasted": outcome.pasted,
+        "copied": outcome.copied,
+        "error": outcome.error,
+    }))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -570,46 +612,21 @@ pub(crate) fn is_diarization_model_available(modelId: Option<String>) -> bool {
     diarization::is_model_available(id)
 }
 
-pub(crate) async fn smoke_test_cursor_insert_impl(
+pub(crate) async fn capture_selected_text_for_playback_impl(
     state: &AppState,
-    text: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let sample = text
-        .unwrap_or_else(|| "Plainsong cursor insert smoke test".to_string())
-        .trim()
-        .to_string();
-    if sample.is_empty() {
-        return Err("Smoke test text cannot be empty".to_string());
+    admission_nonce: &str,
+) -> Result<Option<String>, String> {
+    // Unlike meeting capture's compatibility path, this renderer-facing read
+    // primitive is never allowed before the privileged Electron registrar has
+    // issued a proof. The proof is short-lived and removed on this call.
+    if !state.capture_admission.is_enforcing() {
+        return Err("Selected text playback admission is not initialized".to_string());
     }
+    state
+        .capture_admission
+        .consume(admission_nonce)
+        .map_err(|_| "Selected text playback admission proof is invalid".to_string())?;
 
-    #[cfg(target_os = "macos")]
-    let target = {
-        let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
-        (app_name, app_bundle_id)
-    };
-
-    #[cfg(not(target_os = "macos"))]
-    let target = (get_frontmost_app_name(), None);
-
-    let outcome = paste_text_systemwide(
-        &state.accessibility_trust_observed,
-        &sample,
-        true,
-        target.0.as_deref(),
-        target.1.as_deref(),
-    );
-
-    Ok(serde_json::json!({
-        "text": sample,
-        "targetApp": target.0,
-        "targetBundleId": target.1,
-        "pasted": outcome.pasted,
-        "copied": outcome.copied,
-        "error": outcome.error,
-    }))
-}
-
-pub(crate) async fn capture_selected_text_for_playback_impl() -> Result<Option<String>, String> {
     #[cfg(target_os = "macos")]
     let target = {
         let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
