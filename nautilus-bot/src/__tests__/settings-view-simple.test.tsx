@@ -463,7 +463,7 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("Privacy & Security"));
     expect(
       await screen.findByRole("switch", {
-        name: "Use cloud AI for summaries and answers",
+        name: "Allow cloud AI processing",
       }),
     ).toBeInTheDocument();
     expect(
@@ -756,7 +756,7 @@ describe("SettingsView performance behavior", () => {
     // "not encrypted" just because privacy.encryptRecordings no longer exists
     // on the saved Settings object.
     const remoteProcessingRow = screen
-      .getByText("Use cloud AI for summaries and answers")
+      .getByText("Allow cloud AI processing")
       .closest(".flex.items-center.justify-between");
     const remoteProcessingSwitch = within(
       remoteProcessingRow as HTMLElement,
@@ -2087,7 +2087,7 @@ describe("Settings copy clarity", () => {
     await screen.findByText("API keys");
     expect(
       screen.queryByRole("switch", {
-        name: "Use cloud AI for summaries and answers",
+        name: "Allow cloud AI processing",
       }),
     ).toBeNull();
     expect(screen.getByText("Cloud AI is off")).toBeInTheDocument();
@@ -2098,9 +2098,12 @@ describe("Settings copy clarity", () => {
     fireEvent.click(screen.getByText("Privacy & Security"));
     expect(
       await screen.findByRole("switch", {
-        name: "Use cloud AI for summaries and answers",
+        name: "Allow cloud AI processing",
       }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Dictation requests may also include captured/),
+    ).toHaveTextContent("selected text or app context");
   });
 
   /**
