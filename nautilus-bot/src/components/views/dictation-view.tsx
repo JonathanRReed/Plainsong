@@ -2475,11 +2475,13 @@ export function DictationView() {
     aiProvider: overrides?.aiProvider ?? currentAiProvider,
     aiModelId: overrides?.aiModelId ?? currentAiModelId,
     activationAppMatcher:
-      overrides?.activationAppMatcher ??
-      (customModeDraft.activationAppMatcher.trim() || null),
+      overrides && "activationAppMatcher" in overrides
+        ? (overrides.activationAppMatcher ?? null)
+        : (customModeDraft.activationAppMatcher.trim() || null),
     activationDomainMatcher:
-      overrides?.activationDomainMatcher ??
-      (customModeDraft.activationDomainMatcher.trim() || null),
+      overrides && "activationDomainMatcher" in overrides
+        ? (overrides.activationDomainMatcher ?? null)
+        : (customModeDraft.activationDomainMatcher.trim() || null),
   });
 
   const applySavedCustomMode = (mode: DictationCustomMode) => {

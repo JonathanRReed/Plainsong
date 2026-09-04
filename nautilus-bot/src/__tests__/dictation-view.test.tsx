@@ -867,6 +867,9 @@ describe("DictationView modes", () => {
 
     await openConfigTab("Profiles");
     await screen.findByText("Recommended flow profiles");
+    fireEvent.change(screen.getByLabelText("Website this profile is for"), {
+      target: { value: "unrelated.example" },
+    });
     expect(screen.queryByText(/App undefined/i)).not.toBeInTheDocument();
     fireEvent.click(screen.getAllByRole("button", { name: /install and use/i })[0]);
 
@@ -882,6 +885,7 @@ describe("DictationView modes", () => {
     expect(latestSettings.transcription.dictationCustomModes[0].name).toBe("Slack Replies");
     expect(latestSettings.transcription.dictationCustomModes[0].baseModePreset).toBe("messages");
     expect(latestSettings.transcription.dictationCustomModes[0].activationAppMatcher).toBe("Slack");
+    expect(latestSettings.transcription.dictationCustomModes[0].activationDomainMatcher).toBeNull();
     expect(latestSettings.transcription.dictationCustomModes[0].customPrompt).toMatch(/slack reply/i);
     expect(latestSettings.transcription.dictationContextSource).toBe("application_context");
     expect(latestSettings.transcription.dictationProvider).toBe("distil_whisper");
