@@ -310,6 +310,7 @@ pub(crate) async fn run(audio_path: &Path, duration: f64) -> Result<DiarizationR
         speakers,
         duration,
         method: DiarizationMethod::Model,
+        cluster_centroids: std::collections::HashMap::new(),
     })
 }
 
