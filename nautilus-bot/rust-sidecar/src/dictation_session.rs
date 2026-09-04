@@ -948,7 +948,7 @@ pub(crate) fn reuse_recent_dictation_result(
     let outcome = paste_text_systemwide(
         &state.accessibility_trust_observed,
         &result.text,
-        true,
+        false,
         target_app.as_deref(),
         target_app_bundle_id.as_deref(),
     );
@@ -2997,6 +2997,28 @@ mod recent_dictation_result_tests {
         assert!(
             !body.contains("result.app_bundle_id"),
             "the stored session's bundle id must not be reactivated by the recovery hotkey"
+        );
+    }
+
+    /// Re-paste is an insertion action, not an implicit copy action. Keeping
+    /// the recovered text on the clipboard would bypass the user's disabled
+    /// clipboard-retention preference; the separate re-copy branch remains
+    /// the explicit way to retain it.
+    #[test]
+    fn repaste_does_not_retain_the_result_on_the_clipboard() {
+        let body = reuse_recent_dictation_result_body();
+        let paste_call = body
+            .split("let outcome = paste_text_systemwide(")
+            .nth(1)
+            .expect("re-paste must call paste_text_systemwide");
+
+        assert!(
+            paste_call.contains("&result.text,\n        false,"),
+            "re-paste must restore the prior clipboard after fallback insertion"
+        );
+        assert!(
+            body.contains("if !paste {\n        copy_to_clipboard(&result.text)?;"),
+            "re-copy must remain the explicit clipboard-retention action"
         );
     }
 }
