@@ -10,7 +10,7 @@ use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::{Context, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
-use rand::Rng;
+use rand::RngCore;
 use std::io::{Read, Write};
 
 const SALT_LEN: usize = 16;

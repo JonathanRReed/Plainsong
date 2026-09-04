@@ -142,7 +142,7 @@ use core_foundation_sys::dictionary::CFDictionaryRef;
 use core_foundation_sys::string::{CFStringGetTypeID, CFStringRef};
 #[cfg(target_os = "macos")]
 use objc2::runtime::Bool;
-use rand::Rng;
+use rand::RngCore;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;

@@ -293,7 +293,7 @@ fn model_integrity_mac_key_uncached() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYT
     }
 
     let mut key = [0u8; MODEL_INTEGRITY_MAC_KEY_BYTES];
-    use rand::Rng;
+    use rand::RngCore;
     rand::rng().fill_bytes(&mut key);
     crate::secrets::set_internal_secret(MODEL_INTEGRITY_MAC_KEY_SECRET, &hex::encode(key))
         .map_err(|error| {
