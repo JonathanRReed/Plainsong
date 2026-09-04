@@ -1853,6 +1853,28 @@ async function handleLocalCommand(
       await ipcBridge.invokeSidecar("stop_recording", { recordingId });
       return { handled: true, result: null };
     }
+    case "pause_meeting_capture":
+    case "resume_meeting_capture": {
+      if (!senderWindow) {
+        throw new Error("Changing meeting capture requires a Plainsong window");
+      }
+      if (!ipcBridge) {
+        throw new Error("Meeting capture service is not ready");
+      }
+      const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
+      captureAdmission.consume(senderWindow.id, route);
+      if (!activeMeetingRecordingId) {
+        throw new Error("There is no active meeting capture");
+      }
+      const sidecarCommand =
+        command === "pause_meeting_capture" ? "pause_recording" : "resume_recording";
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar(sidecarCommand, {
+          recordingId: activeMeetingRecordingId,
+        }),
+      };
+    }
     case "prepare_recording_playback": {
       // Main window only: the overlays have no transcript to play against, and
       // a token minted for a hidden window would be a token nobody can see.
