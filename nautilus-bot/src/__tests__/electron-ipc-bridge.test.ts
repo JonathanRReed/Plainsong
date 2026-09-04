@@ -58,12 +58,18 @@ describe("privileged storage command admission", () => {
 });
 
 describe("Apple Speech language install admission", () => {
-  it("deduplicates installs for the same locale", () => {
-    expect(getCommandWorkKey("install_apple_speech_language", { locale: "en_US" })).toBe(
-      "install_apple_speech_language:en_US",
-    );
+  it("deduplicates equivalent hyphenated and underscored locales", () => {
+    const hyphenated = getCommandWorkKey("install_apple_speech_language", {
+      locale: "en-US",
+    });
+    const underscored = getCommandWorkKey("install_apple_speech_language", {
+      locale: "en_US",
+    });
+
+    expect(hyphenated).toBe("install_apple_speech_language:en_us");
+    expect(underscored).toBe(hyphenated);
     expect(getCommandWorkKey("install_apple_speech_language", { locale: "fr_FR" })).toBe(
-      "install_apple_speech_language:fr_FR",
+      "install_apple_speech_language:fr_fr",
     );
   });
 });

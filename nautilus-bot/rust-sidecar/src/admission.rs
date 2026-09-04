@@ -149,14 +149,22 @@ fn string_param(params: &Value, names: &[&str]) -> Option<String> {
     })
 }
 
+fn canonical_locale_work_key(locale: &str) -> String {
+    locale.to_ascii_lowercase().replace('-', "_")
+}
+
 fn duplicate_work_key(command: &str, params: &Value) -> Option<String> {
     let class = classify_command(command);
     let target = match class {
-        CommandClass::Download => string_param(
-            params,
-            &["modelName", "modelId", "providerType", "assetId", "locale"],
-        )
-        .unwrap_or_else(|| command.to_string()),
+        CommandClass::Download if command == "install_apple_speech_language" => {
+            string_param(params, &["locale"])
+                .map(|locale| canonical_locale_work_key(&locale))
+                .unwrap_or_else(|| command.to_string())
+        }
+        CommandClass::Download => {
+            string_param(params, &["modelName", "modelId", "providerType", "assetId"])
+                .unwrap_or_else(|| command.to_string())
+        }
         CommandClass::Benchmark => "benchmark".to_string(),
         CommandClass::Analysis => string_param(params, &["runId", "recordingId", "historyId"])
             .or_else(|| {
@@ -437,7 +445,7 @@ mod tests {
         let _english = admission
             .admit(
                 "install_apple_speech_language",
-                &serde_json::json!({"locale": "en_US"}),
+                &serde_json::json!({"locale": "en-US"}),
             )
             .expect("first language install");
         let duplicate = admission
@@ -445,7 +453,8 @@ mod tests {
                 "install_apple_speech_language",
                 &serde_json::json!({"locale": "en_US"}),
             )
-            .expect_err("duplicate language install must be rejected");
+            .err()
+            .expect("equivalent locale alias must be rejected as duplicate work");
         assert!(duplicate.starts_with("SIDECAR_DUPLICATE:"));
 
         let _french = admission
@@ -459,7 +468,8 @@ mod tests {
                 "install_apple_speech_language",
                 &serde_json::json!({"locale": "de_DE"}),
             )
-            .expect_err("a third concurrent install must be rejected");
+            .err()
+            .expect("a third concurrent install must be rejected");
         assert!(capacity.starts_with("SIDECAR_BUSY: model download"));
     }
 
