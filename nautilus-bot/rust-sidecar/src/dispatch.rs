@@ -3426,7 +3426,15 @@ pub async fn dispatch_command(
             smoke_test_cursor_insert_impl(state.as_ref(), text).await
         }
         "capture_selected_text_for_playback" => {
-            let result = capture_selected_text_for_playback_impl().await?;
+            let admission_nonce: String = serde_json::from_value(
+                params
+                    .get("admissionNonce")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|_| "Selected text playback requires an admission proof".to_string())?;
+            let result =
+                capture_selected_text_for_playback_impl(state.as_ref(), &admission_nonce).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "reprocess_dictation_text" => {

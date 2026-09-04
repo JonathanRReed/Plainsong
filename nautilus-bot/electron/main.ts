@@ -1433,6 +1433,25 @@ async function handleLocalCommand(
   };
 
   switch (command) {
+    case "capture_selected_text_for_playback": {
+      if (!senderWindow || senderWindow !== mainWindow || !senderWindow.isFocused()) {
+        throw new Error(
+          "Selected text playback requires the focused main Plainsong window",
+        );
+      }
+      if (!ipcBridge) {
+        throw new Error("Selected text playback service is not ready");
+      }
+      const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
+      const grant = captureAdmission.consume(senderWindow.id, route);
+      await ipcBridge.invoke("register_capture_admission", { nonce: grant.nonce });
+      return {
+        handled: true,
+        result: await ipcBridge.invokeSidecar("capture_selected_text_for_playback", {
+          admissionNonce: grant.nonce,
+        }),
+      };
+    }
     case "__window_set_size__": {
       if (!senderWindow) {
         return { handled: true, result: null };

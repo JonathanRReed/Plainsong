@@ -609,7 +609,21 @@ pub(crate) async fn smoke_test_cursor_insert_impl(
     }))
 }
 
-pub(crate) async fn capture_selected_text_for_playback_impl() -> Result<Option<String>, String> {
+pub(crate) async fn capture_selected_text_for_playback_impl(
+    state: &AppState,
+    admission_nonce: &str,
+) -> Result<Option<String>, String> {
+    // Unlike meeting capture's compatibility path, this renderer-facing read
+    // primitive is never allowed before the privileged Electron registrar has
+    // issued a proof. The proof is short-lived and removed on this call.
+    if !state.capture_admission.is_enforcing() {
+        return Err("Selected text playback admission is not initialized".to_string());
+    }
+    state
+        .capture_admission
+        .consume(admission_nonce)
+        .map_err(|_| "Selected text playback admission proof is invalid".to_string())?;
+
     #[cfg(target_os = "macos")]
     let target = {
         let (app_name, app_bundle_id, _) = capture_hotkey_target_context(false);
