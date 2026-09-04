@@ -384,12 +384,11 @@ pub(crate) fn validate_plaintext_wav(path: &Path) -> RecordingAudioValidation {
 /// Length of a WAV this process just wrote from an authenticated ciphertext,
 /// after checking that its header parses and that it carries audio frames.
 ///
-/// Deliberately cheaper than `validate_plaintext_wav`: it neither decodes
-/// every sample nor hashes the file. Playback uses it because the bytes came
-/// out of `decrypt_stream`, whose AEAD already refused any frame that was not
-/// written by this vault's key — re-proving that by reading a 700 MB file
-/// twice more only delays the first note. Every other caller, and every
-/// unauthenticated plaintext file, still gets the full validation.
+/// Deliberately cheaper than `validate_plaintext_wav`: it does not decode
+/// every sample. Playback separately hashes the file to bind authenticated
+/// ciphertext to the recording metadata, without paying for a full decode.
+/// Every other caller, and every unauthenticated plaintext file, still gets
+/// the full validation.
 pub(crate) fn measure_plaintext_wav_header(path: &Path) -> Result<u64> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("Could not inspect audio file '{}'", path.display()))?;

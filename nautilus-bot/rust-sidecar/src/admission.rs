@@ -117,13 +117,15 @@ fn classify_command(command: &str) -> CommandClass {
         | "download_diarization_model"
         | "download_platform_assets"
         | "download_silero_vad_model"
-        | "download_whisper_model" => CommandClass::Download,
+        | "download_whisper_model"
+        | "install_apple_speech_language" => CommandClass::Download,
         "benchmark_asr_providers" | "benchmark_asr_providers_bytes" => CommandClass::Benchmark,
         "analyze_recording"
         | "analyze_recordings"
         | "ask_memory"
         | "extract_action_items"
         | "extract_action_items_grounded"
+        | "prepare_meeting_brief"
         // Re-runs ASR and possibly an LLM pass over kept dictation audio, so
         // it shares the analysis budget and the per-target duplicate guard.
         | "reprocess_dictation"
@@ -148,27 +150,38 @@ fn string_param(params: &Value, names: &[&str]) -> Option<String> {
     })
 }
 
+fn canonical_locale_work_key(locale: &str) -> String {
+    locale.to_ascii_lowercase().replace('-', "_")
+}
+
 fn duplicate_work_key(command: &str, params: &Value) -> Option<String> {
     let class = classify_command(command);
     let target = match class {
+        CommandClass::Download if command == "install_apple_speech_language" => {
+            string_param(params, &["locale"])
+                .map(|locale| canonical_locale_work_key(&locale))
+                .unwrap_or_else(|| command.to_string())
+        }
         CommandClass::Download => {
             string_param(params, &["modelName", "modelId", "providerType", "assetId"])
                 .unwrap_or_else(|| command.to_string())
         }
         CommandClass::Benchmark => "benchmark".to_string(),
-        CommandClass::Analysis => string_param(params, &["runId", "recordingId", "historyId"])
-            .or_else(|| {
-                params
-                    .get("recordingIds")
-                    .and_then(Value::as_array)
-                    .map(|ids| {
-                        ids.iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    })
-            })
-            .unwrap_or_else(|| command.to_string()),
+        CommandClass::Analysis => {
+            string_param(params, &["runId", "recordingId", "historyId", "eventId"])
+                .or_else(|| {
+                    params
+                        .get("recordingIds")
+                        .and_then(Value::as_array)
+                        .map(|ids| {
+                            ids.iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
+                })
+                .unwrap_or_else(|| command.to_string())
+        }
         CommandClass::Backup => {
             string_param(params, &["backupId"]).unwrap_or_else(|| command.to_string())
         }
@@ -430,6 +443,40 @@ mod tests {
     }
 
     #[test]
+    fn apple_language_installs_are_bounded_and_deduplicated_by_locale() {
+        let admission = AdmissionController::default();
+        let _english = admission
+            .admit(
+                "install_apple_speech_language",
+                &serde_json::json!({"locale": "en-US"}),
+            )
+            .expect("first language install");
+        let duplicate = admission
+            .admit(
+                "install_apple_speech_language",
+                &serde_json::json!({"locale": "en_US"}),
+            )
+            .err()
+            .expect("equivalent locale alias must be rejected as duplicate work");
+        assert!(duplicate.starts_with("SIDECAR_DUPLICATE:"));
+
+        let _french = admission
+            .admit(
+                "install_apple_speech_language",
+                &serde_json::json!({"locale": "fr_FR"}),
+            )
+            .expect("a second language can use the remaining download slot");
+        let capacity = admission
+            .admit(
+                "install_apple_speech_language",
+                &serde_json::json!({"locale": "de_DE"}),
+            )
+            .err()
+            .expect("a third concurrent install must be rejected");
+        assert!(capacity.starts_with("SIDECAR_BUSY: model download"));
+    }
+
+    #[test]
     fn a_manual_retry_is_admitted_as_analysis_work() {
         // A retry that raced the automatic post-stop pass must share the
         // analysis semaphore and the per-recording duplicate key, or two full
@@ -449,6 +496,32 @@ mod tests {
             .err()
             .expect("concurrent retry for the same recording must be rejected");
         assert!(error.starts_with("SIDECAR_DUPLICATE:"));
+    }
+
+    #[test]
+    fn a_meeting_brief_is_admitted_as_analysis_work_per_event() {
+        let admission = AdmissionController::default();
+        let _first = admission
+            .admit(
+                "prepare_meeting_brief",
+                &serde_json::json!({"eventId": "event-1"}),
+            )
+            .expect("first brief");
+        let error = admission
+            .admit(
+                "prepare_meeting_brief",
+                &serde_json::json!({"eventId": "event-1"}),
+            )
+            .err()
+            .expect("concurrent brief for the same event must be rejected");
+        assert!(error.starts_with("SIDECAR_DUPLICATE:"));
+
+        admission
+            .admit(
+                "prepare_meeting_brief",
+                &serde_json::json!({"eventId": "event-2"}),
+            )
+            .expect("a different event can use another analysis slot");
     }
 
     #[test]

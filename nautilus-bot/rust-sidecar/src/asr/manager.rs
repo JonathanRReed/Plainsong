@@ -1398,7 +1398,10 @@ impl AsrManager {
     pub async fn benchmark_providers(&self, test_audio: &Path) -> Vec<BenchmarkResult> {
         let mut results = Vec::new();
 
-        for provider_type in AsrProviderType::all() {
+        // This aggregate benchmark has no provider-selection or disclosure UI.
+        // Keep it local-only so merely configuring a cloud credential can never
+        // cause the selected audio to cross the remote-processing boundary.
+        for provider_type in benchmark_provider_types() {
             let selected_model = self.provider_model_id(provider_type).await;
             let provider = Self::provider_with_model(provider_type, Some(selected_model.as_str()));
             if !provider.is_available() || !Self::is_provider_transcription_enabled(provider_type) {
@@ -1428,6 +1431,12 @@ impl AsrManager {
 
         results
     }
+}
+
+fn benchmark_provider_types() -> impl Iterator<Item = AsrProviderType> {
+    AsrProviderType::all()
+        .into_iter()
+        .filter(|provider| !provider.is_remote())
 }
 
 /// Provider information for UI
@@ -2406,13 +2415,25 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        meeting_transcription_options, migrate_legacy_local_artifacts,
+        benchmark_provider_types, meeting_transcription_options, migrate_legacy_local_artifacts,
         parakeet_model_dir_and_missing_files, runtime_diagnostics_for_provider, AsrManager,
         AsrProviderType,
     };
     use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
     use std::path::PathBuf;
+
+    #[test]
+    fn aggregate_benchmark_never_includes_remote_providers() {
+        let providers = benchmark_provider_types().collect::<Vec<_>>();
+
+        assert!(!providers.is_empty());
+        assert!(providers.iter().all(|provider| !provider.is_remote()));
+        assert!(AsrProviderType::all()
+            .into_iter()
+            .filter(|provider| provider.is_remote())
+            .all(|provider| !providers.contains(&provider)));
+    }
 
     #[test]
     fn every_meeting_request_asks_for_speaker_labels_because_that_is_what_buys_timestamps() {

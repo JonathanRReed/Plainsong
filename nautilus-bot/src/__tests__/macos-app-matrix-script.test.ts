@@ -13,6 +13,14 @@ const captureScript = fs.readFileSync(
   path.join(repoRoot, "scripts", "capture-packaged-macos-app-matrix-insertion.mjs"),
   "utf8",
 );
+const dispatchSource = fs.readFileSync(
+  path.join(repoRoot, "rust-sidecar", "src", "dispatch.rs"),
+  "utf8",
+);
+const permissionsSource = fs.readFileSync(
+  path.join(repoRoot, "rust-sidecar", "src", "permissions.rs"),
+  "utf8",
+);
 const verifierScript = fs.readFileSync(
   path.join(repoRoot, "scripts", "verify-packaged-macos-app-matrix-insertion.mjs"),
   "utf8",
@@ -92,7 +100,7 @@ describe("macOS app matrix insertion scripts", () => {
 
   it("lets asynchronous target apps consume the staged clipboard before read-back replaces it", () => {
     const insertIndex = captureScript.indexOf(
-      'artifact.sidecarResult = await sidecar.sendCommand("smoke_test_cursor_insert"',
+      'artifact.sidecarResult = await sidecar.sendCommand("qa_smoke_test_cursor_insert"',
     );
     const settleIndex = captureScript.indexOf(
       "await sleep(Math.max(0, postInsertSettleMs))",
@@ -105,6 +113,13 @@ describe("macOS app matrix insertion scripts", () => {
     expect(insertIndex).toBeGreaterThan(-1);
     expect(settleIndex).toBeGreaterThan(insertIndex);
     expect(readBackIndex).toBeGreaterThan(settleIndex);
+  });
+
+  it("keeps insertion available only to the explicit packaged QA sidecar", () => {
+    expect(captureScript).toContain('PLAINSONG_PACKAGED_QA_APP_MATRIX: "1"');
+    expect(dispatchSource).toContain('"qa_smoke_test_cursor_insert" =>');
+    expect(permissionsSource).toContain('var_os("PLAINSONG_PACKAGED_QA_APP_MATRIX")');
+    expect(permissionsSource).toContain('Packaged app-matrix insertion is disabled');
   });
 
   it("requires disposable target text to be removed after machine read-back", () => {

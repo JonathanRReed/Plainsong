@@ -126,6 +126,8 @@ describe("attendeeNamesForContext", () => {
     const names = attendeeNamesForContext([
       attendee({ name: "Alice Brown", email: "alice@acme-holdings.example" }),
       attendee({ name: "Bob", email: "bob@example.com" }),
+      // EventKit supplies this shape when a participant has no display name.
+      attendee({ name: "victim@example.com", email: "victim@example.com" }),
     ]);
     expect(names).toEqual(["Alice Brown", "Bob"]);
     expect(names.join(" ")).not.toContain("@");

@@ -26,12 +26,15 @@ describe("artifacts/ ignore rule keeps QA receipts in the tree", () => {
     expect(isIgnored("artifacts/qa/macos/nested/deeper/receipt.md")).toBe(false);
   });
 
-  it("still ignores raw captures and the per-machine dictation latency receipts", () => {
+  it("still ignores raw captures and machine-local dictation receipts", () => {
     expect(isIgnored("artifacts/qa/macos/capture.wav")).toBe(true);
     expect(isIgnored("artifacts/qa/support-bundle.zip")).toBe(true);
     expect(isIgnored("artifacts/cloud-asr-smoke.json")).toBe(true);
     expect(isIgnored("artifacts/asr-preflight-macos.json")).toBe(true);
     expect(isIgnored("artifacts/qa/dictation-latency.json")).toBe(true);
     expect(isIgnored("artifacts/qa/dictation-latency-e2e.json")).toBe(true);
+    expect(isIgnored("artifacts/qa/macos/capture-dictation-hotkey-toggle.json")).toBe(true);
+    expect(isIgnored("artifacts/qa/macos/capture-dictation-hotkey-hold.json")).toBe(true);
+    expect(isIgnored("artifacts/qa/macos/capture-dictation-hotkey-hands-free.json")).toBe(true);
   });
 });

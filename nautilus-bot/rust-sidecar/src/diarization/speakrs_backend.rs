@@ -139,14 +139,16 @@ pub(crate) fn normalize_turns(turns: &[RawTurn], duration: f64) -> Vec<SpeakerSe
     // merged wherever they sit -- the span that closes was already inside the
     // earlier turn, so nothing new is claimed.
     let mut merged: Vec<RawTurn> = Vec::new();
+    let mut previous_speaker: Option<String> = None;
     for turn in clamped {
+        let is_previous_turn = previous_speaker.as_deref() == Some(turn.speaker.as_str());
+        previous_speaker = Some(turn.speaker.clone());
         if let Some(index) = merged
             .iter()
             .rposition(|existing| existing.speaker == turn.speaker)
         {
             // `clamped` is sorted by start, so `turn` never begins earlier.
             let gap = turn.start - merged[index].end;
-            let is_previous_turn = index + 1 == merged.len();
             let limit = if is_previous_turn {
                 TURN_MERGE_GAP_SECONDS
             } else {
@@ -308,6 +310,7 @@ pub(crate) async fn run(audio_path: &Path, duration: f64) -> Result<DiarizationR
         speakers,
         duration,
         method: DiarizationMethod::Model,
+        cluster_centroids: std::collections::HashMap::new(),
     })
 }
 
@@ -442,6 +445,29 @@ mod tests {
                 .map(|segment| segment.speaker_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["S1", "S2", "S1"]
+        );
+    }
+
+    /// Merging an overlap into an earlier output entry must not lose the input
+    /// ordering: the following turn is still adjacent to the turn just merged.
+    #[test]
+    fn a_breath_gap_merges_after_an_interleaved_overlap_merge() {
+        let turns = vec![
+            turn(0.0, 5.0, "SPEAKER_00"),
+            turn(2.0, 3.0, "SPEAKER_01"),
+            turn(4.0, 8.0, "SPEAKER_00"),
+            turn(8.25, 10.0, "SPEAKER_00"),
+        ];
+        let segments = normalize_turns(&turns, 12.0);
+
+        let speaker_00: Vec<&SpeakerSegment> = segments
+            .iter()
+            .filter(|segment| segment.speaker_id == "S1")
+            .collect();
+        assert_eq!(speaker_00.len(), 1, "adjacent A turns should merge");
+        assert_eq!(
+            (speaker_00[0].start_time, speaker_00[0].end_time),
+            (0.0, 10.0)
         );
     }
 
