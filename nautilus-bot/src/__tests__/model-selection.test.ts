@@ -277,6 +277,12 @@ describe("downloaded model index", () => {
       sizeBytes: 652_000_000,
     },
     {
+      name: "Parakeet parakeet-tdt-0.6b-v2 encoder.int8.onnx",
+      provider: "parakeet",
+      path: "/Users/x/Library/Application Support/Plainsong/models/parakeet/parakeet-tdt-0.6b-v2/encoder.int8.onnx",
+      sizeBytes: 652_000_000,
+    },
+    {
       name: "Silero VAD silero_vad.onnx",
       provider: "silero_vad",
       path: "/Users/x/Library/Application Support/Plainsong/models/vad/silero_vad.onnx",
@@ -287,8 +293,8 @@ describe("downloaded model index", () => {
   it("counts only speech models, at their measured size", () => {
     const index = buildDownloadedModelIndex(files);
 
-    expect(index.fileCount).toBe(2);
-    expect(index.totalBytes).toBe(148_000_000 + 652_000_000);
+    expect(index.fileCount).toBe(3);
+    expect(index.totalBytes).toBe(148_000_000 + 652_000_000 + 652_000_000);
   });
 
   it("answers per model rather than per provider", () => {
@@ -298,6 +304,7 @@ describe("downloaded model index", () => {
     // The same provider, a build that was never fetched.
     expect(isModelOnDisk(index, "whisper", "large-v3-turbo")).toBe(false);
     expect(isModelOnDisk(index, "parakeet", "parakeet-tdt-0.6b-v3")).toBe(true);
+    expect(isModelOnDisk(index, "parakeet", "parakeet-tdt-0.6b-v2")).toBe(true);
     expect(isModelOnDisk(index, "parakeet", "parakeet-tdt-ctc-110m")).toBe(false);
     // Nothing to download, so there is nothing to claim.
     expect(isModelOnDisk(index, "openai_cloud", "whisper-1")).toBeNull();
