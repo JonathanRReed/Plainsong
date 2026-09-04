@@ -4147,11 +4147,35 @@ fn the_native_paste_probes_the_focused_field_right_before_it_stages_the_clipboar
         .find("copy_to_clipboard(text)")
         .expect("the dispatcher must stage the clipboard");
     let keystroke = body
-        .find("dispatch_command_keystroke(9)")
+        .find("send_native_paste_key()")
         .expect("the dispatcher must send Cmd+V");
     assert!(reactivate < probe, "reactivate before probing");
     assert!(probe < stage, "probe before the clipboard is touched");
     assert!(stage < keystroke, "stage before Cmd+V");
+}
+
+#[test]
+fn macos_paste_confirms_system_events_but_preserves_clipboard_for_cgevent_fallback() {
+    let source = include_str!("text_insert.rs");
+    let sender = top_level_item(source, "fn send_native_paste_key(");
+    let system_events = sender
+        .find("Command::new(\"osascript\")")
+        .expect("paste must try the observable System Events path");
+    let core_graphics = sender
+        .find("dispatch_command_keystroke(9)")
+        .expect("paste must retain the CoreGraphics fallback");
+    assert!(
+        system_events < core_graphics,
+        "System Events must run before the unconfirmable CoreGraphics fallback"
+    );
+    assert!(sender.contains("PasteDispatchStatus::Confirmed"));
+    assert!(sender.contains("PasteDispatchStatus::FallbackDispatched"));
+
+    let dispatcher = top_level_item(source, "fn dispatch_paste_from_clipboard(");
+    assert!(
+        dispatcher.contains("status == PasteDispatchStatus::Confirmed"),
+        "the old clipboard must only be restored after a confirmed paste"
+    );
 }
 
 #[test]

@@ -1537,6 +1537,48 @@ pub(crate) fn dispatch_command_keystroke(keycode: u16) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasteDispatchStatus {
+    Confirmed,
+    FallbackDispatched,
+}
+
+#[cfg(target_os = "macos")]
+fn send_native_paste_key() -> Result<PasteDispatchStatus, String> {
+    let system_events_error = match std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to keystroke \"v\" using command down")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            tracing::info!("Cmd+V posted via System Events");
+            return Ok(PasteDispatchStatus::Confirmed);
+        }
+        Ok(output) => format!(
+            "System Events exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Err(error) => format!("Failed to invoke osascript for paste: {}", error),
+    };
+
+    // CGEvent::post has no delivery result. It remains useful as a fallback,
+    // but must not be treated as confirmation that the target received the
+    // paste (in particular when macOS silently denies event posting).
+    dispatch_command_keystroke(9)
+        .map(|()| {
+            tracing::info!("Cmd+V posted via CoreGraphics fallback");
+            PasteDispatchStatus::FallbackDispatched
+        })
+        .map_err(|error| {
+            format!(
+                "{}; CoreGraphics paste failed: {}",
+                system_events_error, error
+            )
+        })
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn send_native_copy_key(
     target_app: Option<&str>,
     target_app_bundle_id: Option<&str>,
@@ -1682,11 +1724,9 @@ pub(crate) fn dispatch_paste_from_clipboard(
         PasteDispatchFailure::Other(format!("Failed to stage clipboard paste: {}", error))
     })?;
 
-    match dispatch_command_keystroke(9)
-        .map_err(|error| format!("CoreGraphics paste failed: {}", error))
-    {
-        Ok(()) => {
-            if !keep_text_in_clipboard {
+    match send_native_paste_key() {
+        Ok(status) => {
+            if !keep_text_in_clipboard && status == PasteDispatchStatus::Confirmed {
                 if let Some(previous) = previous_clipboard {
                     schedule_clipboard_restore(previous, text.to_string());
                 }
