@@ -75,6 +75,12 @@ const TRAIL_PUNCTUATION: &[char] = &[
     '.', ',', '!', '?', ';', ':', ')', ']', '}', '"', '\'', '\u{201d}', '\u{2019}',
 ];
 
+// ITN is a synchronous, allocation-heavy convenience pass, not a suitable
+// parser for an arbitrarily large cloud response. Normal dictation is far
+// smaller than this; leave unusually large transcripts untouched so a
+// provider cannot monopolize the sidecar worker.
+const MAX_ITN_INPUT_BYTES: usize = 64 * 1024;
+
 /// A token that must never be rewritten and must never be crossed by a
 /// numeric span: URLs, emails, file paths, hosts, and anything else carrying
 /// an internal dot next to letters (`a.m.`, `docs.google.com`).
@@ -195,11 +201,19 @@ fn mark_protected_phrases(text: &str, tokens: &mut [Token], phrases: &[String]) 
             };
             let start = from + found;
             let end = start + needle.len();
-            if boundary_starts.contains(&start) && boundary_ends.contains(&end) {
-                for (index, (token_start, token_end)) in ranges.iter().enumerate() {
-                    if *token_start < end && start < *token_end {
-                        tokens[index].protected = true;
+            if boundary_starts.binary_search(&start).is_ok()
+                && boundary_ends.binary_search(&end).is_ok()
+            {
+                // Ranges are ordered. Start at the first token whose core
+                // ends after the match starts, then visit only overlapping
+                // tokens instead of rescanning the complete transcript for
+                // every occurrence.
+                let first = ranges.partition_point(|(_, token_end)| *token_end <= start);
+                for (offset, (token_start, _)) in ranges[first..].iter().enumerate() {
+                    if *token_start >= end {
+                        break;
                     }
+                    tokens[first + offset].protected = true;
                 }
                 from = end;
             } else {
@@ -1240,6 +1254,9 @@ pub fn inverse_text_normalize_protecting(text: &str, protected_phrases: &[String
     if text.is_empty() {
         return String::new();
     }
+    if text.len() > MAX_ITN_INPUT_BYTES {
+        return text.to_string();
+    }
 
     let mut tokens = tokenize(text);
     if tokens.is_empty() {
@@ -1721,6 +1738,21 @@ mod tests {
             ),
             "the U.S. 25% tariff"
         );
+    }
+
+    #[test]
+    fn repeated_protected_phrases_preserve_each_occurrence() {
+        let input = "two ".repeat(10_000);
+        assert_eq!(
+            inverse_text_normalize_protecting(&input, &["two".to_string()]),
+            input
+        );
+    }
+
+    #[test]
+    fn oversized_input_skips_synchronous_normalization() {
+        let input = format!("twenty five {}", "x".repeat(MAX_ITN_INPUT_BYTES));
+        assert_eq!(inverse_text_normalize(&input), input);
     }
 
     /// Half-written numbers are worse than the words the user said.
