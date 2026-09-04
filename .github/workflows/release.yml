@@ -22,9 +22,8 @@ name: Beta release candidate
 # published.
 
 on:
-  push:
-    tags:
-      - "v*"
+  # Manual dispatch ensures GitHub loads this workflow from the protected
+  # default branch, rather than from the commit named by an untrusted tag.
   workflow_dispatch:
     inputs:
       tag:
@@ -32,7 +31,7 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.event.inputs.tag || github.ref_name }}
@@ -42,61 +41,81 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Build, verify, and stage artifact draft (macOS arm64)
-    runs-on: macos-latest
-    timeout-minutes: 90
-    defaults:
-      run:
-        shell: bash
-        working-directory: nautilus-bot
+  verify-ref:
+    name: Verify release tag is approved
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      commit: ${{ steps.verify-tag.outputs.commit }}
+      ref: ${{ steps.release-ref.outputs.ref }}
+      tag: ${{ steps.release-ref.outputs.tag }}
     steps:
-      - name: Validate and resolve release tag
+      - name: Validate release tag name
         id: release-ref
-        working-directory: ${{ github.workspace }}
         env:
-          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          RELEASE_TAG: ${{ github.event.inputs.tag }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            RELEASE_TAG="$DISPATCH_TAG"
-          elif [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            RELEASE_TAG="$GITHUB_REF_NAME"
-          else
-            echo "Unsupported release event: $GITHUB_EVENT_NAME" >&2
-            exit 1
-          fi
-
           TAG_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
           if [[ ! "$RELEASE_TAG" =~ $TAG_PATTERN ]]; then
             echo "Release tag must be a valid v-prefixed semantic version" >&2
             exit 1
           fi
-
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            RELEASE_REF="refs/tags/$RELEASE_TAG"
-          else
-            RELEASE_REF="$GITHUB_REF"
-          fi
-          if [ "$RELEASE_REF" != "refs/tags/$RELEASE_TAG" ]; then
-            echo "Release ref must be the exact tag ref refs/tags/$RELEASE_TAG" >&2
-            exit 1
-          fi
+          RELEASE_REF="refs/tags/$RELEASE_TAG"
           if ! git check-ref-format "$RELEASE_REF"; then
             echo "Invalid release tag ref: $RELEASE_REF" >&2
             exit 1
           fi
-
-          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
-          printf 'RELEASE_REF=%s\n' "$RELEASE_REF" >> "$GITHUB_ENV"
           printf 'ref=%s\n' "$RELEASE_REF" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ steps.release-ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Verify tag commit is on the protected default branch
+        id: verify-tag
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_REF: ${{ steps.release-ref.outputs.ref }}
+        run: |
+          git fetch --no-tags origin \
+            "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          TAG_COMMIT="$(git rev-parse --verify "${RELEASE_REF}^{commit}")"
+          if ! git merge-base --is-ancestor \
+            "$TAG_COMMIT" "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo "$RELEASE_REF does not point to a commit on $DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+          printf 'commit=%s\n' "$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Build, verify, and stage artifact draft (macOS arm64)
+    needs: verify-ref
+    runs-on: macos-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    # Configure this environment with required reviewers. Its secrets and the
+    # publication token are unavailable until the verified ref is approved.
+    environment: release
+    defaults:
+      run:
+        shell: bash
+        working-directory: nautilus-bot
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Pin the privileged checkout to the commit verified by the
+          # unprivileged job so a moved tag cannot create a TOCTOU window.
+          ref: ${{ needs.verify-ref.outputs.commit }}
           fetch-tags: true
 
       - name: Verify checkout matches release tag
+        env:
+          RELEASE_REF: ${{ needs.verify-ref.outputs.ref }}
         run: |
           if ! git show-ref --verify --quiet "$RELEASE_REF"; then
             echo "Checked-out tag ref is missing: $RELEASE_REF" >&2
@@ -112,6 +131,8 @@ jobs:
       # The release tag, package version, and updater manifest must describe
       # one exact build. The tag must already exist on GitHub.
       - name: Verify tag matches package.json version
+        env:
+          RELEASE_TAG: ${{ needs.verify-ref.outputs.tag }}
         run: |
           PKG="$(node -p "require('./package.json').version")"
           EXPECTED_TAG="v$PKG"
@@ -129,7 +150,7 @@ jobs:
         uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66 # 1.93.0
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # post-v2.9.2 cleanup fix (#377)
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # post-v2.9.2 cleanup fix (#377)
         with:
           workspaces: nautilus-bot/rust-sidecar
 
@@ -247,6 +268,7 @@ jobs:
       - name: Stage artifact-only draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.verify-ref.outputs.tag }}
         run: |
           shopt -s nullglob
           ASSETS=(

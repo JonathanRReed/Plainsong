@@ -36,7 +36,7 @@ use std::sync::LazyLock;
 
 /// Bumped when the file set or the redaction policy changes in a way a reader
 /// of an old bundle would need to know about.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// How many log lines the bundle will carry at most.
 pub const MAX_LOG_LINES: usize = 400;
@@ -64,6 +64,37 @@ const SECRET_KEY_MARKERS: &[&str] = &[
     "passphrase",
     "credential",
     "cookie",
+];
+
+/// Audit-detail fields whose values are app-generated machine identifiers.
+///
+/// Audit details have a narrower policy than settings: whether a value happens
+/// to look identifier-like says nothing about whether it is reader-authored
+/// content. New audit fields therefore remain redacted until they are reviewed
+/// and explicitly added here.
+const AUDIT_IDENTIFIER_FIELDS: &[&str] = &[
+    "recording_id",
+    "session_id",
+    "template_id",
+    "model",
+    "format",
+    "source",
+    "engine",
+    "backend",
+    "strategy",
+];
+
+/// Audit-detail fields that contain only app-computed counts, sizes, durations,
+/// or status switches.
+const AUDIT_SCALAR_FIELDS: &[&str] = &[
+    "word_count",
+    "citation_count",
+    "duration_seconds",
+    "converted_bytes",
+    "count",
+    "deleted_count",
+    "grounded",
+    "preview",
 ];
 
 /// Words that mean a log line is about captured content. A line containing
@@ -337,8 +368,39 @@ pub fn redact_diagnostics(value: &Value) -> Value {
     }
 }
 
-/// Redact the tail of the audit log: the event name and severity survive, the
-/// details go through the settings policy, which is the strict one.
+fn redact_audit_details(details: &Value) -> Value {
+    if details.is_null() {
+        return Value::Null;
+    }
+    let Value::Object(fields) = details else {
+        return Value::String(REDACTED.to_string());
+    };
+
+    Value::Object(
+        fields
+            .iter()
+            .map(|(key, value)| {
+                let redacted = if AUDIT_IDENTIFIER_FIELDS.contains(&key.as_str()) {
+                    match value {
+                        Value::String(text) if is_identifier_like(text) => value.clone(),
+                        _ => Value::String(REDACTED.to_string()),
+                    }
+                } else if AUDIT_SCALAR_FIELDS.contains(&key.as_str()) {
+                    match value {
+                        Value::Bool(_) | Value::Number(_) => value.clone(),
+                        _ => Value::String(REDACTED.to_string()),
+                    }
+                } else {
+                    Value::String(REDACTED.to_string())
+                };
+                (key.clone(), redacted)
+            })
+            .collect(),
+    )
+}
+
+/// Redact the tail of the audit log: the event name and severity survive, and
+/// details survive only through an explicit allowlist of non-content fields.
 pub fn redact_audit_entries(entries: &[Value]) -> Vec<Value> {
     let start = entries.len().saturating_sub(MAX_AUDIT_ENTRIES);
     entries[start..]
@@ -351,7 +413,7 @@ pub fn redact_audit_entries(entries: &[Value]) -> Vec<Value> {
                 }
             }
             let details = entry.get("details").unwrap_or(&Value::Null);
-            out.insert("details".to_string(), redact_settings(details));
+            out.insert("details".to_string(), redact_audit_details(details));
             Value::Object(out)
         })
         .collect()
@@ -723,6 +785,35 @@ mod tests {
             redacted[0]["details"]["path"],
             Value::String(REDACTED.into())
         );
+    }
+
+    #[test]
+    fn audit_details_redact_identifier_shaped_content_fields() {
+        let entries = vec![serde_json::json!({
+            "event": "analysis_completed",
+            "details": {
+                "recording_id": "rec-123",
+                "query": "HIV",
+                "new_title": "ProjectPhoenix",
+                "source_file_name": "Patient-HIV.wav",
+                "model": "local-model-v1",
+                "citation_count": 3,
+                "unknown_future_field": "LooksLikeAnIdentifier",
+            },
+        })];
+
+        let details = &redact_audit_entries(&entries)[0]["details"];
+        assert_eq!(details["recording_id"], "rec-123");
+        assert_eq!(details["model"], "local-model-v1");
+        assert_eq!(details["citation_count"], 3);
+        for field in [
+            "query",
+            "new_title",
+            "source_file_name",
+            "unknown_future_field",
+        ] {
+            assert_eq!(details[field], REDACTED, "{field} must fail closed");
+        }
     }
 
     #[test]

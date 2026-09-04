@@ -1452,7 +1452,7 @@ describe("FirstRunWizard", () => {
       ).toBeInTheDocument();
     });
 
-    it("remembers a transcripts-only choice", async () => {
+    it("disables automatic meeting processing for a transcripts-only choice", async () => {
       const ai = await import("@/lib/backend/ai");
       vi.mocked(ai.getOllamaStatus).mockResolvedValue(false);
 
@@ -1466,6 +1466,8 @@ describe("FirstRunWizard", () => {
 
       await waitFor(() => {
         expect(storage.get(AI_NOTES_OPT_OUT_STORAGE_KEY)).toBe("true");
+        expect(currentSettings.transcription.enableAutoAnalysis).toBe(false);
+        expect(currentSettings.transcription.meetingAutoNameEnabled).toBe(false);
       });
     });
 
