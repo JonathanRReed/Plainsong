@@ -1965,13 +1965,6 @@ describe("SettingsView performance behavior", () => {
 
   it("serializes rapid saved-prompt writes through the settings scheduler", async () => {
     const backend = await import("@/lib/backend");
-    let finishFirstSave: (() => void) | undefined;
-    vi.mocked(backend.saveSettings).mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          finishFirstSave = resolve;
-        }),
-    );
 
     render(
       <ToastProvider>
@@ -1983,22 +1976,33 @@ describe("SettingsView performance behavior", () => {
     fireEvent.click(screen.getByText("AI & Keys"));
     fireEvent.click(await screen.findByRole("button", { name: "Manage prompts" }));
     const dialog = await screen.findByRole("dialog");
-    vi.mocked(backend.saveSettings).mockClear();
+    const saveSettings = vi.mocked(backend.saveSettings);
+    await waitFor(() => expect(saveSettings).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByText("Saving…")).toBeNull());
+
+    let finishFirstSave: (() => void) | undefined;
+    saveSettings.mockClear();
+    saveSettings.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishFirstSave = resolve;
+        }),
+    );
 
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Hide Decisions made" }),
     );
-    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(1));
 
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Hide Open questions" }),
     );
     await act(async () => Promise.resolve());
-    expect(backend.saveSettings).toHaveBeenCalledTimes(1);
+    expect(saveSettings).toHaveBeenCalledTimes(1);
 
     finishFirstSave?.();
-    await waitFor(() => expect(backend.saveSettings).toHaveBeenCalledTimes(2));
-    const finalWrite = vi.mocked(backend.saveSettings).mock.calls[1]?.[0];
+    await waitFor(() => expect(saveSettings).toHaveBeenCalledTimes(2));
+    const finalWrite = saveSettings.mock.calls[1]?.[0];
     expect(
       finalWrite?.ai?.savedPrompts?.filter((prompt) => prompt.hidden),
     ).toEqual(
