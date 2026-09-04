@@ -1031,8 +1031,9 @@ evidence is stale and must be recaptured before this becomes a candidate.
 - The Word export no longer italicises identifiers: `file_name_here` keeps
   its underscores, because `_` now marks emphasis only at a word boundary.
 - An action item whose owner the meeting called by their first name is no
-  longer dropped when the speaker alias or the transcript spells the name out
-  in full ("Priya" against "Priya Raman", "Jon" against "Jonathan").
+  longer dropped when the speaker alias spells the name out in full ("Priya"
+  against "Priya Raman"). Transcript words must match exactly: capitalization
+  alone no longer lets a fabricated owner such as "Mark" match "Marketing".
 - Following the audio no longer re-renders the whole Meetings view about four
   times a second, and the up and down arrow keys inside the transcript no
   longer move the reading position while a control in it has focus.
