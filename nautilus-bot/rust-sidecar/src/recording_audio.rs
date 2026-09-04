@@ -265,6 +265,10 @@ impl DurableTempFile {
         self.armed = false;
         self.path.clone()
     }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl Drop for DurableTempFile {
@@ -460,6 +464,23 @@ pub(crate) fn create_new_file(path: &Path) -> Result<File> {
         .with_context(|| format!("Failed to create recording audio '{}'", path.display()))
 }
 
+pub(crate) fn create_secure_temporary_audio(path: &Path) -> Result<(File, DurableTempFile)> {
+    let file = create_new_file(path)?;
+    Ok((file, DurableTempFile::new(path.to_path_buf())))
+}
+
+pub(crate) fn write_secure_temporary_audio(
+    path: &Path,
+    audio_data: &[u8],
+) -> Result<DurableTempFile> {
+    use std::io::Write;
+
+    let (mut file, guard) = create_secure_temporary_audio(path)?;
+    file.write_all(audio_data)
+        .with_context(|| format!("Failed to write temporary audio '{}'", path.display()))?;
+    Ok(guard)
+}
+
 pub(crate) fn sync_file(path: &Path) -> Result<()> {
     OpenOptions::new()
         .write(true)
@@ -542,6 +563,85 @@ pub(crate) fn approved_regular_file(path: &Path, approved_roots: &[PathBuf]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_temporary_audio_is_owner_only_and_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-secure-temp-audio-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let (_file, guard) = create_secure_temporary_audio(&path).expect("create secure audio");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("temporary audio metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(guard);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn secure_temporary_audio_rejects_preexisting_path() {
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-secure-temp-audio-existing-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"keep").expect("seed existing file");
+        assert!(create_secure_temporary_audio(&path).is_err());
+        assert_eq!(std::fs::read(&path).expect("read existing file"), b"keep");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn secure_temporary_audio_cleans_up_when_work_fails() {
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-secure-temp-audio-failure-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let result: Result<()> = (|| {
+            let (_file, _guard) = create_secure_temporary_audio(&path)?;
+            anyhow::bail!("injected transcription failure")
+        })();
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secure_temporary_audio_supports_wav_writer_without_loosening_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-secure-temp-writer-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        let (file, guard) = create_secure_temporary_audio(&path).expect("create secure audio");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::new(file, spec).expect("create WAV writer");
+        writer.write_sample(0_i16).expect("write WAV sample");
+        writer.finalize().expect("finalize WAV");
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("temporary WAV metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        drop(guard);
+        assert!(!path.exists());
+    }
 
     #[test]
     fn encrypted_historical_primary_derives_exact_companions() {

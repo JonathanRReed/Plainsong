@@ -1138,6 +1138,43 @@ export async function listOllamaModels(): Promise<string[]> {
   return await invoke("list_ollama_models");
 }
 
+export interface OllamaCatalogEntry {
+  id: string;
+  displayName: string;
+  provider: string;
+  diskSizeBytes: number;
+  contextTokens: number;
+  minimumMemoryBytes: number | null;
+  recommendedMemoryBytes: number | null;
+  license: string;
+  disclosure: string | null;
+  lanes: string[];
+  expectedManifestDigest: string | null;
+  installed: boolean;
+  installedDigest: string | null;
+  installedSizeBytes: number | null;
+  ready: boolean;
+}
+
+export async function listOllamaModelCatalog(): Promise<OllamaCatalogEntry[]> {
+  return await invoke("list_ollama_model_catalog");
+}
+
+export async function getCuratedOllamaModelCatalog(): Promise<OllamaCatalogEntry[]> {
+  return await invoke("get_curated_ollama_model_catalog");
+}
+
+export async function installOllamaModel(
+  modelId: string,
+  acceptedLicense = false,
+): Promise<OllamaCatalogEntry> {
+  return await invoke("install_ollama_model", { modelId, acceptedLicense });
+}
+
+export async function cancelOllamaModelInstall(): Promise<{ cancelled: boolean }> {
+  return await invoke("cancel_ollama_model_install");
+}
+
 export async function listOllamaCloudModels(): Promise<string[]> {
   return await invoke("list_ollama_cloud_models");
 }

@@ -4289,7 +4289,7 @@ fn macos_paste_confirms_system_events_but_preserves_clipboard_for_cgevent_fallba
     let source = include_str!("text_insert.rs");
     let sender = top_level_item(source, "fn send_native_paste_key(");
     let system_events = sender
-        .find("Command::new(\"osascript\")")
+        .find("Command::new(\"/usr/bin/osascript\")")
         .expect("paste must try the observable System Events path");
     let core_graphics = sender
         .find("dispatch_command_keystroke(9)")
@@ -4306,6 +4306,32 @@ fn macos_paste_confirms_system_events_but_preserves_clipboard_for_cgevent_fallba
         dispatcher.contains("status == PasteDispatchStatus::Confirmed"),
         "the old clipboard must only be restored after a confirmed paste"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn privileged_macos_helpers_never_resolve_through_path() {
+    let source = [
+        include_str!("text_insert.rs"),
+        include_str!("export_paths.rs"),
+        include_str!("permissions.rs"),
+        include_str!("lib.rs"),
+    ]
+    .join("\n");
+    for helper in ["tccutil", "open", "pbcopy", "pbpaste", "osascript"] {
+        assert!(
+            !source.contains(&format!("Command::new(\"{helper}\")")),
+            "{helper} must use its canonical absolute system path"
+        );
+    }
+}
+
+#[test]
+fn rclone_resolution_keeps_windows_path_lookup_platform_gated() {
+    let source = include_str!("backup.rs");
+    assert!(source.contains("#[cfg(windows)]\nfn rclone_executable()"));
+    assert!(source.contains("PathBuf::from(\"rclone.exe\")"));
+    assert!(source.contains("#[cfg(not(windows))]\nfn rclone_executable()"));
 }
 
 #[test]

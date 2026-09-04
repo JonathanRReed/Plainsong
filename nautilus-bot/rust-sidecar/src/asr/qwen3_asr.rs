@@ -1523,10 +1523,9 @@ impl AsrProvider for Qwen3AsrProvider {
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_path =
             std::env::temp_dir().join(format!("qwen3_asr_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data).context("Failed to write temp WAV for Qwen3-ASR")?;
-        let result = self.transcribe(&temp_path).await;
-        let _ = std::fs::remove_file(&temp_path);
-        result
+        let temp = crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
+            .context("Failed to write temp WAV for Qwen3-ASR")?;
+        self.transcribe(temp.path()).await
     }
 
     fn download_status(&self) -> DownloadStatus {

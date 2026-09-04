@@ -20,6 +20,10 @@ export {
   listOpenAiModels,
   listOllamaCloudModels,
   listOllamaModels,
+  listOllamaModelCatalog,
+  getCuratedOllamaModelCatalog,
+  installOllamaModel,
+  cancelOllamaModelInstall,
   searchTranscripts,
   summarizeRecordingGrounded,
 } from "../backend";
@@ -27,6 +31,7 @@ export type {
   AppleLanguageModelAvailability,
   BundledCleanupModelStatus,
   LivePreviewEngineStatus,
+  OllamaCatalogEntry,
   CompanyMemoryProfile,
   MeetingChatMessage,
   PersonMemoryProfile,

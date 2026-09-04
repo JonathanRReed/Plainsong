@@ -1102,10 +1102,9 @@ impl AsrProvider for ParakeetProvider {
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_path = std::env::temp_dir().join(format!("parakeet_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Parakeet")?;
-        let result = self.transcribe(&temp_path).await;
-        let _ = std::fs::remove_file(&temp_path);
-        result
+        let temp = crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
+            .context("failed to write temp wav for Parakeet")?;
+        self.transcribe(temp.path()).await
     }
 
     fn download_status(&self) -> DownloadStatus {
