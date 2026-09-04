@@ -289,6 +289,7 @@ export function createDictationShortcutSignalRuntime(deps: {
   let startGeneration = 0;
   let activeStartGeneration: number | null = null;
   let pendingHoldReleaseGeneration: number | null = null;
+  let pendingHoldReleaseEpochMs: number | null = null;
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
   const clearWatchdog = (): void => {
@@ -328,6 +329,7 @@ export function createDictationShortcutSignalRuntime(deps: {
           // flight. Tag it with the generation that is starting so only that
           // start consumes it.
           pendingHoldReleaseGeneration = activeStartGeneration;
+          pendingHoldReleaseEpochMs = stopGestureEpochMs;
         } else if (watchdogTimer !== null) {
           // The start already resolved (watchdog armed) but the sidecar's
           // phase "recording" event has not been observed yet, so the cached
@@ -365,6 +367,7 @@ export function createDictationShortcutSignalRuntime(deps: {
         pendingHoldReleaseGeneration !== generation
       ) {
         pendingHoldReleaseGeneration = null;
+        pendingHoldReleaseEpochMs = null;
       }
       let started = false;
       try {
@@ -381,17 +384,23 @@ export function createDictationShortcutSignalRuntime(deps: {
         }
         if (!started && pendingHoldReleaseGeneration === generation) {
           pendingHoldReleaseGeneration = null;
+          pendingHoldReleaseEpochMs = null;
         }
       }
       if (holdToTalkWithRelease && pendingHoldReleaseGeneration === generation) {
+        const bufferedStopGestureEpochMs = pendingHoldReleaseEpochMs ?? stopGestureEpochMs;
         pendingHoldReleaseGeneration = null;
+        pendingHoldReleaseEpochMs = null;
         deps.log?.("dictation shortcut stop_dictation", {
           phase: deps.getPhase(),
           behavior: input.behavior,
           capability: input.capability,
           stopReason: "release",
         });
-        await deps.invoke("stop_dictation", { stopReason: "release", stopGestureEpochMs });
+        await deps.invoke("stop_dictation", {
+          stopReason: "release",
+          stopGestureEpochMs: bufferedStopGestureEpochMs,
+        });
         return;
       }
       if (holdToTalkWithRelease) {
