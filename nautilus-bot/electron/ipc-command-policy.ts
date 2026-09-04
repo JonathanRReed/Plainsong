@@ -79,6 +79,7 @@ const EXTENDED_COMMANDS = new Set<string>([
   "create_backup_default",
   "create_settings_backup_default",
   "download_asr_models",
+  "download_bundled_cleanup_model",
   "download_diarization_model",
   "download_platform_assets",
   "download_whisper_model",
