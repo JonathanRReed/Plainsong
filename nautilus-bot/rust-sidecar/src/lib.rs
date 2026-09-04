@@ -4436,7 +4436,7 @@ mod playback_preparation_tests {
         dir
     }
 
-    fn write_wav(path: &Path) {
+    fn write_wav_with_offset(path: &Path, sample_offset: i16) {
         let mut writer = hound::WavWriter::create(
             path,
             hound::WavSpec {
@@ -4449,10 +4449,14 @@ mod playback_preparation_tests {
         .expect("create wav");
         for index in 0..16_000_i32 {
             writer
-                .write_sample(((index % 200) as i16 - 100) * 50)
+                .write_sample(((index % 200) as i16 - 100) * 50 + sample_offset)
                 .expect("write sample");
         }
         writer.finalize().expect("finalize wav");
+    }
+
+    fn write_wav(path: &Path) {
+        write_wav_with_offset(path, 0);
     }
 
     fn asset(
@@ -4660,6 +4664,82 @@ mod playback_preparation_tests {
         )
         .expect_err("a length that contradicts the database must fail");
         assert!(error.contains("does not match stored metadata"), "{error}");
+        assert_eq!(
+            std::fs::read_dir(&runtime)
+                .expect("list runtime dir")
+                .count(),
+            0,
+            "the rejected plaintext is removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn playback_refuses_equal_length_ciphertext_from_another_recording() {
+        let dir = scratch_dir("substitution");
+        let runtime = dir.join("runtime");
+        std::fs::create_dir_all(&runtime).expect("create runtime dir");
+        let key = [9u8; 32];
+
+        let expected_plaintext = dir.join("expected.wav");
+        write_wav(&expected_plaintext);
+        let expected_bytes = std::fs::metadata(&expected_plaintext)
+            .expect("stat expected plaintext")
+            .len();
+        let expected_sha256 = recording_audio::compute_file_sha256(&expected_plaintext)
+            .expect("hash expected plaintext");
+        let victim_ciphertext = dir.join("victim.wav.enc");
+        {
+            let mut reader = std::fs::File::open(&expected_plaintext).expect("open expected");
+            let mut writer = std::fs::File::create(&victim_ciphertext).expect("create victim");
+            crate::crypto::ProjectKeyManager::encrypt_stream(
+                &mut reader,
+                &mut writer,
+                &key,
+                |_| {},
+            )
+            .expect("encrypt expected");
+        }
+
+        let substitute_plaintext = dir.join("substitute.wav");
+        write_wav_with_offset(&substitute_plaintext, 1);
+        assert_eq!(
+            std::fs::metadata(&substitute_plaintext)
+                .expect("stat substitute plaintext")
+                .len(),
+            expected_bytes,
+            "the substitution must evade the length check"
+        );
+        {
+            let mut reader = std::fs::File::open(&substitute_plaintext).expect("open substitute");
+            let mut writer = std::fs::File::create(&victim_ciphertext).expect("replace victim");
+            crate::crypto::ProjectKeyManager::encrypt_stream(
+                &mut reader,
+                &mut writer,
+                &key,
+                |_| {},
+            )
+            .expect("encrypt substitute");
+        }
+
+        let mut primary = asset(
+            victim_ciphertext,
+            recording_audio::RecordingAudioProtection::Encrypted,
+        );
+        primary.plaintext_bytes = Some(expected_bytes);
+        primary.plaintext_sha256 = Some(expected_sha256);
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("rec-playback");
+        bundle.insert(primary).expect("insert victim asset");
+
+        let error = resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            Some(&key),
+            &runtime,
+            std::slice::from_ref(&dir),
+            RuntimeAudioResolveMode::PlaybackPrimary,
+        )
+        .expect_err("same-vault ciphertext from another recording must fail");
+        assert!(error.contains("plaintext hash does not match"), "{error}");
         assert_eq!(
             std::fs::read_dir(&runtime)
                 .expect("list runtime dir")
