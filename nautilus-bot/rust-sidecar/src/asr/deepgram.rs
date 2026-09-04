@@ -64,13 +64,15 @@ pub struct DeepgramProvider {
     whole_file_client: reqwest::Client,
 }
 
-/// Only the two batch models this provider is allowed to send. `nova-3` is the
-/// general model; `nova-3-medical` is the clinical-vocabulary variant. Both
+/// Only the three batch models this provider is allowed to send. `nova-3` is the
+/// general model; `nova-2` is the legacy general model; `nova-3-medical` is the
+/// clinical-vocabulary variant. All three
 /// accept `keyterm` and `diarize`. Deepgram's realtime `flux` model is
 /// deliberately absent: it is a websocket conversational model and this
 /// provider posts to the batch endpoint.
 fn sanitize_deepgram_model_id(model_id: &str) -> &'static str {
     match model_id.trim() {
+        "nova-2" => "nova-2",
         "nova-3-medical" => "nova-3-medical",
         _ => "nova-3",
     }
@@ -674,6 +676,7 @@ mod tests {
 
     #[test]
     fn only_batch_models_reach_the_listen_endpoint() {
+        assert_eq!(sanitize_deepgram_model_id("nova-2"), "nova-2");
         assert_eq!(sanitize_deepgram_model_id("nova-3"), "nova-3");
         assert_eq!(
             sanitize_deepgram_model_id("nova-3-medical"),
@@ -694,7 +697,7 @@ mod tests {
     #[test]
     fn every_request_opts_out_of_the_model_improvement_programme() {
         for diarize in [true, false] {
-            for model in ["nova-3", "nova-3-medical"] {
+            for model in ["nova-2", "nova-3", "nova-3-medical"] {
                 let query = build_deepgram_query(model, diarize, &[], None);
                 assert!(
                     query.contains(&("mip_opt_out", "true".to_string())),
