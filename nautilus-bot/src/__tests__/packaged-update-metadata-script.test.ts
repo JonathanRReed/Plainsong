@@ -13,6 +13,8 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+const macIt = process.platform === "darwin" ? it : it.skip;
+
 function createTempRepo(scriptName: string) {
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "plainsong-update-metadata-"));
   const tempScriptsDir = path.join(tempRoot, "scripts");
@@ -97,7 +99,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
     }
   });
 
-  it("fails closed when the beta channel manifest is missing", () => {
+  macIt("fails closed when the beta channel manifest is missing", () => {
     const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.mjs");
     try {
       const appPath = path.join(tempRoot, "release", "mac-arm64", "Plainsong.app");
@@ -128,7 +130,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
     }
   });
 
-  it("accepts a matching beta manifest, ZIP, blockmap, and package version", () => {
+  macIt("accepts a matching beta manifest, ZIP, blockmap, and package version", () => {
     const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.mjs");
     try {
       const appPath = path.join(tempRoot, "release", "mac-arm64", "Plainsong.app");
@@ -188,7 +190,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
     }
   });
 
-  it("uses the packaged app version as candidate truth and flags a stale workspace", () => {
+  macIt("uses the packaged app version as candidate truth and flags a stale workspace", () => {
     const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.mjs");
     try {
       writeFileSync(

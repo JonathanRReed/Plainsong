@@ -408,6 +408,8 @@ pub struct TranscriptionSettings {
     pub dictation_context_source: String,
     /// Dictation: Command mode toggle (e.g. "command newline")
     pub dictation_command_mode_enabled: bool,
+    /// One-time marker proving the old enabled-by-default value was reset.
+    pub dictation_command_mode_opt_in_migrated: bool,
     /// Dictation: Prefix used to activate command mode
     pub dictation_command_prefix: String,
     /// Dictation insertion mode: auto (insert at cursor) or clipboard_only.
@@ -608,7 +610,10 @@ impl Default for TranscriptionSettings {
             dictation_selected_custom_mode_id: None,
             dictation_custom_modes: Vec::new(),
             dictation_context_source: "none".to_string(),
-            dictation_command_mode_enabled: true,
+            // Spoken commands are opt-in because ASR output is untrusted and
+            // some commands can modify another application's document.
+            dictation_command_mode_enabled: false,
+            dictation_command_mode_opt_in_migrated: true,
             dictation_command_prefix: "command".to_string(),
             dictation_insertion_mode: "auto".to_string(),
             dictation_active_languages: Vec::new(),
@@ -2706,6 +2711,7 @@ impl SettingsManager {
 
     fn load_from_path(config_path: PathBuf) -> Result<Self> {
         let mut needs_migration_rewrite = false;
+        let mut command_mode_opt_in_migration_required = false;
         // A file that never named the built-in cleanup route counts as not
         // having chosen it, and so does no file at all.
         let mut bundled_dictation_lane_chosen_in_file = false;
@@ -2716,6 +2722,10 @@ impl SettingsManager {
                         || raw_settings_carry_dead_whisper_meeting_slot(&raw);
                     bundled_dictation_lane_chosen_in_file =
                         raw_settings_choose_the_bundled_dictation_lane(&raw);
+                    command_mode_opt_in_migration_required = raw
+                        .pointer("/transcription/dictationCommandModeOptInMigrated")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true);
                     // Must run before the removed keys are dropped from disk
                     // by the rewrite below: it is the only thing that reads
                     // the retired single AI provider/model pair.
@@ -2748,6 +2758,13 @@ impl SettingsManager {
         } else {
             Settings::default()
         };
+        if command_mode_opt_in_migration_required {
+            settings.transcription.dictation_command_mode_enabled = false;
+            settings
+                .transcription
+                .dictation_command_mode_opt_in_migrated = true;
+            needs_migration_rewrite = true;
+        }
         normalize_loaded_audio_settings(&mut settings.audio);
         normalize_keyboard_shortcuts(&mut settings.shortcuts);
         normalize_loaded_transcription_settings(&mut settings.transcription);
@@ -4327,11 +4344,70 @@ mod tests {
         assert!(settings.transcription.use_shared_asr_selection);
         assert_eq!(settings.transcription.dictation_provider, "parakeet");
         assert_eq!(settings.transcription.meeting_provider, "parakeet");
-        assert!(settings.transcription.dictation_command_mode_enabled);
+        assert!(!settings.transcription.dictation_command_mode_enabled);
         assert_eq!(settings.transcription.dictation_command_prefix, "command");
         assert_eq!(settings.transcription.dictation_insertion_mode, "auto");
         assert!(settings.transcription.dictation_snippets_enabled);
         assert!(settings.transcription.dictation_auto_learn_corrections);
+    }
+
+    #[test]
+    fn legacy_command_mode_is_disabled_once_then_preserves_user_opt_in() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("plainsong-command-mode-migration-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            r#"{
+                "transcription": { "dictationCommandModeEnabled": true }
+            }"#,
+        )
+        .expect("write legacy settings");
+
+        let manager = SettingsManager::load_from_path(settings_path.clone())
+            .expect("migrate legacy settings");
+        assert!(
+            !manager
+                .settings()
+                .transcription
+                .dictation_command_mode_enabled
+        );
+        assert!(
+            manager
+                .settings()
+                .transcription
+                .dictation_command_mode_opt_in_migrated
+        );
+
+        drop(manager);
+        let mut manager = SettingsManager::load_from_path(settings_path.clone())
+            .expect("reload migrated settings");
+        assert!(
+            !manager
+                .settings()
+                .transcription
+                .dictation_command_mode_enabled
+        );
+
+        manager
+            .settings_mut()
+            .transcription
+            .dictation_command_mode_enabled = true;
+        manager.save().expect("save explicit opt in");
+        let reloaded =
+            SettingsManager::load_from_path(settings_path).expect("reload explicit opt in");
+        assert!(
+            reloaded
+                .settings()
+                .transcription
+                .dictation_command_mode_enabled
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

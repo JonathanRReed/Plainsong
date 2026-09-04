@@ -40,7 +40,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com";
 const GEMINI_INTERACTIONS_PATH: &str = "/v1beta/interactions";
@@ -323,10 +323,10 @@ fn parse_offset_seconds(value: Option<&Value>) -> Option<f64> {
 /// the turn entirely rather than attributing it to `S1`.
 #[derive(Default)]
 struct GeminiSpeakerIds {
-    /// Distinct provider labels, in first-appearance order. Gemini caps
-    /// diarization at eight speakers, so this stays short and a linear scan is
-    /// the right lookup.
-    seen: Vec<String>,
+    /// Provider labels mapped to their zero-based order of first appearance.
+    /// Keep lookups constant-time even if a malformed response exceeds
+    /// Gemini's documented eight-speaker limit.
+    seen: HashMap<String, u32>,
 }
 
 impl GeminiSpeakerIds {
@@ -335,14 +335,15 @@ impl GeminiSpeakerIds {
         if label.is_empty() {
             return String::new();
         }
-        let index = match self.seen.iter().position(|seen| seen == label) {
-            Some(index) => index,
+        let index = match self.seen.get(label) {
+            Some(&index) => index,
             None => {
-                self.seen.push(label.to_string());
-                self.seen.len() - 1
+                let index = self.seen.len() as u32;
+                self.seen.insert(label.to_string(), index);
+                index
             }
         };
-        provider_speaker_id(index as u32)
+        provider_speaker_id(index)
     }
 }
 
