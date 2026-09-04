@@ -58,14 +58,25 @@ pub async fn dispatch_command(
                 Ok(session_id) => Ok(serde_json::json!({ "sessionId": session_id })),
                 Err(error) => {
                     // Make the failure visible instead of leaving the HUD to
-                    // time out on its own: the renderer mirrors this phase.
-                    handle.emit_event(
-                        "dictation-state-changed",
-                        serde_json::json!({
-                            "phase": "error",
-                            "message": error,
-                        }),
-                    );
+                    // time out on its own. A cancelled start has already
+                    // emitted idle, and a stale start must not demote a newer
+                    // session with an unscoped error event.
+                    if error != "Dictation start was cancelled"
+                        && state
+                            .dictation_session_tracker
+                            .lock()
+                            .await
+                            .active_session_id
+                            .is_none()
+                    {
+                        handle.emit_event(
+                            "dictation-state-changed",
+                            serde_json::json!({
+                                "phase": "error",
+                                "message": error,
+                            }),
+                        );
+                    }
                     Err(error)
                 }
             }
@@ -98,17 +109,34 @@ pub async fn dispatch_command(
             Ok(serde_json::json!({ "text": result }))
         }
         "force_stop_dictation" => {
+            let expected_session_id = params.get("sessionId").and_then(|value| value.as_u64());
+            // Claim cancellation before touching audio. Startup checks this
+            // ownership token after opening capture, so either cancellation
+            // aborts the stream or startup observes that it lost ownership
+            // and aborts its own newly-created stream.
+            {
+                let mut tracker = state.dictation_session_tracker.lock().await;
+                let active_session_id = tracker
+                    .active_session_id
+                    .ok_or_else(|| "No active dictation session to force-stop".to_string())?;
+                if let Some(expected) = expected_session_id {
+                    if expected != active_session_id {
+                        return Err(format!(
+                            "Stale force-stop for dictation session {} ignored (active session is {})",
+                            expected, active_session_id
+                        ));
+                    }
+                }
+                tracker.active_session_id = None;
+                tracker.stopping_session_id = None;
+                tracker.started_at = None;
+            }
             let mut audio = state.audio_capture.lock().await;
             audio.abort_dictation();
             drop(audio);
             let mut runtime_state = state.dictation_runtime_state.lock().await;
             *runtime_state = DictationSessionState::Idle;
             drop(runtime_state);
-            let mut tracker = state.dictation_session_tracker.lock().await;
-            tracker.active_session_id = None;
-            tracker.stopping_session_id = None;
-            tracker.started_at = None;
-            drop(tracker);
             if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
                 *overlay = DictationOverlayState::default();
             }

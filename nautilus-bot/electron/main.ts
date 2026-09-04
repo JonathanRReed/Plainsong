@@ -1945,6 +1945,7 @@ type DictationShortcutSignal =
 // tracks the session it guards.
 const dictationShortcutSignalRuntime = createDictationShortcutSignalRuntime({
   getPhase: () => dictationPhase as DictationShortcutPhase,
+  getSessionId: () => dictationSessionId,
   invoke: (command, args) => {
     if (!ipcBridge) {
       return Promise.reject(new Error("IPC bridge is not ready"));

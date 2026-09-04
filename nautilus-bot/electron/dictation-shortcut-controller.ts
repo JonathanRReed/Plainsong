@@ -276,6 +276,7 @@ export type DictationShortcutSignalRuntime = {
  */
 export function createDictationShortcutSignalRuntime(deps: {
   getPhase: () => DictationShortcutPhase;
+  getSessionId?: () => number | null;
   invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>;
   log?: (message: string, payload?: unknown) => void;
   holdWatchdogMs?: number;
@@ -423,7 +424,10 @@ export function createDictationShortcutSignalRuntime(deps: {
         capability: input.capability,
         stopReason: decision.stopReason ?? "cancelled",
       });
-      await deps.invoke("force_stop_dictation", {});
+      const sessionId = deps.getSessionId?.();
+      await deps.invoke("force_stop_dictation", {
+        ...(typeof sessionId === "number" ? { sessionId } : {}),
+      });
     }
   };
 

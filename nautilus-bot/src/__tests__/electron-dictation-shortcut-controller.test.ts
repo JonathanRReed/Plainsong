@@ -257,6 +257,7 @@ describe("createDictationShortcutSignalRuntime", () => {
     });
     const runtime = createDictationShortcutSignalRuntime({
       getPhase: () => phase as Parameters<typeof resolveDictationShortcutDecision>[0]["phase"],
+      getSessionId: () => 41,
       invoke,
     });
     return {
@@ -502,6 +503,7 @@ describe("createDictationShortcutSignalRuntime", () => {
     expect(harness.invocations.map((entry) => entry.command)).toEqual([
       "force_stop_dictation",
     ]);
+    expect(harness.invocations[0]?.args).toEqual({ sessionId: 41 });
   });
 });
 
