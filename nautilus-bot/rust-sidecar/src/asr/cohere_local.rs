@@ -1445,11 +1445,9 @@ impl AsrProvider for CohereLocalProvider {
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_path =
             std::env::temp_dir().join(format!("cohere_local_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data)
+        let temp = crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
             .context("Failed to write a temp WAV for Cohere Transcribe (local)")?;
-        let result = self.transcribe(&temp_path).await;
-        let _ = std::fs::remove_file(&temp_path);
-        result
+        self.transcribe(temp.path()).await
     }
 
     async fn transcribe_bytes_with_options(
@@ -1460,11 +1458,9 @@ impl AsrProvider for CohereLocalProvider {
         let language = Self::resolve_language(options.language.as_deref())?;
         let temp_path =
             std::env::temp_dir().join(format!("cohere_local_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data)
+        let temp = crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
             .context("Failed to write a temp WAV for Cohere Transcribe (local)")?;
-        let result = self.transcribe_in_language(&temp_path, language).await;
-        let _ = std::fs::remove_file(&temp_path);
-        result
+        self.transcribe_in_language(temp.path(), language).await
     }
 
     fn download_status(&self) -> DownloadStatus {

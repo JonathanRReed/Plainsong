@@ -25,6 +25,11 @@ import {
   type AppleLanguageModelAvailability,
   type BundledCleanupModelStatus,
   type LivePreviewEngineStatus,
+  cancelOllamaModelInstall,
+  getCuratedOllamaModelCatalog,
+  installOllamaModel,
+  listOllamaModelCatalog,
+  type OllamaCatalogEntry,
 } from "@/lib/backend/ai";
 import { listen } from "@/lib/electron";
 import type { AsrProviderInventory } from "@/types";
@@ -53,6 +58,7 @@ import {
 } from "@/components/models/model-selection";
 import { LivePreviewEngineRow } from "@/components/models/live-preview-engine-row";
 import { MoreModelsDrawer } from "@/components/models/more-models-drawer";
+import { OllamaModelCatalog } from "@/components/models/ollama-model-catalog";
 import { PresetPicker } from "@/components/models/preset-picker";
 import { SpeechLaneRow } from "@/components/models/speech-lane-row";
 import { SettingsSelect } from "@/components/ui/settings-control";
@@ -135,8 +141,17 @@ export function ModelsScreen({
     useState<AppleLanguageModelAvailability | null>(null);
   const [appleChecking, setAppleChecking] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [ollamaCatalog, setOllamaCatalog] = useState<OllamaCatalogEntry[]>([]);
+  const [ollamaBusyModelId, setOllamaBusyModelId] = useState<string | null>(null);
+  const [ollamaProgress, setOllamaProgress] = useState<number | null>(null);
+  const [ollamaError, setOllamaError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const mountedRef = useRef(true);
+  const ollamaCatalogRequestRef = useRef(0);
+  const readyOllamaModelIds = useMemo(
+    () => ollamaCatalog.filter((model) => model.ready).map((model) => model.id),
+    [ollamaCatalog],
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -212,6 +227,56 @@ export function ModelsScreen({
       mountedRef.current = false;
     };
   }, [refresh, refreshBundledStatus, refreshAppleAvailability]);
+
+  const refreshOllamaCatalog = useCallback(async () => {
+    const request = ++ollamaCatalogRequestRef.current;
+    try {
+      const models = await listOllamaModelCatalog();
+      if (mountedRef.current && request === ollamaCatalogRequestRef.current) {
+        setOllamaCatalog(models);
+        setOllamaError(null);
+      }
+    } catch (error) {
+      console.warn("Failed to load the local Ollama catalog:", error);
+      const curated = await getCuratedOllamaModelCatalog().catch(() => []);
+      if (mountedRef.current && request === ollamaCatalogRequestRef.current) {
+        setOllamaCatalog(curated);
+        setOllamaError(
+          "Ollama is not responding on localhost. You can review the catalog, but installs and status checks need Ollama running.",
+        );
+      }
+    }
+  }, []);
+
+  useEffect(() => { void refreshOllamaCatalog(); }, [refreshOllamaCatalog]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("ollama-model-pull-progress", (payload) => {
+      if (disposed) return;
+      const update = payload as { modelId?: string; percentage?: number };
+      if (update.modelId === ollamaBusyModelId && typeof update.percentage === "number") setOllamaProgress(update.percentage);
+    }).then((dispose) => { if (disposed) dispose(); else unlisten = dispose; }).catch((error) => console.warn("Failed to subscribe to Ollama pull progress:", error));
+    return () => { disposed = true; unlisten?.(); };
+  }, [ollamaBusyModelId]);
+
+  const handleOllamaInstall = useCallback(async (modelId: string, acceptedLicense: boolean) => {
+    setOllamaBusyModelId(modelId); setOllamaProgress(null); setOllamaError(null);
+    try {
+      await installOllamaModel(modelId, acceptedLicense);
+      await refreshOllamaCatalog();
+    } catch (error) {
+      if (mountedRef.current) setOllamaError(error instanceof Error ? error.message : "The Ollama model could not be installed.");
+      await refreshOllamaCatalog();
+    } finally {
+      if (mountedRef.current) { setOllamaBusyModelId(null); setOllamaProgress(null); }
+    }
+  }, [refreshOllamaCatalog]);
+
+  const handleOllamaCancel = useCallback(async () => {
+    await cancelOllamaModelInstall();
+  }, []);
 
   // The sidecar emits weighted 0..100 progress across all four pinned files
   // while `download_bundled_cleanup_model` runs. Without this the button can
@@ -802,7 +867,9 @@ export function ModelsScreen({
                 help={AI_LANE_COPY[lane].help}
                 value={settings.privacy[lane]}
                 remoteProcessingEnabled={settings.privacy.remoteProcessingEnabled}
-                models={aiModelsForProvider(settings.privacy[lane].provider)}
+                models={settings.privacy[lane].provider === "ollama"
+                  ? Array.from(new Set([...aiModelsForProvider("ollama"), ...readyOllamaModelIds]))
+                  : aiModelsForProvider(settings.privacy[lane].provider)}
                 modelsLoading={aiModelsLoading}
                 onProviderChange={onAiProviderChange}
                 onModelChange={onAiModelChange}
@@ -828,6 +895,9 @@ export function ModelsScreen({
               />
             </div>
           ))}
+          <div className="py-5">
+            <OllamaModelCatalog models={ollamaCatalog} busyModelId={ollamaBusyModelId} progressPercent={ollamaProgress} error={ollamaError} onInstall={(modelId, acceptedLicense) => void handleOllamaInstall(modelId, acceptedLicense)} onCancel={() => void handleOllamaCancel()} />
+          </div>
         </div>
       </div>
 

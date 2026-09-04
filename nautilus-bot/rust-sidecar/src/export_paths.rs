@@ -282,7 +282,7 @@ pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<
 
 pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let status = std::process::Command::new("open")
+    let status = std::process::Command::new("/usr/bin/open")
         .arg(path)
         .status()
         .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;

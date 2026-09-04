@@ -142,7 +142,7 @@ use core_foundation_sys::dictionary::CFDictionaryRef;
 use core_foundation_sys::string::{CFStringGetTypeID, CFStringRef};
 #[cfg(target_os = "macos")]
 use objc2::runtime::Bool;
-use rand::Rng;
+use rand::RngCore;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -192,6 +192,9 @@ pub struct AppState {
     audio_capture: Arc<Mutex<audio::AudioCapture>>,
     asr_manager: Arc<asr::AsrManager>,
     ollama_client: Arc<llm::OllamaClient>,
+    ollama_pull_active: Arc<AtomicBool>,
+    ollama_pull_cancelled: Arc<AtomicBool>,
+    ollama_pull_cancel_notify: Arc<tokio::sync::Notify>,
     ollama_embedder: Arc<llm::OllamaEmbedder>,
     settings_manager: Arc<Mutex<settings::SettingsManager>>,
     remote_processing_gate: Arc<remote_processing::RemoteProcessingGate>,
@@ -2383,7 +2386,7 @@ JSON.stringify({
 });
 "#;
 
-    let output = std::process::Command::new("osascript")
+    let output = std::process::Command::new("/usr/bin/osascript")
         .args(["-l", "JavaScript", "-e", script])
         .output()
         .ok()?;
@@ -2770,7 +2773,7 @@ else
 end if
 "#;
 
-    let output = std::process::Command::new("osascript")
+    let output = std::process::Command::new("/usr/bin/osascript")
         .arg("-e")
         .arg(script)
         .output()
@@ -3351,6 +3354,9 @@ pub async fn build_app_state() -> Result<AppState, String> {
         audio_capture: Arc::new(Mutex::new(audio::AudioCapture::new())),
         asr_manager,
         ollama_client: Arc::new(llm::OllamaClient::new()),
+        ollama_pull_active: Arc::new(AtomicBool::new(false)),
+        ollama_pull_cancelled: Arc::new(AtomicBool::new(false)),
+        ollama_pull_cancel_notify: Arc::new(tokio::sync::Notify::new()),
         ollama_embedder: Arc::new(llm::OllamaEmbedder::new()),
         settings_manager: Arc::new(Mutex::new(settings_manager)),
         remote_processing_gate,

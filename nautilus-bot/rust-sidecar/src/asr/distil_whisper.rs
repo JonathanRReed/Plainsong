@@ -234,14 +234,16 @@ impl AsrProvider for DistilWhisperProvider {
         // Write trimmed audio to temp file for inference
         let temp_path =
             std::env::temp_dir().join(format!("distil_trimmed_{}.wav", uuid::Uuid::new_v4()));
-        {
+        let temp_guard = {
             let spec = hound::WavSpec {
                 channels: 1,
                 sample_rate: 16000,
                 bits_per_sample: 16,
                 sample_format: hound::SampleFormat::Int,
             };
-            let mut writer = hound::WavWriter::create(&temp_path, spec)
+            let (file, temp_guard) =
+                crate::recording_audio::create_secure_temporary_audio(&temp_path)?;
+            let mut writer = hound::WavWriter::new(file, spec)
                 .context("Failed to create temp WAV for Distil")?;
             for sample in &samples {
                 let int_sample = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
@@ -250,7 +252,8 @@ impl AsrProvider for DistilWhisperProvider {
                     .context("Failed to write sample")?;
             }
             writer.finalize().context("Failed to finalize temp WAV")?;
-        }
+            temp_guard
+        };
 
         let model_dir = self.model_dir.clone();
         let audio_for_dur = temp_path.clone();
@@ -261,6 +264,7 @@ impl AsrProvider for DistilWhisperProvider {
 
         // Cleanup temp file (even if inference fails)
         let _ = std::fs::remove_file(&audio_for_dur);
+        drop(temp_guard);
         let text = text??;
 
         let duration = Self::wav_duration_seconds(audio_path);
@@ -292,10 +296,9 @@ impl AsrProvider for DistilWhisperProvider {
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_path = std::env::temp_dir().join(format!("distil_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data).context("failed to write temp wav for Distil")?;
-        let result = self.transcribe(&temp_path).await;
-        let _ = std::fs::remove_file(&temp_path);
-        result
+        let temp = crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
+            .context("failed to write temp wav for Distil")?;
+        self.transcribe(temp.path()).await
     }
 
     fn download_status(&self) -> DownloadStatus {

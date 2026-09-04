@@ -119,7 +119,7 @@ sha2 = "0.11"
 # Must track sha2's digest/crypto-common major version (0.11.x) or Mac::new_from_slice
 # fails to resolve due to duplicate digest crate versions.
 hmac = "0.13"
-rand = "0.10"
+rand = "0.9"
 async-trait = "0.1"
 hex = "0.4"
 argon2 = "0.6"
