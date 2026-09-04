@@ -1023,6 +1023,20 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // silently drop a stage's timing. A local `Instant` is `Copy`, cannot be
     // reset out from under this function, and costs nothing to read.
     let stop_signal_instant = std::time::Instant::now();
+    let handler_received_at_epoch_ms = chrono::Utc::now().timestamp_millis();
+    let (stop_command_received_at_epoch_ms, gesture_to_handler_ms) =
+        crate::dictation_timing::resolve_stop_timing(
+            handler_received_at_epoch_ms,
+            stop_gesture_epoch_ms,
+        );
+    let elapsed_since_stop = || {
+        gesture_to_handler_ms.saturating_add(
+            stop_signal_instant
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        )
+    };
 
     // Claim the session atomically. Reading the active id and then re-taking
     // the lock later leaves a window where a second stop passes the same
@@ -1054,15 +1068,6 @@ pub(crate) async fn stop_dictation_for_sidecar(
         tracker.stop_requested_at = Some(stop_signal_instant);
         active
     };
-    // Epoch-ms zero point for the `DictationTimingRecord` below (every
-    // *elapsed* field is measured from `stop_signal_instant` above, not
-    // recomputed from this -- this is only for absolute-timestamp
-    // reporting). Honestly named: absent a real client gesture epoch, all
-    // this sidecar actually knows is when its own stop-command handler ran,
-    // which is not the same moment as the user's hotkey release -- see the
-    // function doc above.
-    let stop_command_received_at_epoch_ms =
-        stop_gesture_epoch_ms.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
     let mut dictation_options = state.dictation_start_options.lock().await.clone();
     let mut settings_snapshot = {
         let sm = state.settings_manager.lock().await;
@@ -1184,12 +1189,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // transcript; this only stops it competing with the decode that does.
     stop_dictation_live_preview(state).await;
 
-    let audio_finalized_ms = Some(
-        stop_signal_instant
-            .elapsed()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64,
-    );
+    let audio_finalized_ms = Some(elapsed_since_stop());
     if hit_max_duration {
         // The session was ended by the length ceiling, not by the user. Say so:
         // the transcript that follows covers only the audio that fit.
@@ -1386,9 +1386,10 @@ pub(crate) async fn stop_dictation_for_sidecar(
     let final_transcript_latency_ms = {
         let mut tracker = state.dictation_session_tracker.lock().await;
         tracker.final_transcript_at_epoch_ms = Some(final_transcript_at_epoch_ms);
-        tracker
-            .stop_requested_at
-            .map(|stopped_at| stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+        tracker.stop_requested_at.map(|stopped_at| {
+            gesture_to_handler_ms
+                .saturating_add(stopped_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+        })
     };
 
     let raw_transcribed_text =
@@ -1849,12 +1850,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // condition that flips `format_outcome` off its `NotApplicable` default.
     let format_complete_ms = (format_outcome
         != crate::dictation_timing::DictationFormatOutcome::NotApplicable)
-        .then(|| {
-            stop_signal_instant
-                .elapsed()
-                .as_millis()
-                .min(u128::from(u64::MAX)) as u64
-        });
+        .then(&elapsed_since_stop);
 
     final_text = sanitize_dictation_output(final_text.as_str(), raw_transcribed_text.as_str())
         .trim()
@@ -2136,12 +2132,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
             undo_performed,
         ) {
             let insert_started_at = std::time::Instant::now();
-            insertion_dispatched_ms = Some(
-                stop_signal_instant
-                    .elapsed()
-                    .as_millis()
-                    .min(u128::from(u64::MAX)) as u64,
-            );
+            insertion_dispatched_ms = Some(elapsed_since_stop());
             let paste_outcome =
                 match DictationInsertionMode::from_settings_value(&requested_insertion_mode) {
                     DictationInsertionMode::ClipboardOnly => {
@@ -2250,12 +2241,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
             // `total_ms` already falls back to `insertion_dispatched_ms` for
             // exactly this case.
             if insertion_confirmed_flag {
-                insertion_confirmed_ms = Some(
-                    stop_signal_instant
-                        .elapsed()
-                        .as_millis()
-                        .min(u128::from(u64::MAX)) as u64,
-                );
+                insertion_confirmed_ms = Some(elapsed_since_stop());
             }
             pasted = paste_outcome.pasted;
             copied = paste_outcome.copied;
