@@ -11,6 +11,8 @@ use anyhow::Context;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::ffi::OsString;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use std::io::Read;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::path::PathBuf;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::process::{Command, Output, Stdio};
@@ -2028,25 +2030,49 @@ fn run_helper_with_timeout(
             )
         })?;
 
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("Failed to capture the macOS Speech helper's standard output")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("Failed to capture the macOS Speech helper's standard error")?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+
     let started = Instant::now();
     loop {
-        if child
+        if let Some(status) = child
             .try_wait()
             .with_context(|| "Failed while waiting for the macOS Speech helper")?
-            .is_some()
         {
-            return child.wait_with_output().map_err(|error| {
-                typed_error(
-                    "recognition_failed",
-                    format!("Failed to capture macOS Speech helper output: {error}"),
-                    true,
-                )
+            let stdout = stdout_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("macOS Speech helper stdout reader panicked"))?
+                .context("Failed to read macOS Speech helper stdout")?;
+            let stderr = stderr_reader
+                .join()
+                .map_err(|_| anyhow::anyhow!("macOS Speech helper stderr reader panicked"))?
+                .context("Failed to read macOS Speech helper stderr")?;
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
             });
         }
 
         if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             return Err(typed_error_with_details(
                 "timeout",
                 "macOS Speech helper timed out.",
