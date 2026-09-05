@@ -1925,7 +1925,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // condition that flips `format_outcome` off its `NotApplicable` default.
     let format_complete_ms = (format_outcome
         != crate::dictation_timing::DictationFormatOutcome::NotApplicable)
-        .then(&elapsed_since_stop);
+        .then(elapsed_since_stop);
 
     final_text = sanitize_dictation_output(final_text.as_str(), raw_transcribed_text.as_str())
         .trim()

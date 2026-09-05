@@ -4,7 +4,7 @@ This file is generated. Do not edit it by hand.
 Regenerate from nautilus-bot/ with:
   node scripts/generate-third-party-notices.mjs
 
-Application package: plainsong@0.9.0-beta.3
+Application package: plainsong@0.9.0-beta.4
 Rust dependency packages: 525
 npm production dependency packages: 79
 Downloadable model artifacts: 23

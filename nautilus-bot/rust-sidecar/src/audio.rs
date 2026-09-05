@@ -354,6 +354,7 @@ pub fn meeting_space_pressure_with_vault_reserve(
     }
 }
 
+#[cfg(test)]
 pub fn meeting_space_pressure(available_bytes: u64, track_count: u64) -> MeetingSpacePressure {
     meeting_space_pressure_with_vault_reserve(available_bytes, track_count, 0, false)
 }
@@ -378,6 +379,7 @@ pub fn meeting_start_space_shortfall_with_vault_reserve(
     (available_bytes < needed).then_some(needed)
 }
 
+#[cfg(test)]
 pub fn meeting_start_space_shortfall(available_bytes: u64, track_count: u64) -> Option<u64> {
     meeting_start_space_shortfall_with_vault_reserve(available_bytes, track_count, false)
 }

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { OllamaCatalogEntry } from "@/lib/backend/ai";
+import { formatNumber } from "@/lib/format-locale";
 
 interface Props {
   models: OllamaCatalogEntry[];
@@ -33,7 +34,7 @@ export function OllamaModelCatalog({ models, busyModelId, progressPercent, error
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <p className="text-sm font-medium">{model.displayName}</p>
-                  <p className="text-xs text-muted-foreground">{model.id} · {model.provider} · {size(model.diskSizeBytes)} · {model.contextTokens.toLocaleString()} context</p>
+                  <p className="text-xs text-muted-foreground">{model.id} · {model.provider} · {size(model.diskSizeBytes)} · {formatNumber(model.contextTokens)} context</p>
                   <p className="text-xs text-muted-foreground">{model.license} · For {model.lanes.join(" and ")}</p>
                 </div>
                 {model.ready ? <span className="text-xs text-emerald-600">Ready</span> : busy ? (

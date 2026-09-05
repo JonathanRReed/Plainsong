@@ -28,97 +28,6 @@ async fn publish_dictation_start_error_if_idle<E: crate::sidecar_handle::AppEmit
     }
 }
 
-#[cfg(test)]
-mod dictation_start_error_race_tests {
-    use super::publish_dictation_start_error_if_idle;
-    use crate::sidecar_handle::AppEmitter;
-    use crate::DictationSessionTracker;
-    use std::sync::{Arc, Mutex as StdMutex};
-    use tokio::sync::{Barrier, Mutex};
-
-    #[derive(Clone, Default)]
-    struct TestEmitter(Arc<StdMutex<Vec<String>>>);
-
-    impl AppEmitter for TestEmitter {
-        fn emit_event<P: serde::Serialize + Clone + Send>(&self, _event: &str, payload: P) {
-            let payload = serde_json::to_value(payload).expect("serialize event");
-            self.0
-                .lock()
-                .expect("event lock")
-                .push(payload["phase"].as_str().expect("phase").to_string());
-        }
-    }
-
-    #[test]
-    fn stale_start_error_never_publishes_after_replacement_start() {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("runtime");
-
-        runtime.block_on(async {
-            for _ in 0..64 {
-                let tracker = Arc::new(Mutex::new(DictationSessionTracker::default()));
-                let emitter = TestEmitter::default();
-                let barrier = Arc::new(Barrier::new(2));
-
-                let stale_tracker = Arc::clone(&tracker);
-                let stale_emitter = emitter.clone();
-                let stale_barrier = Arc::clone(&barrier);
-                let stale = tokio::spawn(async move {
-                    stale_barrier.wait().await;
-                    publish_dictation_start_error_if_idle(
-                        stale_tracker.as_ref(),
-                        &stale_emitter,
-                        "old start failed",
-                    )
-                    .await;
-                });
-
-                let replacement_tracker = Arc::clone(&tracker);
-                let replacement_emitter = emitter.clone();
-                let replacement_barrier = Arc::clone(&barrier);
-                let replacement = tokio::spawn(async move {
-                    replacement_barrier.wait().await;
-                    replacement_tracker.lock().await.active_session_id = Some(2);
-                    replacement_emitter.emit_event(
-                        "dictation-state-changed",
-                        serde_json::json!({ "phase": "preparing", "sessionId": 2 }),
-                    );
-                });
-
-                stale.await.expect("stale task");
-                replacement.await.expect("replacement task");
-                let phases = emitter.0.lock().expect("event lock").clone();
-                assert_ne!(phases, ["preparing", "error"]);
-                assert_eq!(phases.last().map(String::as_str), Some("preparing"));
-            }
-        });
-    }
-
-    #[test]
-    fn force_stop_releases_tracker_before_waiting_for_audio() {
-        const SOURCE: &str = include_str!("dispatch.rs");
-        let start = SOURCE
-            .find("\"force_stop_dictation\" => {")
-            .expect("force stop");
-        let end = SOURCE[start..]
-            .find("\"get_dictation_audio_level\" => {")
-            .expect("next dispatch arm")
-            + start;
-        let body = &SOURCE[start..end];
-        let release = body.find("drop(tracker);").expect("tracker release");
-        let audio = body
-            .find("state.audio_capture.lock().await")
-            .expect("audio cleanup");
-        assert!(
-            release < audio,
-            "force-stop must not wait for audio while holding tracker"
-        );
-    }
-}
-
 /// Dispatch a JSON-RPC command by name to the appropriate handler function.
 /// Used by the sidecar binary's stdin loop.
 ///
@@ -4312,5 +4221,96 @@ pub async fn dispatch_command(
         }
 
         _ => Err(format!("Unknown command: {}", method)),
+    }
+}
+
+#[cfg(test)]
+mod dictation_start_error_race_tests {
+    use super::publish_dictation_start_error_if_idle;
+    use crate::sidecar_handle::AppEmitter;
+    use crate::DictationSessionTracker;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::{Barrier, Mutex};
+
+    #[derive(Clone, Default)]
+    struct TestEmitter(Arc<StdMutex<Vec<String>>>);
+
+    impl AppEmitter for TestEmitter {
+        fn emit_event<P: serde::Serialize + Clone + Send>(&self, _event: &str, payload: P) {
+            let payload = serde_json::to_value(payload).expect("serialize event");
+            self.0
+                .lock()
+                .expect("event lock")
+                .push(payload["phase"].as_str().expect("phase").to_string());
+        }
+    }
+
+    #[test]
+    fn stale_start_error_never_publishes_after_replacement_start() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            for _ in 0..64 {
+                let tracker = Arc::new(Mutex::new(DictationSessionTracker::default()));
+                let emitter = TestEmitter::default();
+                let barrier = Arc::new(Barrier::new(2));
+
+                let stale_tracker = Arc::clone(&tracker);
+                let stale_emitter = emitter.clone();
+                let stale_barrier = Arc::clone(&barrier);
+                let stale = tokio::spawn(async move {
+                    stale_barrier.wait().await;
+                    publish_dictation_start_error_if_idle(
+                        stale_tracker.as_ref(),
+                        &stale_emitter,
+                        "old start failed",
+                    )
+                    .await;
+                });
+
+                let replacement_tracker = Arc::clone(&tracker);
+                let replacement_emitter = emitter.clone();
+                let replacement_barrier = Arc::clone(&barrier);
+                let replacement = tokio::spawn(async move {
+                    replacement_barrier.wait().await;
+                    replacement_tracker.lock().await.active_session_id = Some(2);
+                    replacement_emitter.emit_event(
+                        "dictation-state-changed",
+                        serde_json::json!({ "phase": "preparing", "sessionId": 2 }),
+                    );
+                });
+
+                stale.await.expect("stale task");
+                replacement.await.expect("replacement task");
+                let phases = emitter.0.lock().expect("event lock").clone();
+                assert_ne!(phases, ["preparing", "error"]);
+                assert_eq!(phases.last().map(String::as_str), Some("preparing"));
+            }
+        });
+    }
+
+    #[test]
+    fn force_stop_releases_tracker_before_waiting_for_audio() {
+        const SOURCE: &str = include_str!("dispatch.rs");
+        let start = SOURCE
+            .find("\"force_stop_dictation\" => {")
+            .expect("force stop");
+        let end = SOURCE[start..]
+            .find("\"get_dictation_audio_level\" => {")
+            .expect("next dispatch arm")
+            + start;
+        let body = &SOURCE[start..end];
+        let release = body.find("drop(tracker);").expect("tracker release");
+        let audio = body
+            .find("state.audio_capture.lock().await")
+            .expect("audio cleanup");
+        assert!(
+            release < audio,
+            "force-stop must not wait for audio while holding tracker"
+        );
     }
 }

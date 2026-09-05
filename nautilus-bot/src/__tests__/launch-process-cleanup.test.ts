@@ -21,6 +21,7 @@ describe("packaged launch process cleanup", () => {
       [
         "-e",
         "setInterval(() => {}, 1000)",
+        "--",
         `--user-data-dir=${electronProfile}`,
       ],
       { detached: true, stdio: "ignore" },
@@ -50,7 +51,12 @@ describe("packaged launch process cleanup", () => {
     const profile = path.join(profileRoot, "electron-profile");
     const other = spawn(
       process.execPath,
-      ["-e", "setInterval(() => {}, 1000)", `--user-data-dir=${profile}-other`],
+      [
+        "-e",
+        "setInterval(() => {}, 1000)",
+        "--",
+        `--user-data-dir=${profile}-other`,
+      ],
       { detached: true, stdio: "ignore" },
     );
     other.unref();

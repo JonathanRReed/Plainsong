@@ -251,19 +251,19 @@ pub fn greedy_decode(
 
 /// Blank index for the shipped v3 export: `tokens.txt` carries `<blk> 8192`,
 /// and the joiner's 8193 token logits line up with ids `0..=8192`.
-pub const V3_BLANK_ID: usize = 8192;
+pub const V3_BLANK_ID: usize = super::parakeet::PARAKEET_V3_BLANK_ID;
 
 /// Blank index for the English-only v2 export: `tokens.txt` carries
 /// `<blk> 1024`, and the joiner's token head lines up with ids `0..=1024`.
-pub const V2_BLANK_ID: usize = 1024;
+pub const V2_BLANK_ID: usize = super::parakeet::PARAKEET_V2_BLANK_ID;
 
 /// Encoder hidden width (`outputs [1, 1024, frames]`).
-pub const V3_ENCODER_DIM: usize = 1024;
+pub const V3_ENCODER_DIM: usize = super::parakeet::PARAKEET_V3_ENCODER_DIM;
 
 /// Encoder hidden width for the v2 export. It matches v3, but remains a
 /// separate contract so a future upstream re-export cannot silently change
 /// one model's runtime shape.
-pub const V2_ENCODER_DIM: usize = 1024;
+pub const V2_ENCODER_DIM: usize = super::parakeet::PARAKEET_V2_ENCODER_DIM;
 
 /// Turn SentencePiece pieces into text. `▁` marks a word boundary.
 pub fn detokenize(vocab: &[String], token_ids: &[usize]) -> String {

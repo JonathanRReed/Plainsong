@@ -234,6 +234,7 @@ describe("encodeBundleBuildVersion", () => {
     const order = [
       "0.9.0-beta.2",
       "0.9.0-beta.3",
+      "0.9.0-beta.4",
       "0.9.0",
       "0.9.1-beta.1",
       "0.9.1",

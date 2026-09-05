@@ -32,6 +32,13 @@ const PARAKEET_V3_MODEL_ID: &str = "parakeet-tdt-0.6b-v3";
 const PARAKEET_V2_MODEL_ID: &str = "parakeet-tdt-0.6b-v2";
 const PARAKEET_LEGACY_MODEL_ID: &str = "parakeet-tdt-ctc-110m";
 
+/// Shared graph-shape contracts stay in this always-compiled catalog module
+/// so model discovery also builds when the ONNX runtime feature is disabled.
+pub const PARAKEET_V3_BLANK_ID: usize = 8192;
+pub const PARAKEET_V2_BLANK_ID: usize = 1024;
+pub const PARAKEET_V3_ENCODER_DIM: usize = 1024;
+pub const PARAKEET_V2_ENCODER_DIM: usize = 1024;
+
 // ---------------------------------------------------------------------------
 // v3 artifacts
 //
@@ -130,8 +137,8 @@ const PARAKEET_V2: TdtContract = TdtContract {
     repo: PARAKEET_V2_REPO,
     revision: PARAKEET_V2_REVISION,
     artifacts: &PARAKEET_V2_ARTIFACTS,
-    blank_id: super::parakeet_tdt::V2_BLANK_ID,
-    encoder_dim: super::parakeet_tdt::V2_ENCODER_DIM,
+    blank_id: PARAKEET_V2_BLANK_ID,
+    encoder_dim: PARAKEET_V2_ENCODER_DIM,
 };
 
 const PARAKEET_V3: TdtContract = TdtContract {
@@ -140,8 +147,8 @@ const PARAKEET_V3: TdtContract = TdtContract {
     repo: PARAKEET_V3_REPO,
     revision: PARAKEET_V3_REVISION,
     artifacts: &PARAKEET_V3_ARTIFACTS,
-    blank_id: super::parakeet_tdt::V3_BLANK_ID,
-    encoder_dim: super::parakeet_tdt::V3_ENCODER_DIM,
+    blank_id: PARAKEET_V3_BLANK_ID,
+    encoder_dim: PARAKEET_V3_ENCODER_DIM,
 };
 
 fn tdt_sha256(contract: TdtContract, file_name: &str) -> Option<&'static str> {
