@@ -1,0 +1,15 @@
+# The app's update feed. electron-updater's generic provider in the packaged
+# app reads https://updates.plainsong.jonathanrreed.com/<channel>/ (see
+# nautilus-bot/electron/updater-channel.ts). This Worker answers that host by
+# serving each channel's manifest from the matching GitHub release and sending
+# file downloads to the release assets, so a public GitHub release is the only
+# thing that has to exist for an installed app to find an update.
+name = "plainsong-updates"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+routes = [{ pattern = "updates.plainsong.jonathanrreed.com", custom_domain = true }]
+
+[vars]
+GITHUB_REPO = "JonathanRReed/Plainsong"
+# used only if the GitHub API cannot be reached and nothing is cached
+FALLBACK_BETA_TAG = "v0.9.0-beta.4"
