@@ -629,7 +629,7 @@ mod tests {
                 "openaiApiKey": "sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH",
                 "exportRoot": "/Users/jonathanreed/Documents/Plainsong",
                 "remoteProcessingEnabled": false,
-                "supportEmail": "jonathanrayreed@gmail.com",
+                "supportEmail": "contact@example.com",
             },
             "ai": {
                 "savedPrompts": [
@@ -708,7 +708,7 @@ mod tests {
         assert!(redacted.contains("[redacted:path]"), "{redacted}");
         assert!(!redacted.contains("jonathanreed"), "{redacted}");
 
-        let with_address = redact_log_line("WARN mail: invite sent to jonathanrayreed@gmail.com");
+        let with_address = redact_log_line("WARN mail: invite sent to contact@example.com");
         assert!(with_address.contains("[redacted:email]"), "{with_address}");
 
         let with_key =
@@ -900,7 +900,7 @@ mod tests {
             })],
             &[
                 "INFO plainsong_lib: opened /Users/jonathanreed/Library/x".to_string(),
-                "INFO mail: invited jonathanrayreed@gmail.com".to_string(),
+                "INFO mail: invited contact@example.com".to_string(),
             ],
         );
         assert_eq!(find_leak(&files), None);
