@@ -1,6 +1,6 @@
 # External gate record: credential-free beta update feed
 
-- Status: waiting for user
+- Status: resolved 2026-09-05. The repository is public, so the feed is a Cloudflare Worker (`infra/updates-worker`) on `updates.plainsong.jonathanrreed.com` that serves each channel's manifest from the matching GitHub release and redirects downloads to the release assets; no R2 bucket was created. The record below is kept as the history of the blocker.
 - Observed at: 2026-08-09T22:08:50-05:00
 - Objective: let an installed Plainsong limited beta check for and download signed updates without a repository token or other credential
 - Original operation: request `https://updates.plainsong.jonathanrreed.com/beta/beta-mac.yml` without credentials and require the exact candidate manifest, ZIP, blockmap, hashes, sizes, and byte-range behavior

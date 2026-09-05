@@ -19,9 +19,10 @@ into searchable notes without sending a bot into your call.
   own keys for providers such as OpenAI, Anthropic, ElevenLabs, Groq,
   Cohere, DeepSeek, and Gemini. Usage is billed to you, keys are stored in the OS keychain,
   never routed through our servers.
-- **Actually free and open.** MIT licensed, no trial, no tiers, no nags. Build
-  it yourself today; the first public release will follow completion of the
-  remaining beta qualification gates and explicit distribution approval.
+- **Actually free and open.** MIT licensed, no trial, no tiers, no nags. The
+  source is public, and a signed, notarized 0.9 beta 4 build is downloadable
+  from [Releases](https://github.com/JonathanRReed/Plainsong/releases). A 1.0
+  will follow the remaining beta qualification gates.
 
 > Status: this is an active rebuild of a previously commercial app into a fully
 > free, open-source project. macOS is the primary target today; Windows and
@@ -43,28 +44,35 @@ into searchable notes without sending a bot into your call.
 
 ## Install
 
-The Plainsong `0.9.0-beta.2` integration candidate targets **macOS 13 or later
-on Apple Silicon (arm64)**.
+Plainsong `0.9.0-beta.4` targets **macOS 13 or later on Apple Silicon
+(arm64)**. It is a beta: keep your own backups, read a transcript before you
+rely on it, and expect the interface to change between builds. Hands-free
+dictation did not activate in the maker's last two test runs (toggle and
+hold-to-talk passed), and meetings longer than 45 seconds have not been
+soak-tested yet.
 
-> Beta status, August 22, 2026: source integration and exact-candidate
-> qualification are in progress. Historical `1.0.0` and `0.9.0-beta.1`
-> artifacts do not prove the current build. No installer is public or approved
-> for distribution. The current revision must produce fresh package, trust,
-> clean-install, Dictation, Meetings, and updater evidence before invitations.
+> Status, September 5, 2026: the source and the beta 4 release are public. The
+> real-hardware Dictation matrix, the Meeting soak, and the updater journey are
+> still owed before a 1.0.
 
-Invited testers will receive a verified DMG and its SHA-256 checksum only after
-the release gate passes and distribution is explicitly approved:
-
-1. Download the DMG.
-2. Drag `Plainsong.app` into `/Applications`.
+1. Download
+   [`Plainsong-0.9.0-beta.4-arm64.dmg`](https://github.com/JonathanRReed/Plainsong/releases/download/v0.9.0-beta.4/Plainsong-0.9.0-beta.4-arm64.dmg)
+   (136,566,773 bytes) and check it:
+   `shasum -a 256 Plainsong-0.9.0-beta.4-arm64.dmg` must print
+   `28f1b1a42306095afe36b24c126a42ec060f7e5a1a22b37e1d0b2bceee759cb4`.
+   The DMG is Developer ID signed, notarized, and stapled, so macOS opens it
+   without any bypass.
+2. Drag `Plainsong.app` into `/Applications` and open it from there.
 3. On first run, grant Microphone access so Plainsong can hear you and
    Accessibility access so it can insert text into other apps. Then let it
    download the recommended default model, Parakeet TDT 0.6B v3 (640 MB);
    Whisper `base.en` (142 MB) is offered as a smaller, less accurate
    alternative.
 
-Homebrew is planned after the beta and first public release (see
-[nautilus-bot/docs/homebrew.md](./nautilus-bot/docs/homebrew.md)).
+Updates: an installed app checks `https://updates.plainsong.jonathanrreed.com/beta/`
+when you ask it to; that feed follows the GitHub releases (see
+[infra/updates-worker](./infra/updates-worker/)). Homebrew is planned after 1.0
+(see [nautilus-bot/docs/homebrew.md](./nautilus-bot/docs/homebrew.md)).
 
 ## Quick start (from source)
 

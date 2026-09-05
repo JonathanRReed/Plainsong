@@ -10,8 +10,12 @@ packaged candidate readiness, and distribution are separate states.
 
 ## Beta 4 current boundary
 
-- Private source only. The repository, release, binaries, update feed, and the
-  unreleased Reaper integration stay private.
+- Source, release, binaries, and update feed went public on September 5, 2026
+  at the maintainer's direction (repository public, release `v0.9.0-beta.4`
+  public, `updates.plainsong.jonathanrreed.com` served by
+  `infra/updates-worker`). The unreleased Reaper integration stays private.
+  The acceptance gates below are unchanged by this: they are still owed
+  before a 1.0.
 - Apple Silicon macOS only. Intel and Windows are not release targets for this
   beta.
 - Local processing is the default. Cloud transcription is an explicit BYOK
