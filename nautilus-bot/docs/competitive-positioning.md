@@ -2,6 +2,11 @@
 
 Last reviewed: 2026-08-27
 
+The [September 4 beta 4 final pass](beta4-final-pass.md) supersedes this
+document's release status and current competitor claims. In particular,
+Granola now describes limited free history without the specific 25-note
+figure used below. Treat the rest of this document as historical research.
+
 This document keeps product claims tied to current, first-party evidence. It is
 not launch copy and it should not be used as a substitute for release QA.
 Competitor facts below are attributed research, not first-party verification —

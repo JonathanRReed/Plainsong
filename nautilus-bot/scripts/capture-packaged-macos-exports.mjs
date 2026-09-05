@@ -261,7 +261,18 @@ function launchSidecar() {
 
 function readFileSummary(filePath) {
   const bytes = fs.readFileSync(filePath);
-  const text = bytes.toString("utf8");
+  let text = bytes.toString("utf8");
+  if (path.extname(filePath).toLowerCase() === ".docx") {
+    const converted = spawnSync("/usr/bin/textutil", [
+      "-convert", "txt", "-stdout", filePath,
+    ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+    if (converted.error || converted.status !== 0) {
+      throw new Error(`Could not read exported Word document: ${
+        converted.error?.message ?? converted.stderr?.trim() ?? "conversion failed"
+      }`);
+    }
+    text = converted.stdout;
+  }
   return {
     path: filePath,
     sizeBytes: bytes.length,
@@ -417,7 +428,7 @@ try {
   }
 }
 
-const expectedTemplates = ["meeting", "journal", "medical", "interview", "quick", "podcast", "research"];
+const expectedTemplates = ["meeting", "meeting_word", "journal", "medical", "interview", "quick", "podcast", "research"];
 artifact.checks = {
   noError: artifact.error === null,
   sidecarCleanExit: artifact.sidecarExit?.code === 0 && !artifact.timedOut,

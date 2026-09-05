@@ -22,13 +22,19 @@ packaged candidate readiness, and distribution are separate states.
 - Source audit is green for known JavaScript and Rust vulnerabilities. The one
   remaining Rust audit warning is the unmaintained transitive `paste` crate in
   the local Candle stack; there is no bounded direct replacement in this beta.
-- A Developer ID signed diagnostic build recorded first UI at 890 ms and an
-  interactive workspace or wizard at 1,237 ms under high load. It was not
-  notarized or stapled, so it is not release evidence and does not yet qualify
-  for the Half-Bounce Club.
-- The exact beta 4 candidate must pass source gates, Developer ID signing,
-  notarization, stapling, Gatekeeper assessment, clean installation, dictation
-  and meeting smoke tests, updater validation, and a fresh launch receipt.
+- Half-Bounce is an optional ambition, not a beta release requirement. The
+  maintainer accepted fast, usable launch as the objective on September 4.
+  The notarized beta 4 sample presented at 3,015 ms and was interactive at
+  4,065 ms on a heavily loaded Mac. This is not a quiet-machine benchmark.
+- The private `v0.9.0-beta.4` release points to `5c0ca098`. Source gates,
+  signing, notarization, stapling, Gatekeeper, DMG copy and first-run setup,
+  hold and toggle dictation, Apple Notes insertion, meeting capture,
+  local analysis, backup, retention, and exports have evidence. Update
+  metadata passes; an installed-version updater journey is still unqualified.
+- The [final pass](nautilus-bot/docs/beta4-final-pass.md) records the tested
+  paths and remaining limits for the maintainer's private week of testing.
+  Hands-free did not activate in two speaker-fixture runs. Broad competitor
+  superiority and long-meeting qualification are not established.
 
 ## Historical beta 2 evidence, not valid for beta 4
 
