@@ -35,7 +35,7 @@ packaged candidate readiness, and distribution are separate states.
 The sections below preserve the beta 2 record so its measurements remain
 auditable. They must not be read as evidence for beta 4.
 
-Everything under "Current verdict" and "Exact packaged candidate gate" below
+Everything under "Historical beta 2 verdict" and "Exact packaged candidate gate" below
 describes the source and package as they stood on **August 23, 2026**. Two
 further audited fix waves have merged into `main` since then — Electron
 security hardening, meeting data-integrity fixes, model currency, sidecar
@@ -52,7 +52,7 @@ full, evidence-checked list. `package.json` has not been bumped and no
   source-ready gate must be rerun top to bottom on current `HEAD` before any
   of those lines can be asserted again.
 - **Stale: every number in "Exact packaged candidate gate" and the size/
-  cold-start figures in "Current verdict."** The size gate (374 MB), the
+  cold-start figures in "Historical beta 2 verdict."** The size gate (374 MB), the
   cold-start gate (2428 ms), and the native-helper, signature, and
   entitlement checks were all measured against a binary that no longer
   matches current source — the entitlements files changed shape (see
