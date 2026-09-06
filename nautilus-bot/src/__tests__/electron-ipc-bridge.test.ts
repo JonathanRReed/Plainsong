@@ -239,6 +239,9 @@ describe("getCommandTimeoutMs", () => {
     expect(getCommandTimeoutMs("download_bundled_cleanup_model")).toBe(
       getCommandTimeoutMs("download_asr_models"),
     );
+    expect(getCommandTimeoutMs("install_ollama_model")).toBe(
+      getCommandTimeoutMs("download_asr_models"),
+    );
     expect(getCommandTimeoutMs("stop_dictation")).toBeGreaterThan(getCommandTimeoutMs("get_settings"));
     expect(getCommandTimeoutMs("extract_action_items_grounded")).toBe(
       getCommandTimeoutMs("summarize_recording_grounded"),
