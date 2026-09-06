@@ -473,7 +473,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   useEffect(() => {
     let mounted = true;
-    void Promise.all([getSettings(), getAsrProviders()])
+    void Promise.all([
+      getSettings(),
+      getAsrProviders().catch(() => null),
+    ])
       .then(([settings, providers]) => {
         if (!mounted) {
           return;
@@ -543,7 +546,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             option.providerType === configuredProvider &&
             option.id === configuredModelId
         );
-        const configuredProviderInfo = providers.find(
+        const configuredProviderInfo = providers?.find(
           (provider) =>
             provider.providerType === configuredProvider &&
             provider.selectedModelId === configuredModelId
@@ -564,13 +567,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               ? "hold_to_talk"
               : "toggle"
         );
-        setModelSelectionHydration("ready");
+        setModelSelectionHydration(providers ? "ready" : "error");
       })
       .catch(() => {
         if (mounted) {
-          // The displayed default is not trustworthy until both persisted
-          // settings and provider status have loaded. Keep model actions
-          // fail-closed instead of treating a rejected read as hydration.
+          // The displayed default is not trustworthy until persisted settings
+          // have loaded. Keep model actions fail-closed instead of treating a
+          // rejected settings read as hydration.
           setModelSelectionHydration("error");
         }
       });
