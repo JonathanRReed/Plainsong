@@ -1,120 +1,76 @@
 # Plainsong
 
-**Free, open-source, local-first voice input for your whole computer.**
+Dictate into other apps and record meetings without a bot joining the call. Plainsong transcribes on your Mac by default and turns recordings into searchable notes.
 
-**[Website](https://plainsong.jonathanrreed.com)** ·
-**[Releases](https://github.com/JonathanRReed/Plainsong/releases)** ·
-**[Privacy](./PRIVACY.md)** · **[Contributing](./CONTRIBUTING.md)**
+[Website](https://plainsong.jonathanrreed.com) · [Releases](https://github.com/JonathanRReed/Plainsong/releases) · [Privacy](PRIVACY.md)
 
-Plainsong is a desktop app for fast system-wide dictation and bot-free meeting
-capture. Press a hotkey, speak, and your words appear at the cursor in any app,
-transcribed on your own machine. Meetings are recorded, transcribed, and turned
-into searchable notes without sending a bot into your call.
+![Dictation workspace](docs/images/plainsong-dictation.png)
 
-![Plainsong dictation workspace](./docs/images/plainsong-dictation.png)
+The app is free and MIT-licensed, with no trial, paid tiers, or required account. Optional cloud transcription and AI cleanup use your own provider keys, stored in the OS keychain. Those requests go to the selected provider, not through a Plainsong server. Local transcription remains the default.
 
-- **Local-first.** Transcription runs on your Mac by default. No account, no
-  cloud dependency, no audio leaving your machine unless you opt in.
-- **Bring your own keys.** Optional cloud transcription and AI cleanup use your
-  own keys for providers such as OpenAI, Anthropic, ElevenLabs, Groq,
-  Cohere, DeepSeek, and Gemini. Usage is billed to you, keys are stored in the OS keychain,
-  never routed through our servers.
-- **Actually free and open.** MIT licensed, no trial, no tiers, no nags. The
-  source is public, and a signed, notarized 0.9 beta 4 build is downloadable
-  from [Releases](https://github.com/JonathanRReed/Plainsong/releases). A 1.0
-  will follow the remaining beta qualification gates.
+## Install the beta
 
-> Status: this is an active rebuild of a previously commercial app into a fully
-> free, open-source project. macOS is the primary target today; Windows and
-> Linux are on the roadmap.
+`0.9.0-beta.4` requires macOS 13+ on Apple Silicon. Windows and Linux are planned, not supported release targets.
 
-## Features
+Download [Plainsong-0.9.0-beta.4-arm64.dmg](https://github.com/JonathanRReed/Plainsong/releases/download/v0.9.0-beta.4/Plainsong-0.9.0-beta.4-arm64.dmg), then verify it:
 
-- System-wide dictation via a global hotkey, with a focus-preserving overlay
-- Three activation modes: toggle, hold-to-talk (native key listener), and
-  hands-free voice-activity detection
-- Local speech recognition (Parakeet by default, plus Whisper and other
-  engines) with optional BYOK cloud
-- Dictation modes, snippets, a personal dictionary, and editing commands
-- Meeting recording (microphone, plus system audio where available), transcript
-  review, summaries, action items, and cross-meeting search
-- Optional local AI analysis via Ollama, or BYOK cloud providers
+```bash
+shasum -a 256 Plainsong-0.9.0-beta.4-arm64.dmg
+```
 
-![Plainsong meetings workspace](./docs/images/plainsong-meetings.png)
+Expected SHA-256:
 
-## Install
+```text
+28f1b1a42306095afe36b24c126a42ec060f7e5a1a22b37e1d0b2bceee759cb4
+```
 
-Plainsong `0.9.0-beta.4` targets **macOS 13 or later on Apple Silicon
-(arm64)**. It is a beta: keep your own backups, read a transcript before you
-rely on it, and expect the interface to change between builds. Hands-free
-dictation did not activate in the maker's last two test runs (toggle and
-hold-to-talk passed), and meetings longer than 45 seconds have not been
-soak-tested yet.
+The file is 136,566,773 bytes, Developer ID signed, notarized, and stapled. Drag `Plainsong.app` into `/Applications` and open it there. No macOS security bypass is required.
 
-> Status, September 5, 2026: the source and the beta 4 release are public. The
-> real-hardware Dictation matrix, the Meeting soak, and the updater journey are
-> still owed before a 1.0.
+Grant Microphone access for recording and Accessibility access for text insertion. Download the default Parakeet TDT 0.6B v3 model, 640 MB, or the smaller Whisper `base.en`, 142 MB.
 
-1. Download
-   [`Plainsong-0.9.0-beta.4-arm64.dmg`](https://github.com/JonathanRReed/Plainsong/releases/download/v0.9.0-beta.4/Plainsong-0.9.0-beta.4-arm64.dmg)
-   (136,566,773 bytes) and check it:
-   `shasum -a 256 Plainsong-0.9.0-beta.4-arm64.dmg` must print
-   `28f1b1a42306095afe36b24c126a42ec060f7e5a1a22b37e1d0b2bceee759cb4`.
-   The DMG is Developer ID signed, notarized, and stapled, so macOS opens it
-   without any bypass.
-2. Drag `Plainsong.app` into `/Applications` and open it from there.
-3. On first run, grant Microphone access so Plainsong can hear you and
-   Accessibility access so it can insert text into other apps. Then let it
-   download the recommended default model, Parakeet TDT 0.6B v3 (640 MB);
-   Whisper `base.en` (142 MB) is offered as a smaller, less accurate
-   alternative.
+### Known limits
 
-Updates: an installed app checks `https://updates.plainsong.jonathanrreed.com/beta/`
-when you ask it to; that feed follows the GitHub releases (see
-[infra/updates-worker](./infra/updates-worker/)). Homebrew is planned after 1.0
-(see [nautilus-bot/docs/homebrew.md](./nautilus-bot/docs/homebrew.md)).
+Read transcripts before relying on them and keep your own backups. In the last two documented maker tests, toggle and hold-to-talk passed but hands-free dictation did not activate. Meetings longer than 45 seconds have not been soak-tested.
 
-## Quick start (from source)
+As of the September 5, 2026 release, the real-hardware dictation matrix, long meeting tests, and updater journey remain unfinished. There is no 1.0 or Homebrew cask yet.
 
-The app lives in [`nautilus-bot/`](./nautilus-bot/).
+The app's update target is `https://updates.plainsong.jonathanrreed.com/beta/`, backed by [infra/updates-worker](infra/updates-worker/). Its configuration is not proof of a qualified end-to-end update path. [Homebrew plan](nautilus-bot/docs/homebrew.md).
+
+## Use it
+
+Press the global hotkey to dictate. Activation options are toggle, hold-to-talk through a native listener, and the currently unqualified hands-free mode. Dictation tools include snippets, a personal dictionary, modes, and editing commands.
+
+Meeting capture records the microphone and system audio where available. Review transcripts, summaries, and action items, or search across meetings. AI analysis can use local Ollama or an explicitly configured cloud provider.
+
+![Meetings workspace](docs/images/plainsong-meetings.png)
+
+## Build from source
+
+The app lives in `nautilus-bot/`. Install Bun, stable Rust, CMake, and Xcode Command Line Tools with `xcrun` and `swiftc`. The command-line tools installer is `xcode-select --install`.
 
 ```bash
 cd nautilus-bot
 bun install
-bun run sidecar:build:release   # build the Rust transcription sidecar (required once)
+bun run sidecar:build:release
 bun run dev
 ```
 
-Or run `./setup.sh` inside `nautilus-bot/`, which checks prerequisites and does
-the equivalent.
+`./setup.sh` in that directory checks prerequisites and runs the setup. Ollama is optional for local AI cleanup.
 
-### Prerequisites
+## Verify and contribute
 
-- [Bun](https://bun.sh)
-- Rust toolchain (stable), which builds the local transcription sidecar
-- [CMake](https://cmake.org/)
-- Xcode Command Line Tools, including `xcrun` and the Swift compiler (`swiftc`);
-  install them with `xcode-select --install`
-- macOS 13 or later on Apple Silicon (Windows/Linux are not yet GA targets)
-- Optional: [Ollama](https://ollama.com) running locally for on-device AI cleanup
-
-## Verifying a change
+From `nautilus-bot/`:
 
 ```bash
-cd nautilus-bot
-bun run lint        # typecheck + cargo fmt + clippy
-bun run test        # renderer/Electron tests (Vitest)
-bun run test:rust   # Rust sidecar unit tests
+bun run lint
+bun run test
+bun run test:rust
 ```
 
-Use `bun run test` (Vitest), not `bun test`.
+Lint includes type checking, Cargo formatting, and Clippy. Renderer and Electron tests use Vitest through `bun run test`, not `bun test`.
 
-## Contributing
-
-Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md). Security
-reports go to [SECURITY.md](./SECURITY.md). What the app does and does not do
-with your audio is documented in [PRIVACY.md](./PRIVACY.md).
+[Contributing](CONTRIBUTING.md) · [Security reporting](SECURITY.md) · [Privacy](PRIVACY.md)
 
 ## License
 
-[MIT](./LICENSE) © 2026 Jonathan Reed
+[MIT](LICENSE) © 2026 Jonathan Reed
