@@ -392,6 +392,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [meetingDownloadPercent, setMeetingDownloadPercent] = useState<number | null>(null);
   const meetingDownloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
   const modelInteractionStartedRef = useRef(false);
+  const modelSelectionChangedRef = useRef(false);
   // Captures whatever dictation route was already persisted at mount, so
   // ensureDefaultModelDownloading can tell "nothing configured yet" apart
   // from "user already has a different, working route" -- see its comment.
@@ -978,7 +979,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       Boolean(existingProvider) &&
       existingProvider !== "parakeet" &&
       (existingProvider !== "whisper" || hasCustomWhisperModel);
-    if (hasExistingNonDefaultRoute) {
+    if (hasExistingNonDefaultRoute && !modelSelectionChangedRef.current) {
       return;
     }
     if (modelState === "idle" || modelState === "error") {
@@ -1481,7 +1482,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               selectedId={selectedModelId}
               downloadFromFooter={mode === "full"}
               downloadDisabled={modelSelectionHydration !== "ready"}
-              onSelect={setSelectedModelId}
+              onSelect={(modelId) => {
+                modelSelectionChangedRef.current = true;
+                setSelectedModelId(modelId);
+              }}
               onDownload={() => void startModelDownload(selectedModelId)}
             />
             {modelSelectionHydration === "error" ? (

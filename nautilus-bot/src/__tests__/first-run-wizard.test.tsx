@@ -723,6 +723,31 @@ describe("FirstRunWizard", () => {
     expect(currentSettings.transcription.dictationModelId).toBe("small.en");
   });
 
+  it("replaces a custom Whisper model when the user selects another model", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+
+    currentSettings.transcription.dictationProvider = "whisper";
+    currentSettings.transcription.dictationModelId = "small.en";
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i); // permissions -> dictation-model
+    await clickPrimary(/parakeet tdt 0\.6b v3/i);
+    await clickPrimary(/continue/i); // -> hotkey, downloads the selected replacement
+
+    await waitFor(() => {
+      expect(downloadAsrModels).toHaveBeenCalledWith(
+        "parakeet",
+        "parakeet-tdt-0.6b-v3",
+      );
+      expect(currentSettings.transcription.dictationProvider).toBe("parakeet");
+      expect(currentSettings.transcription.dictationModelId).toBe(
+        "parakeet-tdt-0.6b-v3",
+      );
+    });
+  });
+
   it("downloads base.en for a legacy Whisper route with only selectedModelId", async () => {
     const asrBackend = await import("@/lib/backend/asr");
     const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
