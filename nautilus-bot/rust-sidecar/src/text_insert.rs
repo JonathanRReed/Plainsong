@@ -1767,8 +1767,11 @@ pub(crate) fn dispatch_paste_from_clipboard(
     })?;
 
     match send_native_paste_key() {
-        Ok(status) => {
-            if !keep_text_in_clipboard && status == PasteDispatchStatus::Confirmed {
+        Ok(_status) => {
+            // CoreGraphics only confirms that it posted the events, not that
+            // the target received them. Still bound the lifetime of the
+            // staged transcript when clipboard retention is disabled.
+            if !keep_text_in_clipboard {
                 if let Some(previous) = previous_clipboard {
                     schedule_clipboard_restore(previous, text.to_string());
                 }
