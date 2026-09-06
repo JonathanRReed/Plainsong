@@ -712,6 +712,22 @@ fn meeting_consent_notice_copy_never_claims_plainsong_will_post_it() {
 }
 
 #[test]
+fn meeting_consent_notice_status_does_not_serialize_browser_data() {
+    let status = MeetingConsentNoticeStatus {
+        surface: Some("google_meet".to_string()),
+        app_name: Some("Google Chrome".to_string()),
+        app_bundle_id: Some("com.google.Chrome".to_string()),
+        message: "Send the notice in Google Meet.".to_string(),
+        notice_text: meeting_consent_notice_text().to_string(),
+    };
+
+    let serialized = serde_json::to_value(status).expect("serialize consent notice status");
+    assert_eq!(serialized["surface"], "google_meet");
+    assert!(serialized.get("browserUrl").is_none());
+    assert!(!serialized.to_string().contains("meet.google.com"));
+}
+
+#[test]
 fn database_snapshot_failure_is_propagated_and_partial_file_is_removed() {
     let snapshot_path = std::env::temp_dir().join(format!(
         "nautilus-snapshot-failure-test-{}.db",

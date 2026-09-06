@@ -145,7 +145,6 @@ export interface MeetingConsentNoticeStatus {
   surface?: "zoom" | "google_meet" | string | null;
   appName?: string | null;
   appBundleId?: string | null;
-  browserUrl?: string | null;
   message: string;
   noticeText: string;
 }

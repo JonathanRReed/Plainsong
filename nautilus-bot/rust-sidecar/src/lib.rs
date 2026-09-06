@@ -1050,7 +1050,6 @@ struct MeetingConsentNoticeStatus {
     surface: Option<String>,
     app_name: Option<String>,
     app_bundle_id: Option<String>,
-    browser_url: Option<String>,
     message: String,
     notice_text: String,
 }
@@ -2416,10 +2415,9 @@ fn capture_pending_hotkey_target(state: &AppState) {
     }
 
     tracing::info!(
-        "Captured pending dictation target at hotkey press: app={:?}, bundle_id={:?}, browser_url={:?}",
+        "Captured pending dictation target at hotkey press: app={:?}, bundle_id={:?}",
         app_name,
-        app_bundle_id,
-        browser_url
+        app_bundle_id
     );
 }
 
@@ -2721,7 +2719,7 @@ fn resolve_recent_external_target_context(state: &AppState) -> Option<PendingDic
     build_pending_dictation_target(
         app_name,
         app_bundle_id,
-        browser_url,
+        browser_url.as_deref().and_then(extract_host_from_url),
         chrono::Utc::now().timestamp_millis(),
     )
     .or_else(|| take_recent_external_target(state).filter(consent_target_is_fresh))
@@ -2789,7 +2787,6 @@ fn meeting_consent_notice_status(state: &AppState) -> MeetingConsentNoticeStatus
             surface: None,
             app_name: None,
             app_bundle_id: None,
-            browser_url: None,
             message: meeting_consent_notice_message(None).to_string(),
             notice_text,
         };
@@ -2801,7 +2798,6 @@ fn meeting_consent_notice_status(state: &AppState) -> MeetingConsentNoticeStatus
         surface,
         app_name: target.app_name,
         app_bundle_id: target.app_bundle_id,
-        browser_url: target.browser_url,
         notice_text,
     }
 }
@@ -2812,7 +2808,6 @@ fn meeting_consent_notice_status(_state: &AppState) -> MeetingConsentNoticeStatu
         surface: None,
         app_name: None,
         app_bundle_id: None,
-        browser_url: None,
         message: meeting_consent_notice_message(None).to_string(),
         notice_text: meeting_consent_notice_text().to_string(),
     }
