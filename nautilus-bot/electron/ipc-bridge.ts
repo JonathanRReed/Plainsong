@@ -340,6 +340,7 @@ export class IpcBridge {
   private quitPending = false;
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  private restartSuppressed = false;
   private readonly maxRestarts = 5;
   private readonly inFlightWorkKeys = new Set<string>();
   private sidecarHealthy = false;
@@ -529,19 +530,19 @@ export class IpcBridge {
       this.restartTimer = null;
     }
 
-    if (!this.shuttingDown && !this.quitPending && this.restartAttempts < this.maxRestarts) {
-      const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
-      this.restartAttempts++;
-      console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
-      this.restartTimer = setTimeout(() => {
-        this.restartTimer = null;
-        if (this.shuttingDown || this.quitPending) {
-          return;
-        }
-        this.spawnSidecar();
-      }, delay);
-    } else if (this.restartAttempts >= this.maxRestarts) {
-      console.error("[sidecar] max restarts reached, giving up");
+    if (
+      !this.shuttingDown &&
+      this.quitPending &&
+      this.restartAttempts < this.maxRestarts
+    ) {
+      this.restartSuppressed = true;
+    } else if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
+      this.scheduleSidecarRestart();
+    } else {
+      this.restartSuppressed = false;
+      if (this.restartAttempts >= this.maxRestarts) {
+        console.error("[sidecar] max restarts reached, giving up");
+      }
     }
     // Reject all pending requests with a clear error message
     const pendingCount = this.pending.size;
@@ -554,6 +555,25 @@ export class IpcBridge {
       console.warn(`[sidecar] rejected ${pendingCount} pending request(s): ${message}`);
     }
     this.terminatedCallback?.(message);
+  }
+
+  private scheduleSidecarRestart(): void {
+    this.restartSuppressed = false;
+    if (!this.shuttingDown && this.restartAttempts < this.maxRestarts) {
+      const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
+      this.restartAttempts++;
+      console.log(
+        `[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`,
+      );
+      this.restartTimer = setTimeout(() => {
+        this.restartTimer = null;
+        if (this.shuttingDown || this.quitPending) {
+          this.restartSuppressed = !this.shuttingDown;
+          return;
+        }
+        this.spawnSidecar();
+      }, delay);
+    }
   }
 
   private handleSidecarMessage(msg: JsonRpcResponse, generation: number): void {
@@ -783,6 +803,9 @@ export class IpcBridge {
     if (pending && this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
+      this.restartSuppressed = true;
+    } else if (!pending && this.restartSuppressed) {
+      this.scheduleSidecarRestart();
     }
   }
 }

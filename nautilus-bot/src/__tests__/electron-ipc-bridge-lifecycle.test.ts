@@ -507,6 +507,33 @@ describe("IpcBridge crash-loop containment", () => {
     consoleWarn.mockRestore();
   });
 
+  it("restarts after a failed deferred shutdown is cancelled", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const children: FakeChild[] = [];
+    const spawnProcess = vi.fn(() => {
+      const child = fakeChildProcess();
+      children.push(child);
+      return child as never;
+    });
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+
+    bridge.setQuitPending(true);
+    children[0]?.emit("exit", null, "SIGTERM");
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+
+    bridge.setQuitPending(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+
+    bridge.shutdown();
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
   // SIGKILL is how jetsam and a force-kill arrive, and those are exactly the
   // faults a replacement sidecar exists for.
   it("still replaces a sidecar killed by SIGKILL", async () => {
