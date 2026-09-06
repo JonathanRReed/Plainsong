@@ -17,8 +17,6 @@ use ort::{
 };
 #[cfg(feature = "diarization")]
 use rustfft::FftPlanner;
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 #[cfg(feature = "diarization")]
 use std::f32::consts::PI;
 use std::path::Path;
@@ -615,48 +613,6 @@ pub struct EmbeddingClusterer {
     min_segment_duration: f64,
 }
 
-/// A cached cluster distance. `BinaryHeap` is a max-heap, so the ordering is
-/// reversed to return the closest pair (and then the lowest indexes, matching
-/// the deterministic row-major scan this replaces) first.
-#[derive(Debug)]
-struct ClusterDistance {
-    distance: f32,
-    i: usize,
-    j: usize,
-    generation_i: u32,
-    generation_j: u32,
-}
-
-impl PartialEq for ClusterDistance {
-    fn eq(&self, other: &Self) -> bool {
-        self.distance.to_bits() == other.distance.to_bits()
-            && self.i == other.i
-            && self.j == other.j
-            && self.generation_i == other.generation_i
-            && self.generation_j == other.generation_j
-    }
-}
-
-impl Eq for ClusterDistance {}
-
-impl PartialOrd for ClusterDistance {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ClusterDistance {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .distance
-            .total_cmp(&self.distance)
-            .then_with(|| other.i.cmp(&self.i))
-            .then_with(|| other.j.cmp(&self.j))
-            .then_with(|| self.generation_i.cmp(&other.generation_i))
-            .then_with(|| self.generation_j.cmp(&other.generation_j))
-    }
-}
-
 impl EmbeddingClusterer {
     pub fn new() -> Self {
         Self {
@@ -714,15 +670,14 @@ impl EmbeddingClusterer {
 
         let n = embeddings.len();
 
-        // Collect pairwise distance statistics for debugging and cache every
-        // pair that can cause a merge. Distances above the threshold need not
-        // be retained: if no eligible pair remains, AHC stops before any
-        // centroid can change.
+        // Collect pairwise distance statistics for debugging. Do not retain
+        // the pair matrix: a four-hour recording has more than 100 million
+        // pairs, so caching even only threshold-eligible distances can exhaust
+        // memory for low-variance audio.
         let mut min_d = f32::INFINITY;
         let mut max_d = 0.0f32;
         let mut sum_d = 0.0f32;
         let mut count = 0usize;
-        let mut distances = BinaryHeap::new();
         for i in 0..n {
             for j in (i + 1)..n {
                 let distance = cosine_distance(&embeddings[i].2, &embeddings[j].2);
@@ -730,15 +685,6 @@ impl EmbeddingClusterer {
                 max_d = max_d.max(distance);
                 sum_d += distance;
                 count += 1;
-                if distance <= self.threshold {
-                    distances.push(ClusterDistance {
-                        distance,
-                        i,
-                        j,
-                        generation_i: 0,
-                        generation_j: 0,
-                    });
-                }
             }
         }
         let avg_d = sum_d / count as f32;
@@ -757,35 +703,41 @@ impl EmbeddingClusterer {
         let mut cluster_centroids: Vec<Array1<f32>> =
             embeddings.iter().map(|(_, _, e)| e.clone()).collect();
         let mut active = vec![true; n];
-        // Incremented whenever a centroid changes. Heap entries carrying an
-        // older generation are discarded lazily rather than requiring an
-        // expensive search through the heap after each merge.
-        let mut generations = vec![0u32; n];
         let mut num_active = n;
 
-        // Each initial distance is calculated once. A merge invalidates only
-        // distances involving its resulting centroid, so calculate those O(n)
-        // distances and leave all other cached pairs intact. This bounds the
-        // number of cosine-distance calculations to O(n²), rather than doing a
-        // complete pairwise scan after every merge (O(n³)).
+        // Rescan active centroids for each merge. This deliberately trades
+        // computation for bounded auxiliary memory: retaining all eligible
+        // pairs is O(n²) memory and can abort the sidecar on long recordings.
         while num_active > 1 {
-            let Some(closest) = distances.pop() else {
-                break;
-            };
-            if !active[closest.i]
-                || !active[closest.j]
-                || generations[closest.i] != closest.generation_i
-                || generations[closest.j] != closest.generation_j
-            {
-                continue;
+            let mut min_dist = f32::INFINITY;
+            let mut merge_i = 0;
+            let mut merge_j = 0;
+
+            for i in 0..n {
+                if !active[i] {
+                    continue;
+                }
+                for j in (i + 1)..n {
+                    if !active[j] {
+                        continue;
+                    }
+                    let distance = cosine_distance(&cluster_centroids[i], &cluster_centroids[j]);
+                    if distance < min_dist {
+                        min_dist = distance;
+                        merge_i = i;
+                        merge_j = j;
+                    }
+                }
             }
-            let (merge_i, merge_j) = (closest.i, closest.j);
+
+            if min_dist > self.threshold {
+                break;
+            }
 
             // Merge cluster j into cluster i.
             let moved = std::mem::take(&mut cluster_members[merge_j]);
             cluster_members[merge_i].extend(moved);
             active[merge_j] = false;
-            generations[merge_i] += 1;
             num_active -= 1;
 
             // Recompute the centroid of the merged cluster as the
@@ -804,27 +756,6 @@ impl EmbeddingClusterer {
                 }
             }
             cluster_centroids[merge_i] = Array1::from(new_centroid);
-
-            for other in 0..n {
-                if !active[other] || other == merge_i {
-                    continue;
-                }
-                let (i, j) = if other < merge_i {
-                    (other, merge_i)
-                } else {
-                    (merge_i, other)
-                };
-                let distance = cosine_distance(&cluster_centroids[i], &cluster_centroids[j]);
-                if distance <= self.threshold {
-                    distances.push(ClusterDistance {
-                        distance,
-                        i,
-                        j,
-                        generation_i: generations[i],
-                        generation_j: generations[j],
-                    });
-                }
-            }
         }
 
         // Build embedding_index → cluster_index mapping, then assign labels
