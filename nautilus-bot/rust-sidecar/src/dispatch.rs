@@ -11,6 +11,14 @@
 
 use super::*;
 
+struct OllamaPullActiveGuard(Arc<AtomicBool>);
+
+impl Drop for OllamaPullActiveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 async fn publish_dictation_start_error_if_idle<E: crate::sidecar_handle::AppEmitter>(
     tracker: &tokio::sync::Mutex<DictationSessionTracker>,
     emitter: &E,
@@ -870,7 +878,9 @@ pub async fn dispatch_command(
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .map_err(|_| "Another Ollama model installation is already running".to_string())?;
             state.ollama_pull_cancelled.store(false, Ordering::SeqCst);
-            let active = Arc::clone(&state.ollama_pull_active);
+            // IPC cancellation aborts this dispatch future, so cleanup must run
+            // from Drop rather than only after the pull future completes.
+            let _active_guard = OllamaPullActiveGuard(Arc::clone(&state.ollama_pull_active));
             let event_handle = handle.clone();
             let result = state.ollama_client.pull_model(model_id, accepted_license, &state.ollama_pull_cancelled, &state.ollama_pull_cancel_notify, move |completed, total| {
                 event_handle.emit_event("ollama-model-pull-progress", serde_json::json!({
@@ -878,7 +888,6 @@ pub async fn dispatch_command(
                     "percentage": total.filter(|total| *total > 0).map(|total| completed.saturating_mul(100) / total),
                 }));
             }).await;
-            active.store(false, Ordering::SeqCst);
             let entry = result.map_err(|e| e.to_string())?;
             serde_json::to_value(entry).map_err(|e| e.to_string())
         }

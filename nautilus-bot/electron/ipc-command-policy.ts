@@ -92,6 +92,7 @@ const EXTENDED_COMMANDS = new Set<string>([
   // multi-hour source needs more than the default minute.
   "import_audio_file",
   "import_dictation_dictionary_csv",
+  "install_ollama_model",
   // Asks macOS to download a whole speech language pack. The size is Apple's,
   // not this app's, so it gets the same headroom as a model download.
   "install_apple_speech_language",
