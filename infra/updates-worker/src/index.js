@@ -2,7 +2,7 @@
 //
 //   GET /beta/beta-mac.yml     manifest of the newest pre-release that has one
 //   GET /stable/latest-mac.yml manifest of the newest full release (404 until 1.0)
-//   GET /<channel>/<file>      302 to that release's asset on GitHub
+//   GET /<channel>/<file>      proxy that release's asset from GitHub
 //
 // Manifests are fetched from GitHub and cached at the edge for ten minutes.
 // Nothing here is authenticated; the repository and its releases are public.
@@ -67,7 +67,16 @@ export default {
       return res;
     }
 
-    // installers, zips, blockmaps: let GitHub serve the bytes
-    return Response.redirect(asset, 302);
+    // Keep assets on the feed origin so the release gate can verify them. Forward
+    // ranges because electron-updater and the gate use them for large downloads.
+    const headers = { "User-Agent": UA };
+    const range = request.headers.get("range");
+    if (range) headers.Range = range;
+    const upstream = await fetch(asset, {
+      method: request.method === "HEAD" ? "HEAD" : "GET",
+      headers,
+      redirect: "follow",
+    });
+    return new Response(upstream.body, upstream);
   },
 };
