@@ -4285,7 +4285,7 @@ fn the_native_paste_probes_the_focused_field_right_before_it_stages_the_clipboar
 }
 
 #[test]
-fn macos_paste_confirms_system_events_but_preserves_clipboard_for_cgevent_fallback() {
+fn macos_paste_restores_clipboard_after_all_successful_dispatches() {
     let source = include_str!("text_insert.rs");
     let sender = top_level_item(source, "fn send_native_paste_key(");
     let system_events = sender
@@ -4303,8 +4303,12 @@ fn macos_paste_confirms_system_events_but_preserves_clipboard_for_cgevent_fallba
 
     let dispatcher = top_level_item(source, "fn dispatch_paste_from_clipboard(");
     assert!(
-        dispatcher.contains("status == PasteDispatchStatus::Confirmed"),
-        "the old clipboard must only be restored after a confirmed paste"
+        dispatcher.contains("if !keep_text_in_clipboard {"),
+        "the old clipboard must be restored when retention is disabled"
+    );
+    assert!(
+        !dispatcher.contains("status == PasteDispatchStatus::Confirmed"),
+        "an unconfirmed CoreGraphics dispatch must not retain the transcript indefinitely"
     );
 }
 
