@@ -81,8 +81,8 @@ const createSettings = () => ({
     dictationProjectId: "inbox",
     dictationRetentionPreset: "never" as const,
     dictationRetentionCustomHours: 24,
-    meetingAudioStorageMode: "always" as const,
-    meetingRetentionPreset: "never" as const,
+    meetingAudioStorageMode: "always" as "always" | "transcript_only",
+    meetingRetentionPreset: "never" as "1m" | "2m" | "3m" | "custom" | "never",
     meetingRetentionCustomMonths: 1,
     meetingRetentionDeleteMode: "audio_only" as const,
     dictationSilenceTimeoutSeconds: 0,
@@ -411,6 +411,24 @@ describe("FirstRunWizard", () => {
     expect(downloadButton).toBeDisabled();
     fireEvent.click(downloadButton);
     expect(asrBackend.downloadAsrModels).not.toHaveBeenCalled();
+  });
+
+  it("hydrates meeting privacy settings when provider hydration fails", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    vi.mocked(asrBackend.getAsrProviders).mockRejectedValueOnce(
+      new Error("providers unavailable"),
+    );
+    currentSettings.transcription.meetingAudioStorageMode = "transcript_only";
+    currentSettings.transcription.meetingRetentionPreset = "1m";
+
+    render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Meeting audio storage")).toHaveValue(
+        "transcript_only",
+      );
+      expect(screen.getByLabelText("Meeting retention")).toHaveValue("1m");
+    });
   });
 
   it("announces each step and moves focus to the new heading", async () => {
