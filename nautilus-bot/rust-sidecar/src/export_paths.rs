@@ -281,33 +281,39 @@ pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<
 }
 
 pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve path '{}': {}", path.display(), e))?;
+    // Defense in depth: Ensure target path resides inside approved Plainsong roots before executing system opener
+    ensure_path_in_approved_roots(&canonical, "target path")?;
+
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("/usr/bin/open")
-        .arg(path)
+        .arg(&canonical)
         .status()
-        .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;
+        .map_err(|e| format!("Failed to launch 'open' for '{}': {}", canonical.display(), e))?;
 
     #[cfg(target_os = "windows")]
     let status = std::process::Command::new("cmd")
         .args(["/C", "start", ""])
-        .arg(path)
+        .arg(&canonical)
         .status()
         .map_err(|e| {
             format!(
                 "Failed to launch Windows opener for '{}': {}",
-                path.display(),
+                canonical.display(),
                 e
             )
         })?;
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let status = std::process::Command::new("xdg-open")
-        .arg(path)
+        .arg(&canonical)
         .status()
         .map_err(|e| {
             format!(
                 "Failed to launch 'xdg-open' for '{}': {}",
-                path.display(),
+                canonical.display(),
                 e
             )
         })?;
@@ -315,9 +321,32 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     if !status.success() {
         return Err(format!(
             "Default app open command failed for '{}'",
-            path.display()
+            canonical.display()
         ));
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_path_in_default_app_rejects_unapproved_roots() {
+        let system_file = Path::new("/etc/passwd");
+        if system_file.exists() {
+            let result = open_path_in_default_app(system_file);
+            assert!(
+                result.is_err(),
+                "open_path_in_default_app must reject paths outside approved roots"
+            );
+            let err = result.unwrap_err();
+            assert!(
+                err.contains("outside approved Plainsong roots"),
+                "Expected error mentioning approved roots, got: {}",
+                err
+            );
+        }
+    }
 }
