@@ -74,11 +74,12 @@ const ALLOWED_EXTERNAL_HOST_SET = new Set(ALLOWED_EXTERNAL_HOSTS);
 /**
  * Whether `rawUrl` may be opened in the user's browser.
  *
- * Fails closed on anything unparseable, on any scheme other than `https:`, and
- * on any host not named above. `url.hostname` is compared (not `url.host`) so a
- * port cannot be used to smuggle a different authority past the check, and the
- * URL parser has already lowercased and punycoded the hostname by this point,
- * so `GitHub.com` and `xn--` spoofs both resolve before comparison.
+ * Fails closed on anything unparseable, on any scheme other than `https:`, on
+ * non-standard ports (allowing default port 443 or empty port only), and on any
+ * host not named above. `url.hostname` is compared (not `url.host`) so a port
+ * cannot be used to smuggle a different authority or connect to unexpected
+ * services, and the URL parser has already lowercased and punycoded the hostname
+ * by this point, so `GitHub.com` and `xn--` spoofs both resolve before comparison.
  */
 export function isAllowedExternalUrl(rawUrl: string): boolean {
   let url: URL;
@@ -96,6 +97,12 @@ export function isAllowedExternalUrl(rawUrl: string): boolean {
   // produced, and `https://github.com@evil.example/` parses with hostname
   // `evil.example` anyway — reject it explicitly so the intent is on record.
   if (url.username || url.password) {
+    return false;
+  }
+
+  // Reject non-standard ports to prevent port smuggling or connecting to unexpected
+  // ports/services on allowed external hosts.
+  if (url.port !== "" && url.port !== "443") {
     return false;
   }
 
