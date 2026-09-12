@@ -99,5 +99,11 @@ export function isAllowedExternalUrl(rawUrl: string): boolean {
     return false;
   }
 
+  // External documentation and release hosts operate on standard HTTPS port 443.
+  // Reject non-standard ports to prevent port bypasses or targeting non-standard services.
+  if (url.port !== "" && url.port !== "443") {
+    return false;
+  }
+
   return ALLOWED_EXTERNAL_HOST_SET.has(url.hostname);
 }

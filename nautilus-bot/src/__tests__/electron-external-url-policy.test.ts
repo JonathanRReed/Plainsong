@@ -78,6 +78,12 @@ describe("external URL policy", () => {
     expect(isAllowedExternalUrl("https://user:pass@github.com/")).toBe(false);
   });
 
+  it("rejects non-standard ports while allowing default port or explicit 443", () => {
+    expect(isAllowedExternalUrl("https://github.com:8443/JonathanRReed/Plainsong")).toBe(false);
+    expect(isAllowedExternalUrl("https://huggingface.co:8080/openai/whisper-large-v3")).toBe(false);
+    expect(isAllowedExternalUrl("https://github.com:443/JonathanRReed/Plainsong")).toBe(true);
+  });
+
   it("refuses every scheme other than https, mailto included", () => {
     // mailto: used to be allowed and nothing ever produced one.
     expect(isAllowedExternalUrl("mailto:support@plainsong.example")).toBe(false);
