@@ -7662,3 +7662,13 @@ fn no_command_is_dispatched_twice() {
         "these commands have more than one arm, so all but the first are dead: {duplicated:?}"
     );
 }
+
+#[test]
+fn notes_mode_preserves_numbered_lists_starting_above_one() {
+    let text = "Continue here:\n5. Review auth, not off.\n6. Do not merge.";
+    assert_eq!(format_dictation_notes(text), text);
+    assert_eq!(
+        format_dictation_notes("apples, oranges"),
+        "- apples\n- oranges"
+    );
+}

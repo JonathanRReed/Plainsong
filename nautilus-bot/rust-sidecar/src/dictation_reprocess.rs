@@ -379,7 +379,7 @@ pub(crate) async fn reprocess_dictation_impl(
                         .to_string()
                 });
                 if llm_allowed && !prompt.is_empty() {
-                    match run_custom_dictation_transform_with_selected_provider(
+                    match run_dictation_cleanup_with_selected_provider(
                         state,
                         final_text.as_str(),
                         prompt.as_str(),
@@ -413,7 +413,7 @@ pub(crate) async fn reprocess_dictation_impl(
                 }
             }
             "notes" => {
-                let bulletized = bulletize_text(&final_text);
+                let bulletized = format_dictation_notes(&final_text);
                 if bulletized != final_text {
                     final_text = bulletized;
                     pipeline_stage_keys.push("mode_transform".to_string());
@@ -421,7 +421,7 @@ pub(crate) async fn reprocess_dictation_impl(
             }
             _ => {
                 if let (true, Some(prompt)) = (llm_allowed, custom_prompt.as_deref()) {
-                    match run_custom_dictation_transform_with_selected_provider(
+                    match run_dictation_cleanup_with_selected_provider(
                         state,
                         final_text.as_str(),
                         prompt,

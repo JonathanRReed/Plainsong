@@ -490,6 +490,14 @@ pub(crate) fn rewrite_professional_text(text: &str) -> String {
 /// Splits only on separators the speaker actually voiced as list breaks. It
 /// used to also split on every " and ", which tore ordinary phrases ("bread
 /// and butter", "Jill and I agreed") into two bullets.
+/// Notes mode must not reinterpret an already structured numbered list.
+pub(crate) fn format_dictation_notes(text: &str) -> String {
+    if !crate::dictation_fidelity::numbered_list_markers(text).is_empty() {
+        return text.trim().to_string();
+    }
+    bulletize_text(text)
+}
+
 pub(crate) fn bulletize_text(text: &str) -> String {
     let mut items: Vec<String> = text
         .split([',', ';', '\n'])
@@ -1760,6 +1768,11 @@ pub(crate) async fn prepare_dictation_formatting_request(
         system_prompt
     };
 
+    let system_prompt = format!(
+        "{}\n\n{}",
+        system_prompt,
+        crate::dictation_fidelity::CLEANUP_INSTRUCTION
+    );
     Ok(PreparedDictationFormatting {
         provider,
         selected_model,
@@ -1790,7 +1803,7 @@ pub(crate) async fn execute_dictation_formatting_request(
     )
     .await?;
     let budget = runtime.model_budget(llm::CompletionPurpose::Generic);
-    runtime
+    let output = runtime
         .execute(
             llm::CompletionPurpose::Generic,
             Some(prepared.system_prompt.clone()),
@@ -1806,7 +1819,53 @@ pub(crate) async fn execute_dictation_formatting_request(
         )
         .await
         .map(|response| response.text)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    crate::dictation_fidelity::validate_cleanup(transcript, &output)?;
+    Ok(output)
+}
+
+/// Automatic cleanup is constrained; explicit rewrite commands and translation
+/// deliberately keep using `run_custom_dictation_transform_*` below.
+pub(crate) async fn run_dictation_cleanup_with_selected_provider(
+    state: &AppState,
+    input: &str,
+    system_prompt: &str,
+) -> Result<(String, AnalysisProvider, String), String> {
+    let prompt = format!(
+        "{}\n\n{}",
+        system_prompt,
+        crate::dictation_fidelity::CLEANUP_INSTRUCTION
+    );
+    let result =
+        run_custom_dictation_transform_with_selected_provider(state, input, &prompt).await?;
+    crate::dictation_fidelity::validate_cleanup(input, &result.0)?;
+    Ok(result)
+}
+
+pub(crate) async fn run_dictation_cleanup_with_provider(
+    state: &AppState,
+    input: &str,
+    system_prompt: &str,
+    provider: AnalysisProvider,
+    selected_model: &str,
+    remote_processing_enabled: bool,
+) -> Result<(String, AnalysisProvider, String), String> {
+    let prompt = format!(
+        "{}\n\n{}",
+        system_prompt,
+        crate::dictation_fidelity::CLEANUP_INSTRUCTION
+    );
+    let result = run_custom_dictation_transform_with_provider(
+        state,
+        input,
+        &prompt,
+        provider,
+        selected_model,
+        remote_processing_enabled,
+    )
+    .await?;
+    crate::dictation_fidelity::validate_cleanup(input, &result.0)?;
+    Ok(result)
 }
 
 pub(crate) async fn run_custom_dictation_transform_with_selected_provider(
