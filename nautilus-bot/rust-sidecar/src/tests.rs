@@ -3476,18 +3476,18 @@ fn sweep_removes_orphaned_dictation_audio_only() {
 }
 
 #[test]
-fn sanitize_dictation_output_collapses_repeated_runs() {
+fn sanitize_dictation_output_preserves_repeated_runs_without_acoustic_evidence() {
     let repeated = "Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3.";
     let sanitized = sanitize_dictation_output(repeated, repeated);
-    assert_eq!(sanitized, "Testing: 1, 2, 3.");
+    assert_eq!(sanitized, repeated);
 }
 
 #[test]
-fn sanitize_dictation_output_prefers_non_repetitive_fallback() {
+fn sanitize_dictation_output_does_not_guess_that_repetition_is_hallucination() {
     let candidate = "Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3.";
     let fallback = "testing 1,2,3 this is a test.";
     let sanitized = sanitize_dictation_output(candidate, fallback);
-    assert_eq!(sanitized, "testing 1,2,3 this is a test.");
+    assert_eq!(sanitized, candidate);
 }
 
 #[test]
@@ -7661,4 +7661,42 @@ fn no_command_is_dispatched_twice() {
         duplicated.is_empty(),
         "these commands have more than one arm, so all but the first are dead: {duplicated:?}"
     );
+}
+
+#[test]
+fn notes_mode_preserves_numbered_lists_starting_above_one() {
+    let text = "Continue here:\n5. Review auth, not off.\n6. Do not merge.";
+    assert_eq!(format_dictation_notes(text), text);
+    assert_eq!(
+        format_dictation_notes("apples, oranges"),
+        "- apples\n- oranges"
+    );
+}
+
+#[test]
+fn rewrite_shorter_preserves_like_repairs_acronyms_and_paragraphs() {
+    let source = "I, like, want orange, err, pale yellow.\n\nThe ER is, like, closed.";
+    assert_eq!(rewrite_shorter_text(source), source);
+    assert_eq!(
+        rewrite_shorter_text("um I, like, agree.\n\nuh Keep this."),
+        "I, like, agree.\n\nKeep this."
+    );
+}
+
+#[test]
+fn sanitize_dictation_output_preserves_every_short_answer_in_long_dictation() {
+    let source = (0..150)
+        .map(|_| "A. Agreed. Agreed. Agreed. Keep all of this context.\n")
+        .collect::<String>();
+    let sanitized = sanitize_dictation_output(&source, &source);
+    assert_eq!(sanitized, source.trim());
+    assert_eq!(sanitized.matches("Agreed.").count(), 450);
+    assert_eq!(sanitize_dictation_output("", &source), source.trim());
+}
+
+#[test]
+fn rewrite_professional_text_preserves_numbered_item_and_paragraph_breaks() {
+    let source =
+        "5. Review, do not merge.\n6. Ship only after approval.\n\nLike, keep this context.";
+    assert_eq!(rewrite_professional_text(source), source);
 }

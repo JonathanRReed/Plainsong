@@ -10,6 +10,20 @@ hardening pass. The source version and numeric macOS build version are now
 signed candidate being notarized, stapled, installed, and exercised on Apple
 Silicon. See `LAUNCH.md` for that boundary.
 
+### Dictation fidelity
+- Keep resumed numbered lists intact in Notes mode and reject AI cleanup that
+  renumbers, drops, adds, or reorders dictated words. Negation and intentional
+  "like" survive automatic formatting; explicit rewrite commands stay separate.
+- Admit short dictionary hints after an oversized candidate instead of discarding
+  every later term. No built-in global "off" to "auth" replacement is added.
+- Resolve unambiguous punctuated single-word "er/err/erm" repairs when local smart
+  formatting is enabled. Ambiguous repairs remain visible.
+- Preserve repeated short answers in raw and final dictation instead of deduping
+  them as presumed hallucinations. Keep paragraph breaks, acronyms such as ER,
+  and meaningful interjections in the local fallback.
+- Recognition errors and uncaptured audio are not repaired by these text-stage
+  checks. See [dictation fidelity](docs/dictation-fidelity.md) for scope and QA.
+
 ### Documented
 - Plainsong's own speaker separation could not report a turn shorter than five
   seconds: it discarded any turn under that length as noise. On a five-minute

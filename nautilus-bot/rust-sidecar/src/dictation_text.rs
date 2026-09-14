@@ -230,25 +230,17 @@ pub(crate) fn should_replace_with_retry_transcript(primary: &str, retry: &str) -
     retry_text.split_whitespace().count() > primary_text.split_whitespace().count()
 }
 
+/// Keep dictation verbatim after stripping complete non-speech markers.
+/// Repetition alone is not acoustic evidence of hallucination: repeated "A"
+/// and "agreed" answers are real content, including in the saved raw text.
+/// Automatic AI output is checked separately against its immediate input.
 pub(crate) fn sanitize_dictation_output(candidate: &str, fallback: &str) -> String {
     let candidate = strip_non_speech_placeholder(candidate);
-    let fallback = strip_non_speech_placeholder(fallback);
-    let candidate_was_repetitive = looks_repetitive_hallucination(&candidate);
-
-    let cleaned = collapse_repeated_sentence_runs(&candidate);
-    if cleaned.trim().is_empty() {
-        return fallback;
+    if candidate.is_empty() {
+        strip_non_speech_placeholder(fallback)
+    } else {
+        candidate
     }
-
-    if candidate_was_repetitive || looks_repetitive_hallucination(&cleaned) {
-        if !fallback.trim().is_empty() && !looks_repetitive_hallucination(&fallback) {
-            return collapse_repeated_sentence_runs(&fallback);
-        }
-
-        return dedupe_sentence_inventory(&cleaned);
-    }
-
-    cleaned
 }
 
 pub(crate) fn sanitize_meeting_segment_text(text: &str) -> String {
@@ -451,20 +443,7 @@ pub(crate) fn rewrite_shorter_text(text: &str) -> String {
 }
 
 pub(crate) fn strip_light_dictation_disfluencies(text: &str) -> String {
-    text.split_whitespace()
-        .filter(|token| {
-            let normalized = token
-                .trim_matches(|ch: char| !ch.is_alphanumeric())
-                .to_ascii_lowercase();
-            !matches!(
-                normalized.as_str(),
-                "um" | "uh" | "umm" | "uhh" | "er" | "erm" | "ah"
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
+    crate::dictation_fidelity::strip_optional_disfluencies(text)
 }
 
 pub(crate) fn rewrite_professional_text(text: &str) -> String {
@@ -472,8 +451,8 @@ pub(crate) fn rewrite_professional_text(text: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = normalized.chars();
+    // A local fallback must not flatten numbered items or paragraph breaks.
+    let mut chars = trimmed.chars();
     let Some(first) = chars.next() else {
         return String::new();
     };
@@ -483,6 +462,14 @@ pub(crate) fn rewrite_professional_text(text: &str) -> String {
         output.push('.');
     }
     output
+}
+
+/// Notes mode must not reinterpret an already structured numbered list.
+pub(crate) fn format_dictation_notes(text: &str) -> String {
+    if !crate::dictation_fidelity::numbered_list_markers(text).is_empty() {
+        return text.trim().to_string();
+    }
+    bulletize_text(text)
 }
 
 /// Local "turn this into bullets" fallback.
@@ -840,13 +827,13 @@ pub(crate) const DICTATION_NUMBER_PRESERVATION_INSTRUCTION: &str =
 pub(crate) fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
     match normalize_dictation_mode_preset(mode_preset) {
         "messages" => Some(
-            "Rewrite the user's text as a short, natural message. Keep it concise, clear, and conversational. Keep numerals, currency, times and dates exactly as written. Return only the final message.",
+            "Format the user's words as a natural message without shortening or paraphrasing them. Keep numerals, currency, times and dates exactly as written. Return only the final message.",
         ),
         "email" => Some(
-            "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Keep numerals, currency, times and dates exactly as written. Return only the final text.",
+            "Format the user's words as email-ready prose. Improve paragraph structure, punctuation, and capitalization without paraphrasing. Keep numerals, currency, times and dates exactly as written. Return only the final text.",
         ),
         "meeting_follow_up" => Some(
-            "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Keep numerals, currency, times and dates exactly as written. Return only the final follow-up text.",
+            "Format the user's words as a meeting follow-up without shortening them. Preserve all action items, owners, and next steps. Keep numerals, currency, times and dates exactly as written. Return only the final follow-up text.",
         ),
         _ => None,
     }
@@ -1597,7 +1584,7 @@ pub(crate) fn generate_default_dictation_prompt(
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text.
             The user is currently dictating into the application: '{}'.
             Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). {}
-            Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+            Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um' or 'uh'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
             {}
             Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
             {}
@@ -1610,7 +1597,7 @@ pub(crate) fn generate_default_dictation_prompt(
     } else {
         format!(
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text. {}
-        Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um', 'uh', or 'ah'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+        Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um' or 'uh'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
         {}
         Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
         {}
@@ -1760,6 +1747,11 @@ pub(crate) async fn prepare_dictation_formatting_request(
         system_prompt
     };
 
+    let system_prompt = format!(
+        "{}\n\n{}",
+        system_prompt,
+        crate::dictation_fidelity::CLEANUP_INSTRUCTION
+    );
     Ok(PreparedDictationFormatting {
         provider,
         selected_model,
@@ -1790,7 +1782,7 @@ pub(crate) async fn execute_dictation_formatting_request(
     )
     .await?;
     let budget = runtime.model_budget(llm::CompletionPurpose::Generic);
-    runtime
+    let output = runtime
         .execute(
             llm::CompletionPurpose::Generic,
             Some(prepared.system_prompt.clone()),
@@ -1806,7 +1798,53 @@ pub(crate) async fn execute_dictation_formatting_request(
         )
         .await
         .map(|response| response.text)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    crate::dictation_fidelity::validate_cleanup(transcript, &output)?;
+    Ok(output)
+}
+
+/// Automatic cleanup is constrained; explicit rewrite commands and translation
+/// deliberately keep using `run_custom_dictation_transform_*` below.
+pub(crate) async fn run_dictation_cleanup_with_selected_provider(
+    state: &AppState,
+    input: &str,
+    system_prompt: &str,
+) -> Result<(String, AnalysisProvider, String), String> {
+    let prompt = format!(
+        "{}\n\n{}",
+        system_prompt,
+        crate::dictation_fidelity::CLEANUP_INSTRUCTION
+    );
+    let result =
+        run_custom_dictation_transform_with_selected_provider(state, input, &prompt).await?;
+    crate::dictation_fidelity::validate_cleanup(input, &result.0)?;
+    Ok(result)
+}
+
+pub(crate) async fn run_dictation_cleanup_with_provider(
+    state: &AppState,
+    input: &str,
+    system_prompt: &str,
+    provider: AnalysisProvider,
+    selected_model: &str,
+    remote_processing_enabled: bool,
+) -> Result<(String, AnalysisProvider, String), String> {
+    let prompt = format!(
+        "{}\n\n{}",
+        system_prompt,
+        crate::dictation_fidelity::CLEANUP_INSTRUCTION
+    );
+    let result = run_custom_dictation_transform_with_provider(
+        state,
+        input,
+        &prompt,
+        provider,
+        selected_model,
+        remote_processing_enabled,
+    )
+    .await?;
+    crate::dictation_fidelity::validate_cleanup(input, &result.0)?;
+    Ok(result)
 }
 
 pub(crate) async fn run_custom_dictation_transform_with_selected_provider(

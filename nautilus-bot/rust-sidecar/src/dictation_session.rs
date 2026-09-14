@@ -1736,7 +1736,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
                             );
                             let transform = tokio::time::timeout(
                                 format_timeout,
-                                run_custom_dictation_transform_with_provider(
+                                run_dictation_cleanup_with_provider(
                                     state,
                                     final_text.as_str(),
                                     prompt.as_str(),
@@ -1816,7 +1816,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 }
             }
             "notes" => {
-                let bulletized = bulletize_text(final_text.as_str());
+                let bulletized = format_dictation_notes(final_text.as_str());
                 if bulletized != final_text {
                     final_text = bulletized;
                     pipeline_stage_keys.push("mode_transform".to_string());

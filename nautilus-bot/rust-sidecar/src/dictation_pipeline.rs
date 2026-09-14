@@ -67,6 +67,15 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
         };
     }
 
+    if input.smart_formatting_enabled {
+        let repaired = crate::dictation_fidelity::resolve_spoken_repairs(&text);
+        if repaired != text {
+            text = repaired;
+            formatting_applied = true;
+            pipeline_stage_keys.push("spoken_correction".to_string());
+        }
+    }
+
     let (normalized_text, dictionary_applied) = apply_dictionary_entries(
         text.as_str(),
         input.dictionary_entries,
@@ -149,8 +158,9 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
             input.mode_preset,
             input.destination_category,
         );
-        formatting_applied = formatted_text != text;
-        if formatting_applied {
+        let locally_formatted = formatted_text != text;
+        formatting_applied |= locally_formatted;
+        if locally_formatted {
             pipeline_stage_keys.push("smart_formatting".to_string());
         }
         text = formatted_text;
@@ -501,6 +511,84 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn inline_repair_precedes_dictionary_and_respects_literal_mode() {
+        let entries = [dictionary_entry("yellow", "amber")];
+        for smart in [false, true] {
+            let result = apply_dictation_pipeline(DictationPipelineInput {
+                text: "I want orange, err, yellow.",
+                dictionary_entries: &entries,
+                snippets: &[],
+                app_target: None,
+                mode_preset: "voice",
+                smart_formatting_enabled: smart,
+                numbers_as_digits: false,
+                recent_inserted_text: Some("Do not touch this previous insertion."),
+                command_mode_enabled: false,
+                destination_category: DictationAppCategory::Other,
+            });
+            assert_eq!(
+                result.text,
+                if smart {
+                    "I want amber."
+                } else {
+                    "I want orange, err, amber."
+                }
+            );
+            assert_eq!(result.dictionary_applied_count, 1);
+            assert_eq!(result.formatting_applied, smart);
+            assert!(!result.undo_previous_insert);
+            assert_eq!(
+                result
+                    .pipeline_stage_keys
+                    .contains(&"spoken_correction".to_string()),
+                smart
+            );
+        }
+    }
+
+    #[test]
+    fn technical_homophone_dictionary_is_scoped_and_hints_only_the_preferred_word() {
+        let mut entry = dictionary_entry("off", "auth");
+        entry.category_scope = Some("code_editor".to_string());
+        let entries = [entry];
+        let candidates = vocabulary_candidates_from_entries(&entries, &[]);
+        let hint = crate::dictation_parity::build_vocabulary_hint(
+            &candidates,
+            Some("Code"),
+            DictationAppCategory::CodeEditor,
+        )
+        .expect("auth should be hinted");
+        assert_eq!(hint.terms(), &["auth"]);
+        assert_eq!(
+            apply_learned_dictionary(
+                "fix off",
+                &entries,
+                Some("Code"),
+                DictationAppCategory::CodeEditor
+            ),
+            ("fix auth".to_string(), 1)
+        );
+        assert_eq!(
+            apply_learned_dictionary(
+                "turn it off",
+                &entries,
+                Some("Mail"),
+                DictationAppCategory::Email
+            ),
+            ("turn it off".to_string(), 0)
+        );
+        assert_eq!(
+            apply_learned_dictionary(
+                "office",
+                &entries,
+                Some("Code"),
+                DictationAppCategory::CodeEditor
+            ),
+            ("office".to_string(), 0)
+        );
     }
 
     #[test]
