@@ -98,8 +98,9 @@ describe("external URL policy", () => {
     expect(isAllowedExternalUrl("")).toBe(false);
   });
 
-  it("normalizes case and punycode before comparing", () => {
+  it("normalizes case, punycode, and trailing dots before comparing", () => {
     expect(isAllowedExternalUrl("https://GitHub.COM/JonathanRReed/Plainsong")).toBe(true);
+    expect(isAllowedExternalUrl("https://github.com./JonathanRReed/Plainsong")).toBe(true);
     // A homograph host is a different host once the parser has resolved it.
     expect(isAllowedExternalUrl("https://xn--githb-8va.com/")).toBe(false);
   });
