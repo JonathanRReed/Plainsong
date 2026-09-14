@@ -99,5 +99,11 @@ export function isAllowedExternalUrl(rawUrl: string): boolean {
     return false;
   }
 
+  // Non-standard ports (anything other than empty/default port 443) are rejected
+  // to prevent port smuggling or connecting to non-standard services on allowed hosts.
+  if (url.port !== "") {
+    return false;
+  }
+
   return ALLOWED_EXTERNAL_HOST_SET.has(url.hostname);
 }

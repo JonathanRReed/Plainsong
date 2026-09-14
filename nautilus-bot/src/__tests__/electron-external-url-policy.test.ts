@@ -78,6 +78,15 @@ describe("external URL policy", () => {
     expect(isAllowedExternalUrl("https://user:pass@github.com/")).toBe(false);
   });
 
+  it("rejects non-standard ports on allowed hosts", () => {
+    // Non-standard ports should be rejected to prevent connecting to arbitrary services.
+    expect(isAllowedExternalUrl("https://github.com:8443/")).toBe(false);
+    expect(isAllowedExternalUrl("https://github.com:8080/")).toBe(false);
+    expect(isAllowedExternalUrl("https://huggingface.co:80/")).toBe(false);
+    // Explicit standard HTTPS port 443 parses with an empty port string and is allowed.
+    expect(isAllowedExternalUrl("https://github.com:443/")).toBe(true);
+  });
+
   it("refuses every scheme other than https, mailto included", () => {
     // mailto: used to be allowed and nothing ever produced one.
     expect(isAllowedExternalUrl("mailto:support@plainsong.example")).toBe(false);
