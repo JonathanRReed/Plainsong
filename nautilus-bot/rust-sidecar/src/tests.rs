@@ -7672,3 +7672,13 @@ fn notes_mode_preserves_numbered_lists_starting_above_one() {
         "- apples\n- oranges"
     );
 }
+
+#[test]
+fn rewrite_shorter_preserves_like_repairs_acronyms_and_paragraphs() {
+    let source = "I, like, want orange, err, pale yellow.\n\nThe ER is, like, closed.";
+    assert_eq!(rewrite_shorter_text(source), source);
+    assert_eq!(
+        rewrite_shorter_text("um I, like, agree.\n\nuh Keep this."),
+        "I, like, agree.\n\nKeep this."
+    );
+}

@@ -6,7 +6,8 @@ pub(crate) const CLEANUP_INSTRUCTION: &str =
      including lists starting above one. Do not renumber or summarize. Never drop, add, or move \
      negation (not, never, haven't), conditions, technical terms, or short answers. Only change \
      punctuation, capitalization, and unambiguous contraction spelling. Explicit rewrite commands \
-     are separate from automatic cleanup.";
+     are separate from automatic cleanup. Keep intentional 'like' and ambiguous er/err/erm \
+     repair cues. Only isolated um/uh hesitation sounds may be removed; keep quoted words and acronyms.";
 
 pub(crate) fn numbered_list_markers(text: &str) -> Vec<&str> {
     text.lines()
@@ -40,7 +41,9 @@ pub(crate) fn validate_cleanup(source: &str, candidate: &str) -> Result<(), Stri
 /// "not" to another clause is just as dangerous as dropping it. This is a
 /// conservative cleanup contract, not a semantic-equivalence classifier.
 fn content_tokens(text: &str) -> Vec<String> {
-    let normalized = text.replace(['’', '‘'], "'").to_lowercase();
+    let normalized = strip_optional_disfluencies(text)
+        .replace(['’', '‘'], "'")
+        .to_lowercase();
     normalized
         .split(|ch: char| !ch.is_alphanumeric() && ch != '\'' && ch != '_')
         .map(|word| word.trim_matches('\''))
@@ -89,6 +92,24 @@ fn content_tokens(text: &str) -> Vec<String> {
             vec![word.to_string()]
         })
         .collect()
+}
+
+/// Optional hesitation cleanup, not a stop-word list. Preserve discourse words
+/// (especially "like"), repair cues, acronyms, quoted words and line breaks.
+pub(crate) fn strip_optional_disfluencies(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for piece in text.split_inclusive(char::is_whitespace) {
+        let word = piece.trim_end().trim_end_matches([',', '.', '!', '?']);
+        if matches!(
+            word,
+            "um" | "Um" | "umm" | "Umm" | "uh" | "Uh" | "uhh" | "Uhh"
+        ) {
+            output.extend(piece.chars().filter(|ch| matches!(ch, '\n' | '\r')));
+        } else {
+            output.push_str(piece);
+        }
+    }
+    output.trim().to_string()
 }
 
 /// Resolve only a punctuated, single-word repair within this utterance.
@@ -225,5 +246,14 @@ mod tests {
                 "{source} => {candidate}"
             );
         }
+    }
+    #[test]
+    fn cleanup_preserves_like_but_can_remove_isolated_hesitation_sounds() {
+        assert!(validate_cleanup("I, like, agree", "I agree").is_err());
+        assert!(validate_cleanup("I like it. Like, really.", "I like it, really.").is_err());
+        assert!(validate_cleanup("Um, I, like, agree.", "I, like, agree.").is_ok());
+        assert!(validate_cleanup("UM and ER", "and ER").is_err());
+        assert!(validate_cleanup("Say 'um'", "Say").is_err());
+        assert!(validate_cleanup("Ah, now I see", "Now I see").is_err());
     }
 }
