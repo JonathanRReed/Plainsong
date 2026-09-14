@@ -3476,18 +3476,18 @@ fn sweep_removes_orphaned_dictation_audio_only() {
 }
 
 #[test]
-fn sanitize_dictation_output_collapses_repeated_runs() {
+fn sanitize_dictation_output_preserves_repeated_runs_without_acoustic_evidence() {
     let repeated = "Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3.";
     let sanitized = sanitize_dictation_output(repeated, repeated);
-    assert_eq!(sanitized, "Testing: 1, 2, 3.");
+    assert_eq!(sanitized, repeated);
 }
 
 #[test]
-fn sanitize_dictation_output_prefers_non_repetitive_fallback() {
+fn sanitize_dictation_output_does_not_guess_that_repetition_is_hallucination() {
     let candidate = "Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3. Testing: 1, 2, 3.";
     let fallback = "testing 1,2,3 this is a test.";
     let sanitized = sanitize_dictation_output(candidate, fallback);
-    assert_eq!(sanitized, "testing 1,2,3 this is a test.");
+    assert_eq!(sanitized, candidate);
 }
 
 #[test]
@@ -7681,4 +7681,15 @@ fn rewrite_shorter_preserves_like_repairs_acronyms_and_paragraphs() {
         rewrite_shorter_text("um I, like, agree.\n\nuh Keep this."),
         "I, like, agree.\n\nKeep this."
     );
+}
+
+#[test]
+fn sanitize_dictation_output_preserves_every_short_answer_in_long_dictation() {
+    let source = (0..150)
+        .map(|_| "A. Agreed. Agreed. Agreed. Keep all of this context.\n")
+        .collect::<String>();
+    let sanitized = sanitize_dictation_output(&source, &source);
+    assert_eq!(sanitized, source.trim());
+    assert_eq!(sanitized.matches("Agreed.").count(), 450);
+    assert_eq!(sanitize_dictation_output("", &source), source.trim());
 }

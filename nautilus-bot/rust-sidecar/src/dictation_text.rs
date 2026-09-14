@@ -230,25 +230,17 @@ pub(crate) fn should_replace_with_retry_transcript(primary: &str, retry: &str) -
     retry_text.split_whitespace().count() > primary_text.split_whitespace().count()
 }
 
+/// Keep dictation verbatim after stripping complete non-speech markers.
+/// Repetition alone is not acoustic evidence of hallucination: repeated "A"
+/// and "agreed" answers are real content, including in the saved raw text.
+/// Automatic AI output is checked separately against its immediate input.
 pub(crate) fn sanitize_dictation_output(candidate: &str, fallback: &str) -> String {
     let candidate = strip_non_speech_placeholder(candidate);
-    let fallback = strip_non_speech_placeholder(fallback);
-    let candidate_was_repetitive = looks_repetitive_hallucination(&candidate);
-
-    let cleaned = collapse_repeated_sentence_runs(&candidate);
-    if cleaned.trim().is_empty() {
-        return fallback;
+    if candidate.is_empty() {
+        strip_non_speech_placeholder(fallback)
+    } else {
+        candidate
     }
-
-    if candidate_was_repetitive || looks_repetitive_hallucination(&cleaned) {
-        if !fallback.trim().is_empty() && !looks_repetitive_hallucination(&fallback) {
-            return collapse_repeated_sentence_runs(&fallback);
-        }
-
-        return dedupe_sentence_inventory(&cleaned);
-    }
-
-    cleaned
 }
 
 pub(crate) fn sanitize_meeting_segment_text(text: &str) -> String {

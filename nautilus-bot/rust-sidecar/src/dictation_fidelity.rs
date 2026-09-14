@@ -256,4 +256,16 @@ mod tests {
         assert!(validate_cleanup("Say 'um'", "Say").is_err());
         assert!(validate_cleanup("Ah, now I see", "Now I see").is_err());
     }
+    #[test]
+    fn cleanup_rejects_missing_middle_tail_and_repeated_answers_at_any_length() {
+        let source = (0..150)
+            .map(|i| format!("Answer {i}: A. Agreed. Agreed. Keep this context.\n"))
+            .collect::<String>();
+        assert!(validate_cleanup(&source, &source).is_ok());
+        assert!(validate_cleanup(&source, &source[..source.len() / 2]).is_err());
+        assert!(validate_cleanup(&source, &source.replacen("Agreed. ", "", 1)).is_err());
+        assert!(validate_cleanup("A. A. A.", "A.").is_err());
+        assert!(validate_cleanup("Agreed", "").is_err());
+        assert!(validate_cleanup("A", "").is_err());
+    }
 }
