@@ -3,7 +3,10 @@
 
 pub(crate) const CLEANUP_INSTRUCTION: &str =
     "Preserve the speaker's words and their order. Keep numbered-list labels and item breaks, \
-     including lists starting above one. Do not renumber or summarize.";
+     including lists starting above one. Do not renumber or summarize. Never drop, add, or move \
+     negation (not, never, haven't), conditions, technical terms, or short answers. Only change \
+     punctuation, capitalization, and unambiguous contraction spelling. Explicit rewrite commands \
+     are separate from automatic cleanup.";
 
 pub(crate) fn numbered_list_markers(text: &str) -> Vec<&str> {
     text.lines()
@@ -27,7 +30,65 @@ pub(crate) fn validate_cleanup(source: &str, candidate: &str) -> Result<(), Stri
     if numbered_list_markers(source) != numbered_list_markers(candidate) {
         return Err("AI cleanup changed numbered-list labels or item breaks".to_string());
     }
+    if content_tokens(source) != content_tokens(candidate) {
+        return Err("AI cleanup changed, added, reordered, or omitted dictated words".to_string());
+    }
     Ok(())
+}
+
+/// Compare ordered words, not a word-count ratio or a bag of negations: moving
+/// "not" to another clause is just as dangerous as dropping it. This is a
+/// conservative cleanup contract, not a semantic-equivalence classifier.
+fn content_tokens(text: &str) -> Vec<String> {
+    let normalized = text.replace(['’', '‘'], "'").to_lowercase();
+    normalized
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '\'' && ch != '_')
+        .map(|word| word.trim_matches('\''))
+        .filter(|word| !word.is_empty())
+        .flat_map(|word| {
+            let expansion = match word {
+                "can't" | "cannot" => "can not",
+                "won't" => "will not",
+                "shan't" => "shall not",
+                "isn't" => "is not",
+                "aren't" => "are not",
+                "wasn't" => "was not",
+                "weren't" => "were not",
+                "don't" => "do not",
+                "doesn't" => "does not",
+                "didn't" => "did not",
+                "haven't" => "have not",
+                "hasn't" => "has not",
+                "hadn't" => "had not",
+                "couldn't" => "could not",
+                "wouldn't" => "would not",
+                "shouldn't" => "should not",
+                "mustn't" => "must not",
+                "needn't" => "need not",
+                _ => word,
+            };
+            if expansion != word {
+                return expansion
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+            }
+            for (suffix, expanded) in [
+                ("'m", "am"),
+                ("'re", "are"),
+                ("'ve", "have"),
+                ("'ll", "will"),
+            ] {
+                if let Some(subject) = word
+                    .strip_suffix(suffix)
+                    .filter(|subject| !subject.is_empty())
+                {
+                    return vec![subject.to_string(), expanded.to_string()];
+                }
+            }
+            vec![word.to_string()]
+        })
+        .collect()
 }
 
 /// Resolve only a punctuated, single-word repair within this utterance.
@@ -125,6 +186,44 @@ mod tests {
             "say orange, err, yellow again",
         ] {
             assert_eq!(resolve_spoken_repairs(text), text);
+        }
+    }
+    #[test]
+    fn cleanup_cannot_drop_add_or_move_negation() {
+        for (source, candidate) in [
+            ("I'd prefer to never merge this", "I'd prefer to merge this"),
+            ("Do not deploy", "Do deploy"),
+            ("I haven't approved this", "I have approved this"),
+            ("I haven’t approved this", "I have approved this"),
+            ("Do merge this", "Do not merge this"),
+            (
+                "Do not merge this. Do deploy that.",
+                "Do merge this. Do not deploy that.",
+            ),
+            ("Merge only after review", "Merge after review"),
+            ("Fix auth", "Fix off"),
+        ] {
+            assert!(
+                validate_cleanup(source, candidate).is_err(),
+                "{source} => {candidate}"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_allows_punctuation_case_and_unambiguous_contractions() {
+        for (source, candidate) in [
+            ("i haven't approved this", "I have not approved this."),
+            ("I haven’t approved this", "I haven't approved this."),
+            ("we can't merge", "We cannot merge."),
+            ("it won't merge", "It will not merge."),
+            ("we're ready", "We are ready."),
+            ("hello world", "Hello, world!"),
+        ] {
+            assert!(
+                validate_cleanup(source, candidate).is_ok(),
+                "{source} => {candidate}"
+            );
         }
     }
 }

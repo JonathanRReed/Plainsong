@@ -848,13 +848,13 @@ pub(crate) const DICTATION_NUMBER_PRESERVATION_INSTRUCTION: &str =
 pub(crate) fn dictation_mode_transform_prompt(mode_preset: &str) -> Option<&'static str> {
     match normalize_dictation_mode_preset(mode_preset) {
         "messages" => Some(
-            "Rewrite the user's text as a short, natural message. Keep it concise, clear, and conversational. Keep numerals, currency, times and dates exactly as written. Return only the final message.",
+            "Format the user's words as a natural message without shortening or paraphrasing them. Keep numerals, currency, times and dates exactly as written. Return only the final message.",
         ),
         "email" => Some(
-            "Rewrite the user's text into polished email-ready prose. Keep the meaning, improve structure, punctuation, and professionalism. Keep numerals, currency, times and dates exactly as written. Return only the final text.",
+            "Format the user's words as email-ready prose. Improve paragraph structure, punctuation, and capitalization without paraphrasing. Keep numerals, currency, times and dates exactly as written. Return only the final text.",
         ),
         "meeting_follow_up" => Some(
-            "Turn the user's text into a concise professional meeting follow-up. Keep action items, owners, and next steps clear. Keep numerals, currency, times and dates exactly as written. Return only the final follow-up text.",
+            "Format the user's words as a meeting follow-up without shortening them. Preserve all action items, owners, and next steps. Keep numerals, currency, times and dates exactly as written. Return only the final follow-up text.",
         ),
         _ => None,
     }
