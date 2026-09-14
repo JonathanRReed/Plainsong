@@ -82,6 +82,7 @@ describe("dictation history labels", () => {
 
   it("keeps pipeline stage labels readable", () => {
     expect(historyPipelineStageLabel("dictionary")).toBe("Dictionary");
+    expect(historyPipelineStageLabel("spoken_correction")).toBe("Spoken correction");
     expect(historyPipelineStageLabel("mode_transform")).toBe("Mode transform");
     expect(historyPipelineStageLabel("mode_transform_fallback")).toBe(
       "Mode transform fallback",

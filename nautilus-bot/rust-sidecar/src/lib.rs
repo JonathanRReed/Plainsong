@@ -383,7 +383,7 @@ const MAX_BENCHMARK_AUDIO_BYTES: usize = 6 * 1024 * 1024;
 /// delivery outcome turned out to be (see `dictation_done_message`), so they
 /// must not assert that the text was inserted — insertion can still fail.
 const DICTATION_FORMAT_FAILED_WARNING: &str =
-    "AI formatting could not run, so the text was left unformatted.";
+    "AI formatting was unavailable or changed your words; the local transcript was kept.";
 const DICTATION_FORMAT_TIMEOUT_WARNING: &str =
     "AI formatting took too long, so the text was left unformatted.";
 /// Translate-to-English through the AI lane did not come back in time or at

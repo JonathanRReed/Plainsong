@@ -464,11 +464,6 @@ pub(crate) fn rewrite_professional_text(text: &str) -> String {
     output
 }
 
-/// Local "turn this into bullets" fallback.
-///
-/// Splits only on separators the speaker actually voiced as list breaks. It
-/// used to also split on every " and ", which tore ordinary phrases ("bread
-/// and butter", "Jill and I agreed") into two bullets.
 /// Notes mode must not reinterpret an already structured numbered list.
 pub(crate) fn format_dictation_notes(text: &str) -> String {
     if !crate::dictation_fidelity::numbered_list_markers(text).is_empty() {
@@ -477,6 +472,11 @@ pub(crate) fn format_dictation_notes(text: &str) -> String {
     bulletize_text(text)
 }
 
+/// Local "turn this into bullets" fallback.
+///
+/// Splits only on separators the speaker actually voiced as list breaks. It
+/// used to also split on every " and ", which tore ordinary phrases ("bread
+/// and butter", "Jill and I agreed") into two bullets.
 pub(crate) fn bulletize_text(text: &str) -> String {
     let mut items: Vec<String> = text
         .split([',', ';', '\n'])
