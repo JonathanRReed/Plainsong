@@ -504,6 +504,48 @@ mod tests {
     }
 
     #[test]
+    fn technical_homophone_dictionary_is_scoped_and_hints_only_the_preferred_word() {
+        let mut entry = dictionary_entry("off", "auth");
+        entry.category_scope = Some("code_editor".to_string());
+        let entries = [entry];
+        let candidates = vocabulary_candidates_from_entries(&entries, &[]);
+        let hint = crate::dictation_parity::build_vocabulary_hint(
+            &candidates,
+            Some("Code"),
+            DictationAppCategory::CodeEditor,
+        )
+        .expect("auth should be hinted");
+        assert_eq!(hint.terms(), &["auth"]);
+        assert_eq!(
+            apply_learned_dictionary(
+                "fix off",
+                &entries,
+                Some("Code"),
+                DictationAppCategory::CodeEditor
+            ),
+            ("fix auth".to_string(), 1)
+        );
+        assert_eq!(
+            apply_learned_dictionary(
+                "turn it off",
+                &entries,
+                Some("Mail"),
+                DictationAppCategory::Email
+            ),
+            ("turn it off".to_string(), 0)
+        );
+        assert_eq!(
+            apply_learned_dictionary(
+                "office",
+                &entries,
+                Some("Code"),
+                DictationAppCategory::CodeEditor
+            ),
+            ("office".to_string(), 0)
+        );
+    }
+
+    #[test]
     fn pipeline_applies_dictionary_then_snippets() {
         let result = apply_dictation_pipeline(DictationPipelineInput {
             text: "open ai brb",

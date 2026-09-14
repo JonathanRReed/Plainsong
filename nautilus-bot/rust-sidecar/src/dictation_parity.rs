@@ -576,12 +576,16 @@ pub fn build_vocabulary_hint(
         } else {
             format!("{}, {term}.", &prompt[..prompt.len() - 1])
         };
-        if terms.len() >= VOCABULARY_HINT_MAX_TERMS
-            || prompt_chars + added > VOCABULARY_HINT_MAX_CHARS
+        if terms.len() >= VOCABULARY_HINT_MAX_TERMS {
+            break;
+        }
+        if prompt_chars + added > VOCABULARY_HINT_MAX_CHARS
             || VocabularyHint::estimate_prompt_tokens(&candidate_prompt)
                 > VOCABULARY_HINT_MAX_TOKENS
         {
-            break;
+            // An oversized phrase must not hide shorter, older terms such as
+            // "auth" that still fit. Keep recency order among admitted terms.
+            continue;
         }
         prompt_chars += added;
         prompt = candidate_prompt;
@@ -2111,6 +2115,20 @@ mod vocabulary_hint_tests {
 
     fn terms(hint: Option<VocabularyHint>) -> Vec<String> {
         hint.map(|hint| hint.terms().to_vec()).unwrap_or_default()
+    }
+
+    #[test]
+    fn short_technical_term_still_fits_after_an_oversized_candidate() {
+        let mut candidates: Vec<_> = (0..12)
+            .map(|index| candidate(&format!("{index:040}"), 100 - index))
+            .collect();
+        candidates.push(candidate(&"x".repeat(50), 20));
+        candidates.push(candidate("auth", 1));
+        let hint = build_vocabulary_hint(&candidates, None, DictationAppCategory::Other)
+            .expect("terms fit");
+        assert!(hint.terms().iter().any(|term| term == "auth"));
+        assert!(hint.as_prompt().chars().count() <= VOCABULARY_HINT_MAX_CHARS);
+        assert!(hint.estimated_prompt_tokens() <= VOCABULARY_HINT_MAX_TOKENS);
     }
 
     #[test]
