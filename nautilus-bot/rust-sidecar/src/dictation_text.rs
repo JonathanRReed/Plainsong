@@ -451,8 +451,8 @@ pub(crate) fn rewrite_professional_text(text: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = normalized.chars();
+    // A local fallback must not flatten numbered items or paragraph breaks.
+    let mut chars = trimmed.chars();
     let Some(first) = chars.next() else {
         return String::new();
     };

@@ -7693,3 +7693,10 @@ fn sanitize_dictation_output_preserves_every_short_answer_in_long_dictation() {
     assert_eq!(sanitized.matches("Agreed.").count(), 450);
     assert_eq!(sanitize_dictation_output("", &source), source.trim());
 }
+
+#[test]
+fn rewrite_professional_text_preserves_numbered_item_and_paragraph_breaks() {
+    let source =
+        "5. Review, do not merge.\n6. Ship only after approval.\n\nLike, keep this context.";
+    assert_eq!(rewrite_professional_text(source), source);
+}
