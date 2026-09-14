@@ -189,6 +189,8 @@ export function historyPipelineStageLabel(stageKey: string): string {
   }
 
   switch (stageKey) {
+    case "spoken_correction":
+      return "Spoken correction";
     case "dictionary":
       return "Dictionary";
     case "translate_to_english":
