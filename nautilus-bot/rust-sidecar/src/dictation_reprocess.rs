@@ -393,14 +393,12 @@ pub(crate) async fn reprocess_dictation_impl(
                         }
                         Err(error) => {
                             tracing::warn!(
-                                "Process again: '{}' transform fell back to the local rewrite: {}",
+                                "Process again: '{}' transform kept the local transcript: {}",
                                 base_preset,
                                 error
                             );
-                            final_text = match base_preset.as_str() {
-                                "messages" => rewrite_shorter_text(&final_text),
-                                _ => rewrite_professional_text(&final_text),
-                            };
+                            // Keep the immediate pre-AI text verbatim, just as live
+                            // dictation does. Do not run another rewrite after rejection.
                             pipeline_stage_keys.push("mode_transform_fallback".to_string());
                         }
                     }
