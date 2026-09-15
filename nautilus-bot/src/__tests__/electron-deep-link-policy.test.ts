@@ -47,6 +47,10 @@ describe("parseDeepLink", () => {
       ok: false,
       reason: "renderer_origin",
     });
+    expect(parseDeepLink("plainsong://bundle./index.html")).toEqual({
+      ok: false,
+      reason: "renderer_origin",
+    });
     expect(parseDeepLink("https://plainsong.example/record")).toEqual({
       ok: false,
       reason: "wrong_scheme",
@@ -54,6 +58,16 @@ describe("parseDeepLink", () => {
     expect(parseDeepLink("file:///etc/passwd")).toEqual({ ok: false, reason: "wrong_scheme" });
     expect(parseDeepLink("not a url")).toEqual({ ok: false, reason: "not_a_url" });
     expect(parseDeepLink("")).toEqual({ ok: false, reason: "not_a_url" });
+  });
+
+  it("normalizes trailing dots on command hostnames", () => {
+    expect(parseDeepLink("plainsong://record./")).toEqual({ ok: true, command: { kind: "record" } });
+    expect(parseDeepLink("plainsong://stop./")).toEqual({ ok: true, command: { kind: "stop" } });
+    expect(parseDeepLink("plainsong://open./")).toEqual({ ok: true, command: { kind: "open" } });
+    expect(parseDeepLink("plainsong://mode.?key=notes")).toEqual({
+      ok: true,
+      command: { kind: "mode", key: "notes" },
+    });
   });
 
   it("refuses text payloads: queries, fragments, userinfo and ports", () => {
