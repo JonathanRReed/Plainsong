@@ -20,6 +20,9 @@ describe("packaged renderer protocol", () => {
 
   it("recognizes only the packaged renderer host", () => {
     expect(isRendererUrl("plainsong://bundle/index.html")).toBe(true);
+    expect(isRendererUrl("plainsong://bundle./index.html")).toBe(true);
+    expect(isRendererUrl("plainsong://user:pass@bundle/index.html")).toBe(false);
+    expect(isRendererUrl("plainsong://bundle:8080/index.html")).toBe(false);
     expect(isRendererUrl("plainsong://attacker/index.html")).toBe(false);
     expect(isRendererUrl("file:///tmp/index.html")).toBe(false);
     expect(isRendererUrl("https://example.com")).toBe(false);
