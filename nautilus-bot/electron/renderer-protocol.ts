@@ -95,7 +95,15 @@ export function rendererUrl(query?: Record<string, string>): string {
 export function isRendererUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
-    return url.protocol === `${RENDERER_SCHEME}:` && url.host === RENDERER_HOST;
+    if (url.protocol !== `${RENDERER_SCHEME}:`) {
+      return false;
+    }
+    // Reject embedded credentials or non-default ports
+    if (url.username || url.password || url.port !== "") {
+      return false;
+    }
+    const hostname = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
+    return hostname === RENDERER_HOST;
   } catch {
     return false;
   }

@@ -1,0 +1,4 @@
+## 2025-05-18 - Electron Protocol URL Validation Bypass Prevention
+**Vulnerability:** `isRendererUrl` validated `plainsong://` renderer URLs using `url.host === RENDERER_HOST`. `url.host` excludes URL userinfo credentials (`username`/`password`) and does not normalize trailing DNS root dots (e.g. `bundle.`), allowing `plainsong://user:pass@bundle/index.html` or non-standard port variations to bypass validation.
+**Learning:** Checking `url.host` alone in custom scheme validation is insufficient because standard `URL` objects parse embedded credentials into `username`/`password` while leaving `host` as `bundle`.
+**Prevention:** Explicitly check and reject `url.username`, `url.password`, and `url.port !== ""` and strip trailing DNS root dots on `url.hostname` when validating custom renderer/deep link scheme origins.
