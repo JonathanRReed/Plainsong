@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   isRendererUrl,
+  playbackTokenFromUrl,
   rendererUrl,
   resolveRendererAssetPath,
 } from "../../electron/renderer-protocol";
@@ -20,9 +21,20 @@ describe("packaged renderer protocol", () => {
 
   it("recognizes only the packaged renderer host", () => {
     expect(isRendererUrl("plainsong://bundle/index.html")).toBe(true);
+    expect(isRendererUrl("plainsong://bundle./index.html")).toBe(true);
+    expect(isRendererUrl("plainsong://user:pass@bundle/index.html")).toBe(false);
+    expect(isRendererUrl("plainsong://bundle:8080/index.html")).toBe(false);
     expect(isRendererUrl("plainsong://attacker/index.html")).toBe(false);
     expect(isRendererUrl("file:///tmp/index.html")).toBe(false);
     expect(isRendererUrl("https://example.com")).toBe(false);
+  });
+
+  it("validates playback tokens securely", () => {
+    const validToken = "0123456789abcdef0123456789abcdef";
+    expect(playbackTokenFromUrl(`plainsong://playback/${validToken}`)).toBe(validToken);
+    expect(playbackTokenFromUrl(`plainsong://playback./${validToken}`)).toBe(validToken);
+    expect(playbackTokenFromUrl(`plainsong://user:pass@playback/${validToken}`)).toBe(null);
+    expect(playbackTokenFromUrl(`plainsong://playback:8080/${validToken}`)).toBe(null);
   });
 
   it("resolves renderer assets inside the packaged dist directory", () => {

@@ -95,7 +95,11 @@ export function rendererUrl(query?: Record<string, string>): string {
 export function isRendererUrl(rawUrl: string): boolean {
   try {
     const url = new URL(rawUrl);
-    return url.protocol === `${RENDERER_SCHEME}:` && url.host === RENDERER_HOST;
+    if (url.username || url.password || url.port) {
+      return false;
+    }
+    const hostname = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
+    return url.protocol === `${RENDERER_SCHEME}:` && hostname.toLowerCase() === RENDERER_HOST;
   } catch {
     return false;
   }
@@ -142,7 +146,11 @@ export function playbackTokenFromUrl(rawUrl: string): string | null {
   } catch {
     return null;
   }
-  if (url.protocol !== `${RENDERER_SCHEME}:` || url.host !== PLAYBACK_HOST) {
+  if (url.username || url.password || url.port) {
+    return null;
+  }
+  const hostname = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
+  if (url.protocol !== `${RENDERER_SCHEME}:` || hostname.toLowerCase() !== PLAYBACK_HOST) {
     return null;
   }
   if (url.search || url.hash) {
