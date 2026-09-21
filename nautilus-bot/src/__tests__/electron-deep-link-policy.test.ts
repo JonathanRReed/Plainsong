@@ -16,6 +16,7 @@ describe("parseDeepLink", () => {
   it("accepts exactly the six documented commands", () => {
     expect(parseDeepLink("plainsong://record")).toEqual({ ok: true, command: { kind: "record" } });
     expect(parseDeepLink("plainsong://record/")).toEqual({ ok: true, command: { kind: "record" } });
+    expect(parseDeepLink("plainsong://record./")).toEqual({ ok: true, command: { kind: "record" } });
     expect(parseDeepLink("plainsong://stop")).toEqual({ ok: true, command: { kind: "stop" } });
     expect(parseDeepLink("plainsong://open")).toEqual({ ok: true, command: { kind: "open" } });
     expect(parseDeepLink("plainsong://meeting/start")).toEqual({
@@ -44,6 +45,10 @@ describe("parseDeepLink", () => {
 
   it("refuses the renderer's own origin and other schemes", () => {
     expect(parseDeepLink("plainsong://bundle/index.html")).toEqual({
+      ok: false,
+      reason: "renderer_origin",
+    });
+    expect(parseDeepLink("plainsong://bundle./index.html")).toEqual({
       ok: false,
       reason: "renderer_origin",
     });
