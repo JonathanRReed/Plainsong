@@ -52,6 +52,10 @@ describe("parseDeepLink", () => {
       ok: false,
       reason: "renderer_origin",
     });
+    expect(parseDeepLink("plainsong://bundle../record")).toEqual({
+      ok: false,
+      reason: "renderer_origin",
+    });
     expect(parseDeepLink("https://plainsong.example/record")).toEqual({
       ok: false,
       reason: "wrong_scheme",

@@ -101,7 +101,7 @@ export function isRendererUrl(rawUrl: string): boolean {
     if (url.username || url.password || url.port) {
       return false;
     }
-    const hostname = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
+    const hostname = url.hostname.replace(/\.+$/, "");
     return hostname === RENDERER_HOST;
   } catch {
     return false;
@@ -155,7 +155,7 @@ export function playbackTokenFromUrl(rawUrl: string): string | null {
   if (url.username || url.password || url.port) {
     return null;
   }
-  const hostname = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
+  const hostname = url.hostname.replace(/\.+$/, "");
   if (hostname !== PLAYBACK_HOST) {
     return null;
   }
