@@ -98,3 +98,26 @@ describe("model choices", () => {
     ).toEqual(["gpt-5.6-luna"]);
   });
 });
+
+describe("Plainsong Plus in the lane pickers", () => {
+  it("is offered only when the sidecar reports it, and then in both lanes", () => {
+    for (const lane of ["dictationAi", "meetingsAi"] as const) {
+      expect(
+        analysisProviderOptionsForLane(lane).some((option) => option.value === "plainsong-plus"),
+      ).toBe(false);
+      expect(
+        analysisProviderOptionsForLane(lane, true).some(
+          (option) => option.value === "plainsong-plus",
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it("offers the relay's two aliases as its models and counts as remote", () => {
+    expect(analysisModelChoices("plainsong-plus", [])).toEqual([
+      "plainsong-fast",
+      "plainsong-quality",
+    ]);
+    expect(isRemoteAnalysisProvider("plainsong-plus")).toBe(true);
+  });
+});

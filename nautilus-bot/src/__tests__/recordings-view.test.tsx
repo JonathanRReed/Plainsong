@@ -106,15 +106,15 @@ vi.mock("@/hooks/use-recordings", () => ({
 }));
 
 vi.mock("@/hooks/use-recording", () => ({
-  useRecording: () => ({
+  useRecordingSession: () => ({
     startMeeting,
     stopMeeting,
     isRecording: recordingState.isRecording,
     recordingId: recordingState.recordingId,
-    formattedDuration: recordingState.formattedDuration,
     meetingPhase: recordingState.meetingPhase,
     meetingMessage: recordingState.meetingMessage,
   }),
+  RecordingDurationText: () => recordingState.formattedDuration,
 }));
 
 vi.mock("@/components/toast", () => ({
@@ -2286,7 +2286,7 @@ describe("RecordingsView", () => {
   it("starts meeting capture after consent and stops an active meeting", async () => {
     startMeeting.mockResolvedValueOnce("r-live");
 
-    render(<RecordingsView />);
+    const firstView = render(<RecordingsView />);
 
     fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
@@ -2306,6 +2306,9 @@ describe("RecordingsView", () => {
       formattedDuration: "02:04",
     };
 
+    // Otherwise the first view shows its own Stop button once it re-renders
+    // with the live state, and this fails or passes depending on timing.
+    firstView.unmount();
     render(<RecordingsView />);
     fireEvent.click(screen.getByRole("button", { name: "Stop meeting" }));
 
@@ -3227,6 +3230,48 @@ describe("RecordingsView", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Move to Dictation" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+  });
+
+  it("offers the dictation move only for rows that look like dictations", async () => {
+    const view = render(<RecordingsView />);
+
+    // A full Me + Them meeting is not a dictation; the blanket move waits in
+    // the list's overflow menu instead of a banner on every visit.
+    expect(screen.queryByText(/like a dictation/i)).not.toBeInTheDocument();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "More list actions" }), {
+      button: 0,
+    });
+    expect(
+      await screen.findByRole("menuitem", { name: "Move all listed to Dictation" })
+    ).toBeInTheDocument();
+    view.unmount();
+
+    recordings = [
+      ...recordings,
+      {
+        id: "r-short",
+        title: "Note to self",
+        projectId: "default",
+        duration: 40,
+        createdAt: "2026-03-07T12:00:00Z",
+        updatedAt: "2026-03-07T12:00:00Z",
+        sourceType: "meeting",
+        audioPath: "/tmp/note.wav",
+        status: "completed",
+        meetingCaptureMode: "mic_only",
+        metadata: { sampleRate: 48000, channels: 1, systemAudio: false },
+      },
+    ];
+    render(<RecordingsView />);
+
+    expect(
+      screen.getByText("One listed recording is short and microphone-only, like a dictation.")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Move it to Dictation" }));
+    await waitFor(() => {
+      expect(backend.setRecordingSourceType).toHaveBeenCalledTimes(1);
+    });
+    expect(backend.setRecordingSourceType).toHaveBeenCalledWith("r-short", "dictation");
   });
 
   it("sets the recap down as a document and only opens an editor when asked", async () => {

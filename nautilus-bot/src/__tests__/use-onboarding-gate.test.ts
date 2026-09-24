@@ -63,6 +63,9 @@ const readinessContext = vi.hoisted(() => ({
 
 const backendMocks = vi.hoisted(() => ({
   recordOnboardingState: vi.fn(async () => ({})),
+  // The gate's own early read of the record. Never answers unless a test
+  // says otherwise, so the patience tests see only the readiness sweep.
+  getSettings: vi.fn((): Promise<unknown> => new Promise(() => {})),
 }));
 
 vi.mock("@/features/readiness/product-readiness-context", () => ({
@@ -70,6 +73,7 @@ vi.mock("@/features/readiness/product-readiness-context", () => ({
 }));
 
 vi.mock("@/lib/backend/settings", () => ({
+  getSettings: backendMocks.getSettings,
   recordOnboardingState: backendMocks.recordOnboardingState,
 }));
 
@@ -97,6 +101,8 @@ describe("useOnboardingGate readiness patience window", () => {
     readinessContext.permissions = null;
     readinessContext.dictationRoute = { ready: null };
     backendMocks.recordOnboardingState.mockClear();
+    backendMocks.getSettings.mockReset();
+    backendMocks.getSettings.mockImplementation(() => new Promise(() => {}));
   });
 
   afterEach(() => {
@@ -167,5 +173,66 @@ describe("useOnboardingGate readiness patience window", () => {
       await vi.advanceTimersByTimeAsync(2);
     });
     expect(result.current.decision.action).toBe("show");
+  });
+});
+
+describe("useOnboardingGate on a completed install", () => {
+  beforeEach(() => {
+    readinessContext.loading = true;
+    readinessContext.error = null;
+    readinessContext.settings = null;
+    readinessContext.providers = [];
+    readinessContext.permissions = null;
+    readinessContext.dictationRoute = { ready: null };
+    backendMocks.getSettings.mockReset();
+    backendMocks.getSettings.mockImplementation(() => new Promise(() => {}));
+  });
+
+  it("opens the workspace as soon as the record says setup was completed, while readiness is still loading", async () => {
+    backendMocks.getSettings.mockResolvedValue({
+      onboarding: { completedAt: "2026-06-19T10:04:00Z" },
+    });
+    const { useOnboardingGate } = await import(
+      "@/features/onboarding/use-onboarding-gate"
+    );
+    const { result } = renderHook(() => useOnboardingGate());
+
+    await act(async () => {});
+    expect(result.current.decision.action).toBe("skip");
+  });
+
+  it("still holds the splash for an install that never completed setup", async () => {
+    backendMocks.getSettings.mockResolvedValue({ onboarding: {} });
+    const { useOnboardingGate } = await import(
+      "@/features/onboarding/use-onboarding-gate"
+    );
+    const { result } = renderHook(() => useOnboardingGate());
+
+    await act(async () => {});
+    expect(result.current.decision.action).toBe("wait");
+  });
+
+  it("does not go back to the splash when readiness refreshes after deciding", async () => {
+    const { useOnboardingGate } = await import(
+      "@/features/onboarding/use-onboarding-gate"
+    );
+    readinessContext.loading = false;
+    readinessContext.settings = {
+      onboarding: { deferredAt: "2026-06-19T10:04:00Z", deferredUnmet: ["dictation_model"] },
+      transcription: { dictationInsertionMode: "auto" },
+    };
+    readinessContext.providers = [{ providerType: "distil_whisper" }];
+    readinessContext.permissions = {
+      microphonePermissionReady: true,
+      cursorInsertionReady: true,
+    };
+    readinessContext.dictationRoute = { ready: false };
+    const { result, rerender } = renderHook(() => useOnboardingGate());
+    expect(result.current.decision.action).toBe("skip");
+
+    // A focus refresh: readiness reports "loading" for a moment.
+    readinessContext.loading = true;
+    rerender();
+    expect(result.current.decision.action).toBe("skip");
   });
 });

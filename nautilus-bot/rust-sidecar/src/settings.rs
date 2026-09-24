@@ -361,6 +361,13 @@ pub struct TranscriptionSettings {
     pub dictation_push_to_talk: bool,
     /// Dictation: Hands-free mode (start on press, stop on silence or next press)
     pub dictation_hands_free_enabled: bool,
+    /// Dictation, hold-to-talk only: a quick tap locks the mic on until the
+    /// next press (read by the Electron shortcut controller).
+    pub dictation_tap_to_lock: bool,
+    /// Dictation: fit spacing and casing to the text around the caret
+    /// (`text::cursor_fit`), from characters read at insert time and never
+    /// stored.
+    pub dictation_match_surrounding_text: bool,
     /// Dictation route preference: local or cloud.
     pub dictation_route_preference: String,
     /// Dictation: allow quick one-shot route override for the next manual capture.
@@ -382,6 +389,10 @@ pub struct TranscriptionSettings {
     pub dictation_live_preview_engine: String,
     /// Dictation: Smart Format, LLM polishes text before insert
     pub dictation_ai_formatting: bool,
+    /// Dictation: remove um/uh, stuttered function words ("the the") and
+    /// like-for-like spoken corrections ("Tuesday, no wait, Wednesday") on
+    /// this Mac before insert. On by default; see `dictation_cleanup.rs`.
+    pub dictation_remove_disfluencies: bool,
     /// Dictation: translate whatever was spoken into English before the text
     /// is formatted and inserted. This is the built-in modes' setting; a saved
     /// custom mode carries its own `translate_to_english` flag instead. How
@@ -548,6 +559,11 @@ pub struct DictationCustomMode {
     /// Translate the spoken words into English for this mode. Mirrors the
     /// built-in modes' `dictation_translate_to_english`.
     pub translate_to_english: bool,
+    /// Voice Edit: the spoken words are an instruction, not text. With a
+    /// selection, the instruction is applied to it and the result replaces
+    /// it ("make this friendlier"); with none, the instruction is written
+    /// out as a draft ("Help me write"). See `run_voice_edit`.
+    pub voice_edit: bool,
 }
 
 impl Default for TranscriptionSettings {
@@ -598,12 +614,15 @@ impl Default for TranscriptionSettings {
             // Toggle mode is safer for new users and avoids silent hold-to-talk confusion.
             dictation_push_to_talk: false,
             dictation_hands_free_enabled: false,
+            dictation_tap_to_lock: true,
+            dictation_match_surrounding_text: true,
             dictation_route_preference: "local".to_string(),
             dictation_route_override_enabled: true,
             dictation_keep_warm: "on".to_string(),
             dictation_live_preview_enabled: true,
             dictation_live_preview_engine: "auto".to_string(),
             dictation_ai_formatting: false,
+            dictation_remove_disfluencies: true,
             dictation_translate_to_english: false,
             dictation_mode_preset: "voice".to_string(),
             dictation_numbers_as_digits: HashMap::new(),
@@ -716,6 +735,18 @@ pub struct UiSettings {
     pub show_recording_popup: bool,
     /// Selected premium color scheme applied via `data-theme`
     pub color_scheme: String,
+    /// Soft sounds when dictation starts, finishes and fails (played by the
+    /// Electron main process). On by default, like Wispr Flow and Typeless.
+    pub dictation_sounds: bool,
+    /// Size preset for the dictation pill: "small", "default", "large" or
+    /// "xlarge" (0.85x, 1x, 1.15x, 1.3x). Read by the overlay window.
+    pub dictation_pill_size: String,
+    /// Where the dictation pill sits: "bottom" (centered), "left" or "right"
+    /// (docked to that screen edge, vertical). A drag snaps to one of these.
+    pub dictation_pill_dock: String,
+    /// Mute other audio (music, videos) while the microphone is live, and
+    /// restore it afterwards. Off by default.
+    pub mute_media_while_dictating: bool,
 }
 
 impl Default for UiSettings {
@@ -726,6 +757,10 @@ impl Default for UiSettings {
             show_dictation_popup: true,
             show_recording_popup: true,
             color_scheme: "default".to_string(),
+            dictation_sounds: true,
+            dictation_pill_size: "default".to_string(),
+            dictation_pill_dock: "bottom".to_string(),
+            mute_media_while_dictating: false,
         }
     }
 }
@@ -1445,11 +1480,14 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "deepgram" => "deepgram".to_string(),
         "gemini_transcribe" => "gemini_transcribe".to_string(),
         "mistral_voxtral" => "mistral_voxtral".to_string(),
+        "xai_stt" => "xai_stt".to_string(),
         // Only when the spike is compiled in. A default build has no engine
         // that answers to this name, so it must land on `whisper` through the
         // fallback below rather than become a ghost route in the settings file.
         #[cfg(feature = "asr-transcribe-cpp")]
         "transcribe_cpp" => "transcribe_cpp".to_string(),
+        #[cfg(feature = "plainsong-plus")]
+        "plainsong_plus" => "plainsong_plus".to_string(),
         _ => "whisper".to_string(),
     }
 }
@@ -1529,6 +1567,8 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             // sanitize_mistral_model_id).
             crate::asr::mistral_voxtral::sanitize_mistral_model_id(model_id).to_string()
         }
+        // One route: the endpoint picks the model.
+        "xai_stt" => crate::asr::xai_stt::XAI_STT_MODEL_ID.to_string(),
         // `route_spec_for`, not `spec_for`: the latter also resolves the
         // Nemotron streaming GGUF that the benchmark loads to prove the runtime
         // path and that `model_options()` deliberately never offers. Normalizing
@@ -1538,6 +1578,8 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         "transcribe_cpp" => crate::asr::transcribe_cpp::route_spec_for(model_id)
             .model_id
             .to_string(),
+        #[cfg(feature = "plainsong-plus")]
+        "plainsong_plus" => crate::asr::plainsong_plus::PLUS_STT_MODEL_ID.to_string(),
         _ => "base.en".to_string(),
     }
 }
@@ -2208,6 +2250,13 @@ const KNOWN_AI_PROVIDERS: [&str; 8] = [
     "ollama-cloud",
 ];
 
+/// Plus is known only to a build that compiled it in; any other build resets
+/// a lane naming it, like any other unknown provider.
+fn is_known_ai_provider(provider: &str) -> bool {
+    KNOWN_AI_PROVIDERS.contains(&provider)
+        || (cfg!(feature = "plainsong-plus") && provider == "plainsong-plus")
+}
+
 fn normalize_ai_lane_settings(lane: &mut AiLaneSettings, which: AiLane) {
     // Normalize LLM provider to ensure it's a valid value
     lane.provider = lane.provider.trim().to_lowercase();
@@ -2224,7 +2273,7 @@ fn normalize_ai_lane_settings(lane: &mut AiLaneSettings, which: AiLane) {
         AiLane::Dictation => DEFAULT_DICTATION_AI_PROVIDER,
         AiLane::Meetings => "ollama",
     };
-    if lane.provider.is_empty() || !KNOWN_AI_PROVIDERS.contains(&lane.provider.as_str()) {
+    if lane.provider.is_empty() || !is_known_ai_provider(&lane.provider) {
         lane.provider = fallback.to_string();
     }
     if which == AiLane::Meetings && DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str()) {

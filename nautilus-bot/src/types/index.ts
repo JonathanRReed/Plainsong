@@ -12,6 +12,10 @@ export const MEETING_CAPTURE_MODE_IMPORTED = "imported";
 export interface Recording {
   id: string;
   title: string;
+  /** Dictations only: the first 240 characters of the delivered text. */
+  dictationPreview?: string | null;
+  /** Dictations only: the app the text was last inserted into. */
+  dictationAppTarget?: string | null;
   projectId: string;
   duration: number;
   createdAt: string;

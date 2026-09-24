@@ -86,6 +86,10 @@ export interface DictationInsights {
   snippetsTriggered: number;
   topAppTarget: string | null;
   topAppTargetCount: number;
+  /** Seconds of audio behind `dictatedWords`. Absent from older sidecars. */
+  spokenSeconds?: number;
+  /** Consecutive days with a dictation, ending today or yesterday. */
+  currentStreakDays?: number;
 }
 
 interface MeetingChatCitation {

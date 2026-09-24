@@ -965,7 +965,14 @@ impl AudioCapture {
             active_recording: None,
             microphone_preparation_stalled: false,
             preprocessor: Some(preprocessor),
-            noise_suppression_enabled: true,
+            // Off for dictation. The gate calibrated its noise floor on the
+            // first half-second of every capture -- which, with push-to-talk,
+            // is usually speech -- then closed within a sample on any quiet
+            // stretch, cutting soft consonants and word endings by 70%.
+            // Current ASR models are trained on noisy audio and do better
+            // with it than with gated audio; loudness is handled by
+            // `normalize_dictation_loudness` instead.
+            noise_suppression_enabled: false,
             dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
             dictation_capture_stop: None,
@@ -1923,7 +1930,7 @@ impl AudioCapture {
             }
         }
 
-        boost_quiet_audio(&mut samples);
+        normalize_dictation_loudness(&mut samples, self.dictation_sample_rate);
         ensure_min_duration(&mut samples, self.dictation_sample_rate, 0.7);
 
         tracing::info!(
@@ -3307,6 +3314,79 @@ fn boost_quiet_audio(samples: &mut [f32]) {
     }
 }
 
+/// Speech loudness the recognizer sees: about -20 dBFS RMS over speech.
+const DICTATION_TARGET_SPEECH_RMS: f32 = 0.1;
+/// At most +20 dB. Enough to lift a whisper or a far microphone to normal
+/// speech level without turning room hiss into words.
+const DICTATION_MAX_LOUDNESS_GAIN: f32 = 10.0;
+/// 20 ms analysis frames; a frame counts as speech above -50 dBFS RMS.
+const DICTATION_LOUDNESS_FRAME_SECONDS: f32 = 0.02;
+const DICTATION_SPEECH_FRAME_RMS: f32 = 0.003;
+/// Samples above this are soft-limited rather than clipped.
+const DICTATION_LIMITER_KNEE: f32 = 0.9;
+/// A capture whose loudest frames stay under -40 dBFS and within 6 dB of its
+/// quietest is room tone, not words (speech rises and falls by far more).
+const DICTATION_NOISE_ONLY_MAX_RMS: f32 = 0.01;
+const DICTATION_NOISE_ONLY_MAX_CONTRAST: f32 = 2.0;
+
+/// Brings quiet dictation up to normal speech loudness (the "whisper mode"
+/// every dictation gets). Loudness is measured over speech frames only, so
+/// silence before and after the words does not dilute it; the gain only ever
+/// raises, never lowers, audio; and a soft limiter above the knee means one
+/// key click cannot cap the gain for the whole utterance the way the old
+/// peak-based boost did.
+fn normalize_dictation_loudness(samples: &mut [f32], sample_rate: u32) {
+    if samples.is_empty() || sample_rate == 0 {
+        return;
+    }
+    let frame_len = ((sample_rate as f32 * DICTATION_LOUDNESS_FRAME_SECONDS) as usize).max(1);
+    let mut speech_energy = 0.0_f64;
+    let mut speech_samples = 0_usize;
+    let mut frame_levels = Vec::with_capacity(samples.len() / frame_len + 1);
+    for frame in samples.chunks(frame_len) {
+        let energy: f64 = frame.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+        let rms = (energy / frame.len() as f64).sqrt() as f32;
+        if !rms.is_finite() {
+            return;
+        }
+        frame_levels.push(rms);
+        if rms >= DICTATION_SPEECH_FRAME_RMS {
+            speech_energy += energy;
+            speech_samples += frame.len();
+        }
+    }
+    if speech_samples == 0 {
+        return;
+    }
+    // An accidental press with nobody speaking: lifting it would hand the
+    // recognizer amplified hiss, which Whisper-family models turn into
+    // invented words.
+    frame_levels.sort_by(f32::total_cmp);
+    let level_at =
+        |fraction: f32| frame_levels[((frame_levels.len() - 1) as f32 * fraction).round() as usize];
+    let (quiet, loud) = (level_at(0.1), level_at(0.95));
+    if loud < DICTATION_NOISE_ONLY_MAX_RMS && loud < quiet * DICTATION_NOISE_ONLY_MAX_CONTRAST {
+        return;
+    }
+    let speech_rms = (speech_energy / speech_samples as f64).sqrt() as f32;
+    let gain = (DICTATION_TARGET_SPEECH_RMS / speech_rms).clamp(1.0, DICTATION_MAX_LOUDNESS_GAIN);
+    if gain <= 1.0 {
+        return;
+    }
+    let headroom = 1.0 - DICTATION_LIMITER_KNEE;
+    for sample in samples.iter_mut() {
+        let boosted = *sample * gain;
+        let magnitude = boosted.abs();
+        *sample = if magnitude <= DICTATION_LIMITER_KNEE {
+            boosted
+        } else {
+            boosted.signum()
+                * (DICTATION_LIMITER_KNEE
+                    + headroom * ((magnitude - DICTATION_LIMITER_KNEE) / headroom).tanh())
+        };
+    }
+}
+
 fn ensure_min_duration(samples: &mut Vec<f32>, sample_rate: u32, min_seconds: f32) {
     if sample_rate == 0 || min_seconds <= 0.0 {
         return;
@@ -4462,5 +4542,85 @@ mod hands_free_monitor_tests {
         let from_preview: crate::models::DictationStartOptions =
             serde_json::from_value(serde_json::json!({ "deliveryMode": "preview" })).unwrap();
         assert_eq!(from_preview.delivery_mode, DictationDeliveryMode::Preview);
+    }
+}
+
+#[cfg(test)]
+mod dictation_loudness_tests {
+    use super::normalize_dictation_loudness;
+
+    fn tone(amplitude: f32, seconds: f32, rate: u32) -> Vec<f32> {
+        (0..(seconds * rate as f32) as usize)
+            .map(|i| {
+                amplitude * (i as f32 * 2.0 * std::f32::consts::PI * 220.0 / rate as f32).sin()
+            })
+            .collect()
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn a_whisper_is_lifted_toward_normal_speech_level() {
+        let mut quiet = tone(0.02, 1.0, 16_000);
+        normalize_dictation_loudness(&mut quiet, 16_000);
+        let level = rms(&quiet);
+        assert!(level > 0.09 && level < 0.11, "rms {level}");
+    }
+
+    #[test]
+    fn normal_speech_and_silence_are_left_alone() {
+        let mut loud = tone(0.3, 1.0, 16_000);
+        let before = loud.clone();
+        normalize_dictation_loudness(&mut loud, 16_000);
+        assert_eq!(loud, before);
+
+        let mut silence = vec![0.0005; 16_000];
+        let before = silence.clone();
+        normalize_dictation_loudness(&mut silence, 16_000);
+        assert_eq!(silence, before);
+    }
+
+    #[test]
+    fn a_key_click_does_not_cap_the_gain_and_never_clips() {
+        let mut samples = vec![0.0; 800];
+        samples[10] = 0.95; // push-to-talk click
+        samples.extend(tone(0.02, 1.0, 16_000));
+        normalize_dictation_loudness(&mut samples, 16_000);
+        // The old peak-based boost gave this utterance no gain at all.
+        assert!(rms(&samples[800..]) > 0.08);
+        assert!(samples.iter().all(|s| s.abs() <= 1.0));
+    }
+
+    #[test]
+    fn steady_room_noise_with_no_words_is_not_lifted() {
+        // Deterministic white noise at about -45 dBFS RMS.
+        let mut state = 0x2545_f491_u32;
+        let mut noise: Vec<f32> = (0..32_000)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+            })
+            .map(|sample| sample * 0.01)
+            .collect();
+        let before = noise.clone();
+        normalize_dictation_loudness(&mut noise, 16_000);
+        assert_eq!(noise, before);
+    }
+
+    #[test]
+    fn a_whisper_after_a_pause_is_still_lifted() {
+        let mut samples = vec![0.0005; 8_000];
+        samples.extend(tone(0.02, 1.0, 16_000));
+        normalize_dictation_loudness(&mut samples, 16_000);
+        assert!(rms(&samples[8_000..]) > 0.08);
+    }
+
+    #[test]
+    fn gain_is_capped_so_hiss_is_not_turned_into_speech() {
+        let mut faint = tone(0.004, 1.0, 16_000);
+        normalize_dictation_loudness(&mut faint, 16_000);
+        assert!(rms(&faint) <= 0.004 * 10.0 / 2f32.sqrt() + 1e-4);
     }
 }

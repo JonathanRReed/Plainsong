@@ -41,7 +41,7 @@ pub(crate) async fn qa_smoke_test_cursor_insert_impl(
         (app_name, app_bundle_id)
     };
     #[cfg(not(target_os = "macos"))]
-    let target = (get_frontmost_app_name(), None);
+    let target = (get_frontmost_app_name(), None::<String>);
 
     let outcome = paste_text_systemwide(
         &state.accessibility_trust_observed,
@@ -634,7 +634,7 @@ pub(crate) async fn capture_selected_text_for_playback_impl(
     };
 
     #[cfg(target_os = "windows")]
-    let target = (get_frontmost_app_name(), None);
+    let target = (get_frontmost_app_name(), None::<String>);
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {

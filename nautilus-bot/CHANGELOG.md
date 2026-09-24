@@ -10,6 +10,95 @@ hardening pass. The source version and numeric macOS build version are now
 signed candidate being notarized, stapled, installed, and exercised on Apple
 Silicon. See `LAUNCH.md` for that boundary.
 
+### Feel: matching Typeless and Wispr Flow
+- The dictation pill has four sizes and can dock upright to the left or
+  right screen edge; drop it near an edge to dock it there.
+- Mute other audio while dictating (off by default): music and videos go
+  quiet while the mic is live and come back after.
+- The menu-bar item shows a dot and a running clock while dictating or
+  recording a meeting, and its menu can cancel a dictation, stop or start
+  a meeting, and paste or copy recent results.
+- Onboarding has a live microphone check with a level meter, a microphone
+  picker and named errors; a clear hold-to-talk or press-to-toggle choice;
+  and a Ready step that shows your hotkey and what is set up.
+- Fixed: mid-sentence fitting no longer lowercases names; undo removes the
+  fitted text; a Voice Edit that gets nothing back from the model changes
+  nothing instead of pasting the instruction.
+- Review fixes before merge:
+  - Filler removal keeps real doubles ("told you you were", "on on
+    Monday", "Will will") and "no one", and leaves "erm" repairs to the
+    repair pass. AI cleanup may now only remove words, never add them.
+  - Mid-sentence fitting keeps "Will" capitalized, adds no spaces in
+    Chinese or Japanese, looks past a space or comma after the caret, and
+    treats a closing quote or emoji as a sentence end.
+  - Notes bullets no longer split "I think, maybe, we should go" or
+    "Dr. Smith". Quiet room noise with no words is no longer boosted.
+  - A sidecar crash, a failed unmute or a force quit can no longer leave
+    the Mac muted; the start sound plays before the mute and the done
+    sound after it. The menu bar stops saying "Recording" once a meeting
+    is being finished, and its menu no longer closes while you dictate.
+  - Tap to lock is off for a lone Fn/Globe key, where a language-switch
+    tap looked the same; unlocking no longer flashes an error.
+  - Onboarding's Ready step can always finish, retries download the model
+    you chose, and the mic check measures the mic it names.
+- Every push to a work branch builds an unsigned test app on GitHub
+  (Actions, Test build).
+- Dictation sounds (on by default): a tick when the mic goes live, a pop
+  when the words land, a low tone on failure.
+- Hold to talk, tap to lock: a quick tap on the hold key keeps listening
+  until the next press.
+- Dictating into the middle of a sentence adds the space, keeps lowercase
+  and drops a stray full stop (Match surrounding text, on by default).
+- Words, speaking pace, time saved and a day streak on Home and above
+  dictation history; history rows show what you said and where it went.
+- The dictation pill says "Still working" when a stage runs long.
+- No theme flash or setup splash at launch, views fade in instead of
+  blanking and keep their scroll, a compact Settings bar, an onboarding
+  wizard whose buttons never scroll away, and less re-rendering while
+  recording. See `docs/typeless-wispr-comparison-2026-09.md`.
+
+### Voice Edit, quiet speech and Plainsong Plus
+- New style, Voice Edit: select text, dictate an instruction ("make this
+  friendlier", "turn this into bullets") and the selection is rewritten in
+  place. With nothing selected it drafts what you ask for ("Help me write").
+  It needs an AI model (Ollama or a cloud provider) and is installed from
+  Dictation, recommended styles.
+- Dictation no longer runs a noise gate that clipped quiet consonants;
+  quiet recordings are instead brought to a steady level before
+  transcription, with a soft limiter so loud ones do not clip.
+- Not launched and not in any build users get: groundwork for Plainsong
+  Plus, an optional $10/month tier with hosted models. See
+  `docs/plainsong-plus.md`.
+
+### Dictation cleanup and HUD
+- New, on by default: "Remove filler words" drops um/uh, stuttered words
+  ("the the") and like-for-like corrections ("Tuesday, no wait, Wednesday"
+  becomes "Wednesday") on this Mac. Ambiguous speech is left as said.
+- AI formatting can now make those same edits and write spoken numbers as
+  digits; it still cannot change, drop or reorder your words.
+- The dictation HUD opens as a compact pill with one honest word per state
+  and a live voice trace. A refused or empty delivery no longer looks like
+  success, and errors name their cause.
+- Notes mode no longer turns every comma into a bullet; app detection no
+  longer mistakes 1Password for a notes app.
+
+### Dictation finishing and accuracy
+- After you stop speaking, the dictation HUD now shows Finishing, Transcribing
+  and (when an AI pass runs) Polishing, with a bar that fills toward an
+  estimate learned from this Mac's recent dictations. It slows near the end
+  and only fills when the text lands, so it can run late but never claims the
+  text is ready early. Reduced motion steps it instead of animating it.
+- `bun run eval:asr-wer` scores ASR routes by word error rate against
+  human-read references (`docs/evals/asr-wer/prompts.json`). Earlier WER
+  figures in this repo were measured against another model's output.
+- New bring-your-own-key dictation route: xAI Grok speech-to-text, with your
+  dictionary sent as key terms. Not offered for meetings until xAI's request
+  limits are confirmed.
+- Experimental, off by default: a Nemotron 3 Diarization backend behind the
+  `diarization-nemotron` Cargo feature, for scoring against the current
+  speaker separation. See `docs/typeless-parity-and-model-refresh-2026-09.md`.
+- The Rust sidecar builds and runs its tests on Linux again.
+
 ### Dictation fidelity
 - Keep resumed numbered lists intact in Notes mode and reject AI cleanup that
   renumbers, drops, adds, or reorders dictated words. Negation and intentional

@@ -57,6 +57,7 @@ const TIME_PARTS = {
 
 const dateFormatters = new Map<string, Intl.DateTimeFormat>();
 const timeFormatters = new Map<string, Intl.DateTimeFormat>();
+const shortTimeFormatters = new Map<string, Intl.DateTimeFormat>();
 const dateTimeFormatters = new Map<string, Intl.DateTimeFormat>();
 const numberFormatters = new Map<string, Intl.NumberFormat>();
 const collators = new Map<string, Intl.Collator>();
@@ -99,6 +100,16 @@ export function formatTime(value: Date | string | number): string {
   const locale = appLocale();
   return cached(timeFormatters, locale, () =>
     new Intl.DateTimeFormat(locale, TIME_PARTS),
+  ).format(date);
+}
+
+/** Hours and minutes only ("6:17 PM"), for lists where seconds are noise. */
+export function formatShortTime(value: Date | string | number): string {
+  const date = asDate(value);
+  if (!date) return "";
+  const locale = appLocale();
+  return cached(shortTimeFormatters, locale, () =>
+    new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" }),
   ).format(date);
 }
 

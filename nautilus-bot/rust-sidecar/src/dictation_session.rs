@@ -1054,6 +1054,53 @@ pub(crate) fn recent_dictation_result_at(
         .and_then(|results| results.get(index).cloned())
 }
 
+/// Whether this dictation is expected to run a pre-insert AI pass, so the
+/// finishing bar can reserve room for a Polishing stage. A hint for the UI
+/// only: the passes themselves keep their own gates, and a pass that is
+/// skipped simply means `done` arrives before the bar reaches that stage.
+fn dictation_polish_expected(
+    settings: &settings::Settings,
+    options: &models::DictationStartOptions,
+    translation_route: DictationTranslationRoute,
+) -> bool {
+    translation_route == DictationTranslationRoute::AiLane
+        || dictation_llm_formatting_enabled(settings, options)
+}
+
+/// Moves the HUD from Transcribing to Polishing just before a pre-insert AI
+/// pass starts. Returns when the stage started and whether the provider is
+/// remote, for the timing estimate.
+fn emit_dictation_polishing_stage(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    session_id: u64,
+    remote: bool,
+) -> (std::time::Instant, bool) {
+    const POLISHING_MESSAGE: &str = "Polishing…";
+    let expected_polish_ms = crate::dictation_progress::expected_polish_ms(remote);
+    let mut expected_transcribe_ms = None;
+    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
+        overlay.message = Some(POLISHING_MESSAGE.to_string());
+        overlay.processing_stage = Some("polishing".to_string());
+        overlay.expected_polish_ms = Some(expected_polish_ms);
+        expected_transcribe_ms = overlay.expected_transcribe_ms;
+    }
+    // Repeats the transcription estimate so a HUD that mounted mid-session
+    // still places the stage boundary where the first event put it.
+    handle.emit_event(
+        "dictation-state-changed",
+        serde_json::json!({
+            "phase": "transcribing",
+            "sessionId": session_id,
+            "message": POLISHING_MESSAGE,
+            "processingStage": "polishing",
+            "expectedTranscribeMs": expected_transcribe_ms,
+            "expectedPolishMs": expected_polish_ms,
+        }),
+    );
+    (std::time::Instant::now(), remote)
+}
+
 /// Sidecar-compatible stop_dictation.
 ///
 /// `expected_session_id`, when provided, scopes the stop to a specific
@@ -1197,6 +1244,9 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // Emit stopping phase so the UI shows feedback immediately.
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "stopping".to_string();
+        overlay.processing_stage = None;
+        overlay.expected_transcribe_ms = None;
+        overlay.expected_polish_ms = None;
     }
     handle.emit_event(
         "dictation-state-changed",
@@ -1376,16 +1426,45 @@ pub(crate) async fn stop_dictation_for_sidecar(
         .map(|hint| hint.terms().len())
         .unwrap_or(0);
 
+    // Expected stage durations for the finishing bar, learned from this
+    // Mac's recent dictations (see `dictation_progress`).
+    let progress_route_key = crate::dictation_progress::asr_route_key(
+        asr_provider_to_settings_value(provider_type),
+        actual_model_id.as_deref(),
+    );
+    let progress_audio_seconds = dictation_duration_seconds.max(0) as f64;
+    let expected_transcribe_ms = crate::dictation_progress::expected_transcribe_ms(
+        &progress_route_key,
+        provider_type.is_remote(),
+        progress_audio_seconds,
+    );
+    let expected_polish_ms =
+        dictation_polish_expected(&settings_snapshot, &dictation_options, translation_route).then(
+            || {
+                let remote = dictation_session_ai_selection(&settings_snapshot)
+                    .map(|(provider, _, _)| provider.is_remote())
+                    .unwrap_or(false);
+                crate::dictation_progress::expected_polish_ms(remote)
+            },
+        );
+
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "transcribing".to_string();
         overlay.message = Some("Transcribing…".to_string());
+        overlay.processing_stage = Some("transcribing".to_string());
+        overlay.expected_transcribe_ms = Some(expected_transcribe_ms);
+        overlay.expected_polish_ms = expected_polish_ms;
     }
+    let transcribe_started_at = std::time::Instant::now();
     handle.emit_event(
         "dictation-state-changed",
         serde_json::json!({
             "phase": "transcribing",
             "sessionId": session_id,
             "message": "Transcribing…",
+            "processingStage": "transcribing",
+            "expectedTranscribeMs": expected_transcribe_ms,
+            "expectedPolishMs": expected_polish_ms,
             "requestedProvider": asr_provider_to_settings_value(requested_provider_type),
             "actualProvider": asr_provider_to_settings_value(provider_type),
             "requestedModelId": requested_model_id.clone(),
@@ -1440,6 +1519,15 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // actually ran attached (a whisper decode withholds it on near-silent
     // audio, cloud routes without a prompt field ignore it entirely). Only
     // the second says the dictionary reached the recognizer.
+    crate::dictation_progress::record_transcribe_ms(
+        &progress_route_key,
+        provider_type.is_remote(),
+        progress_audio_seconds,
+        transcribe_started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64,
+    );
     let vocabulary_hint_terms_applied = transcription_result.vocabulary_hint_terms_applied;
     if vocabulary_hint_terms_built > 0 {
         tracing::info!(
@@ -1495,9 +1583,57 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // (an empty transcript or a consumed command skips it entirely).
     let mut format_outcome = crate::dictation_timing::DictationFormatOutcome::NotApplicable;
 
-    if settings_snapshot
-        .transcription
-        .dictation_command_mode_enabled
+    // Voice Edit: the words are an instruction. Runs instead of the command
+    // grammar and the cleanup pipeline, and fails loudly rather than
+    // inserting the instruction itself into the user's document.
+    let voice_edit_mode = dictation_options
+        .resolved_custom_mode_id
+        .as_deref()
+        .and_then(|id| {
+            settings_snapshot
+                .transcription
+                .dictation_custom_modes
+                .iter()
+                .find(|mode| mode.id == id)
+        })
+        .is_some_and(|mode| mode.voice_edit);
+    if voice_edit_mode && !raw_transcribed_text.trim().is_empty() {
+        let ai_is_remote = dictation_session_ai_selection(&settings_snapshot)
+            .map(|(provider, _, _)| provider.is_remote())
+            .unwrap_or(false);
+        emit_dictation_polishing_stage(state, handle, session_id, ai_is_remote);
+        // Only a captured selection is something to edit. Clipboard or window
+        // context under a customized profile would otherwise be rewritten
+        // and pasted at the caret as if it had been selected.
+        let selection = (normalize_dictation_context_source(&dictation_options.context_source)
+            == "selected_text")
+            .then_some(dictation_options.captured_context_text.as_deref())
+            .flatten();
+        match crate::dictation_text::run_voice_edit(
+            state,
+            &settings_snapshot,
+            raw_transcribed_text.as_str(),
+            selection,
+        )
+        .await
+        {
+            Ok((output, kind)) => {
+                final_text = output;
+                command_applied = Some(kind.command_key().to_string());
+                pipeline_stage_keys.push(kind.command_key().to_string());
+            }
+            Err(error) => {
+                return Err(
+                    fail_dictation_stop(state, handle, &failure_context, None, error).await,
+                );
+            }
+        }
+    }
+
+    if command_applied.is_none()
+        && settings_snapshot
+            .transcription
+            .dictation_command_mode_enabled
     {
         if let Some((command_key, action)) = parse_dictation_command(
             raw_transcribed_text.as_str(),
@@ -1591,6 +1727,9 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 app_target: app_target.as_deref(),
                 mode_preset: effective_mode.as_str(),
                 smart_formatting_enabled: true,
+                clean_disfluencies: settings_snapshot
+                    .transcription
+                    .dictation_remove_disfluencies,
                 numbers_as_digits: resolve_dictation_numbers_as_digits(&settings_snapshot),
                 recent_inserted_text,
                 command_mode_enabled: settings_snapshot
@@ -1627,6 +1766,8 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // building stay outside it deliberately -- and every later pass gets what
     // is left. See `DictationPreInsertBudget`.
     let mut pre_insert_budget = crate::dictation_timing::DictationPreInsertBudget::new();
+    // Set when the first AI pass starts; the HUD switches to Polishing then.
+    let mut polish_started_at: Option<(std::time::Instant, bool)> = None;
 
     // Translate-to-English through the AI lane (B7a). Runs before the mode
     // transform / Smart Format pass so that pass formats English, out of the
@@ -1650,6 +1791,9 @@ pub(crate) async fn stop_dictation_for_sidecar(
                     dictation_format_timeout(provider),
                     std::time::Instant::now(),
                 );
+                polish_started_at.get_or_insert_with(|| {
+                    emit_dictation_polishing_stage(state, handle, session_id, provider.is_remote())
+                });
                 let translated = tokio::time::timeout(
                     format_timeout,
                     run_custom_dictation_transform_with_provider(
@@ -1734,6 +1878,14 @@ pub(crate) async fn stop_dictation_for_sidecar(
                                 dictation_format_timeout(provider),
                                 std::time::Instant::now(),
                             );
+                            polish_started_at.get_or_insert_with(|| {
+                                emit_dictation_polishing_stage(
+                                    state,
+                                    handle,
+                                    session_id,
+                                    provider.is_remote(),
+                                )
+                            });
                             let transform = tokio::time::timeout(
                                 format_timeout,
                                 run_dictation_cleanup_with_provider(
@@ -1840,6 +1992,14 @@ pub(crate) async fn stop_dictation_for_sidecar(
                                 dictation_format_timeout(prepared.provider),
                                 std::time::Instant::now(),
                             );
+                            polish_started_at.get_or_insert_with(|| {
+                                emit_dictation_polishing_stage(
+                                    state,
+                                    handle,
+                                    session_id,
+                                    prepared.provider.is_remote(),
+                                )
+                            });
                             let formatting = tokio::time::timeout(
                                 format_timeout,
                                 execute_dictation_formatting_request(
@@ -1926,6 +2086,16 @@ pub(crate) async fn stop_dictation_for_sidecar(
     let format_complete_ms = (format_outcome
         != crate::dictation_timing::DictationFormatOutcome::NotApplicable)
         .then(elapsed_since_stop);
+    // A pass that failed fast says nothing about how long a real pass takes;
+    // a timeout does, so it is kept.
+    if let Some((started_at, remote)) = polish_started_at
+        .filter(|_| format_outcome != crate::dictation_timing::DictationFormatOutcome::Failed)
+    {
+        crate::dictation_progress::record_polish_ms(
+            remote,
+            started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        );
+    }
 
     final_text = sanitize_dictation_output(final_text.as_str(), raw_transcribed_text.as_str())
         .trim()
@@ -2143,6 +2313,10 @@ pub(crate) async fn stop_dictation_for_sidecar(
     > = None;
     let mut pasted = false;
     let mut copied = false;
+    // What actually went into the field. Differs from `final_text` when the
+    // words were fitted to the text around the caret; undo and the
+    // correction anchor must look for this, not the unfitted text.
+    let mut inserted_text = final_text.clone();
     let mut paste_error: Option<String> = None;
     let mut actual_insertion_mode = requested_insertion_mode.clone();
     let mut outcome = "ready".to_string();
@@ -2265,18 +2439,47 @@ pub(crate) async fn stop_dictation_for_sidecar(
                         let insert_text = final_text.clone();
                         let insert_app_target = app_target.clone();
                         let insert_app_bundle_id = app_bundle_id.clone();
+                        let match_surrounding_text = settings_snapshot
+                            .transcription
+                            .dictation_match_surrounding_text;
                         match tokio::task::spawn_blocking(move || {
-                            paste_text_systemwide(
+                            // Fit the words to the sentence around the caret
+                            // (spacing, casing, a stray full stop). macOS only;
+                            // the neighbors are read here and dropped.
+                            #[cfg(target_os = "macos")]
+                            let insert_text = match match_surrounding_text
+                                .then(|| {
+                                    crate::text_insert::read_cursor_neighbors(
+                                        insert_app_target.as_deref(),
+                                        insert_app_bundle_id.as_deref(),
+                                    )
+                                })
+                                .flatten()
+                            {
+                                Some((before, after)) => crate::text::cursor_fit::fit_to_cursor(
+                                    &insert_text,
+                                    &before,
+                                    &after,
+                                ),
+                                None => insert_text,
+                            };
+                            #[cfg(not(target_os = "macos"))]
+                            let _ = match_surrounding_text;
+                            let outcome = paste_text_systemwide(
                                 &accessibility_trust_observed,
                                 insert_text.as_str(),
                                 keep_text_in_clipboard,
                                 insert_app_target.as_deref(),
                                 insert_app_bundle_id.as_deref(),
-                            )
+                            );
+                            (outcome, insert_text)
                         })
                         .await
                         {
-                            Ok(outcome) => outcome,
+                            Ok((outcome, text)) => {
+                                inserted_text = text;
+                                outcome
+                            }
                             Err(join_error) => {
                                 // A panic inside insertion must not be reported
                                 // as a successful insert; the transcript is
@@ -2334,7 +2537,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
                     .dictation_learn_from_external_corrections
                 && !is_self_activation_target(app_target.as_deref(), app_bundle_id.as_deref())
             {
-                let anchor_text = final_text.clone();
+                let anchor_text = inserted_text.clone();
                 post_insert_focus_anchor = tokio::task::spawn_blocking(move || {
                     dictation_correction_capture::capture_insertion_anchor(
                         &MacosFocusedFieldReader,
@@ -2553,7 +2756,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
         let mut recent_delivery_slot = state.recent_dictation_delivery.lock().await;
         if pasted || copied {
             *recent_delivery_slot = Some(RecentDictationDelivery {
-                text: final_text.clone(),
+                text: inserted_text.clone(),
                 app_target: app_target.clone(),
                 app_bundle_id: app_bundle_id.clone(),
                 delivered_at: now,
@@ -2565,10 +2768,12 @@ pub(crate) async fn stop_dictation_for_sidecar(
     }
 
     if let Some(anchor) = post_insert_focus_anchor {
+        // The fitted text, as the field holds it: diffing the unfitted
+        // "We ... go." would read the fit itself as the user's correction.
         schedule_post_insert_correction_readback(
             state,
             handle,
-            final_text.clone(),
+            inserted_text.clone(),
             app_target.clone(),
             anchor,
             now,

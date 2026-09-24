@@ -5,6 +5,7 @@ import type { ProductReadinessSnapshot } from "@/features/readiness/product-read
 import { OPEN_SETTINGS_TAB_EVENT } from "@/lib/navigation";
 
 const readinessContext = vi.hoisted(() => ({
+  loading: false,
   settings: {
     privacy: {
       dictationAi: { provider: "ollama", modelId: null },
@@ -47,6 +48,11 @@ vi.mock("@/hooks/use-recording", () => ({
     formattedDuration: "0:00",
     recordingMode: "dictation",
   }),
+  useRecordingSession: () => ({
+    isRecording: false,
+    recordingMode: "dictation",
+  }),
+  RecordingDurationText: () => "0:00",
 }));
 
 vi.mock("@/lib/backend/settings", () => ({
@@ -60,6 +66,7 @@ vi.mock("@/components/theme-toggle", () => ({
 describe("Sidebar collapsed layout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    readinessContext.loading = false;
     readinessContext.settings = {
       privacy: {
         dictationAi: { provider: "ollama", modelId: null },
@@ -443,5 +450,44 @@ describe("Sidebar collapsed layout", () => {
     ).toEqual({ tab: "models" });
 
     window.removeEventListener(OPEN_SETTINGS_TAB_EVENT, settingsTabListener);
+  });
+
+  it("says it is checking, and raises no Setup needed badge, while readiness loads", () => {
+    const previous = readinessContext.settings;
+    const checking = {
+      state: "unknown",
+      cause: {
+        id: "loading",
+        message: "Plainsong is still checking this setup.",
+        action: { id: "retry", label: "Check again", destination: "setup" },
+      },
+    } as const;
+    readinessContext.loading = true;
+    readinessContext.settings = null as unknown as typeof previous;
+    readinessContext.productReadiness = {
+      evidenceObservedAt: 1,
+      dictation: { domain: "dictation", ...checking },
+      meetings: { domain: "meetings", ...checking },
+      meetingsCapture: { domain: "meetings_capture", ...checking },
+      fullCapture: { domain: "full_capture", ...checking },
+      overall: { domain: "overall", ...checking },
+    };
+    try {
+      render(
+        <Sidebar
+          activeView="dashboard"
+          onToggleCollapse={vi.fn()}
+          onViewChange={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: "Checking. Reading privacy settings." }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /^Setup needed\./ }),
+      ).not.toBeInTheDocument();
+    } finally {
+      readinessContext.settings = previous;
+    }
   });
 });

@@ -664,6 +664,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "deepgram":
       case "gemini_transcribe":
       case "mistral_voxtral":
+      case "xai_stt":
+      case "plainsong_plus":
         return <CloudLightning className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
@@ -776,6 +778,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         return "Add a Google Gemini API key in Settings → API Keys";
       case "mistral_voxtral":
         return "Add a Mistral API key in Settings → API Keys";
+      case "xai_stt":
+        return "Add an xAI API key in Settings → API Keys";
+      case "plainsong_plus":
+        return "Enter your license key in Settings → Plainsong Plus";
       default:
         return "Use the Download button to fetch the model (no Python needed)";
     }

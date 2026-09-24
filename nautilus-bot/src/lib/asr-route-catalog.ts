@@ -94,6 +94,8 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "deepgram",
   "gemini_transcribe",
   "mistral_voxtral",
+  "xai_stt",
+  "plainsong_plus",
   "cohere_transcribe",
 ];
 
@@ -450,6 +452,12 @@ function routeSummary(
   }
   if (providerType === "mistral_voxtral") {
     return "Cheapest cloud route here with speaker labels, at $0.003/min, in 13 languages. Mistral's API refuses a language and timestamps on the same request, so meetings detect the language and dictation sends the one you chose. Billed to your Mistral key.";
+  }
+  if (providerType === "plainsong_plus") {
+    return "Included with Plainsong Plus: the most accurate hosted model we route to, with your dictionary sent as key terms. Dictation only for now.";
+  }
+  if (providerType === "xai_stt") {
+    return "xAI's Grok speech-to-text, near the top of the Artificial Analysis accuracy board, with your dictionary sent as key terms. Dictation only for now. Billed to your xAI key.";
   }
   if (providerType === "macos_apple_speech") {
     return capabilityBadge === "Best for dictation"

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 
 type WaveformVariant = "bars" | "pulse";
@@ -15,6 +15,12 @@ interface AudioWaveformProps {
   size?: WaveformSize;
   /** Number of bars (ignored if levels is an array) */
   barCount?: number;
+  /**
+   * Taper bar heights toward both edges (the default, for a centred pulse).
+   * Off for a scrolling level history, whose newest sample is at the edge
+   * and must not be the most damped bar.
+   */
+  envelope?: boolean;
   /** Bar color, defaults to currentColor */
   barColor?: string;
   /** Accent color for the active glow */
@@ -57,6 +63,7 @@ export function AudioWaveform({
   variant = "bars",
   size = "md",
   barCount = 13,
+  envelope = true,
   barColor,
   glowColor,
   glow = false,
@@ -70,7 +77,19 @@ export function AudioWaveform({
 
   const config = SIZE_CONFIG[size];
   const totalBars = Array.isArray(levels) ? levels.length : barCount;
-  const weights = generateSymmetricWeights(totalBars);
+  // Memoized, and levels read through a ref: the draw loop must survive a new
+  // level every 120 ms. Restarting it re-sized the canvas, which clears it,
+  // so every sample and every timer tick flashed a blank frame.
+  const weights = useMemo(
+    () => (envelope ? generateSymmetricWeights(totalBars) : new Array(totalBars).fill(1)),
+    [envelope, totalBars],
+  );
+  const levelsRef = useRef(levels);
+  levelsRef.current = levels;
+  const reducedMotionPreferred =
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const canvasWidth = totalBars * (config.barWidth + config.gap) - config.gap;
 
   // Canvas can't read CSS custom properties, so resolve var(--token) refs (and
@@ -121,9 +140,10 @@ export function AudioWaveform({
 
       ctx.clearRect(0, 0, canvasWidth, config.height);
 
-      const barLevels = Array.isArray(levels)
-        ? levels
-        : new Array(totalBars).fill(levels as number);
+      const currentLevels = levelsRef.current;
+      const barLevels = Array.isArray(currentLevels)
+        ? currentLevels
+        : new Array(totalBars).fill(currentLevels as number);
 
       for (let i = 0; i < totalBars; i++) {
         const weight = weights[i];
@@ -184,7 +204,20 @@ export function AudioWaveform({
       animationRef.current = requestAnimationFrame(draw);
     }
     return () => cancelAnimationFrame(animationRef.current);
-  }, [levels, active, variant, totalBars, barColor, glowColor, glow, config, weights, canvasWidth]);
+    // Levels are a dependency only under reduced motion, where there is no
+    // loop and each new level needs its own static frame.
+  }, [
+    reducedMotionPreferred ? levels : null,
+    active,
+    variant,
+    totalBars,
+    barColor,
+    glowColor,
+    glow,
+    config,
+    weights,
+    canvasWidth,
+  ]);
 
   return (
     <canvas

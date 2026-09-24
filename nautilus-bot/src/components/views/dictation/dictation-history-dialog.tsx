@@ -153,7 +153,7 @@ export function DictationHistoryDialog({
           </div>
         </DialogHeader>
         {isLoadingTranscript ? (
-          <p className="text-sm text-muted-foreground">Loading transcript...</p>
+          <p className="text-sm text-muted-foreground">Loading transcript…</p>
         ) : transcript ? (
           <div className="space-y-5">
             <div className="space-y-3">
@@ -416,7 +416,7 @@ export function DictationHistoryDialog({
                     onClick={onReprocess}
                     disabled={isReprocessing}
                   >
-                    {isReprocessing ? "Reprocessing..." : "Reprocess"}
+                    {isReprocessing ? "Reprocessing…" : "Reprocess"}
                   </Button>
                   {reprocessedResult && (
                     <Button variant="outline" onClick={onUseReprocessedResult}>
@@ -482,7 +482,7 @@ export function DictationHistoryDialog({
                     disabled={isProcessingAgain}
                   >
                     {isProcessingAgain
-                      ? "Processing again..."
+                      ? "Processing again…"
                       : "Process again"}
                   </Button>
                 </div>

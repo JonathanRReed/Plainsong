@@ -225,6 +225,12 @@ export interface DictationCustomMode {
    * modes use `TranscriptionSettings.dictationTranslateToEnglish` instead.
    */
   translateToEnglish?: boolean;
+  /**
+   * Voice Edit: the spoken words are an instruction applied to the selected
+   * text, or a request for a draft when nothing is selected. Mirrors
+   * `voice_edit` in rust-sidecar/src/settings.rs.
+   */
+  voiceEdit?: boolean;
 }
 
 /**
@@ -280,6 +286,10 @@ export interface TranscriptionSettings {
   dictationAutoRequestPermissions?: boolean;
   dictationPushToTalk: boolean;
   dictationHandsFreeEnabled?: boolean;
+  /** Hold-to-talk only: a quick tap locks the mic on. Absent means on. */
+  dictationTapToLock?: boolean;
+  /** Fit spacing and casing to the text around the caret. Absent means on. */
+  dictationMatchSurroundingText?: boolean;
   dictationRoutePreference?: "local" | "cloud";
   dictationRouteOverrideEnabled?: boolean;
   dictationKeepWarm?: "off" | "on";
@@ -295,6 +305,13 @@ export interface TranscriptionSettings {
    */
   dictationLivePreviewEngine?: "auto" | "redecode" | "streaming";
   dictationAiFormatting: boolean;
+  /**
+   * Remove um/uh, stuttered words ("the the") and like-for-like spoken
+   * corrections ("Tuesday, no wait, Wednesday") on this Mac before insert.
+   * Optional so older settings payloads still type-check; the sidecar
+   * defaults it to true. Mirrors `dictation_remove_disfluencies`.
+   */
+  dictationRemoveDisfluencies?: boolean;
   /**
    * Translate-to-English for the built-in modes (a saved custom mode carries
    * its own `translateToEnglish`). Mirrors `dictation_translate_to_english`
@@ -382,6 +399,14 @@ interface UiSettings {
   showDictationPopup: boolean;
   showRecordingPopup: boolean;
   colorScheme: string;
+  /** Start, finish and failure sounds for dictation. Absent means on. */
+  dictationSounds?: boolean;
+  /** Dictation pill size preset. Absent means "default". */
+  dictationPillSize?: "small" | "default" | "large" | "xlarge";
+  /** Where the dictation pill is docked. Absent means "bottom". */
+  dictationPillDock?: "bottom" | "left" | "right";
+  /** Mute other audio while the microphone is live. Absent means off. */
+  muteMediaWhileDictating?: boolean;
 }
 
 // Transitional empty container -- kept because Settings.export is a required

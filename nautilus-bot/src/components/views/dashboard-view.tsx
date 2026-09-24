@@ -25,10 +25,18 @@ import type {
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import { requestMainView, requestRecordingWorkspace } from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
+import { getSettings } from "@/lib/backend/settings";
+import { resolveDictationHotkeyMode } from "@/lib/dictation-hotkey-mode";
+import {
+  defaultDictationShortcut,
+  dictationInstruction,
+  formatShortcutForDisplay,
+} from "@/lib/shortcuts";
 import { cn } from "@/lib/utils";
+import type { Recording } from "@/types";
 import {
   Folder,
-  FileAudio,
+  AudioWaveform,
   Brain,
   Loader2,
   Mic,
@@ -40,7 +48,12 @@ import {
   TriangleAlert,
   Users,
 } from "lucide-react";
-import { formatDate, formatDateTime, formatTime } from "@/lib/format-locale";
+import { formatDate, formatNumber, formatShortTime } from "@/lib/format-locale";
+import { getDictationInsights, type DictationInsights } from "@/lib/backend/dictation";
+import { DictationStats } from "@/components/views/dictation/dictation-stats";
+
+/** How many recordings Recent shows; the Dictation and Meetings views hold the rest. */
+const RECENT_LIMIT = 12;
 
 /** m:ss for a transcript offset, so a hit reads like a place in the meeting. */
 function formatHitTimestamp(seconds: number): string {
@@ -49,9 +62,34 @@ function formatHitTimestamp(seconds: number): string {
   return `${minutes}:${(safeSeconds % 60).toString().padStart(2, "0")}`;
 }
 
+/** "45 min" under an hour, then hours to one decimal, in the user's locale. */
+function formatAudioTotal(seconds: number): string {
+  const minutes = Math.round(Math.max(0, seconds) / 60);
+  if (minutes < 60) return `${formatNumber(minutes)} min`;
+  return `${formatNumber(Math.round(minutes / 6) / 10)} h`;
+}
+
+/** "Today", "Yesterday", or the locale date, for grouping the Recent list. */
+function dayLabel(value: string, now: Date): string {
+  const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(now) - startOfDay(new Date(value))) / 86_400_000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return formatDate(value);
+}
+
+/** Meetings open in their workspace; dictations live in the Dictation view. */
+function openRecording(recording: Recording) {
+  if (recording.sourceType === "dictation") {
+    requestMainView("dictation");
+    return;
+  }
+  requestRecordingWorkspace({ recordingId: recording.id });
+}
+
 export function DashboardView() {
   const { projects } = useProjects();
-  const { recordings } = useRecordings();
+  const { recordings, isLoading: recordingsLoading } = useRecordings();
   const [globalQuery, setGlobalQuery] = useState("");
   const [searchResults, setSearchResults] = useState<Array<{
     recordingId: string;
@@ -125,8 +163,71 @@ export function DashboardView() {
     };
   }, []);
 
-  const recentRecordings = useMemo(() => recordings.slice(0, 10), [recordings]);
-  const totalDuration = useMemo(() => recordings.reduce((acc, r) => acc + r.duration, 0), [recordings]);
+  // The empty state teaches the hotkey, so it has to be the one the user set.
+  const [dictationHotkey, setDictationHotkey] = useState(() => {
+    const shortcut = defaultDictationShortcut();
+    return { label: formatShortcutForDisplay(shortcut), instruction: dictationInstruction(shortcut, "toggle") };
+  });
+  useEffect(() => {
+    let cancelled = false;
+    getSettings()
+      .then((settings) => {
+        if (cancelled) return;
+        const shortcut = settings.shortcuts.toggleDictation || defaultDictationShortcut();
+        const mode = resolveDictationHotkeyMode(
+          settings.transcription.dictationPushToTalk,
+          settings.transcription.dictationHandsFreeEnabled ?? false,
+        );
+        setDictationHotkey({
+          label: formatShortcutForDisplay(shortcut),
+          instruction: dictationInstruction(shortcut, mode),
+        });
+      })
+      .catch(() => {
+        // The default shortcut stays on screen; it is right for most people.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const [dictationInsights, setDictationInsights] = useState<DictationInsights | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getDictationInsights()
+      .then((insights) => {
+        if (!cancelled) setDictationInsights(insights);
+      })
+      .catch(() => {
+        // No stats strip; the rest of Home does not depend on it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const hasHistory = recordings.length > 0;
+  // Newest first, grouped Today / Yesterday / date. The hook's order is not
+  // guaranteed, so sort here rather than trusting slice(0, n).
+  const recentGroups = useMemo(() => {
+    const now = new Date();
+    const newest = [...recordings]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, RECENT_LIMIT);
+    const groups: Array<{ label: string; items: Recording[] }> = [];
+    for (const recording of newest) {
+      const label = dayLabel(recording.createdAt, now);
+      const last = groups[groups.length - 1];
+      if (last?.label === label) last.items.push(recording);
+      else groups.push({ label, items: [recording] });
+    }
+    return groups;
+  }, [recordings]);
+  const storedCounts = useMemo(() => ({
+    meetings: recordings.filter((r) => r.sourceType === "meeting").length,
+    dictations: recordings.filter((r) => r.sourceType === "dictation").length,
+    seconds: recordings.reduce((acc, r) => acc + r.duration, 0),
+  }), [recordings]);
   const setupHeadline = setupLoading
     ? "Checking your voice workspace"
     : dictationReady && meetingReady && fullCaptureReady
@@ -138,14 +239,6 @@ export function DashboardView() {
           : meetingReady
             ? "Mic-only meetings are ready. Dictation needs one more pass"
             : "Finish setup to unlock the full solo workflow";
-  const timelineGroups = useMemo(() => recordings.reduce<Record<string, typeof recordings>>((acc, recording) => {
-    const key = formatDate(recording.createdAt);
-    if (!acc[key]) {
-      acc[key] = [];
-    }
-    acc[key].push(recording);
-    return acc;
-  }, {}), [recordings]);
 
   const buildThreadedMemoryQuery = (query: string) => {
     if (memoryMessages.length === 0) {
@@ -284,7 +377,7 @@ export function DashboardView() {
             ) : (
               <TriangleAlert data-icon="inline-start" />
             )}
-            {dictationReady ? "Start Dictation" : "Review dictation setup"}
+            {dictationReady ? "Start dictation" : "Review dictation setup"}
           </Button>
         }
       />
@@ -293,7 +386,7 @@ export function DashboardView() {
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-6 py-6 lg:px-8">
           <section className="grid grid-cols-1 gap-5 xl:grid-cols-12">
             <Card className="surface-panel overflow-hidden xl:col-span-8">
-              <CardContent className="grid gap-6 p-5 sm:p-6 lg:grid-cols-[minmax(0,1fr)_260px]">
+              <CardContent className="p-5 sm:p-6">
                 <div className="min-w-0">
                   <div className="mb-5 flex flex-wrap items-center gap-2">
                     {/* The one full-gold mark on Home is the CTA in the page
@@ -329,80 +422,166 @@ export function DashboardView() {
                     Dictate into whatever app you are in, record a meeting, then search back through
                     everything that was said.
                   </p>
+                  {/* Dictation is the header CTA and every view is in the
+                      sidebar, so the hero only carries what those do not:
+                      the meetings entry point and, while a lane is not
+                      ready, the way to set it up. */}
                   <div className="mt-6 flex flex-wrap gap-2">
-                    <Button variant="outline" onClick={() => requestMainView("dictation")}>
-                      <Mic data-icon="inline-start" />
-                      Open dictation
-                    </Button>
-                    <Button variant="outline" onClick={() => requestMainView("recordings")}>
-                      <FileAudio data-icon="inline-start" />
-                      Open meetings
-                    </Button>
-                    <Button variant="ghost" onClick={() => requestMainView("setup")}>
-                      <Rocket data-icon="inline-start" />
-                      Setup
-                    </Button>
-                  </div>
-                </div>
-                <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
-                  {[
-                    {
-                      label: "Dictation",
-                      ready: dictationReady,
-                      action: () =>
-                        dictationReady ? requestMainView("dictation") : requestOnboarding("dictation"),
-                    },
-                    {
-                      label: "Meetings",
-                      ready: meetingReady,
-                      action: () =>
-                        meetingReady ? requestMainView("recordings") : requestOnboarding("meetings"),
-                    },
-                    { label: "Local memory", ready: true, action: () => requestMainView("settings") },
-                  ].map((item) => (
-                    <button
-                      key={item.label}
-                      type="button"
-                      className="command-card flex items-center justify-between gap-3 rounded-xl px-3 py-3 text-left"
-                      onClick={item.action}
+                    {!setupLoading && !dictationReady ? (
+                      <Button variant="outline" onClick={() => requestOnboarding("dictation")}>
+                        <Mic data-icon="inline-start" />
+                        Set up dictation
+                      </Button>
+                    ) : null}
+                    <Button
+                      variant="outline"
+                      onClick={() =>
+                        meetingReady ? requestMainView("recordings") : requestOnboarding("meetings")
+                      }
                     >
-                      <span className="min-w-0">
-                        <span className="block text-sm font-medium text-card-foreground">{item.label}</span>
-                        <span className="mt-0.5 block text-sm text-muted-foreground">
-                          {item.ready ? "Open" : "Review"}
-                        </span>
-                      </span>
-                      {item.ready ? (
-                        <ArrowRight className="h-4 w-4 shrink-0 text-gold-text" />
-                      ) : (
-                        <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-                      )}
-                    </button>
-                  ))}
+                      <AudioWaveform data-icon="inline-start" />
+                      {meetingReady ? "Open meetings" : "Set up meetings"}
+                    </Button>
+                    {!setupLoading && dictationReady && meetingReady && !fullCaptureReady ? (
+                      <Button variant="ghost" onClick={() => requestMainView("setup")}>
+                        <Rocket data-icon="inline-start" />
+                        Finish setup
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
               </CardContent>
             </Card>
 
-            <Card className="surface-panel-subtle xl:col-span-4">
-              <CardContent className="flex h-full flex-col gap-4 p-5">
-                <h2 className="section-heading">Stored on this Mac</h2>
-                <div className="grid grid-cols-3 gap-4">
-                  <div>
-                    <p className="text-xl font-semibold tabular-nums">{recordings.length}</p>
-                    <p className="mt-1 text-sm text-muted-foreground">Recordings</p>
+            {hasHistory || recordingsLoading ? (
+              <Card className="surface-panel-subtle self-start xl:col-span-4">
+                <CardContent className="flex flex-col gap-4 p-5">
+                  <h2 className="section-heading">Stored on this Mac</h2>
+                  <div className="grid grid-cols-3 gap-4">
+                    {[
+                      { label: "Dictations", value: formatNumber(storedCounts.dictations) },
+                      { label: "Meetings", value: formatNumber(storedCounts.meetings) },
+                      { label: "Audio", value: formatAudioTotal(storedCounts.seconds) },
+                    ].map((stat) => (
+                      <div key={stat.label} className="min-w-0">
+                        <p className="text-xl font-semibold tabular-nums">
+                          {recordingsLoading ? "–" : stat.value}
+                        </p>
+                        <p className="mt-1 text-sm text-muted-foreground">{stat.label}</p>
+                      </div>
+                    ))}
                   </div>
-                  <div>
-                    <p className="text-xl font-semibold tabular-nums">{projects.length}</p>
-                    <p className="mt-1 text-sm text-muted-foreground">Projects</p>
-                  </div>
-                  <div>
-                    <p className="text-xl font-semibold tabular-nums">{Math.floor(totalDuration / 3600)}h</p>
-                    <p className="mt-1 text-sm text-muted-foreground">Audio</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card className="surface-panel-subtle self-start xl:col-span-4">
+                <CardContent className="flex flex-col gap-3 p-5">
+                  <h2 className="section-heading">Your first dictation</h2>
+                  <kbd className="self-start rounded-md border border-gold/40 bg-gold/10 px-3 py-1.5 font-mono text-base font-medium text-gold-text">
+                    {dictationHotkey.label}
+                  </kbd>
+                  <p className="text-sm leading-6 text-muted-foreground">
+                    {dictationHotkey.instruction} It works in any app with a text field.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
           </section>
+
+          {dictationInsights && dictationInsights.totalDictations > 0 ? (
+            <DictationStats insights={dictationInsights} />
+          ) : null}
+
+          <Tabs defaultValue="recent" className="space-y-4">
+            <TabsList>
+              <TabsTrigger value="recent">Recent</TabsTrigger>
+              <TabsTrigger value="projects">Projects</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="recent" className="space-y-4">
+              {recentGroups.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+                  <span className="neume neume-hollow" />
+                  <p className="font-serif text-base font-medium">Nothing recorded yet</p>
+                  <p className="text-sm text-muted-foreground">
+                    Dictations and meetings show up here, newest first.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  {recentGroups.map((group) => (
+                    <section key={group.label} aria-label={group.label}>
+                      <h3 className="rubric-muted mb-2">{group.label}</h3>
+                      <div className="divide-y divide-border/60 overflow-hidden rounded-xl border bg-card">
+                        {group.items.map((recording) => {
+                          const isDictation = recording.sourceType === "dictation";
+                          const KindIcon = isDictation ? Mic : AudioWaveform;
+                          return (
+                            <button
+                              type="button"
+                              key={recording.id}
+                              onClick={() => openRecording(recording)}
+                              className="group flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                            >
+                              <KindIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate font-medium">{(isDictation && recording.dictationPreview?.trim()) || recording.title}</p>
+                                <p className="text-xs text-muted-foreground">
+                                  {isDictation ? "Dictation" : "Meeting"} · {formatShortTime(recording.createdAt)}
+                                </p>
+                              </div>
+                              <Badge variant="secondary" className="time-spec shrink-0">
+                                {formatHitTimestamp(recording.duration)}
+                              </Badge>
+                              <ArrowRight className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+              )}
+            </TabsContent>
+
+            <TabsContent value="projects" className="space-y-4">
+              {projects.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+                  <span className="neume neume-hollow" />
+                  <p className="font-serif text-base font-medium">No projects yet</p>
+                  <p className="text-sm text-muted-foreground">Create one to file dictation somewhere of its own.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+                  {projects.map((project) => (
+                    <button
+                      type="button"
+                      key={project.id}
+                      onClick={() => requestMainView("projects")}
+                      className="rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    >
+                      <Card variant="interactive" className="h-full">
+                        <CardHeader className="pb-2">
+                          <div className="flex items-center gap-2">
+                            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                            <CardTitle className="truncate text-base">{project.name}</CardTitle>
+                          </div>
+                        </CardHeader>
+                        <CardContent>
+                          <p className="line-clamp-2 text-sm text-muted-foreground">
+                            {project.description || "No description"}
+                          </p>
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            Created {formatDate(project.createdAt)}
+                          </p>
+                        </CardContent>
+                      </Card>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </TabsContent>
+          </Tabs>
 
           <Card>
             <CardHeader>
@@ -758,113 +937,6 @@ export function DashboardView() {
               )}
             </CardContent>
           </Card>
-
-          <Tabs defaultValue="recent" className="space-y-4">
-            <TabsList>
-              <TabsTrigger value="recent">Recent</TabsTrigger>
-              <TabsTrigger value="projects">Projects</TabsTrigger>
-              <TabsTrigger value="timeline">By day</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="recent" className="space-y-4">
-              {recentRecordings.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-                  <span className="neume neume-hollow" />
-                  <p className="font-serif text-base font-medium">Nothing recorded yet</p>
-                  <p className="text-sm text-muted-foreground">Recordings show up here as you make them.</p>
-                </div>
-              ) : (
-                <div className="space-y-1.5">
-                  {recentRecordings.map((recording) => (
-                    <button
-                      type="button"
-                      key={recording.id}
-                      onClick={() => requestMainView("recordings")}
-                      className="group flex w-full items-center gap-3 rounded-lg border bg-card px-4 py-3 text-left transition-colors hover:bg-accent/50 cursor-pointer"
-                    >
-                      <FileAudio className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                      <div className="min-w-0 flex-1">
-                        <p className="font-medium truncate">{recording.title}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {formatDateTime(recording.createdAt)}
-                        </p>
-                      </div>
-                      <Badge variant="secondary" className="time-spec shrink-0">
-                        {Math.floor(recording.duration / 60)}:{(recording.duration % 60).toString().padStart(2, '0')}
-                      </Badge>
-                      <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
-                    </button>
-                  ))}
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="projects" className="space-y-4">
-              {projects.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-                  <span className="neume neume-hollow" />
-                  <p className="font-serif text-base font-medium">No projects yet</p>
-                  <p className="text-sm text-muted-foreground">Create one to file dictation somewhere of its own.</p>
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-                  {projects.map((project) => (
-                    <button
-                      type="button"
-                      key={project.id}
-                      onClick={() => requestMainView("projects")}
-                      className="rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    >
-                      <Card variant="interactive" className="h-full">
-                        <CardHeader className="pb-2">
-                          <div className="flex items-center gap-2">
-                            <Folder className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                            <CardTitle className="truncate text-base">{project.name}</CardTitle>
-                          </div>
-                        </CardHeader>
-                        <CardContent>
-                          <p className="line-clamp-2 text-sm text-muted-foreground">
-                            {project.description || "No description"}
-                          </p>
-                          <p className="mt-2 text-xs text-muted-foreground">
-                            Created {formatDate(project.createdAt)}
-                          </p>
-                        </CardContent>
-                      </Card>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </TabsContent>
-
-            <TabsContent value="timeline">
-              {Object.keys(timelineGroups).length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-                  <span className="neume neume-hollow" />
-                  <p className="font-serif text-base font-medium">Nothing recorded yet</p>
-                  <p className="text-sm text-muted-foreground">Recordings group themselves by day once you have some.</p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {Object.entries(timelineGroups).map(([date, items]) => (
-                    <div key={date}>
-                      <p className="rubric-muted mb-2">{date}</p>
-                      <div className="space-y-1">
-                        {items.map((recording) => (
-                          <div key={recording.id} className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
-                            <span className="truncate font-medium">{recording.title}</span>
-                            <span className="time-spec shrink-0 text-xs text-muted-foreground">
-                              {formatTime(recording.createdAt)}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </TabsContent>
-          </Tabs>
         </div>
       </ScrollArea>
     </div>

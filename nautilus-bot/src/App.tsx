@@ -2,7 +2,10 @@ import {
   Component,
   Suspense,
   lazy,
+  startTransition,
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ComponentType,
@@ -12,6 +15,12 @@ import {
 } from "react";
 import { listen } from "@/lib/electron";
 import { scheduleAfterPaint } from "@/lib/post-paint";
+import {
+  readViewScroll,
+  restoreViewScroll,
+  type ViewScrollPosition,
+} from "@/lib/view-scroll-memory";
+import { useSidebarCollapsed } from "@/hooks/use-sidebar-collapsed";
 import {
   normalizeCallCaptureRequest,
   publishCallCaptureRequest,
@@ -37,9 +46,25 @@ import {
   type MainViewId,
 } from "@/lib/navigation";
 
-const DashboardView = lazy(() =>
-  import("@/components/views/dashboard-view").then((m) => ({ default: m.DashboardView }))
-);
+/**
+ * A lazily loaded view that can also be fetched ahead of time. Both paths
+ * share one promise, so a view preloaded while the app sat idle renders
+ * without suspending. A failed load is forgotten so the next attempt retries.
+ */
+function lazyView(load: () => Promise<ComponentType>): {
+  Component: ComponentType;
+  preload: () => Promise<unknown>;
+} {
+  let pending: Promise<{ default: ComponentType }> | null = null;
+  const loadOnce = () =>
+    (pending ??= load()
+      .then((component) => ({ default: component }))
+      .catch((error: unknown) => {
+        pending = null;
+        throw error;
+      }));
+  return { Component: lazy(loadOnce), preload: loadOnce };
+}
 
 export type ViewId =
   | "dashboard"
@@ -58,24 +83,40 @@ interface ErrorBoundaryState {
   error: Error | null;
 }
 
-const ProjectsView = lazy(async () => ({
-  default: (await import("@/components/views/projects-view")).ProjectsView,
-}));
-const RecordingsView = lazy(async () => ({
-  default: (await import("@/components/views/recordings-view")).RecordingsView,
-}));
-const DictationView = lazy(async () => ({
-  default: (await import("@/components/views/dictation-view")).DictationView,
-}));
-const ExportsView = lazy(async () => ({
-  default: (await import("@/components/views/exports-view")).ExportsView,
-}));
-const SettingsView = lazy(async () => ({
-  default: (await import("@/components/views/settings-view-simple")).SettingsView,
-}));
-const SetupView = lazy(async () => ({
-  default: (await import("@/components/views/setup-view")).SetupView,
-}));
+const VIEWS: Record<ViewId, ReturnType<typeof lazyView>> = {
+  dashboard: lazyView(async () => (await import("@/components/views/dashboard-view")).DashboardView),
+  projects: lazyView(async () => (await import("@/components/views/projects-view")).ProjectsView),
+  recordings: lazyView(
+    async () => (await import("@/components/views/recordings-view")).RecordingsView,
+  ),
+  dictation: lazyView(async () => (await import("@/components/views/dictation-view")).DictationView),
+  exports: lazyView(async () => (await import("@/components/views/exports-view")).ExportsView),
+  settings: lazyView(
+    async () => (await import("@/components/views/settings-view-simple")).SettingsView,
+  ),
+  setup: lazyView(async () => (await import("@/components/views/setup-view")).SetupView),
+};
+
+/**
+ * Fetch every view once the first frame is up and the renderer is idle, so
+ * the first visit to each is as quick as the second.
+ */
+function preloadViewsWhenIdle(): void {
+  const preloadAll = () => {
+    for (const view of Object.values(VIEWS)) {
+      void view.preload().catch(() => {
+        // Loaded again, and reported, when the reader opens the view.
+      });
+    }
+  };
+  scheduleAfterPaint(() => {
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(preloadAll, { timeout: 2000 });
+    } else {
+      window.setTimeout(preloadAll, 500);
+    }
+  });
+}
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
@@ -116,16 +157,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     return this.props.children;
   }
 }
-
-const VIEW_COMPONENTS: Record<ViewId, ComponentType> = {
-  dashboard: DashboardView,
-  projects: ProjectsView,
-  recordings: RecordingsView,
-  dictation: DictationView,
-  exports: ExportsView,
-  settings: SettingsView,
-  setup: SetupView,
-};
 
 const VIEW_LABELS: Record<ViewId, string> = {
   dashboard: "Home",
@@ -249,12 +280,23 @@ function AppShell() {
   const [pendingRecordingWorkspaceId, setPendingRecordingWorkspaceId] = useState<string | null>(
     null
   );
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const { collapsed: sidebarCollapsed, toggle: toggleSidebar } = useSidebarCollapsed();
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const firstViewMarked = useRef(false);
   const mainRef = useRef<HTMLElement>(null);
   const navigationFocusReadyRef = useRef(false);
   const interactiveMarkedRef = useRef(false);
+  const activeViewRef = useRef(activeView);
+  const viewScrollRef = useRef(new Map<ViewId, ViewScrollPosition>());
+
+  // A transition keeps the current view on screen until the next one is
+  // ready, instead of blanking the workspace to a loading line.
+  const showView = useCallback((view: ViewId, recordingId: string | null = null) => {
+    startTransition(() => {
+      setActiveView(view);
+      setPendingRecordingWorkspaceId(recordingId);
+    });
+  }, []);
 
   // UI overlays
   const { decision: onboardingGate, recordCompleted, recordDeferred } =
@@ -292,11 +334,40 @@ function AppShell() {
   }, [activeView]);
 
   useEffect(() => {
+    preloadViewsWhenIdle();
+  }, []);
+
+  useEffect(() => {
     if (!navigationFocusReadyRef.current) {
       navigationFocusReadyRef.current = true;
       return;
     }
     mainRef.current?.focus({ preventScroll: true });
+  }, [activeView]);
+
+  // Remember where each view was scrolled, and put the reader back there when
+  // they return. Scroll events do not bubble, so this listens in the capture
+  // phase. Keyed on the gate so it attaches once the workspace is on screen.
+  const workspaceMounted = onboardingGate.action !== "wait";
+  useEffect(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    const handleScroll = (event: Event) => {
+      const position = readViewScroll(main, event.target);
+      if (position) {
+        viewScrollRef.current.set(activeViewRef.current, position);
+      }
+    };
+    main.addEventListener("scroll", handleScroll, { capture: true, passive: true });
+    return () => main.removeEventListener("scroll", handleScroll, { capture: true });
+  }, [workspaceMounted]);
+
+  useLayoutEffect(() => {
+    activeViewRef.current = activeView;
+    const main = mainRef.current;
+    const position = viewScrollRef.current.get(activeView);
+    if (!main || !position?.top) return;
+    return restoreViewScroll(main, position);
   }, [activeView]);
 
   // The reader closed setup and something is still missing — a model download
@@ -351,8 +422,8 @@ function AppShell() {
         requestedView === "settings" ||
         requestedView === "setup"
       ) {
-        setActiveView(requestedView);
-        setPendingRecordingWorkspaceId(
+        showView(
+          requestedView,
           requestedView === "recordings" ? requestedRecordingId : null
         );
       }
@@ -362,7 +433,7 @@ function AppShell() {
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [showView]);
 
   useEffect(() => {
     const handleOpenOnboarding = (event: Event) => {
@@ -387,7 +458,7 @@ function AppShell() {
       if (!request) {
         return;
       }
-      setActiveView("recordings");
+      showView("recordings");
       publishCallCaptureRequest(request);
     }).then((fn) => {
       unlisten = fn;
@@ -395,7 +466,7 @@ function AppShell() {
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [showView]);
 
   useEffect(() => {
     const handleOpenMainView = (event: Event) => {
@@ -403,14 +474,14 @@ function AppShell() {
       if (!detail?.view) {
         return;
       }
-      setActiveView(detail.view as ViewId);
+      showView(detail.view as ViewId);
     };
 
     window.addEventListener(OPEN_MAIN_VIEW_EVENT, handleOpenMainView as EventListener);
     return () => {
       window.removeEventListener(OPEN_MAIN_VIEW_EVENT, handleOpenMainView as EventListener);
     };
-  }, []);
+  }, [showView]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -431,14 +502,14 @@ function AppShell() {
       }
 
       event.preventDefault();
-      setActiveView(view as ViewId);
+      showView(view as ViewId);
     };
 
     window.addEventListener("keydown", handleShortcut);
     return () => {
       window.removeEventListener("keydown", handleShortcut);
     };
-  }, []);
+  }, [showView]);
 
   useEffect(() => {
     const handleCommandPaletteShortcut = (event: KeyboardEvent) => {
@@ -513,7 +584,7 @@ function AppShell() {
     );
   }
 
-  const ActiveView = VIEW_COMPONENTS[activeView] ?? VIEW_COMPONENTS.dashboard;
+  const ActiveView = (VIEWS[activeView] ?? VIEWS.dashboard).Component;
   const activeViewLabel = VIEW_LABELS[activeView] ?? VIEW_LABELS.dashboard;
 
   return (
@@ -528,9 +599,9 @@ function AppShell() {
         </a>
         <Sidebar
           activeView={activeView}
-          onViewChange={(v) => setActiveView(v as ViewId)}
+          onViewChange={(v) => showView(v as ViewId)}
           isCollapsed={sidebarCollapsed}
-          onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+          onToggleCollapse={toggleSidebar}
         />
 
         <main
@@ -550,7 +621,11 @@ function AppShell() {
               </div>
             }
           >
-            <ActiveView />
+            {/* Keyed so each arrival settles in; `.view-enter` sits still
+                under reduced motion. */}
+            <div key={activeView} className="view-enter h-full">
+              <ActiveView />
+            </div>
             {!wizardMode && (
               <LaunchInteractiveReporter marked={interactiveMarkedRef} />
             )}

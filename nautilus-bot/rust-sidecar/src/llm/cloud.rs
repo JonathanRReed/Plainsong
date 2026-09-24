@@ -16,6 +16,10 @@ pub struct OllamaCloudClient {
     base_url: String,
     api_key: Option<String>,
     client: reqwest::Client,
+    /// Which provider this client speaks for. Plainsong Plus reuses the same
+    /// OpenAI-compatible request shape against its own relay.
+    provider: Provider,
+    label: &'static str,
 }
 
 impl OllamaCloudClient {
@@ -28,6 +32,21 @@ impl OllamaCloudClient {
             base_url: OLLAMA_CLOUD_URL.to_string(),
             api_key: api_key.or_else(|| std::env::var("OLLAMA_CLOUD_API_KEY").ok()),
             client: reqwest::Client::new(),
+            provider: Provider::OllamaCloud,
+            label: "Ollama Cloud",
+        }
+    }
+
+    /// The Plainsong Plus relay's `/v1/chat/completions`, authorized by the
+    /// entitlement token from `crate::plus::access_token`.
+    #[cfg(feature = "plainsong-plus")]
+    pub fn for_plainsong_plus(token: Option<String>) -> Self {
+        Self {
+            base_url: format!("{}/v1", crate::plus::base_url()),
+            api_key: token,
+            client: reqwest::Client::new(),
+            provider: Provider::PlainsongPlus,
+            label: "Plainsong Plus",
         }
     }
 
@@ -75,15 +94,15 @@ impl OllamaCloudClient {
 #[async_trait]
 impl CompletionTransport for OllamaCloudClient {
     fn provider(&self) -> Provider {
-        Provider::OllamaCloud
+        self.provider
     }
 
     async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let key = self.api_key.as_deref().ok_or_else(|| {
             LlmError::new(
-                Provider::OllamaCloud,
+                self.provider,
                 ErrorKind::Configuration,
-                "Ollama Cloud API key not configured",
+                format!("{} API key not configured", self.label),
             )
         })?;
         let mut messages = Vec::new();
@@ -120,31 +139,34 @@ impl CompletionTransport for OllamaCloudClient {
             .send()
             .await
             .map_err(|error| {
-                LlmError::from_reqwest(Provider::OllamaCloud, "Failed to send request", error)
+                LlmError::from_reqwest(self.provider, "Failed to send request", error)
             })?;
         if !response.status().is_success() {
             let status = response.status();
             let body = read_error_body(response).await;
-            return Err(classify_http_error(Provider::OllamaCloud, status, body));
+            return Err(classify_http_error(self.provider, status, body));
         }
         let data: serde_json::Value = read_json_body(response, COMPLETION_BODY_LIMIT)
             .await
             .map_err(|error| {
-                bounded_body_error_to_llm(Provider::OllamaCloud, "Failed to read response", error)
+                bounded_body_error_to_llm(self.provider, "Failed to read response", error)
             })?;
         let finish_reason = data["choices"][0]["finish_reason"].as_str();
         if matches!(finish_reason, Some("length")) {
             return Err(LlmError::new(
-                Provider::OllamaCloud,
+                self.provider,
                 ErrorKind::OutputLimit,
-                "Ollama Cloud stopped because the output token limit was reached",
+                format!(
+                    "{} stopped because the output token limit was reached",
+                    self.label
+                ),
             ));
         }
         if let Some(reason) = finish_reason.filter(|reason| *reason != "stop") {
             return Err(LlmError::new(
-                Provider::OllamaCloud,
+                self.provider,
                 ErrorKind::Upstream,
-                format!("Ollama Cloud stopped before completion: {}", reason),
+                format!("{} stopped before completion: {}", self.label, reason),
             ));
         }
         let text = data["choices"][0]["message"]["content"]
@@ -153,9 +175,9 @@ impl CompletionTransport for OllamaCloudClient {
             .to_string();
         if text.trim().is_empty() {
             return Err(LlmError::new(
-                Provider::OllamaCloud,
+                self.provider,
                 ErrorKind::EmptyResponse,
-                "Ollama Cloud returned an empty completion",
+                format!("{} returned an empty completion", self.label),
             ));
         }
         Ok(CompletionResponse {

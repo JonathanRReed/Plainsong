@@ -52,6 +52,27 @@ export function nextActiveMeetingRecordingId(
   return incomingId ?? currentRecordingId;
 }
 
+/**
+ * Phase of the active meeting, for the menu bar: null once no meeting is
+ * active, otherwise the phase of the latest event about the active one. The
+ * recording id stays set from "preparing" through "processing", so the id
+ * alone cannot say whether the microphone is actually capturing.
+ */
+export function nextActiveMeetingPhase(
+  currentPhase: MeetingLifecyclePhase | null,
+  nextActiveRecordingId: string | null,
+  event: MeetingLifecycleEvent,
+): MeetingLifecyclePhase | null {
+  if (!nextActiveRecordingId) {
+    return null;
+  }
+  const incomingId = event.recordingId?.trim() || null;
+  if (incomingId && incomingId !== nextActiveRecordingId) {
+    return currentPhase;
+  }
+  return event.phase === "transcribing" ? "processing" : event.phase;
+}
+
 export function resolveMeetingStopId(
   activeRecordingId: string | null,
   requestedRecordingId?: string | null,

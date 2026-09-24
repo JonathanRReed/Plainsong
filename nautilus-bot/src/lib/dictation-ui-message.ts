@@ -54,6 +54,9 @@ export function describeCloudDictationVocabularyNote(
       return "Your dictionary terms and snippet triggers are sent with the audio to help recognition. Google's paid tier does not train on them; its free tier does.";
     case "mistral_voxtral":
       return "Up to 100 of your dictionary terms and snippet triggers are sent with the audio as context bias to help recognition. Mistral optimises that for English; other languages are experimental.";
+    case "xai_stt":
+    case "plainsong_plus":
+      return "Up to 100 of your dictionary terms and snippet triggers are sent with the audio as key terms to help recognition.";
     default:
       return null;
   }

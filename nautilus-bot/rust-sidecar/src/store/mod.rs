@@ -93,6 +93,10 @@ pub struct DictationInsightTotals {
     pub snippets_triggered: u64,
     pub top_app_target: Option<String>,
     pub top_app_target_count: u64,
+    /// Seconds of dictation audio behind `dictated_words`, for speaking WPM.
+    pub spoken_seconds: u64,
+    /// Local calendar days (`DATE(created_at, 'localtime')`) with a dictation.
+    pub active_dates: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -171,11 +171,34 @@ vi.mock("@/lib/backend/ai", () => ({
 }));
 
 vi.mock("@/lib/backend/dictation", () => ({
+  getDictationAudioLevel: vi.fn(async () => 0),
   startDictation: vi.fn(async () => {}),
   stopDictation: vi.fn(async () => "This is my first Plainsong dictation."),
 }));
 
 vi.mock("@/lib/backend/recordings", () => ({
+  listAudioInputDevices: vi.fn(async () => ({
+    devices: [
+      {
+        deviceId: "BuiltInMicrophoneDevice",
+        deviceName: "MacBook Pro Microphone",
+        transportType: "builtin",
+        isDefault: true,
+        isAvailable: true,
+        isBluetoothLike: false,
+      },
+      {
+        deviceId: "usb-podcast-mic",
+        deviceName: "Podcast Mic",
+        transportType: "usb",
+        isDefault: false,
+        isAvailable: true,
+        isBluetoothLike: false,
+      },
+    ],
+    dictationOverrideEnabled: false,
+    meetingOverrideEnabled: false,
+  })),
   getSystemAudioCapability: vi.fn(async () => ({
     backend: "core_audio_process_tap",
     nativeOsSupported: true,
@@ -230,6 +253,9 @@ vi.mock("@/lib/backend/calendar", () => ({
 }));
 
 vi.mock("@/lib/backend/settings", () => ({
+  getDictationShortcutCapabilityStatus: vi.fn(async () => ({
+    nativeShortcutAvailable: true,
+  })),
   recordOnboardingState: vi.fn(async () => ({})),
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
@@ -257,6 +283,18 @@ vi.mock("@/lib/backend/settings", () => ({
   }),
   verifyMeetingSetup: vi.fn(async () => getMeetingVerificationResult()),
 }));
+
+/**
+ * The microphone check sits between the model step and the first practice
+ * dictation in full onboarding. jsdom has no microphone, so the step shows its
+ * "could not start" state; these flow tests only need to pass through it.
+ */
+async function passMicrophoneStep() {
+  expect(
+    await screen.findByRole("heading", { name: /microphone check/i }),
+  ).toBeInTheDocument();
+  await clickPrimary(/^continue$/i);
+}
 
 async function clickPrimary(label: RegExp) {
   const button = screen.getByRole("button", { name: label });
@@ -333,7 +371,7 @@ describe("FirstRunWizard", () => {
     expect(
       await screen.findByRole("heading", { name: /dictation model/i })
     ).toBeInTheDocument();
-    expect(screen.getByText(/^step 1 of 6$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^step 1 of 7$/i)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /download and continue/i })
     ).toBeInTheDocument();
@@ -438,18 +476,20 @@ describe("FirstRunWizard", () => {
       name: /dictation model/i,
     });
     await waitFor(() => expect(modelHeading).toHaveFocus());
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Step 1 of 6: Dictation model",
+    // The step announcement is the first live region in the dialog; a step
+    // may add its own below it.
+    expect(screen.getAllByRole("status")[0]).toHaveTextContent(
+      "Step 1 of 7: Dictation model",
     );
 
     await clickPrimary(/skip model download/i);
 
-    const tryHeading = await screen.findByRole("heading", {
-      name: /try dictation here/i,
+    const micHeading = await screen.findByRole("heading", {
+      name: /microphone check/i,
     });
-    await waitFor(() => expect(tryHeading).toHaveFocus());
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Step 2 of 6: Try dictation here",
+    await waitFor(() => expect(micHeading).toHaveFocus());
+    expect(screen.getAllByRole("status")[0]).toHaveTextContent(
+      "Step 2 of 7: Microphone check",
     );
   });
 
@@ -468,6 +508,7 @@ describe("FirstRunWizard", () => {
 
     render(<FirstRunWizard onComplete={vi.fn()} />);
     await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
 
     expect(
       await screen.findByText(/macOS may ask for Microphone.*then Accessibility/i),
@@ -489,6 +530,7 @@ describe("FirstRunWizard", () => {
     render(<FirstRunWizard onComplete={vi.fn()} />);
 
     await clickPrimary(/download and continue/i);
+    await passMicrophoneStep();
     await screen.findByRole("heading", { name: /try dictation here/i });
     fireEvent.click(
       screen.getByRole("button", { name: /start a test/i })
@@ -513,6 +555,7 @@ describe("FirstRunWizard", () => {
     expect(
       await screen.findByText("This is my first Plainsong dictation.")
     ).toBeInTheDocument();
+    expect(screen.getByText(/6 words, written on this Mac/i)).toBeInTheDocument();
   });
 
   it("hydrates an already-downloaded local model instead of offering it again", async () => {
@@ -548,7 +591,7 @@ describe("FirstRunWizard", () => {
     render(<FirstRunWizard onComplete={vi.fn()} />);
 
     expect(
-      await screen.findByText(/local dictation route downloaded and selected/i)
+      await screen.findByText(/downloaded and ready to use/i)
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /^continue$/i })
@@ -572,6 +615,7 @@ describe("FirstRunWizard", () => {
     expect(onComplete).not.toHaveBeenCalled();
     expect(downloadAsrModels).not.toHaveBeenCalled();
 
+    await passMicrophoneStep();
     await clickPrimary(/^continue$/i);
     await clickPrimary(/^continue$/i);
     expect(
@@ -594,6 +638,108 @@ describe("FirstRunWizard", () => {
       deferred: false,
     });
     expect(downloadAsrModels).not.toHaveBeenCalled();
+  });
+
+  /** Skip the model, then walk every step through to the closing summary. */
+  async function reachReadyAfterSkippingModel() {
+    await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/^continue$/i);
+    expect(
+      await screen.findByRole("heading", { name: /meeting setup/i }),
+    ).toBeInTheDocument();
+    await clickPrimary(/download meeting model/i);
+    await passMeetingNotesStep();
+    expect(
+      await screen.findByRole("heading", { name: /^ready$/i }),
+    ).toBeInTheDocument();
+  }
+
+  it("lets the reader finish on Ready while the model downloads, and keeps their model", async () => {
+    const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    const download = deferred<void>();
+    downloadAsrModels.mockImplementationOnce(() => download.promise);
+
+    // Apple Speech has no row on the model step, so it opens on base.en; a
+    // retry has to fetch that, not the Parakeet default.
+    const { unmount } = render(<FirstRunWizard onComplete={onComplete} />);
+    await reachReadyAfterSkippingModel();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /download local model/i }));
+    });
+    expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
+    expect(await screen.findByText(/still downloading/i)).toBeInTheDocument();
+
+    await clickPrimary(/start using plainsong/i);
+    expect(onComplete).toHaveBeenCalledWith({
+      markOnboardingComplete: true,
+      meetingsCompleted: true,
+      deferred: false,
+    });
+
+    // Finishing closes the wizard; the download still becomes the route.
+    unmount();
+    await act(async () => {
+      download.resolve();
+    });
+    await waitFor(() => {
+      expect(currentSettings.transcription.dictationProvider).toBe("whisper");
+    });
+    expect(currentSettings.transcription.dictationModelId).toBe("base.en");
+    expect(downloadAsrModels).not.toHaveBeenCalledWith("parakeet", expect.anything());
+  });
+
+  it("lets the reader finish on Ready after a failed download", async () => {
+    const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    vi.mocked(asrBackend.downloadAsrModels).mockRejectedValueOnce(
+      new Error("Network unavailable"),
+    );
+
+    render(<FirstRunWizard onComplete={onComplete} />);
+    await reachReadyAfterSkippingModel();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /download local model/i }));
+    });
+    expect(
+      await screen.findByText(/model download failed: network unavailable\. try again/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /retry local model download/i }),
+    ).toBeInTheDocument();
+
+    await clickPrimary(/start using plainsong/i);
+    expect(onComplete).toHaveBeenCalledWith({
+      markOnboardingComplete: true,
+      meetingsCompleted: true,
+      deferred: false,
+    });
+  });
+
+  it("downloads the reader's selected model from the practice step", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    currentSettings.transcription.dictationProvider = "moonshine";
+    currentSettings.transcription.dictationModelId = "moonshine-base";
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+    await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
+    expect(
+      await screen.findByRole("heading", { name: /try dictation here/i }),
+    ).toBeInTheDocument();
+    await clickPrimary(/^download$/i);
+
+    expect(downloadAsrModels).toHaveBeenCalledWith("moonshine", "moonshine-base");
+    await waitFor(() => {
+      expect(currentSettings.transcription.dictationProvider).toBe("moonshine");
+    });
+    expect(currentSettings.transcription.dictationModelId).toBe("moonshine-base");
   });
 
   it("downloads the selected model before the primary action advances", async () => {
@@ -623,7 +769,7 @@ describe("FirstRunWizard", () => {
     });
 
     expect(
-      await screen.findByRole("heading", { name: /try dictation here/i })
+      await screen.findByRole("heading", { name: /microphone check/i })
     ).toBeInTheDocument();
   });
 
@@ -813,6 +959,7 @@ describe("FirstRunWizard", () => {
     // before the step advances; wait for that transition to actually land
     // (mirroring the explicit wait other tests in this file use for the same
     // step) instead of racing the next click against it.
+    await passMicrophoneStep();
     expect(
       await screen.findByRole("heading", { name: /try dictation here/i }),
     ).toBeInTheDocument();
@@ -880,6 +1027,7 @@ describe("FirstRunWizard", () => {
     render(<FirstRunWizard onComplete={vi.fn()} />);
 
     await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
     await clickPrimary(/^continue$/i);
     await clickPrimary(/^continue$/i);
     expect(
@@ -936,6 +1084,7 @@ describe("FirstRunWizard", () => {
     render(<FirstRunWizard onComplete={vi.fn()} />);
 
     await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
     await clickPrimary(/^continue$/i);
     await clickPrimary(/^continue$/i);
     await screen.findByRole("heading", { name: /meeting setup/i });
@@ -993,7 +1142,7 @@ describe("FirstRunWizard", () => {
     });
 
     expect(
-      await screen.findByRole("heading", { name: /try dictation here/i })
+      await screen.findByRole("heading", { name: /microphone check/i })
     ).toBeInTheDocument();
   });
 
@@ -1060,12 +1209,16 @@ describe("FirstRunWizard", () => {
     await clickPrimary(/continue/i);
     await clickPrimary(/continue/i);
     // Hold-to-talk is a real, working mode configured from Settings (see
-    // settings-view-simple.tsx); the wizard must describe it accurately
-    // instead of assuming everyone is on toggle.
-    expect(screen.getByText("Hotkey behavior")).toBeInTheDocument();
-    expect(
-      screen.getByText(/hold the shortcut to record, release to stop/i)
-    ).toBeInTheDocument();
+    // settings-view-simple.tsx); the wizard opens on it instead of assuming
+    // everyone is on toggle.
+    expect(screen.getByRole("radio", { name: /hold to talk/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(screen.getByRole("radio", { name: /press to toggle/i })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
     await clickPrimary(/finish/i);
 
     await waitFor(() => {
@@ -1079,6 +1232,92 @@ describe("FirstRunWizard", () => {
     // Re-running onboarding must not silently clobber the existing preference.
     expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
     expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
+  });
+
+  it("saves press-to-toggle when the reader chooses it", async () => {
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+    fireEvent.click(screen.getByRole("radio", { name: /press to toggle/i }));
+    // Tap to lock belongs to hold-to-talk and goes away with it.
+    expect(screen.queryByLabelText(/tap to lock/i)).not.toBeInTheDocument();
+    await clickPrimary(/finish/i);
+
+    await waitFor(() => {
+      expect(currentSettings.transcription.dictationPushToTalk).toBe(false);
+    });
+    expect(currentSettings.transcription.dictationHandsFreeEnabled).toBe(false);
+  });
+
+  it("saves hold-to-talk with the reader's tap-to-lock choice", async () => {
+    currentSettings.transcription.dictationPushToTalk = false;
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+    fireEvent.click(screen.getByRole("radio", { name: /hold to talk/i }));
+    const tapToLock = screen.getByLabelText(/tap to lock/i);
+    expect(tapToLock).toBeChecked();
+    fireEvent.click(tapToLock);
+    await clickPrimary(/finish/i);
+
+    await waitFor(() => {
+      expect(currentSettings.transcription.dictationPushToTalk).toBe(true);
+    });
+    expect(
+      (currentSettings.transcription as { dictationTapToLock?: boolean })
+        .dictationTapToLock,
+    ).toBe(false);
+  });
+
+  it("says when hold-to-talk cannot work on this Mac yet", async () => {
+    const backend = await import("@/lib/backend/settings");
+    vi.mocked(backend.getDictationShortcutCapabilityStatus).mockResolvedValueOnce({
+      nativeShortcutAvailable: false,
+    });
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+    expect(
+      await screen.findByText(/hold to talk is not available on this mac right now/i),
+    ).toBeInTheDocument();
+  });
+
+  it("offers hands-free only to someone who already uses it", async () => {
+    currentSettings.transcription.dictationHandsFreeEnabled = true;
+
+    render(<FirstRunWizard mode="dictation" onComplete={vi.fn()} />);
+
+    await clickPrimary(/continue/i);
+    await clickPrimary(/continue/i);
+    expect(screen.getByRole("radio", { name: /hands-free/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("shows the shortcut and what was set up on the final step", async () => {
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+
+    await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/download meeting model/i);
+    await passMeetingNotesStep();
+
+    expect(
+      await screen.findByRole("heading", { name: /^ready$/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Cmd + Shift + Space")).toBeInTheDocument();
+    expect(screen.getByText("Hold to talk.")).toBeInTheDocument();
+    expect(screen.getByText(/a quick tap locks it on/i)).toBeInTheDocument();
+    expect(screen.getByText("Typing into other apps")).toBeInTheDocument();
+    expect(screen.getByText(/written on this mac with ollama/i)).toBeInTheDocument();
   });
 
   it("announces a hotkey save failure and retries without losing the shortcut", async () => {
@@ -1193,7 +1432,7 @@ describe("FirstRunWizard", () => {
 
     render(<FirstRunWizard mode="meetings" onComplete={onComplete} />);
 
-    await screen.findByText(/meeting transcription route/i);
+    await screen.findByText(/^meeting transcription$/i);
     expect(
       screen.getByText(/meetings need a meeting-grade asr route/i)
     ).toBeInTheDocument();
@@ -1570,7 +1809,7 @@ describe("FirstRunWizard", () => {
       currentSettings.transcription.meetingModelId = "distil-large-v3";
 
       render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
-      await screen.findByText(/meeting transcription route/i);
+      await screen.findByText(/^meeting transcription$/i);
       await clickPrimary(/^continue$/i);
       return screen.findByRole("heading", { name: /meeting notes/i });
     }

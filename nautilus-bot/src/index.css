@@ -616,3 +616,49 @@
     display: none;
   }
 }
+
+/* ---- Shell fluidity: view enter and sidebar labels. -------------------- */
+/* A view settles in on the same keyframes as .settle-in, only quicker, so a
+   switch reads as one motion. `backwards` rather than `both` leaves no
+   transform behind once it ends, which would otherwise give every
+   position: fixed element inside the view a new containing block. */
+.view-enter {
+  animation: settle-in 140ms var(--ease-settle) backwards;
+}
+/* The sidebar width snaps; the labels that appear with it fade in. */
+.sidebar-labels-enter :is(span, p) {
+  animation: sidebar-label-in 140ms ease-out backwards;
+}
+@keyframes sidebar-label-in {
+  from {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .view-enter,
+  .sidebar-labels-enter :is(span, p) {
+    animation: none;
+  }
+}
+
+/* ---- Meetings: list settle and long transcripts. ------------------------ */
+/* The meetings list stays invisible until the header's banners have landed
+   (see use-settled-reveal.ts), then fades in. Content at opacity 0 does not
+   count as a layout shift, so a late banner no longer shoves it down. */
+.meetings-list-settle {
+  transition: opacity 0.18s var(--ease-settle);
+}
+.meetings-list-settle[data-settled="false"] {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .meetings-list-settle {
+    transition: none;
+  }
+}
+/* Past a few hundred turns, let the browser skip laying out the ones off
+   screen. A turn's size is remembered once it has been seen. */
+.transcript-turn-deferred {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}

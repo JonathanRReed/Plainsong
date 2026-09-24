@@ -14,10 +14,41 @@ interface ThemeContextType {
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
+/**
+ * The last theme preference settings reported, so the next launch paints in
+ * it before `get_settings` answers. public/theme-boot.js reads the same key to
+ * set the class ahead of first paint. Settings stay the source of truth: this
+ * is only ever a copy of what they said last time.
+ */
+const THEME_CACHE_KEY = "plainsong.theme";
+
+function isTheme(value: unknown): value is Theme {
+  return value === "light" || value === "dark" || value === "system";
+}
+
+function readCachedTheme(): Theme | null {
+  try {
+    const cached = localStorage.getItem(THEME_CACHE_KEY);
+    return isTheme(cached) ? cached : null;
+  } catch {
+    return null;
+  }
+}
+
+function cacheTheme(theme: Theme): void {
+  try {
+    localStorage.setItem(THEME_CACHE_KEY, theme);
+  } catch {
+    // Costs one launch in the default theme, nothing more.
+  }
+}
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // Dark (the candle-lit folio) is Plainsong's default.
-  const [theme, setThemeState] = useState<Theme>("dark");
-  const [isDark, setIsDark] = useState(true);
+  const [theme, setThemeState] = useState<Theme>(() => readCachedTheme() ?? "dark");
+  const [isDark, setIsDark] = useState(() =>
+    window.document.documentElement.classList.contains("dark"),
+  );
   const [colorScheme, setColorSchemeState] = useState<string>("default");
 
   // Load theme from settings on mount
@@ -25,11 +56,12 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const loadTheme = async () => {
       try {
         const settings = await invoke<Record<string, unknown>>("get_settings");
-        const savedTheme = (settings.theme as Theme) || "dark";
+        const savedTheme = isTheme(settings.theme) ? settings.theme : "dark";
         const ui = (settings.ui as Record<string, unknown> | undefined) ?? {};
         const rawColorScheme = typeof ui.colorScheme === "string" ? ui.colorScheme : "default";
         const savedColorScheme = normalizeThemeScheme(rawColorScheme);
         setThemeState(savedTheme);
+        cacheTheme(savedTheme);
         setColorSchemeState(savedColorScheme);
         if (savedColorScheme !== rawColorScheme) {
           await invoke("save_settings", {
@@ -43,8 +75,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
           });
         }
       } catch {
-        // If settings not available, default to the candle-lit folio.
-        setThemeState("dark");
+        // If settings not available, keep what the last launch cached, or
+        // default to the candle-lit folio.
+        setThemeState(readCachedTheme() ?? "dark");
         setColorSchemeState("default");
       }
     };
@@ -85,6 +118,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   const setTheme = async (newTheme: Theme) => {
     setThemeState(newTheme);
+    cacheTheme(newTheme);
     
     // Save to settings
     try {

@@ -10,6 +10,7 @@ import {
   type AiLaneKey,
 } from "@/components/models/ai-lanes";
 import type { AiLaneSettings } from "@/types/settings";
+import { usePlusAvailable } from "@/lib/plus";
 
 interface AiLaneRowProps {
   lane: AiLaneKey;
@@ -49,7 +50,8 @@ export function AiLaneRow({
 }: AiLaneRowProps) {
   const choices = analysisModelChoices(value.provider, models);
   const zeroSetup = isZeroSetupAnalysisProvider(value.provider);
-  const options = analysisProviderOptionsForLane(lane);
+  const plusAvailable = usePlusAvailable();
+  const options = analysisProviderOptionsForLane(lane, plusAvailable);
 
   return (
     <div className="space-y-4">

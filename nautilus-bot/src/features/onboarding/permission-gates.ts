@@ -81,7 +81,7 @@ export const PERMISSION_GATES: PermissionGate[] = [
     label: "Microphone",
     purpose: "Plainsong hears what you say, on this Mac.",
     consequence:
-      "Without it nothing can be dictated or recorded — this is the one permission everything else depends on.",
+      "Without it nothing can be dictated or recorded. Every other feature depends on this one.",
     settingsLabel: "Microphone",
     destination: { kind: "settings_pane", section: "microphone" },
     optional: false,
@@ -121,7 +121,7 @@ export const PERMISSION_GATES: PermissionGate[] = [
     key: "system_audio",
     label: "Screen & System Audio",
     purpose:
-      "Meetings capture the other side of a call — what comes out of your speakers.",
+      "Meetings capture the other side of a call: what comes out of your speakers.",
     consequence:
       "Without it meetings still record, from your microphone only, so the people on the call are not in the transcript.",
     settingsLabel: "Screen & System Audio Recording",

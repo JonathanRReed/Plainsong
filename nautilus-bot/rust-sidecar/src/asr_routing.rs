@@ -28,9 +28,12 @@ pub(crate) fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> 
         asr::AsrProviderType::Qwen3Asr => "qwen3_asr",
         asr::AsrProviderType::Deepgram => "deepgram",
         asr::AsrProviderType::MistralVoxtral => "mistral_voxtral",
+        asr::AsrProviderType::XaiStt => "xai_stt",
         asr::AsrProviderType::GeminiTranscribe => "gemini_transcribe",
         #[cfg(feature = "asr-transcribe-cpp")]
         asr::AsrProviderType::TranscribeCpp => "transcribe_cpp",
+        #[cfg(feature = "plainsong-plus")]
+        asr::AsrProviderType::PlainsongPlus => "plainsong_plus",
     }
 }
 
@@ -51,9 +54,12 @@ pub(crate) fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrPr
         "qwen3_asr" => Some(asr::AsrProviderType::Qwen3Asr),
         "deepgram" => Some(asr::AsrProviderType::Deepgram),
         "mistral_voxtral" => Some(asr::AsrProviderType::MistralVoxtral),
+        "xai_stt" => Some(asr::AsrProviderType::XaiStt),
         "gemini_transcribe" => Some(asr::AsrProviderType::GeminiTranscribe),
         #[cfg(feature = "asr-transcribe-cpp")]
         "transcribe_cpp" => Some(asr::AsrProviderType::TranscribeCpp),
+        #[cfg(feature = "plainsong-plus")]
+        "plainsong_plus" => Some(asr::AsrProviderType::PlainsongPlus),
         _ => None,
     }
 }

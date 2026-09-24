@@ -1939,6 +1939,70 @@ fn runtime_diagnostics_for_provider(
                 },
             }
         }
+        AsrProviderType::XaiStt => {
+            let has_key = has_provider_secret_or_env("xai", "XAI_API_KEY");
+            RuntimeDiagnosticsInternal {
+                runtime_status: if has_key {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if has_key {
+                    "xAI Grok speech-to-text cloud API ready for dictation. Your dictionary \
+                     terms are sent as key terms; meetings use another route."
+                        .to_string()
+                } else {
+                    "Set XAI_API_KEY to enable xAI Grok speech-to-text.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if has_key {
+                        Vec::new()
+                    } else {
+                        vec!["XAI_API_KEY".to_string()]
+                    },
+                    setup_action: if has_key {
+                        None
+                    } else {
+                        Some(
+                            "Get an API key from https://console.x.ai and set it in Settings -> API Keys."
+                                .to_string(),
+                        )
+                    },
+                },
+            }
+        }
+        #[cfg(feature = "plainsong-plus")]
+        AsrProviderType::PlainsongPlus => {
+            let signed_in = crate::plus::is_signed_in();
+            RuntimeDiagnosticsInternal {
+                runtime_status: if signed_in {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if signed_in {
+                    "Plainsong Plus is ready for dictation.".to_string()
+                } else {
+                    "Sign in to Plainsong Plus to use hosted transcription.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if signed_in {
+                        Vec::new()
+                    } else {
+                        vec!["Plainsong Plus license".to_string()]
+                    },
+                    setup_action: if signed_in {
+                        None
+                    } else {
+                        Some("Enter your license key in Settings -> Plainsong Plus.".to_string())
+                    },
+                },
+            }
+        }
         AsrProviderType::Deepgram => {
             let has_key = has_provider_secret_or_env("deepgram", "DEEPGRAM_API_KEY");
             RuntimeDiagnosticsInternal {

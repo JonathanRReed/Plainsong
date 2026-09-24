@@ -144,6 +144,14 @@ walkdir = "2.5"
 # outside the pinned-hash download manager.
 speakrs = { version = "0.5.0", optional = true, default-features = false, features = ["default-linalg"] }
 
+# EXPERIMENTAL Nemotron 3 Diarization (NVIDIA Sortformer v3) through
+# parakeet-rs (MIT OR Apache-2.0). Behind `diarization-nemotron`, off by
+# default and not in the release feature list. It pins the same
+# `ort 2.0.0-rc.13` and `ndarray 0.17` as this crate, so no second ONNX
+# Runtime is linked. `default-features = false` drops parakeet-rs's own `ort`
+# defaults so ours decide how ONNX Runtime is fetched and linked.
+parakeet-rs = { version = "0.3.8", optional = true, default-features = false, features = ["sortformer"] }
+
 # Optional progress bars
 indicatif = { version = "0.18", optional = true }
 
@@ -260,11 +268,22 @@ download-manager = ["indicatif"]
 audio-processing = []
 desktop-shell = []
 
+# Plainsong Plus, the optional paid hosted tier (OFF by default and NOT
+# LAUNCHED; deliberately NOT in scripts/sidecar-cargo-features.mjs, so no
+# release build contains it). Adds the `plainsong_plus` speech-to-text route,
+# the `plainsong-plus` cleanup provider and the account commands; without it
+# `plus_get_status` reports `available: false` and the renderer shows nothing.
+# The relay it talks to lives in infra/plus-worker.
+plainsong-plus = []
+
 # Speaker diarization (requires ONNX runtime)
 diarization = ["ort", "ndarray", "rustfft"]
 # EXPERIMENTAL, OFF by default and NOT shipped: swap the embedding+AHC
 # diarizer for speakrs (pyannote community-1 in Rust on ONNX Runtime).
 diarization-speakrs = ["diarization", "dep:speakrs"]
+# EXPERIMENTAL, OFF by default and NOT shipped: Nemotron 3 Diarization for the
+# eval harness only (diarization::eval_tests::eval_nemotron_backend).
+diarization-nemotron = ["diarization", "dep:parakeet-rs"]
 
 [patch.crates-io]
 # CPAL 0.18.1's macOS loopback implementation links the macOS 14.2 process-tap
@@ -298,7 +317,12 @@ codegen-units = 1
 # realtime audio callbacks we own, so those degrade to an inert stream instead
 # of reaching that abort at all.
 panic = "unwind"
-strip = true
+# Not `true`: on macOS rustc strips with its bundled `rust-objcopy`, whose
+# output current dyld rejects ("mis-aligned LINKEDIT string pool"). That broke
+# every proc macro in a release build ("can't find crate for zerofrom_derive")
+# and left the sidecar unloadable by `dyld_info`. scripts/build-rust-sidecar.mjs
+# strips the shipped binaries with the platform's own `strip` instead.
+strip = false
 
 [profile.dev]
 opt-level = 1

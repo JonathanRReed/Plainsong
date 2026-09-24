@@ -1,0 +1,40 @@
+# Plainsong Plus: the optional paid cloud tier. NOT LAUNCHED.
+# Every route but /v1/status answers 503 while PLUS_LAUNCH_STATE is "off".
+# Deploying this does not change the app: the app side is compiled only
+# with the sidecar's `plainsong-plus` Cargo feature, which no release enables.
+name = "plainsong-plus"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+# routes = [{ pattern = "plus.plainsong.jonathanrreed.com", custom_domain = true }]
+
+[vars]
+PLUS_LAUNCH_STATE = "off"        # off | testers | on
+TESTER_CUSTOMER_IDS = ""         # comma-separated Polar customer ids for "testers"
+BILLING_PROVIDER = "polar"       # polar | stripe
+PLUS_RETURN_URL = ""             # where checkout Cancel and the billing portal return to
+# Polar
+POLAR_ENVIRONMENT = "sandbox"    # sandbox | production
+POLAR_ORGANIZATION_ID = ""
+POLAR_CHECKOUT_URL_MONTHLY = ""  # Polar checkout links, handed out by /v1/checkout
+POLAR_CHECKOUT_URL_YEARLY = ""
+POLAR_PORTAL_URL = ""
+# Stripe
+STRIPE_PRICE_MONTHLY = ""        # price_... for $10/month
+STRIPE_PRICE_YEARLY = ""         # price_... for $96/year
+STRIPE_AUTOMATIC_TAX = "false"   # "true" once Stripe Tax is set up
+
+[[d1_databases]]
+binding = "DB"
+database_name = "plainsong-plus"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# Secrets (wrangler secret put <NAME>), never in this file:
+#   TOKEN_SECRET          32+ random characters, signs entitlement tokens
+#   POLAR_WEBHOOK_SECRET  from the Polar webhook settings (Polar billing)
+#   STRIPE_SECRET_KEY     restricted key: Checkout Sessions write, Billing Portal write (Stripe billing)
+#   STRIPE_WEBHOOK_SECRET whsec_... from the Stripe webhook endpoint (Stripe billing)
+#   LICENSE_SECRET        32+ random characters, derives Stripe license keys; never rotate
+#   XAI_API_KEY           Grok speech-to-text
+#   GROQ_API_KEY          plainsong-fast chat
+#   ANTHROPIC_API_KEY     plainsong-quality chat
+#   ELEVENLABS_API_KEY    optional speech-to-text fallback

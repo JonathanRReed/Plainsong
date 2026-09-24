@@ -342,7 +342,23 @@ pub async fn dispatch_command(
             let recs = db
                 .get_recordings(project_id.as_deref())
                 .map_err(|e| e.to_string())?;
-            serde_json::to_value(recs).map_err(|e| e.to_string())
+            let mut value = serde_json::to_value(recs).map_err(|e| e.to_string())?;
+            // Dictation rows carry a text preview and the app they went into,
+            // so history lists can show the words instead of "Dictation - <date>".
+            if let Ok(previews) = db.get_dictation_list_previews() {
+                if let Some(rows) = value.as_array_mut() {
+                    for row in rows {
+                        let Some(id) = row.get("id").and_then(|id| id.as_str()) else {
+                            continue;
+                        };
+                        if let Some((preview, app)) = previews.get(id).cloned() {
+                            row["dictationPreview"] = serde_json::json!(preview);
+                            row["dictationAppTarget"] = serde_json::json!(app);
+                        }
+                    }
+                }
+            }
+            Ok(value)
         }
         "get_recording" => {
             let recording_id: String =
@@ -3213,6 +3229,11 @@ pub async fn dispatch_command(
                 snippets_triggered: totals.snippets_triggered,
                 top_app_target: totals.top_app_target,
                 top_app_target_count: totals.top_app_target_count,
+                spoken_seconds: totals.spoken_seconds,
+                current_streak_days: models::current_streak_days(
+                    &totals.active_dates,
+                    chrono::Local::now().date_naive(),
+                ),
             };
             serde_json::to_value(insights).map_err(|e| e.to_string())
         }
@@ -3676,6 +3697,31 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["provider"].clone()).map_err(|e| e.to_string())?;
             let normalized = normalize_provider_secret_name(&provider)?;
             secrets::clear_provider_secret(normalized).map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Null)
+        }
+        // ── Plainsong Plus (not launched) ──────────────────────────────────
+        // Present in every build so the IPC contract is the same everywhere;
+        // only a `plainsong-plus` build answers anything but "not available".
+        "plus_get_status" => Ok(crate::plus::status().await),
+        "plus_activate" => {
+            #[cfg(feature = "plainsong-plus")]
+            {
+                let license_key: String = serde_json::from_value(params["licenseKey"].clone())
+                    .map_err(|e| e.to_string())?;
+                crate::plus::activate(&license_key)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            #[cfg(not(feature = "plainsong-plus"))]
+            {
+                Err("This build does not include Plainsong Plus.".to_string())
+            }
+        }
+        "plus_sign_out" => {
+            #[cfg(feature = "plainsong-plus")]
+            {
+                crate::plus::sign_out().map_err(|e| e.to_string())?;
+            }
             Ok(serde_json::Value::Null)
         }
         "get_security_status" => {

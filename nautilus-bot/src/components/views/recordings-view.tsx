@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useRecordings } from "@/hooks/use-recordings";
-import { useRecording } from "@/hooks/use-recording";
+import { RecordingDurationText, useRecordingSession } from "@/hooks/use-recording";
 import { useRecordingDetail } from "@/hooks/use-recording-detail";
 import { AudioPlayer, type AudioPlayerHandle } from "@/components/meetings/audio-player";
 import { useScopedRequestGuard } from "@/hooks/use-scoped-request-guard";
@@ -187,6 +187,7 @@ import {
   FileOutput,
   FileText,
   FolderOpen,
+  HelpCircle,
   MessageSquare,
   Loader2,
   Mic2,
@@ -206,6 +207,7 @@ import type { AnalysisTemplate } from "@/types";
 import type { AsrProviderType, LlmCitation, SearchHit } from "@/types";
 import { MEETING_CAPTURE_MODE_IMPORTED } from "@/types";
 import { formatDate, formatDateTime } from "@/lib/format-locale";
+import { useSettledReveal } from "@/components/views/meetings/use-settled-reveal";
 
 const MEETING_ASK_TEMPLATES: AnalysisTemplate[] = [
   {
@@ -439,6 +441,8 @@ const CLOUD_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   deepgram: "Deepgram Nova",
   mistral_voxtral: "Mistral Voxtral",
   gemini_transcribe: "Gemini Transcribe",
+  xai_stt: "xAI Grok",
+  plainsong_plus: "Plainsong Plus",
 };
 
 /**
@@ -521,6 +525,29 @@ function buildMeetingShareMarkdown(args: {
   ].filter(Boolean);
 
   return [...sections, ...body].join("\n\n").trim();
+}
+
+/** Longer than this, a microphone-only capture is taken to be a real meeting. */
+const MISFILED_DICTATION_MAX_SECONDS = 120;
+
+/**
+ * A row that reads like a dictation filed as a meeting: a short capture from
+ * the microphone alone, recorded here rather than imported, with no one
+ * listed as attending. These are the only signals the record carries and none
+ * of them is proof, so the list offers the move and never makes it.
+ */
+function looksLikeMisfiledDictation(recording: Recording): boolean {
+  if (recording.status === "recording" || recording.status === "processing") return false;
+  if (recording.metadata?.systemAudio) return false;
+  if (
+    recording.meetingCaptureMode === "me_and_them" ||
+    recording.meetingCaptureMode === MEETING_CAPTURE_MODE_IMPORTED ||
+    recording.importedSourceName
+  ) {
+    return false;
+  }
+  if ((recording.attendees?.length ?? 0) > 0) return false;
+  return recording.duration > 0 && recording.duration < MISFILED_DICTATION_MAX_SECONDS;
 }
 
 function resolveRecordingCaptureMode(
@@ -1053,11 +1080,12 @@ export function RecordingsView() {
     resumeMeeting,
     isRecording,
     recordingId,
-    formattedDuration,
     meetingPhase = "idle",
     meetingMessage = null,
     meetingPaused = false,
-  } = useRecording();
+    // The clock is read only by the labels that show it (RecordingDurationText),
+    // so this view does not re-render once a second during a meeting.
+  } = useRecordingSession();
   const { toast } = useToast();
   const [recordingStatusOverrides, setRecordingStatusOverrides] = useState<
     Record<string, Recording["status"]>
@@ -1076,6 +1104,7 @@ export function RecordingsView() {
   // left on <body> and a keyboard reader restarts from the top of the document.
   const workspaceHeadingRef = useRef<HTMLHeadingElement>(null);
   const listHeadingRef = useRef<HTMLHeadingElement>(null);
+  const listHeaderRef = useRef<HTMLDivElement>(null);
   const hasOpenedWorkspaceRef = useRef(false);
   const [meetingTab, setMeetingTab] = useState("record");
   // The record is a document first. Editing is an explicit act on one field at
@@ -1090,6 +1119,7 @@ export function RecordingsView() {
     warning: string;
   } | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [showTranscriptHelp, setShowTranscriptHelp] = useState(false);
   const [transcriptMatches, setTranscriptMatches] = useState<TranscriptMatch[]>([]);
   const [activeTranscriptMatchIndex, setActiveTranscriptMatchIndex] = useState(0);
   // Where the reader is in the transcript. Set by a segment click, by keyboard
@@ -3769,6 +3799,22 @@ export function RecordingsView() {
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [meetingSearch, meetingTranscriptHits, meetings, statusFilter]);
 
+  // Rows that look like dictations, among the ones listed. The move-them
+  // banner shows only when there is at least one; the blanket "move all
+  // listed" lives in the list's overflow menu.
+  const suspectedDictations = useMemo(
+    () => filteredMeetings.filter(looksLikeMisfiledDictation),
+    [filteredMeetings]
+  );
+
+  // The list waits, invisibly and briefly, for the header's banners to land,
+  // so it appears once in place instead of jumping down as each one arrives.
+  const listSettled = useSettledReveal(
+    (recordingsHaveLoaded || Boolean(recordingsError)) &&
+      meetingsReadiness.state !== "unknown",
+    listHeaderRef,
+  );
+
   const meetingStats = useMemo(() => {
     const total = meetings.length;
     const completed = meetings.filter((meeting) => meeting.status === "completed").length;
@@ -4351,21 +4397,19 @@ export function RecordingsView() {
     }
   };
 
-  const handleBulkMarkFilteredAsDictation = async () => {
-    if (filteredMeetings.length === 0 || isBulkReclassifying) {
+  const handleBulkMarkAsDictation = async (toMove: Recording[]) => {
+    if (toMove.length === 0 || isBulkReclassifying) {
       return;
     }
 
     setIsBulkReclassifying(true);
     try {
       await Promise.all(
-        filteredMeetings.map((recording) => setRecordingSourceType(recording.id, "dictation"))
+        toMove.map((recording) => setRecordingSourceType(recording.id, "dictation"))
       );
       await refetch();
       toast(
-        `Moved ${filteredMeetings.length} meeting${
-          filteredMeetings.length === 1 ? "" : "s"
-        } to Dictation.`,
+        `Moved ${toMove.length} meeting${toMove.length === 1 ? "" : "s"} to Dictation.`,
         "success"
       );
     } catch (error) {
@@ -4629,7 +4673,7 @@ export function RecordingsView() {
               {isLiveSelectedMeeting ? (
                 <span className="inline-flex items-center gap-1.5 text-gold-text">
                   <span className="neume neume-lit" aria-hidden="true" />
-                  Live capture · {formattedDuration}
+                  Live capture · <RecordingDurationText />
                 </span>
               ) : null}
             </div>
@@ -5994,7 +6038,7 @@ export function RecordingsView() {
                   <h2 className="section-heading">Transcript</h2>
                   <p className="mt-0.5 text-sm text-muted-foreground">
                     {isLoadingDetail
-                      ? "Loading the transcript."
+                      ? "Loading transcript…"
                       : `${selectedTranscript?.segments?.length ?? 0} lines · ${selectedMeetingCaptureMode}`}
                   </p>
                 </div>
@@ -6033,12 +6077,9 @@ export function RecordingsView() {
                 </div>
               ) : null}
 
-              <div className="flex min-h-0 flex-1 flex-col px-5 pb-5 pt-4">
+              <div className="flex min-h-0 flex-1 flex-col px-5 pb-5 pt-1">
               {isLoadingDetail ? (
-                <div className="flex-1 flex items-center justify-center text-muted-foreground">
-                  <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-                  Loading transcript…
-                </div>
+                <WorkspaceSkeleton label="Loading transcript…" lines={8} className="flex-1" />
               ) : selectedTranscript ? (
                 <div className="flex min-h-0 flex-1 flex-col">
                   {detailError && (
@@ -6110,12 +6151,30 @@ export function RecordingsView() {
                           ).toFixed(1)}s`
                         : "Transcription time unknown"}
                     </span>
+                    {/* How to work the transcript, on request. As a standing
+                        paragraph it pushed the transcript itself below the
+                        fold of a short window on every visit. */}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="ml-auto h-7 w-7 shrink-0"
+                      aria-label="How to use the transcript"
+                      aria-expanded={showTranscriptHelp}
+                      aria-controls="transcript-help"
+                      title="How to use the transcript"
+                      onClick={() => setShowTranscriptHelp((open) => !open)}
+                    >
+                      <HelpCircle className="h-4 w-4" />
+                    </Button>
                   </div>
-                  <p className="mb-3 max-w-prose text-sm text-muted-foreground">
-                    Click a line to mark your place; with audio loaded, playback jumps there too.
-                    The text stays selectable. Double-click it, or use Edit, to correct it. Arrow
-                    keys move line by line; Space plays or pauses; ← and → skip five seconds.
-                  </p>
+                  {showTranscriptHelp ? (
+                    <p id="transcript-help" className="mb-3 max-w-prose text-sm text-muted-foreground">
+                      Click a line to mark your place; with audio loaded, playback jumps there too.
+                      The text stays selectable. Double-click it, or use Edit, to correct it. Arrow
+                      keys move line by line; Space plays or pauses; ← and → skip five seconds.
+                    </p>
+                  ) : null}
                   {selectedRecording?.audioPath ? (
                     <AudioPlayer
                       key={selectedRecording.id}
@@ -6325,9 +6384,9 @@ export function RecordingsView() {
         </div>
       ) : (
         <>
-      <div className="border-b">
-      <div className="p-6 pb-4 flex items-center justify-between">
-        <div>
+      <div ref={listHeaderRef} className="border-b">
+      <div className="p-6 pb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+        <div className="min-w-0">
           <p className="rubric mb-1.5">MEETINGS</p>
           <h1
             ref={listHeadingRef}
@@ -6340,7 +6399,7 @@ export function RecordingsView() {
             Capture meetings, review transcripts, and keep follow-up moving.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {/* Secondary to the one primary CTA on this surface. Disabled while a
               meeting is live: an import and a capture want the same
               post-processing lease, and the sidecar would refuse the second. */}
@@ -6419,7 +6478,10 @@ export function RecordingsView() {
         />
       </div>
 
-      <ScrollArea className="flex-1">
+      <ScrollArea
+        className="meetings-list-settle flex-1"
+        data-settled={listSettled ? "true" : "false"}
+      >
         <div className="p-6">
           {/* Engine loss, said in plain words on the surface the reader is
               actually on. It used to appear only as the bridge's own log line
@@ -6685,18 +6747,22 @@ export function RecordingsView() {
               and the one bulk action, with the filter buttons grouped so a
               screen reader announces what the row of words does. */}
           <section className="mb-5">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div className="relative w-full md:max-w-md">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                {/* Wide enough for the placeholder at any width; the filters
+                    wrap below it before it gets any narrower. */}
+                <div className="relative min-w-[15rem] flex-1 md:max-w-md">
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
                     className="pl-9"
-                    placeholder="Search titles, notes, summaries, action items, and transcripts"
+                    placeholder="Search meetings and transcripts"
+                    title="Searches titles, notes, summaries, action items, and transcripts"
                     aria-label="Search meetings"
                     value={meetingSearch}
                     onChange={(event) => setMeetingSearch(event.target.value)}
                   />
                 </div>
-                <div className="flex items-center gap-2" role="group" aria-label="Show only">
+                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Show only">
                   <Button
                     variant={statusFilter === "all" ? "active" : "outline"}
                     size="sm"
@@ -6738,30 +6804,66 @@ export function RecordingsView() {
                     Failed
                   </Button>
                 </div>
+                {/* The blanket move is rare and hard to undo in bulk, so it
+                    sits behind the overflow menu rather than on every visit. */}
+                {filteredMeetings.length > 0 ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 w-8 p-0"
+                      aria-label="More list actions"
+                    >
+                      <MoreHorizontal className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      disabled={isBulkReclassifying}
+                      onClick={() => {
+                        void handleBulkMarkAsDictation(filteredMeetings);
+                      }}
+                    >
+                      <Mic2 className="h-4 w-4 mr-2" />
+                      Move all listed to Dictation
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                ) : null}
+                </div>
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
-                <p className="text-sm text-muted-foreground">
-                  A dictation landed in this list? Move it out from its row menu, or move
-                  everything listed at once.
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={filteredMeetings.length === 0 || isBulkReclassifying}
-                  onClick={() => {
-                    void handleBulkMarkFilteredAsDictation();
-                  }}
+              {suspectedDictations.length > 0 ? (
+                <div
+                  role="status"
+                  className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border/80 bg-muted/30 px-4 py-2.5"
                 >
-                  {isBulkReclassifying ? (
-                    <>
-                      <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                      Moving…
-                    </>
-                  ) : (
-                    "Move all listed to Dictation"
-                  )}
-                </Button>
-              </div>
+                  <p className="min-w-0 flex-1 text-sm text-muted-foreground">
+                    {suspectedDictations.length === 1
+                      ? "One listed recording is short and microphone-only, like a dictation."
+                      : `${suspectedDictations.length} listed recordings are short and microphone-only, like dictations.`}
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isBulkReclassifying}
+                    onClick={() => {
+                      void handleBulkMarkAsDictation(suspectedDictations);
+                    }}
+                  >
+                    {isBulkReclassifying ? (
+                      <>
+                        <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                        Moving…
+                      </>
+                    ) : suspectedDictations.length === 1 ? (
+                      "Move it to Dictation"
+                    ) : (
+                      "Move them to Dictation"
+                    )}
+                  </Button>
+                </div>
+              ) : null}
 
               {/* Transcript hits are ranked by the backend's bm25 index and open
                   the meeting at the moment they were found. */}
@@ -6930,7 +7032,7 @@ export function RecordingsView() {
                         meetingPaused && "text-muted-foreground",
                       )}
                     >
-                      {formattedDuration}
+                      <RecordingDurationText />
                     </div>
                   </div>
                 </div>

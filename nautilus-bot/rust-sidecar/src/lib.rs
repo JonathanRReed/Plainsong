@@ -62,6 +62,7 @@ mod backup;
 mod crypto;
 mod db;
 mod diarization;
+mod dictation_cleanup;
 mod dictation_commands;
 pub mod dictation_correction_capture;
 mod dictation_dictionary_csv;
@@ -69,6 +70,7 @@ mod dictation_fidelity;
 mod dictation_live_preview;
 pub mod dictation_parity;
 pub mod dictation_pipeline;
+mod dictation_progress;
 mod dictation_reprocess;
 pub mod dictation_secure_field;
 mod dictation_session;
@@ -92,6 +94,7 @@ mod ort_utils;
 mod paths;
 mod permissions;
 mod playback;
+mod plus;
 mod provider_models;
 mod recording_audio;
 mod recording_lifecycle;
@@ -137,6 +140,14 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 #[cfg(target_os = "macos")]
 use core_foundation_sys::base::{Boolean, CFGetTypeID, CFRange, CFTypeRef};
+/// Same layout as CoreFoundation's `CFRange`, so the pure UTF-16 range
+/// helpers and their tests build on non-macOS hosts.
+#[cfg(all(test, not(target_os = "macos")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CFRange {
+    pub location: isize,
+    pub length: isize,
+}
 #[cfg(target_os = "macos")]
 use core_foundation_sys::dictionary::CFDictionaryRef;
 #[cfg(target_os = "macos")]
@@ -688,7 +699,7 @@ const VAULT_UNLOCK_CHECK_PLAINTEXT: &[u8] = b"nautilus-vault-check";
 /// Canonical registry for every provider credential accepted by the sidecar.
 /// Reset and provider-name validation share it so adding a credential cannot
 /// leave a second cleanup list stale.
-const PROVIDER_SECRET_NAMES: [&str; 10] = [
+const PROVIDER_SECRET_NAMES: [&str; 11] = [
     "openai",
     "elevenlabs",
     "deepgram",
@@ -699,6 +710,7 @@ const PROVIDER_SECRET_NAMES: [&str; 10] = [
     "ollama-cloud",
     "mistral",
     "cohere",
+    "xai",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1100,6 +1112,12 @@ struct DictationOverlayState {
     dictation_resolved_hosting: Option<String>,
     model_readiness: Option<String>,
     capture_ready: bool,
+    /// Finishing-bar state, so an overlay that remounts mid-session (display
+    /// mode switch, window reload) rehydrates the stage and its estimates
+    /// instead of restarting from a default plan.
+    processing_stage: Option<String>,
+    expected_transcribe_ms: Option<u64>,
+    expected_polish_ms: Option<u64>,
 }
 
 impl Default for DictationOverlayState {
@@ -1136,6 +1154,9 @@ impl Default for DictationOverlayState {
             dictation_resolved_hosting: None,
             model_readiness: None,
             capture_ready: false,
+            processing_stage: None,
+            expected_transcribe_ms: None,
+            expected_polish_ms: None,
         }
     }
 }
@@ -1157,7 +1178,6 @@ struct RecordingOverlayState {
     pause_started_at_ms: Option<i64>,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 struct PendingDictationTarget {
     app_name: Option<String>,
@@ -2255,6 +2275,29 @@ fn missing_provider_secret_error(provider: AnalysisProvider) -> String {
     )
 }
 
+/// Plus has no API key: its credential is the entitlement token.
+#[cfg(feature = "plainsong-plus")]
+fn plainsong_plus_provider(provider: AnalysisProvider) -> bool {
+    provider == AnalysisProvider::PlainsongPlus
+}
+
+#[cfg(not(feature = "plainsong-plus"))]
+fn plainsong_plus_provider(_provider: AnalysisProvider) -> bool {
+    false
+}
+
+#[cfg(feature = "plainsong-plus")]
+async fn plus_access_token() -> Result<String, String> {
+    plus::access_token()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "plainsong-plus"))]
+async fn plus_access_token() -> Result<String, String> {
+    Err("This build does not include Plainsong Plus.".to_string())
+}
+
 fn provider_secret_for(provider: AnalysisProvider) -> Result<String, String> {
     let Some(secret_name) = provider.provider_secret_name() else {
         return Err(format!(
@@ -2326,7 +2369,9 @@ async fn analysis_runtime_for_provider(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| provider.default_model())
         .to_string();
-    let api_key = if provider.is_remote() {
+    let api_key = if plainsong_plus_provider(provider) {
+        Some(plus_access_token().await?)
+    } else if provider.is_remote() {
         Some(provider_secret_for(provider)?)
     } else {
         None
@@ -2373,6 +2418,7 @@ fn workspace_frontmost_application() -> Option<WorkspaceFrontmostApplication> {
     workspace_frontmost_application_via_osascript()
 }
 
+#[cfg(target_os = "macos")]
 fn workspace_frontmost_application_via_osascript() -> Option<WorkspaceFrontmostApplication> {
     let script = r#"
 ObjC.import("AppKit");
@@ -3990,6 +4036,11 @@ async fn reset_app_state_for_sidecar(
 
     let (cleared_provider_secrets, failed_provider_secret_clears) =
         clear_registered_provider_secrets_with(secrets::clear_provider_secret);
+    // A reset also forgets a Plainsong Plus license on this Mac.
+    #[cfg(feature = "plainsong-plus")]
+    if let Err(error) = plus::sign_out() {
+        tracing::warn!("Reset could not clear the Plainsong Plus license: {error}");
+    }
 
     handle.emit_event(
         "dictation-state-changed",

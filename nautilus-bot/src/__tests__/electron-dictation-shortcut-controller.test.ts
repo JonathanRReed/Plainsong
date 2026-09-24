@@ -437,6 +437,105 @@ describe("createDictationShortcutSignalRuntime", () => {
     ).toHaveLength(1);
   });
 
+  describe("tap to lock", () => {
+    const tapLock = { ...holdToTalk, holdTapLocks: true } as const;
+
+    it("keeps listening after a quick tap and stops on the next press", async () => {
+      const harness = createHarness();
+      vi.setSystemTime(10_000);
+      const press = harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      harness.finishStart();
+      await press;
+      vi.setSystemTime(10_150);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+      expect(harness.invocations.map((entry) => entry.command)).toEqual(["start_dictation"]);
+
+      vi.setSystemTime(14_000);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+      expect(harness.invocations.map((entry) => entry.command)).toEqual([
+        "start_dictation",
+        "stop_dictation",
+      ]);
+      expect(harness.invocations[1]?.args).toEqual({
+        stopReason: "tap_lock_toggle",
+        stopGestureEpochMs: 14_000,
+      });
+    });
+
+    it("does not send a second stop for the release of the unlocking press", async () => {
+      const harness = createHarness();
+      vi.setSystemTime(40_000);
+      const press = harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      harness.finishStart();
+      await press;
+      vi.setSystemTime(40_100);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+
+      vi.setSystemTime(44_000);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      // The sidecar's "stopping" event has not been observed yet, so the
+      // cached phase still says "recording" when the key comes back up.
+      harness.setPhase("recording");
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+      expect(harness.invocations.map((entry) => entry.command)).toEqual([
+        "start_dictation",
+        "stop_dictation",
+      ]);
+
+      // The next session's release is not swallowed.
+      harness.setPhase("done");
+      vi.setSystemTime(50_000);
+      const next = harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      harness.finishStart();
+      await next;
+      vi.setSystemTime(52_000);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+      expect(harness.invocations[harness.invocations.length - 1]).toMatchObject({
+        command: "stop_dictation",
+        args: { stopReason: "release" },
+      });
+    });
+
+    it("still stops on release after a real hold", async () => {
+      const harness = createHarness();
+      vi.setSystemTime(20_000);
+      const press = harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      harness.finishStart();
+      await press;
+      vi.setSystemTime(22_500);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+      expect(harness.invocations.map((entry) => entry.command)).toEqual([
+        "start_dictation",
+        "stop_dictation",
+      ]);
+      expect(harness.invocations[1]?.args).toMatchObject({ stopReason: "release" });
+    });
+
+    it("locks a tap that lands before the start resolves, and forgets the lock once the session ends", async () => {
+      const harness = createHarness();
+      vi.setSystemTime(30_000);
+      const press = harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      vi.setSystemTime(30_100);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+      harness.finishStart();
+      await press;
+      await vi.runAllTimersAsync();
+      expect(harness.invocations.map((entry) => entry.command)).toEqual(["start_dictation"]);
+
+      // The session ends on its own (silence, Escape): the next press starts
+      // a new one rather than trying to stop the old one.
+      harness.setPhase("done");
+      const next = harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      harness.finishStart();
+      await next;
+      expect(harness.invocations.map((entry) => entry.command)).toEqual([
+        "start_dictation",
+        "start_dictation",
+      ]);
+    });
+  });
+
   it("stops a release seen while the sidecar phase is still primed", async () => {
     const harness = createHarness();
 

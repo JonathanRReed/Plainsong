@@ -11,8 +11,10 @@ const {
   requestMainView,
   requestRecordingWorkspace,
   requestOnboarding,
+  getSettings,
   dashboardState,
 } = vi.hoisted(() => ({
+  getSettings: vi.fn(),
   askMemory: vi.fn(),
   getRelationshipMemory: vi.fn(),
   analyzeRecordings: vi.fn(),
@@ -98,6 +100,10 @@ vi.mock("@/lib/onboarding", () => ({
   requestOnboarding,
 }));
 
+vi.mock("@/lib/backend/settings", () => ({
+  getSettings,
+}));
+
 vi.mock("@/lib/backend/ai", () => ({
   analyzeRecordings,
   askMemory,
@@ -139,6 +145,10 @@ describe("DashboardView memory chat", () => {
         status: "completed",
       },
     ];
+    getSettings.mockResolvedValue({
+      shortcuts: { toggleDictation: "Alt+Space" },
+      transcription: { dictationPushToTalk: true, dictationHandsFreeEnabled: false },
+    });
     getRelationshipMemory.mockResolvedValue({
       people: [
         {
@@ -182,24 +192,29 @@ describe("DashboardView memory chat", () => {
 
     expect(await screen.findByText("Everything is ready")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
-    expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("0h")).toBeInTheDocument();
+    expect(screen.getByText("Stored on this Mac")).toBeInTheDocument();
+    expect(screen.getByText("30 min")).toBeInTheDocument();
+    // Everything is ready, so there is no setup nudge to repeat the sidebar.
+    expect(screen.queryByRole("button", { name: "Finish setup" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Start Dictation" }));
-    fireEvent.click(screen.getByRole("button", { name: "Open dictation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start dictation" }));
     fireEvent.click(screen.getByRole("button", { name: "Open meetings" }));
-    fireEvent.click(screen.getByRole("button", { name: "Setup" }));
-    fireEvent.click(screen.getByRole("button", { name: /Dictation\s*Open/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Meetings\s*Open/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Local memory\s*Open/ }));
 
     expect(requestMainView).toHaveBeenNthCalledWith(1, "dictation");
-    expect(requestMainView).toHaveBeenNthCalledWith(2, "dictation");
-    expect(requestMainView).toHaveBeenNthCalledWith(3, "recordings");
-    expect(requestMainView).toHaveBeenNthCalledWith(4, "setup");
-    expect(requestMainView).toHaveBeenNthCalledWith(5, "dictation");
-    expect(requestMainView).toHaveBeenNthCalledWith(6, "recordings");
-    expect(requestMainView).toHaveBeenNthCalledWith(7, "settings");
+    expect(requestMainView).toHaveBeenNthCalledWith(2, "recordings");
+  });
+
+  it("invites the first dictation with the user's own hotkey instead of showing zeros", async () => {
+    dashboardState.recordings = [];
+
+    render(<DashboardView />);
+
+    expect(await screen.findByText("Alt + Space")).toBeInTheDocument();
+    expect(screen.getByText("Your first dictation")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Hold Alt \+ Space to record, release to transcribe and paste\./)
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Stored on this Mac")).not.toBeInTheDocument();
   });
 
   it("opens meetings for mic-only-ready users instead of restarting onboarding", async () => {
@@ -253,9 +268,11 @@ describe("DashboardView memory chat", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Mic-only ready")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Meetings\s*Open/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Open meetings" }));
+    fireEvent.click(screen.getByRole("button", { name: "Finish setup" }));
 
-    expect(requestMainView).toHaveBeenCalledWith("recordings");
+    expect(requestMainView).toHaveBeenNthCalledWith(1, "recordings");
+    expect(requestMainView).toHaveBeenNthCalledWith(2, "setup");
     expect(requestOnboarding).not.toHaveBeenCalled();
   });
 
@@ -340,8 +357,8 @@ describe("DashboardView memory chat", () => {
     expect(await screen.findByText("Finish setup to unlock the full solo workflow")).toBeInTheDocument();
     expect(screen.getByText("Needs attention")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Dictation\s*Review/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Meetings\s*Review/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Set up dictation" }));
+    fireEvent.click(screen.getByRole("button", { name: "Set up meetings" }));
 
     expect(requestOnboarding).toHaveBeenNthCalledWith(1, "dictation");
     expect(requestOnboarding).toHaveBeenNthCalledWith(2, "meetings");
@@ -411,25 +428,58 @@ describe("DashboardView memory chat", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Start Dictation" }),
+      screen.queryByRole("button", { name: "Start dictation" }),
     ).not.toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "Review dictation setup" }),
     );
     expect(requestMainView).toHaveBeenCalledWith("dictation");
-    fireEvent.click(screen.getByRole("button", { name: /Dictation\s*Review/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Set up dictation" }));
     expect(requestOnboarding).toHaveBeenCalledWith("dictation");
   });
 
-  it("shows recent recordings and opens the meetings workspace from the timeline", async () => {
+  it("opens a recent meeting in its own workspace", async () => {
     render(<DashboardView />);
 
     const recentRecording = await screen.findByRole("button", { name: /ACME pricing review/ });
     expect(recentRecording).toHaveTextContent("30:00");
+    expect(recentRecording).toHaveTextContent("Meeting");
 
     fireEvent.click(recentRecording);
 
-    expect(requestMainView).toHaveBeenCalledWith("recordings");
+    expect(requestRecordingWorkspace).toHaveBeenCalledWith({ recordingId: "rec-1" });
+    expect(requestMainView).not.toHaveBeenCalled();
+  });
+
+  it("lists recent items newest first and sends dictations to the Dictation view", async () => {
+    const now = Date.now();
+    const base = dashboardState.recordings[0];
+    dashboardState.recordings = [
+      { ...base, id: "old", title: "Older meeting", createdAt: new Date(now - 3 * 86_400_000).toISOString() },
+      {
+        ...base,
+        id: "dict-1",
+        title: "Reply to Dana about the launch",
+        sourceType: "dictation",
+        duration: 12,
+        createdAt: new Date(now).toISOString(),
+      },
+    ];
+
+    render(<DashboardView />);
+
+    const rows = await screen.findAllByRole("button", { name: /Older meeting|Reply to Dana/ });
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("Reply to Dana"),
+      expect.stringContaining("Older meeting"),
+    ]);
+    expect(screen.getByRole("region", { name: "Today" })).toBeInTheDocument();
+    expect(rows[0]).toHaveTextContent("Dictation");
+
+    fireEvent.click(rows[0]);
+
+    expect(requestMainView).toHaveBeenCalledWith("dictation");
+    expect(requestRecordingWorkspace).not.toHaveBeenCalled();
   });
 
   it("keeps follow-up memory questions in a local cross-meeting thread", async () => {

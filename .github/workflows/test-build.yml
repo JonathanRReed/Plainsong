@@ -1,0 +1,104 @@
+name: Test build
+
+# A downloadable, unsigned macOS build of every push to a work branch, so a
+# change can be tried on a real Mac without cutting a release. Not signed or
+# notarized: see the job summary for how to open it. The signed path is
+# release.yml.
+on:
+  push:
+    branches:
+      - "claude/**"
+    paths-ignore:
+      - "**/*.md"
+      - "nautilus-bot/docs/**"
+      - "nautilus-bot/artifacts/**"
+      - "infra/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-macos:
+    name: Build unsigned macOS app
+    runs-on: macos-latest
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: bash
+        working-directory: nautilus-bot
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d0befba8b9ddf874327619e84c39b094edd58b66 # 1.93.0
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # post-v2.9.2 cleanup fix (#377)
+        with:
+          workspaces: nautilus-bot/rust-sidecar
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      # Visible in the run, but a flaky test must not keep a build from the
+      # person who asked for one; CI on main still gates on it.
+      - name: Test
+        continue-on-error: true
+        run: bun run test
+
+      # No signing identity is configured, so electron-builder skips Developer
+      # ID signing; the result runs after the quarantine flag is removed.
+      - name: Build macOS app
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: bun run electron:build:mac
+
+      - name: Name the build
+        id: name
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          echo "artifact=Plainsong-${BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload app
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          path: nautilus-bot/release/*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: How to open it
+        run: |
+          {
+            echo "## ${{ steps.name.outputs.artifact }}"
+            echo
+            echo "1. Download the artifact above and unzip it (twice: GitHub zips the zip)."
+            echo "2. Move **Plainsong.app** to Applications."
+            echo "3. This build is not signed, so clear the download flag once:"
+            echo
+            echo '```'
+            echo 'xattr -dr com.apple.quarantine /Applications/Plainsong.app'
+            echo '```'
+            echo
+            echo "4. Open it. macOS asks for Microphone and Accessibility the first time you dictate."
+            echo "   An unsigned build is a new app to macOS each time, so it may ask again after an update."
+          } >> "$GITHUB_STEP_SUMMARY"

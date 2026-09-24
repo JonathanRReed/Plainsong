@@ -98,7 +98,6 @@ describe("TranscriptViewer", () => {
     );
 
     expect(screen.getByText("Apple Speech · on-device")).toBeInTheDocument();
-    expect(screen.getByText("Apple on-device")).toBeInTheDocument();
     expect(screen.getByTitle(/server fallback disabled/i)).toBeInTheDocument();
   });
 

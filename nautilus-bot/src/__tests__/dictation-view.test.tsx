@@ -254,6 +254,12 @@ vi.mock("@/hooks/use-recording", () => ({
     startDictation: backendMocks.startDictation,
     stopDictation: backendMocks.stopDictation,
   }),
+  useRecordingSession: () => ({
+    isRecording: false,
+    startDictation: backendMocks.startDictation,
+    stopDictation: backendMocks.stopDictation,
+  }),
+  RecordingDurationText: () => "0:00",
 }));
 
 vi.mock("@/hooks/use-projects", () => ({
@@ -629,17 +635,14 @@ describe("DictationView modes", () => {
 
     await openConfigTab("Capture");
 
-    const select = (await screen.findByLabelText(
-      "Insertion mode",
-    )) as HTMLSelectElement;
+    fireEvent.click(
+      await screen.findByRole("combobox", { name: "Insertion mode" }),
+    );
     // "paste" and "inline" took the same code path as "auto" — three names for
     // one behavior — so they are gone rather than sitting here as choices that
     // change nothing.
     expect(
-      Array.from(select.options).map((option) => option.value),
-    ).toEqual(["auto", "clipboard_only"]);
-    expect(
-      Array.from(select.options).map((option) => option.textContent),
+      (await screen.findAllByRole("option")).map((option) => option.textContent),
     ).toEqual(["Insert at cursor", "Clipboard only"]);
   });
 
@@ -648,15 +651,15 @@ describe("DictationView modes", () => {
 
     await openConfigTab("Capture");
 
-    const select = (await screen.findByLabelText(
-      "Keep warm",
-    )) as HTMLSelectElement;
+    fireEvent.click(
+      await screen.findByRole("combobox", { name: "Keep warm" }),
+    );
     // "Short" and "Long" described a prewarm that ran unconditionally, so
     // neither of them (nor "Off") changed anything. The setting now gates the
     // prewarm, and there is one thing to gate.
     expect(
-      Array.from(select.options).map((option) => option.value),
-    ).toEqual(["on", "off"]);
+      (await screen.findAllByRole("option")).map((option) => option.textContent),
+    ).toEqual(["On", "Off"]);
   });
 
   it("suppresses batch live preview when Apple Speech is selected", async () => {
@@ -667,11 +670,11 @@ describe("DictationView modes", () => {
     render(<DictationView />);
     await openConfigTab("Capture");
 
-    const select = (await screen.findByLabelText(
-      "Live preview",
-    )) as HTMLSelectElement;
+    const select = await screen.findByRole("combobox", {
+      name: "Live preview",
+    });
     expect(select).toBeDisabled();
-    expect(select).toHaveValue("off");
+    expect(select).toHaveTextContent("Wait for the finished text");
     expect(
       screen.getByText(/waits for the final on-device result/i),
     ).toBeInTheDocument();
@@ -1030,6 +1033,93 @@ describe("DictationView modes", () => {
       expect(backendMocks.deleteRecording).toHaveBeenCalledWith("dictation-1");
       expect(backendMocks.refetchDictationHistory).toHaveBeenCalled();
     });
+  });
+
+  it("groups history by day with short times and a preview, not a raw status", async () => {
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    backendMocks.recordings = [
+      createSavedDictation({
+        id: "today-1",
+        title: "Dictation - today",
+        createdAt: now.toISOString(),
+        transcript: {
+          id: "t-today-1",
+          recordingId: "today-1",
+          segments: [],
+          fullText: "Ship the release notes after lunch.",
+          language: "en",
+          confidence: 1,
+          model: "test",
+        },
+      }),
+      createSavedDictation({
+        id: "yesterday-1",
+        title: "Dictation - yesterday",
+        createdAt: yesterday.toISOString(),
+        status: "error",
+      }),
+    ];
+
+    render(<DictationView />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Today", level: 3 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Yesterday", level: 3 }),
+    ).toBeInTheDocument();
+    // The words, not the generic title, lead the row.
+    expect(
+      screen.getByText("Ship the release notes after lunch."),
+    ).toBeInTheDocument();
+    // A finished dictation says nothing about its status; a failed one does.
+    expect(screen.queryByText(/completed/)).not.toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+  });
+
+  it("pages history with Show more instead of stopping at 25", async () => {
+    backendMocks.recordings = Array.from({ length: 30 }, (_, index) =>
+      createSavedDictation({ id: `d-${index}`, title: `Note ${index}` }),
+    );
+
+    render(<DictationView />);
+
+    await screen.findByRole("button", { name: "Open saved dictation: Note 0" });
+    expect(
+      screen.queryByRole("button", { name: "Open saved dictation: Note 29" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/Showing 25 of 30/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    expect(
+      screen.getByRole("button", { name: "Open saved dictation: Note 29" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Show more" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("confirms a history copy in place", async () => {
+    backendMocks.recordings = [createSavedDictation()];
+    backendMocks.getTranscript.mockResolvedValueOnce({
+      fullText: "Project update text",
+    });
+
+    render(<DictationView />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Copy Project update" }),
+    );
+
+    await waitFor(() => {
+      expect(clipboardWriteText).toHaveBeenCalledWith("Project update text");
+    });
+    expect(
+      await screen.findByRole("button", { name: "Copy Project update" }),
+    ).toHaveTextContent("Copied");
   });
 
   it("uses the same delete confirmation from the saved-dictation dialog", async () => {
@@ -2159,6 +2249,52 @@ describe("DictationView modes", () => {
     });
   });
 
+  it("does not show the default hotkey before settings say which one is bound", async () => {
+    const loadSettings = backendMocks.getSettings.getMockImplementation();
+    backendMocks.getSettings.mockImplementation(() => new Promise(() => {}));
+    try {
+      render(<DictationView />);
+      expect(
+        await screen.findByText("Loading your shortcut…"),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/Shift/)).not.toBeInTheDocument();
+    } finally {
+      backendMocks.getSettings.mockImplementation(loadSettings!);
+    }
+  });
+
+  it("shows the main path explainer only until the first dictation", async () => {
+    const backend = await import("@/lib/backend/dictation");
+    vi.mocked(backend.getDictationInsights).mockResolvedValueOnce({
+      totalDictations: 0,
+      dictatedWords: 0,
+      averageWordsPerDictation: 0,
+      activeDays: 0,
+      lastSevenDaysDictations: 0,
+      commandsUsed: 0,
+      backtracksUsed: 0,
+      snippetsTriggered: 0,
+      topAppTarget: null,
+      topAppTargetCount: 0,
+    });
+    const { unmount } = render(<DictationView />);
+    // Wait for the insights to land so the check is not just the first paint.
+    await screen.findByText("Speaking speed");
+    expect(
+      screen.getByRole("heading", { name: "The main path", level: 2 }),
+    ).toBeInTheDocument();
+    unmount();
+
+    // The default fixture has dictations on record.
+    render(<DictationView />);
+    await screen.findByRole("heading", { name: "Recent dictations" });
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("heading", { name: "The main path" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("gives the page body real headings, not styled paragraphs", async () => {
     render(<DictationView />);
 
@@ -2171,7 +2307,6 @@ describe("DictationView modes", () => {
     ).toBeInTheDocument();
     for (const name of [
       "Capture",
-      "The main path",
       "Dictation coach",
       "Recent dictations",
       "Set up dictation",

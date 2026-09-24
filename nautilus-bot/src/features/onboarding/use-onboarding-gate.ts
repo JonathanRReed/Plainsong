@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { recordOnboardingState } from "@/lib/backend/settings";
+import { getSettings, recordOnboardingState } from "@/lib/backend/settings";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import {
   MEETING_ONBOARDING_STORAGE_KEY,
@@ -9,6 +9,7 @@ import {
   resolveOnboardingGate,
   type OnboardingGateDecision,
 } from "@/features/onboarding/onboarding-gate";
+import type { OnboardingSettings } from "@/types/settings";
 
 /**
  * Read the retired renderer flag, if this Electron profile still has one.
@@ -85,10 +86,33 @@ export function useOnboardingGate(): {
   // refreshes readiness, which re-runs the gate — without this the same
   // decision would queue a second write behind the first.
   const adoptionRef = useRef(false);
+  // The record on its own, read ahead of the full readiness sweep. Readiness
+  // reports nothing until providers, permissions, system audio and the notes
+  // probe have all answered, which on a cold start takes seconds; the record
+  // alone is enough to know a completed install should open to its workspace.
+  // `undefined` is "not read yet", `null` "could not be read".
+  const [earlyRecord, setEarlyRecord] = useState<OnboardingSettings | null | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
     const timer = setTimeout(() => setEvidenceTimedOut(true), READINESS_PATIENCE_MS);
     return () => clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getSettings()
+      .then((settings) => {
+        if (!cancelled) setEarlyRecord(settings?.onboarding ?? {});
+      })
+      .catch(() => {
+        // The readiness sweep reads settings too and reports the failure.
+        if (!cancelled) setEarlyRecord(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const record = readiness.settings?.onboarding ?? null;
@@ -103,13 +127,13 @@ export function useOnboardingGate(): {
     (readiness.settings?.transcription.dictationInsertionMode ?? "auto") !==
     "clipboard_only";
 
-  const decision = useMemo(
+  const resolved = useMemo(
     () =>
       resolveOnboardingGate({
         // `settings` is the whole document; a loaded document with no
         // `onboarding` key is an install that has never recorded anything,
         // which is a real answer and not "still loading".
-        record: readiness.settings ? (record ?? {}) : null,
+        record: readiness.settings ? (record ?? {}) : (earlyRecord ?? null),
         legacyFlagComplete,
         evidenceLoaded,
         evidenceError: readiness.error,
@@ -127,6 +151,7 @@ export function useOnboardingGate(): {
       }),
     [
       cursorInsertionRequired,
+      earlyRecord,
       evidenceLoaded,
       evidenceTimedOut,
       legacyFlagComplete,
@@ -137,6 +162,17 @@ export function useOnboardingGate(): {
       record,
     ],
   );
+
+  // Once the launch has decided, it stays decided until readiness says
+  // something new. A background refresh (focus, a settings change) briefly
+  // reports "loading" again, and going back to "wait" would swap the whole
+  // workspace, or a wizard in progress, for the splash.
+  const settledRef = useRef<OnboardingGateDecision | null>(null);
+  if (resolved.action !== "wait") {
+    settledRef.current = resolved;
+  }
+  const decision =
+    resolved.action === "wait" && settledRef.current ? settledRef.current : resolved;
 
   useEffect(() => {
     if (!decision.adoptRecord || adoptionRef.current) {

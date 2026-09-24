@@ -36,12 +36,17 @@ import {
   type MeetingLifecyclePhase,
   type MeetingLifecycleState,
 } from "@/features/meetings/runtime";
+import {
+  createRecordingClock,
+  formatRecordingClock,
+  useRecordingClockValue,
+  type RecordingClock,
+} from "@/hooks/recording-clock";
 
 interface RecordingState {
   isRecording: boolean;
   recordingId: string | null;
   recordingMode: "dictation" | "meeting" | null;
-  duration: number;
   isSystemAudioActive: boolean;
   meetingPhase: MeetingLifecyclePhase;
   meetingMessage: string | null;
@@ -55,8 +60,11 @@ interface RecordingState {
 
 type RecordingOverlayState = MeetingLifecycleEvent;
 
-interface RecordingContextValue extends RecordingState {
-  formattedDuration: string;
+/**
+ * Everything about the capture except its clock. Stable between ticks: it
+ * changes only when the capture itself changes (starts, pauses, stops).
+ */
+interface RecordingSessionValue extends RecordingState {
   startDictation: (options?: DictationStartOptions) => Promise<void>;
   stopDictation: () => Promise<string>;
   startMeeting: (options: {
@@ -76,11 +84,15 @@ interface RecordingContextValue extends RecordingState {
   resumeMeeting: () => Promise<void>;
 }
 
+interface RecordingContextValue extends RecordingSessionValue {
+  duration: number;
+  formattedDuration: string;
+}
+
 const INITIAL_STATE: RecordingState = {
   isRecording: false,
   recordingId: null,
   recordingMode: null,
-  duration: 0,
   isSystemAudioActive: false,
   meetingPhase: "idle",
   meetingMessage: null,
@@ -90,7 +102,8 @@ const INITIAL_STATE: RecordingState = {
   meetingStartedAtMs: null,
 };
 
-const RecordingContext = createContext<RecordingContextValue | null>(null);
+const RecordingContext = createContext<RecordingSessionValue | null>(null);
+const RecordingClockContext = createContext<RecordingClock | null>(null);
 
 function lifecycleFromRecordingState(state: RecordingState): MeetingLifecycleState {
   if (state.recordingMode !== "meeting") {
@@ -115,7 +128,14 @@ function reconcileMeetingState(
 ): RecordingState {
   const current = lifecycleFromRecordingState(state);
   const next = reduceMeetingLifecycleState(current, event);
-  if (next === current) {
+  // The overlay poll repeats the same snapshot every few seconds; an
+  // unchanged answer must not hand every consumer a new context value.
+  if (
+    next === current ||
+    (Object.keys(next) as (keyof MeetingLifecycleState)[]).every((key) =>
+      Object.is(next[key], current[key]),
+    )
+  ) {
     return state;
   }
   if (next.phase === "idle") {
@@ -126,7 +146,6 @@ function reconcileMeetingState(
     isRecording: meetingPhaseIsCapturing(next.phase),
     recordingId: next.recordingId,
     recordingMode: "meeting",
-    duration: next.phase === "recording" ? state.duration : 0,
     isSystemAudioActive: next.systemAudioActive,
     meetingPhase: next.phase,
     meetingMessage: next.message,
@@ -157,14 +176,28 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<RecordingState>(INITIAL_STATE);
   const stateRef = useRef(state);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerStartRef = useRef<number | null>(null);
+  const clockRef = useRef<RecordingClock | null>(null);
+  if (!clockRef.current) {
+    clockRef.current = createRecordingClock();
+  }
+  const clock = clockRef.current;
   stateRef.current = state;
 
   const clearTimer = useCallback(() => {
+    timerStartRef.current = null;
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
   }, []);
+
+  // A stopped timer leaves the last reading on the clock, as it always has.
+  const tick = useCallback(() => {
+    const startTime = timerStartRef.current;
+    if (startTime === null) return;
+    clock.set(meetingDurationFrom(stateRef.current, startTime, Date.now()));
+  }, [clock]);
 
   const startTimer = useCallback((startedAtMs?: number | null) => {
     clearTimer();
@@ -172,19 +205,30 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       typeof startedAtMs === "number" && Number.isFinite(startedAtMs)
         ? startedAtMs
         : Date.now();
+    timerStartRef.current = startTime;
     setState((prev) => ({
       ...prev,
       meetingStartedAtMs:
         prev.recordingMode === "meeting" ? prev.meetingStartedAtMs ?? startTime : prev.meetingStartedAtMs,
-      duration: meetingDurationFrom(prev, startTime, Date.now()),
     }));
-    timerRef.current = setInterval(() => {
-      setState((prev) => ({
-        ...prev,
-        duration: meetingDurationFrom(prev, startTime, Date.now()),
-      }));
-    }, 1000);
-  }, [clearTimer]);
+    tick();
+    timerRef.current = setInterval(tick, 1000);
+  }, [clearTimer, tick]);
+
+  // Re-read the clock whenever the capture changes, so a pause freezes it and
+  // a new capture starts it from the state that was just committed. Outside a
+  // live capture it reads zero.
+  useEffect(() => {
+    const live =
+      state.recordingMode === "dictation"
+        ? state.isRecording
+        : state.meetingPhase === "recording";
+    if (!live) {
+      clock.set(0);
+      return;
+    }
+    tick();
+  }, [clock, state, tick]);
 
   const startDictationFn = useCallback(async (options?: DictationStartOptions) => {
     try {
@@ -342,7 +386,6 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
               isRecording: true,
               recordingId: null,
               recordingMode: "dictation",
-              duration: 0,
               isSystemAudioActive: false,
             });
             startTimer(payload.startedAtMs);
@@ -360,7 +403,6 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
               ...prev,
               isRecording: true,
               recordingMode: "dictation",
-              duration: 0,
               isSystemAudioActive: false,
             }));
             return;
@@ -436,7 +478,6 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
                 isRecording: true,
                 recordingId: null,
                 recordingMode: "dictation",
-                duration: 0,
                 isSystemAudioActive: false,
               });
               startTimer(overlayState.startedAtMs);
@@ -476,16 +517,9 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     };
   }, [clearTimer, startTimer]);
 
-  const formattedDuration = useMemo(() => {
-    const mins = Math.floor(state.duration / 60);
-    const secs = state.duration % 60;
-    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
-  }, [state.duration]);
-
-  const value = useMemo<RecordingContextValue>(
+  const value = useMemo<RecordingSessionValue>(
     () => ({
       ...state,
-      formattedDuration,
       startDictation: startDictationFn,
       stopDictation: stopDictationFn,
       startMeeting,
@@ -494,7 +528,6 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
       resumeMeeting,
     }),
     [
-      formattedDuration,
       pauseMeeting,
       resumeMeeting,
       startDictationFn,
@@ -505,13 +538,48 @@ export function RecordingProvider({ children }: { children: ReactNode }) {
     ]
   );
 
-  return <RecordingContext.Provider value={value}>{children}</RecordingContext.Provider>;
+  return (
+    <RecordingContext.Provider value={value}>
+      <RecordingClockContext.Provider value={clock}>{children}</RecordingClockContext.Provider>
+    </RecordingContext.Provider>
+  );
 }
 
-export function useRecording() {
+/**
+ * The capture without its clock. Does not re-render while the clock ticks;
+ * show the time with `RecordingDurationText`.
+ */
+export function useRecordingSession(): RecordingSessionValue {
   const context = useContext(RecordingContext);
   if (!context) {
     throw new Error("useRecording must be used within RecordingProvider");
   }
   return context;
+}
+
+/** Seconds of live capture. Re-renders the caller once a second. */
+function useRecordingDuration(): number {
+  const clock = useContext(RecordingClockContext);
+  if (!clock) {
+    throw new Error("useRecordingDuration must be used within RecordingProvider");
+  }
+  return useRecordingClockValue(clock);
+}
+
+/** The live clock as mm:ss, re-rendering only this text. */
+export function RecordingDurationText() {
+  return <>{formatRecordingClock(useRecordingDuration())}</>;
+}
+
+/**
+ * The capture with its clock, for callers that have not moved to
+ * `useRecordingSession`. Re-renders the caller on every tick.
+ */
+export function useRecording(): RecordingContextValue {
+  const session = useRecordingSession();
+  const duration = useRecordingDuration();
+  return useMemo(
+    () => ({ ...session, duration, formattedDuration: formatRecordingClock(duration) }),
+    [session, duration],
+  );
 }

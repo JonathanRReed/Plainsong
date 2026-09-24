@@ -7,7 +7,9 @@ pub(crate) const CLEANUP_INSTRUCTION: &str =
      negation (not, never, haven't), conditions, technical terms, or short answers. Only change \
      punctuation, capitalization, and unambiguous contraction spelling. Explicit rewrite commands \
      are separate from automatic cleanup. Keep intentional 'like' and ambiguous er/err/erm \
-     repair cues. Only isolated um/uh hesitation sounds may be removed; keep quoted words and acronyms.";
+     repair cues. You may remove um/uh hesitation sounds, an immediately repeated word ('the the'), \
+     and a like-for-like correction of a day, date, time or number ('Tuesday, no wait, Wednesday' \
+     becomes 'Wednesday'); keep quoted words and acronyms.";
 
 pub(crate) fn numbered_list_markers(text: &str) -> Vec<&str> {
     text.lines()
@@ -31,10 +33,42 @@ pub(crate) fn validate_cleanup(source: &str, candidate: &str) -> Result<(), Stri
     if numbered_list_markers(source) != numbered_list_markers(candidate) {
         return Err("AI cleanup changed numbered-list labels or item breaks".to_string());
     }
-    if content_tokens(source) != content_tokens(candidate) {
+    if content_tokens(&comparable(source)) != content_tokens(&comparable(candidate)) {
+        return Err("AI cleanup changed, added, reordered, or omitted dictated words".to_string());
+    }
+    // `comparable` cleans both sides, so it alone would accept an AI pass
+    // that adds "the the" or invents "Tuesday, no wait," before a real
+    // "Wednesday". Cleanup may only remove words, never add them.
+    // Checked against the source both as spoken and as cleaned, because
+    // number normalization can read differently once a filler is gone
+    // ("twenty uh five" vs "twenty five").
+    let kept = normalized_tokens(candidate);
+    if !is_subsequence(&kept, &normalized_tokens(source))
+        && !is_subsequence(&kept, &content_tokens(&comparable(source)))
+    {
         return Err("AI cleanup changed, added, reordered, or omitted dictated words".to_string());
     }
     Ok(())
+}
+
+fn normalized_tokens(text: &str) -> Vec<String> {
+    content_tokens(&crate::text::itn::inverse_text_normalize(text))
+}
+
+fn is_subsequence(needle: &[String], haystack: &[String]) -> bool {
+    let mut remaining = haystack.iter();
+    needle
+        .iter()
+        .all(|token| remaining.any(|candidate| candidate == token))
+}
+
+/// Both sides go through the same deterministic edits the local pipeline is
+/// allowed to make (hesitations, stutters, like-for-like corrections) and the
+/// same spoken-to-written number normalization, so an AI pass that makes one
+/// of those edits, or writes "three" as "3", compares equal. Anything else --
+/// a dropped negation, a removed "like", a reordered clause -- still differs.
+fn comparable(text: &str) -> String {
+    crate::text::itn::inverse_text_normalize(&crate::dictation_cleanup::clean_disfluencies(text))
 }
 
 /// Compare ordered words, not a word-count ratio or a bag of negations: moving
@@ -210,6 +244,21 @@ mod tests {
         }
     }
     #[test]
+    fn cleanup_may_remove_disfluencies_but_never_add_them() {
+        assert!(validate_cleanup("Bring the the slides.", "Bring the slides.").is_ok());
+        assert!(validate_cleanup("Meet Tuesday, no wait, Wednesday.", "Meet Wednesday.").is_ok());
+        for (source, candidate) in [
+            ("Bring the slides.", "Bring the the slides."),
+            ("Meet Wednesday.", "Meet Tuesday, no wait, Wednesday."),
+        ] {
+            assert!(
+                validate_cleanup(source, candidate).is_err(),
+                "{source} => {candidate}"
+            );
+        }
+    }
+
+    #[test]
     fn cleanup_cannot_drop_add_or_move_negation() {
         for (source, candidate) in [
             ("I'd prefer to never merge this", "I'd prefer to merge this"),
@@ -256,6 +305,37 @@ mod tests {
         assert!(validate_cleanup("Say 'um'", "Say").is_err());
         assert!(validate_cleanup("Ah, now I see", "Now I see").is_err());
     }
+    #[test]
+    fn cleanup_may_make_the_local_safe_edits_and_write_numbers_as_digits() {
+        for (source, candidate) in [
+            (
+                "we should meet on Tuesday, no wait, Wednesday and bring the the slides",
+                "We should meet on Wednesday and bring the slides.",
+            ),
+            ("meet at three thirty", "Meet at 3:30."),
+            ("it costs twelve dollars", "It costs $12."),
+            ("I I think so", "I think so."),
+        ] {
+            assert!(
+                validate_cleanup(source, candidate).is_ok(),
+                "{source} => {candidate}"
+            );
+        }
+        for (source, candidate) in [
+            // An untyped restart is not a like-for-like correction.
+            ("go to the store, no wait, stay home", "Stay home."),
+            // A real repeated answer is not a stutter.
+            ("No no no.", "No."),
+            // Reading "three" as a different number is still a changed word.
+            ("meet at three", "Meet at 4."),
+        ] {
+            assert!(
+                validate_cleanup(source, candidate).is_err(),
+                "{source} => {candidate}"
+            );
+        }
+    }
+
     #[test]
     fn cleanup_rejects_missing_middle_tail_and_repeated_answers_at_any_length() {
         let source = (0..150)

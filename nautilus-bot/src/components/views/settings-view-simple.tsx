@@ -9,6 +9,11 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
+import { settingsErrorMessage } from "@/components/settings/settings-error-message";
+import {
+  OptionSelect,
+  SettingsOptionSelect,
+} from "@/components/settings/option-select";
 import { ModelsScreen } from "@/components/models/models-screen";
 import {
   AI_LANE_KEYS,
@@ -24,10 +29,10 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
   SettingsInput,
-  SettingsSelect,
   SettingsSwitch,
 } from "@/components/ui/settings-control";
 import { CalendarSettingsSection } from "@/components/meetings/calendar-settings-section";
+import { PlusSettingsSection } from "@/components/plus-settings-section";
 import { LocalToolsSection } from "@/components/local-tools-section";
 import { RememberedVoicesSection } from "@/components/remembered-voices-section";
 import { Input } from "@/components/ui/input";
@@ -179,6 +184,7 @@ import { SupportBundlePanel } from "@/components/settings/support-bundle-panel";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import type { ReadinessAssessment } from "@/features/readiness/product-readiness";
 import { formatDateTime } from "@/lib/format-locale";
+import { micErrorMessage, useMicLevel } from "@/hooks/use-mic-level";
 
 type TabId = SettingsTabId;
 type QueuedSettingsSave = {
@@ -384,6 +390,15 @@ function normalizeActiveLanguageSet(languages: string[] | undefined): string[] {
   return normalized;
 }
 
+// The sidecar has replied without `conflicts` (and with no payload at all), and
+// iterating that took down the whole Settings view. Anything but an array
+// reads as "no conflicts known".
+function normalizeShortcutConflicts(
+  reply: { conflicts?: ShortcutConflict[] | null } | null | undefined,
+): ShortcutConflict[] {
+  return Array.isArray(reply?.conflicts) ? reply.conflicts : [];
+}
+
 function markSettingsPerf(markName: string) {
   if (!import.meta.env.DEV || typeof performance === "undefined") {
     return;
@@ -538,6 +553,41 @@ export function SettingsView() {
   const { theme, setTheme } = useTheme();
   const { productReadiness } = useProductReadinessStatus();
   const [activeTab, setActiveTab] = useState<TabId>("general");
+  const tabButtonRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>(
+    {},
+  );
+  const activeTabSummary =
+    SETTINGS_TABS.find((tab) => tab.id === activeTab)?.summary ?? "";
+  // Arrow keys move along the section row and open the section they land on
+  // (the tablist pattern); Tab leaves the row for the section's controls.
+  const handleTabKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLButtonElement>) => {
+      const index = SETTINGS_TABS.findIndex((tab) => tab.id === activeTab);
+      const last = SETTINGS_TABS.length - 1;
+      let nextIndex: number;
+      switch (event.key) {
+        case "ArrowRight":
+          nextIndex = index === last ? 0 : index + 1;
+          break;
+        case "ArrowLeft":
+          nextIndex = index === 0 ? last : index - 1;
+          break;
+        case "Home":
+          nextIndex = 0;
+          break;
+        case "End":
+          nextIndex = last;
+          break;
+        default:
+          return;
+      }
+      event.preventDefault();
+      const nextTab = SETTINGS_TABS[nextIndex].id;
+      setActiveTab(nextTab);
+      tabButtonRefs.current[nextTab]?.focus();
+    },
+    [activeTab],
+  );
   const [savedPromptsOpen, setSavedPromptsOpen] = useState(false);
   const [savedPromptsSaveError, setSavedPromptsSaveError] = useState<
     string | null
@@ -615,9 +665,9 @@ export function SettingsView() {
   >([]);
   const [sileroVadAvailable, setSileroVadAvailable] = useState(false);
   const [sileroVadDownloading, setSileroVadDownloading] = useState(false);
-  const [micTestActive, setMicTestActive] = useState(false);
-  const [micTestError, setMicTestError] = useState<string | null>(null);
-  const [micTestLevel, setMicTestLevel] = useState(0);
+  const micTest = useMicLevel();
+  const micTestActive = micTest.state === "live";
+  const micTestLevel = Math.round(micTest.level * 100);
   const [micTestRecording, setMicTestRecording] = useState(false);
   const [micTestPlaybackUrl, setMicTestPlaybackUrl] = useState<string | null>(
     null,
@@ -628,9 +678,6 @@ export function SettingsView() {
     useState<SystemAudioCapability | null>(null);
   const [systemAudioTestLoading, setSystemAudioTestLoading] = useState(false);
   const [systemAudioTestStatus, setSystemAudioTestStatus] = useState<string | null>(null);
-  const micTestContextRef = useRef<AudioContext | null>(null);
-  const micTestAnimFrameRef = useRef<number | null>(null);
-  const micTestStreamRef = useRef<MediaStream | null>(null);
   const micTestRecorderRef = useRef<MediaRecorder | null>(null);
   const micTestChunksRef = useRef<BlobPart[]>([]);
   const backupConfigLoadInFlightRef = useRef(false);
@@ -761,7 +808,7 @@ export function SettingsView() {
             queued.waiters.forEach(({ reject }) => reject(e));
             if (mountedRef.current) {
               setError(
-                e instanceof Error ? e.message : "Failed to save settings",
+                settingsErrorMessage(e, "Failed to save settings"),
               );
             }
           }
@@ -845,9 +892,7 @@ export function SettingsView() {
       window.location.reload();
     } catch (err) {
       const message =
-        err instanceof Error
-          ? err.message
-          : "Failed to reset application state";
+        settingsErrorMessage(err, "Failed to reset application state");
       setError(message);
       toast(message, "error");
     } finally {
@@ -1177,6 +1222,12 @@ export function SettingsView() {
 
   useEffect(() => {
     markSettingsPerf(`settings-tab-open:${activeTab}`);
+    // In a narrow window the section row scrolls sideways; keep the open
+    // section in view, including after a deep link opens one off-screen.
+    tabButtonRefs.current[activeTab]?.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+    });
   }, [activeTab]);
 
   useEffect(() => {
@@ -1201,7 +1252,7 @@ export function SettingsView() {
       } catch (e) {
         if (mounted) {
           setError(
-            e instanceof Error ? e.message : "Failed to load permission status",
+            settingsErrorMessage(e, "Failed to load permission status"),
           );
         }
       }
@@ -1275,7 +1326,7 @@ export function SettingsView() {
     getShortcutConflicts()
       .then((status) => {
         if (mounted) {
-          setShortcutConflicts(status.conflicts);
+          setShortcutConflicts(normalizeShortcutConflicts(status));
         }
       })
       .catch((err) => {
@@ -1287,7 +1338,7 @@ export function SettingsView() {
       "shortcut-conflicts-changed",
       (event) => {
         if (mounted) {
-          setShortcutConflicts(event.payload.conflicts);
+          setShortcutConflicts(normalizeShortcutConflicts(event.payload));
         }
       },
     );
@@ -1318,7 +1369,7 @@ export function SettingsView() {
       } catch (e) {
         if (mounted) {
           setError(
-            e instanceof Error ? e.message : "Failed to load security details",
+            settingsErrorMessage(e, "Failed to load security details"),
           );
         }
       }
@@ -1349,7 +1400,7 @@ export function SettingsView() {
         }
       } catch (e) {
         if (mounted) {
-          setError(e instanceof Error ? e.message : "Failed to load backups");
+          setError(settingsErrorMessage(e, "Failed to load backups"));
         }
       }
     };
@@ -1624,9 +1675,7 @@ export function SettingsView() {
         return true;
       } catch (e) {
         const message =
-          e instanceof Error
-            ? e.message
-            : "Plainsong could not save your prompts.";
+          settingsErrorMessage(e, "Plainsong could not save your prompts.");
         if (mountedRef.current) {
           setSavedPromptsSaveError(message);
           setError(message);
@@ -1878,9 +1927,10 @@ export function SettingsView() {
       );
     } catch (systemAudioError) {
       setSystemAudioTestStatus(
-        systemAudioError instanceof Error
-          ? systemAudioError.message
-          : String(systemAudioError),
+        settingsErrorMessage(
+          systemAudioError,
+          "The system audio test could not run. Try again.",
+        ),
       );
     } finally {
       setSystemAudioTestLoading(false);
@@ -1949,12 +1999,9 @@ export function SettingsView() {
     [flushPendingSettingsSave],
   );
 
+  // useMicLevel releases the microphone itself on unmount.
   useEffect(() => {
     return () => {
-      if (micTestAnimFrameRef.current !== null)
-        cancelAnimationFrame(micTestAnimFrameRef.current);
-      micTestStreamRef.current?.getTracks().forEach((t) => t.stop());
-      micTestContextRef.current?.close().catch(() => {});
       if (micTestPlaybackUrl) URL.revokeObjectURL(micTestPlaybackUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1965,79 +2012,35 @@ export function SettingsView() {
     void refreshSystemAudioCapability();
   }, [refreshAudioDevices, refreshSystemAudioCapability]);
 
+  const { start: startMicLevel, stop: stopMicLevel, getStream: getMicTestStream } =
+    micTest;
+
   const stopMicTest = useCallback(() => {
-    if (micTestAnimFrameRef.current !== null) {
-      cancelAnimationFrame(micTestAnimFrameRef.current);
-      micTestAnimFrameRef.current = null;
-    }
-    if (micTestStreamRef.current) {
-      micTestStreamRef.current.getTracks().forEach((t) => t.stop());
-      micTestStreamRef.current = null;
-    }
-    if (micTestContextRef.current) {
-      micTestContextRef.current.close().catch(() => {});
-      micTestContextRef.current = null;
-    }
-    setMicTestActive(false);
-    setMicTestLevel(0);
+    stopMicLevel();
     setMicTestRecording(false);
-  }, []);
+  }, [stopMicLevel]);
 
   const startMicTest = useCallback(async () => {
-    setMicTestError(null);
-    try {
-      const preferredDeviceId = settings?.audio.dictationInputOverrideEnabled
-        ? settings.audio.dictationInputDevice?.deviceId
-        : settings?.audio.preferredInputDevice?.deviceId;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: preferredDeviceId
-          ? { deviceId: { ideal: preferredDeviceId } }
-          : true,
-        video: false,
-      });
-      micTestStreamRef.current = stream;
-      const ctx = new AudioContext();
-      micTestContextRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      const buf = new Float32Array(analyser.fftSize);
-      const tick = () => {
-        analyser.getFloatTimeDomainData(buf);
-        const rms = Math.sqrt(
-          buf.reduce((sum, v) => sum + v * v, 0) / buf.length,
-        );
-        const db = 20 * Math.log10(Math.max(rms, 1e-6));
-        const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
-        setMicTestLevel(Math.round(pct));
-        micTestAnimFrameRef.current = requestAnimationFrame(tick);
-      };
-      tick();
-      setMicTestActive(true);
-    } catch (err) {
-      console.error("Mic test failed:", err);
-      // Mic failure is exactly what this test exists to diagnose — name it.
-      setMicTestError(
-        err instanceof DOMException && err.name === "NotAllowedError"
-          ? "Microphone access was denied. Allow it in System Settings → Privacy & Security → Microphone, then try again."
-          : "Microphone unavailable — check that the device is connected and not in use by another app.",
-      );
-    }
+    const preferredDevice = settings?.audio.dictationInputOverrideEnabled
+      ? settings.audio.dictationInputDevice
+      : settings?.audio.preferredInputDevice;
+    await startMicLevel(preferredDevice ?? null);
   }, [
-    settings?.audio.dictationInputDevice?.deviceId,
+    settings?.audio.dictationInputDevice,
     settings?.audio.dictationInputOverrideEnabled,
-    settings?.audio.preferredInputDevice?.deviceId,
+    settings?.audio.preferredInputDevice,
+    startMicLevel,
   ]);
 
   const recordMicTest = useCallback(async () => {
-    if (!micTestStreamRef.current) return;
+    const stream = getMicTestStream();
+    if (!stream) return;
     if (micTestPlaybackUrl) {
       URL.revokeObjectURL(micTestPlaybackUrl);
       setMicTestPlaybackUrl(null);
     }
     micTestChunksRef.current = [];
-    const recorder = new MediaRecorder(micTestStreamRef.current);
+    const recorder = new MediaRecorder(stream);
     micTestRecorderRef.current = recorder;
     recorder.ondataavailable = (e) => micTestChunksRef.current.push(e.data);
     recorder.onstop = () => {
@@ -2052,7 +2055,7 @@ export function SettingsView() {
         micTestRecorderRef.current.stop();
       }
     }, 3000);
-  }, [micTestPlaybackUrl]);
+  }, [getMicTestStream, micTestPlaybackUrl]);
 
   // The live answer, from the same `findConflictingShortcuts` Electron runs
   // at registration time (imported from the electron module, so the two
@@ -2351,14 +2354,14 @@ export function SettingsView() {
       >
         <div className="flex flex-col gap-2 lg:flex-row lg:flex-wrap lg:items-center">
           <span className="text-sm text-muted-foreground lg:w-24">{rowLabel}</span>
-          <select
+          <OptionSelect
             aria-label={`${rowLabel} trigger type`}
             aria-describedby="dictation-bindings-description"
-            className="h-9 rounded-md border bg-background px-2 text-sm"
+            className="lg:w-auto lg:min-w-44"
             value={triggerType}
-            onChange={(event) =>
+            onValueChange={(value) =>
               updateDictationBinding(binding.id, {
-                trigger: bindingTriggerFromTypeValue(event.target.value, binding.trigger),
+                trigger: bindingTriggerFromTypeValue(value, binding.trigger),
               })
             }
           >
@@ -2367,7 +2370,7 @@ export function SettingsView() {
             <option value="mouse:3">Middle mouse button</option>
             <option value="mouse:4">Mouse button 4</option>
             <option value="mouse:5">Mouse button 5</option>
-          </select>
+          </OptionSelect>
           <Input
             value={isRecording ? "Listening..." : triggerText}
             readOnly
@@ -2393,14 +2396,14 @@ export function SettingsView() {
             onKeyDown={handleBindingRecorderKeyDown(binding.id)}
             onMouseDown={handleBindingRecorderMouseDown(binding.id, triggerIsRecordable)}
           />
-          <select
+          <OptionSelect
             aria-label={`${rowLabel} action`}
             aria-describedby="dictation-bindings-description"
-            className="h-9 rounded-md border bg-background px-2 text-sm"
+            className="lg:w-auto lg:min-w-44"
             value={bindingActionValue(binding.action)}
-            onChange={(event) =>
+            onValueChange={(value) =>
               updateDictationBinding(binding.id, {
-                action: bindingActionFromValue(event.target.value, binding.action),
+                action: bindingActionFromValue(value, binding.action),
               })
             }
           >
@@ -2417,21 +2420,21 @@ export function SettingsView() {
             ))}
             <option value="cycleMode">Next profile</option>
             <option value="cancel">Cancel dictation</option>
-          </select>
+          </OptionSelect>
           {binding.action.kind === "dictation" && (
-            <select
+            <OptionSelect
               aria-label={`${rowLabel} behavior`}
               aria-describedby="dictation-bindings-description"
-              className="h-9 rounded-md border bg-background px-2 text-sm"
+              className="lg:w-auto lg:min-w-44"
               value={binding.action.behavior}
-              onChange={(event) =>
+              onValueChange={(value) =>
                 updateDictationBinding(binding.id, {
                   action: {
                     ...(binding.action as Extract<
                       DictationBindingAction,
                       { kind: "dictation" }
                     >),
-                    behavior: event.target.value as "toggle" | "hold" | "inherit",
+                    behavior: value as "toggle" | "hold" | "inherit",
                   },
                 })
               }
@@ -2439,16 +2442,15 @@ export function SettingsView() {
               <option value="inherit">Follows the setting above</option>
               <option value="toggle">Press to start, press to stop</option>
               {/* Always rendered, disabled without the helper. Hiding it left
-                  a saved `hold` row showing a <select> with no matching
-                  option, which browsers render as the first one -- so the row
-                  read "Follows the setting above" while the stored behavior
-                  was still hold. */}
+                  a saved `hold` row with no matching option, so the row
+                  misreported the stored behavior (a native select showed
+                  "Follows the setting above" while it was still hold). */}
               <option value="hold" disabled={!nativeShortcutAvailable}>
                 {nativeShortcutAvailable
                   ? "Hold to record, release to stop"
                   : "Hold to record (needs the native helper)"}
               </option>
-            </select>
+            </OptionSelect>
           )}
           <Button
             variant="ghost"
@@ -2636,16 +2638,15 @@ export function SettingsView() {
             >
               {dictationShortcutBehaviorHint}
             </p>
-            <select
+            <OptionSelect
               aria-label="How the dictation shortcut works"
               aria-describedby="dictation-shortcut-behavior-description"
-              className="w-full rounded-md border bg-background px-3 py-2 text-sm"
               value={dictationShortcutBehavior}
-              onChange={(event) => {
+              onValueChange={(value) => {
                 if (!settings) {
                   return;
                 }
-                const behavior = event.target.value as DictationHotkeyBehavior;
+                const behavior = value as DictationHotkeyBehavior;
                 updateSettings({
                   ...settings,
                   transcription: {
@@ -2659,20 +2660,71 @@ export function SettingsView() {
               <option value="toggle">
                 Press to start, press again to stop
               </option>
-              {nativeShortcutAvailable && (
-                <option value="hold_to_talk">
-                  Hold to record, release to stop
-                </option>
-              )}
+              {/* Always listed, so a saved hold-to-talk choice never shows
+                  as an empty box while the key helper is down or starting. */}
+              <option value="hold_to_talk" disabled={!nativeShortcutAvailable}>
+                {nativeShortcutAvailable
+                  ? "Hold to record, release to stop"
+                  : "Hold to record, release to stop (needs the key helper)"}
+              </option>
               <option value="hands_free">
                 Start on its own when you speak
               </option>
-            </select>
+            </OptionSelect>
+            {dictationShortcutBehavior === "hold_to_talk" && (
+              <SettingsSwitch
+                className="pt-2 pb-0"
+                label="Tap to lock"
+                description="A quick tap keeps listening without holding the key; tap again to finish. Holding still works as before."
+                checked={settings.transcription.dictationTapToLock !== false}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationTapToLock: checked,
+                    },
+                  })
+                }
+              />
+            )}
           </div>
         )}
 
         {includeCoreControls && (
           <>
+            <SettingsSwitch
+              className="py-0"
+              label="Remove filler words"
+              description="Drops um and uh, repeated words like “the the”, and corrections like “Tuesday, no wait, Wednesday” on this Mac. Anything unclear is left as you said it."
+              checked={settings.transcription.dictationRemoveDisfluencies ?? true}
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationRemoveDisfluencies: checked,
+                  },
+                })
+              }
+            />
+
+            <SettingsSwitch
+              className="py-0"
+              label="Match surrounding text"
+              description="When you dictate into the middle of a sentence, adds the space and keeps lowercase, so the words read as part of it. Reads only the characters next to the cursor, and never keeps them."
+              checked={settings.transcription.dictationMatchSurroundingText ?? true}
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationMatchSurroundingText: checked,
+                  },
+                })
+              }
+            />
+
             <SettingsSwitch
               className="py-0"
               label="Smart Format"
@@ -3015,8 +3067,10 @@ export function SettingsView() {
                             },
                           });
                         } catch (e) {
-                          const msg =
-                            e instanceof Error ? e.message : String(e);
+                          const msg = settingsErrorMessage(
+                            e,
+                            "Plainsong could not download the model.",
+                          );
                           setError(`Download failed: ${msg}`);
                         } finally {
                           setSileroVadDownloading(false);
@@ -3060,14 +3114,26 @@ export function SettingsView() {
                 </Button>
               </div>
 
-              {micTestError && !micTestActive && (
-                <p className="mt-3 rounded-md bg-rust/10 p-2 text-sm text-rust">
-                  {micTestError}
+              {micTest.error && !micTestActive && (
+                // Mic failure is exactly what this test exists to diagnose,
+                // so it says which failure it was.
+                <p
+                  role="alert"
+                  className="mt-3 rounded-md bg-rust/10 p-2 text-sm text-rust"
+                >
+                  {micErrorMessage(micTest.error)}
                 </p>
               )}
 
               {micTestActive && (
                 <>
+                  {micTest.usingSystemDefault ? (
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      The chosen microphone can&apos;t be checked here, so
+                      this is the system default. Dictation still uses the
+                      one you chose.
+                    </p>
+                  ) : null}
                   <div className="mt-4 space-y-1">
                     <div className="flex items-center justify-between text-sm text-muted-foreground">
                       <span>Level</span>
@@ -3282,20 +3348,19 @@ export function SettingsView() {
                 Plainsong use it — that is chosen in Models.
               </p>
               <div className="flex items-center gap-2">
-                <select
+                <OptionSelect
                   aria-label="API key service"
                   aria-describedby="api-key-service-description"
                   value={provider}
-                  onChange={(e: ChangeEvent<HTMLSelectElement>) => {
+                  onValueChange={(value) => {
                     // This only chooses which provider's credential is being
                     // viewed/edited below -- it must not rewrite the default
                     // analysis provider (settings.privacy.meetingsAi.provider), which
                     // has its own selector on the AI tab.
-                    const next = e.target.value;
-                    setProvider(next);
-                    void refreshModelsForProvider(next);
+                    setProvider(value);
+                    void refreshModelsForProvider(value);
                   }}
-                  className="flex-1 rounded-md border bg-background p-2"
+                  className="flex-1"
                 >
                   <option value="openai">OpenAI</option>
                   <option value="anthropic">Anthropic</option>
@@ -3311,10 +3376,11 @@ export function SettingsView() {
                       the ASR model is chosen on the Models screen. */}
                   <option value="deepgram">Deepgram (transcription)</option>
                   <option value="mistral">Mistral (transcription)</option>
+                  <option value="xai">xAI Grok (transcription)</option>
                   <option value="elevenlabs">ElevenLabs (transcription)</option>
                   <option value="groq">Groq (transcription)</option>
                   <option value="cohere">Cohere (transcription)</option>
-                </select>
+                </OptionSelect>
                 <Button
                   variant="outline"
                   size="sm"
@@ -3331,7 +3397,7 @@ export function SettingsView() {
                         }
                       } catch (e) {
                         toast(
-                          `Failed to save key: ${e instanceof Error ? e.message : 'Unknown error'}`,
+                          `Failed to save key: ${settingsErrorMessage(e, "Plainsong could not store it.")}`,
                           'error',
                         );
                       } finally {
@@ -3396,9 +3462,7 @@ export function SettingsView() {
                       await refreshModelsForProvider(provider);
                     } catch (e) {
                       setError(
-                        e instanceof Error
-                          ? e.message
-                          : "Failed to save API key",
+                        settingsErrorMessage(e, "Failed to save API key"),
                       );
                     } finally {
                       setSavingApiKey(false);
@@ -3422,9 +3486,7 @@ export function SettingsView() {
                       await refreshModelsForProvider(provider);
                     } catch (e) {
                       setError(
-                        e instanceof Error
-                          ? e.message
-                          : "Failed to save API key",
+                        settingsErrorMessage(e, "Failed to save API key"),
                       );
                     } finally {
                       setSavingApiKey(false);
@@ -3448,9 +3510,7 @@ export function SettingsView() {
                       }
                     } catch (e) {
                       setError(
-                        e instanceof Error
-                          ? e.message
-                          : "Failed to clear API key",
+                        settingsErrorMessage(e, "Failed to clear API key"),
                       );
                     } finally {
                       setSavingApiKey(false);
@@ -3574,7 +3634,7 @@ export function SettingsView() {
               </Button>
             </div>
 
-            <SettingsSelect
+            <SettingsOptionSelect
               label="How search finds a meeting"
               description="Word matching only finds a meeting that used the words you typed. Meaning matching also finds one that said the same thing differently, but it needs Ollama running on this Mac and an index that has to be built first."
               value={settings.transcription.memorySearchMode}
@@ -3594,7 +3654,7 @@ export function SettingsView() {
               <option value="ollama_embeddings">
                 Match the meaning as well — needs Ollama on this Mac
               </option>
-            </SettingsSelect>
+            </SettingsOptionSelect>
 
             {settings.transcription.memorySearchMode ===
               "ollama_embeddings" && (
@@ -3656,7 +3716,10 @@ export function SettingsView() {
                           );
                         } catch (err) {
                           toast(
-                            err instanceof Error ? err.message : String(err),
+                            settingsErrorMessage(
+                              err,
+                              "Plainsong could not rebuild the index.",
+                            ),
                             "error",
                           );
                         }
@@ -3716,39 +3779,49 @@ export function SettingsView() {
               </div>
             </div>
           </div>
+          {/* One slim row of sections. It lives in the header, outside the
+              scroller, so it stays put while a long tab scrolls, and the
+              settings themselves start right under it instead of under a
+              grid of tiles. */}
+          <div
+            role="tablist"
+            aria-label="Settings sections"
+            className="-mx-1 flex gap-0.5 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none] lg:gap-1"
+          >
+            {SETTINGS_TABS.map((tab) => {
+              const selected = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  ref={(element) => {
+                    tabButtonRefs.current[tab.id] = element;
+                  }}
+                  type="button"
+                  role="tab"
+                  id={`settings-tab-${tab.id}`}
+                  aria-selected={selected}
+                  aria-controls="settings-tab-panel"
+                  tabIndex={selected ? 0 : -1}
+                  onClick={() => setActiveTab(tab.id)}
+                  onKeyDown={handleTabKeyDown}
+                  className={`flex shrink-0 items-center gap-2 rounded-full px-2 py-1.5 text-[13px] font-medium transition-colors lg:px-3 lg:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                    selected
+                      ? "bg-foreground text-background"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                  }`}
+                >
+                  <tab.icon className="hidden h-4 w-4 xl:block" aria-hidden="true" />
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden">
         <div className="mx-auto max-w-[1680px] p-4 sm:p-6">
           <div className="min-w-0 space-y-4 sm:space-y-5">
-            <div className="rounded-[20px] border border-border bg-card p-2 shadow-sm">
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-                {SETTINGS_TABS.map((tab) => (
-                  <button
-                    key={`compact-${tab.id}`}
-                    onClick={() => setActiveTab(tab.id)}
-                    className={`group flex w-full items-start gap-3 rounded-2xl border px-4 py-3 text-left transition-all ${
-                      activeTab === tab.id
-                        ? "border-border bg-background text-foreground"
-                        : "border-transparent bg-transparent text-muted-foreground hover:border-border hover:bg-background/70 hover:text-foreground"
-                    }`}
-                  >
-                    <div
-                      className={`mt-0.5 rounded-xl p-2 ${activeTab === tab.id ? "bg-muted text-foreground" : "bg-muted/40 text-muted-foreground group-hover:text-foreground"}`}
-                    >
-                      <tab.icon className="h-4 w-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium">{tab.label}</p>
-                      <p className="mt-1 text-sm leading-5 text-current/70">
-                        {tab.summary}
-                      </p>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
             {error && (
               <div className="flex items-center gap-2 rounded-2xl border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
                 <AlertCircle className="h-4 w-4" />
@@ -3766,8 +3839,21 @@ export function SettingsView() {
               </span>
             </div>
 
-            <section className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm">
-              <div className="space-y-6 px-4 py-5 sm:px-6 sm:py-6">
+            <section
+              id="settings-tab-panel"
+              role="tabpanel"
+              aria-labelledby={`settings-tab-${activeTab}`}
+              className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm"
+            >
+              {/* Keyed on the tab so each switch replays a short fade; the
+                  reduced-motion variant drops it. */}
+              <div
+                key={activeTab}
+                className="space-y-6 px-4 py-5 animate-in fade-in-0 duration-150 motion-reduce:animate-none sm:px-6 sm:py-6"
+              >
+                <p className="text-sm text-muted-foreground">
+                  {activeTabSummary}
+                </p>
                 {activeTab === "models" && (
                   <ModelsScreen
                     settings={settings}
@@ -3820,15 +3906,14 @@ export function SettingsView() {
                               the overrides beside it is switched on.
                             </p>
                           </div>
-                          <select
+                          <OptionSelect
                             aria-label="App-wide microphone"
                             aria-describedby="app-wide-microphone-description"
-                            className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground"
                             value={appWideDeviceId}
-                            onChange={(event) => {
+                            onValueChange={(value) => {
                               const nextDevice =
                                 resolveAudioDevicePreference(
-                                  event.target.value || null,
+                                  value || null,
                                 );
                               void updateSettings({
                                 ...settings,
@@ -3850,7 +3935,13 @@ export function SettingsView() {
                                 {renderDeviceOptionLabel(device)}
                               </option>
                             ))}
-                          </select>
+                            {appWideDeviceId &&
+                            !currentAudioDevices.some((device) => device.deviceId === appWideDeviceId) ? (
+                              <option value={appWideDeviceId}>
+                                {`${settings.audio.preferredInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                              </option>
+                            ) : null}
+                          </OptionSelect>
                         </div>
 
                         <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
@@ -3894,7 +3985,7 @@ export function SettingsView() {
                               }
                             />
                           </div>
-                          <select
+                          <OptionSelect
                             aria-label="Dictation microphone override"
                             aria-describedby="dictation-microphone-description"
                             disabled={
@@ -3903,12 +3994,11 @@ export function SettingsView() {
                                   .dictationInputOverrideEnabled ?? false
                               )
                             }
-                            className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50"
                             value={dictationDeviceId}
-                            onChange={(event) => {
+                            onValueChange={(value) => {
                               const nextDevice =
                                 resolveAudioDevicePreference(
-                                  event.target.value || null,
+                                  value || null,
                                 );
                               void updateSettings({
                                 ...settings,
@@ -3930,7 +4020,13 @@ export function SettingsView() {
                                 {renderDeviceOptionLabel(device)}
                               </option>
                             ))}
-                          </select>
+                            {dictationDeviceId &&
+                            !currentAudioDevices.some((device) => device.deviceId === dictationDeviceId) ? (
+                              <option value={dictationDeviceId}>
+                                {`${settings.audio.dictationInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                              </option>
+                            ) : null}
+                          </OptionSelect>
                         </div>
 
                         <div className="space-y-3 rounded-2xl border border-border bg-background p-4 md:col-span-2 xl:col-span-1">
@@ -3973,7 +4069,7 @@ export function SettingsView() {
                               }
                             />
                           </div>
-                          <select
+                          <OptionSelect
                             aria-label="Meeting microphone override"
                             aria-describedby="meeting-microphone-description"
                             disabled={
@@ -3982,12 +4078,11 @@ export function SettingsView() {
                                   .meetingInputOverrideEnabled ?? false
                               )
                             }
-                            className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground disabled:opacity-50"
                             value={meetingDeviceId}
-                            onChange={(event) => {
+                            onValueChange={(value) => {
                               const nextDevice =
                                 resolveAudioDevicePreference(
-                                  event.target.value || null,
+                                  value || null,
                                 );
                               void updateSettings({
                                 ...settings,
@@ -4009,7 +4104,13 @@ export function SettingsView() {
                                 {renderDeviceOptionLabel(device)}
                               </option>
                             ))}
-                          </select>
+                            {meetingDeviceId &&
+                            !currentAudioDevices.some((device) => device.deviceId === meetingDeviceId) ? (
+                              <option value={meetingDeviceId}>
+                                {`${settings.audio.meetingInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                              </option>
+                            ) : null}
+                          </OptionSelect>
                         </div>
                       </div>
 
@@ -4191,8 +4292,10 @@ export function SettingsView() {
                                 },
                               });
                             } catch (e) {
-                              const msg =
-                                e instanceof Error ? e.message : String(e);
+                              const msg = settingsErrorMessage(
+                                e,
+                                "Plainsong could not download the model.",
+                              );
                               setError(`Download failed: ${msg}`);
                             } finally {
                               setDiarizationDownloading(false);
@@ -4217,7 +4320,7 @@ export function SettingsView() {
                     {diarizationAvailable &&
                     settings.transcription.enableDiarization &&
                     diarizationModels.length > 0 ? (
-                      <SettingsSelect
+                      <SettingsOptionSelect
                         label="Speaker separation model"
                         description="Which model decides that two stretches of a recording are the same voice. Every voice signature is tied to the model that made it, so changing this means remembered voices stop matching and the next meeting starts fresh."
                         value={
@@ -4259,7 +4362,7 @@ export function SettingsView() {
                             {model.description}
                           </option>
                         ))}
-                      </SettingsSelect>
+                      </SettingsOptionSelect>
                     ) : null}
 
                     <div className="space-y-2">
@@ -4271,17 +4374,16 @@ export function SettingsView() {
                         the speech engine decide per recording, narrowed by the
                         list below.
                       </p>
-                      <select
+                      <OptionSelect
                         id="transcription-language"
                         aria-describedby="transcription-language-description"
-                        className="w-full rounded-md border bg-background px-3 py-2 text-sm"
                         value={settings.transcription.language ?? ""}
-                        onChange={(e: ChangeEvent<HTMLSelectElement>) =>
+                        onValueChange={(value) =>
                           void updateSettings({
                             ...settings,
                             transcription: {
                               ...settings.transcription,
-                              language: e.target.value || null,
+                              language: value || null,
                             },
                           })
                         }
@@ -4299,7 +4401,7 @@ export function SettingsView() {
                         <option value="ru">Russian</option>
                         <option value="ar">Arabic</option>
                         <option value="hi">Hindi</option>
-                      </select>
+                      </OptionSelect>
                       <div className="border-t pt-4">
                         <p className="section-heading">
                           Languages you dictate in
@@ -4472,6 +4574,10 @@ export function SettingsView() {
                         narrowed or switched back off. */}
                     <CalendarSettingsSection />
 
+                    {/* Plainsong Plus is not launched: this renders nothing
+                        unless the sidecar was built with it. */}
+                    <PlusSettingsSection />
+
                     <div className="pt-4 border-t space-y-4">
                       <div className="space-y-1">
                         <p className="section-heading">Mini windows</p>
@@ -4508,6 +4614,77 @@ export function SettingsView() {
                             ui: {
                               ...settings.ui,
                               showRecordingPopup: checked,
+                            },
+                          })
+                        }
+                      />
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Dictation sounds"
+                        description="A soft tick when the microphone goes live, a pop when your words land, and a low tone if a dictation fails, so you never have to look."
+                        checked={settings.ui.dictationSounds !== false}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              dictationSounds: checked,
+                            },
+                          })
+                        }
+                      />
+
+                      <SettingsOptionSelect
+                        label="Dictation pill size"
+                        description="How big the dictation pill is on screen."
+                        value={settings.ui.dictationPillSize ?? "default"}
+                        onChange={(value) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              dictationPillSize: value as NonNullable<Settings["ui"]["dictationPillSize"]>,
+                            },
+                          })
+                        }
+                      >
+                        <option value="small">Small</option>
+                        <option value="default">Default</option>
+                        <option value="large">Large</option>
+                        <option value="xlarge">Extra large</option>
+                      </SettingsOptionSelect>
+
+                      <SettingsOptionSelect
+                        label="Dictation pill position"
+                        description="Bottom center, or docked to the left or right edge of the screen. Dragging the pill near an edge docks it there too."
+                        value={settings.ui.dictationPillDock ?? "bottom"}
+                        onChange={(value) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              dictationPillDock: value as NonNullable<Settings["ui"]["dictationPillDock"]>,
+                            },
+                          })
+                        }
+                      >
+                        <option value="bottom">Bottom center</option>
+                        <option value="left">Left edge</option>
+                        <option value="right">Right edge</option>
+                      </SettingsOptionSelect>
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Mute other audio while dictating"
+                        description="Silences music and videos while the microphone is live, then turns them back on. Plainsong only restores audio it muted itself."
+                        checked={settings.ui.muteMediaWhileDictating === true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              muteMediaWhileDictating: checked,
                             },
                           })
                         }
@@ -4848,9 +5025,7 @@ export function SettingsView() {
                                   );
                                 } catch (e) {
                                   setError(
-                                    e instanceof Error
-                                      ? e.message
-                                      : "Failed to unlock vault",
+                                    settingsErrorMessage(e, "Failed to unlock vault"),
                                   );
                                 }
                               }}
@@ -4868,9 +5043,7 @@ export function SettingsView() {
                                   );
                                 } catch (e) {
                                   setError(
-                                    e instanceof Error
-                                      ? e.message
-                                      : "Failed to lock vault",
+                                    settingsErrorMessage(e, "Failed to lock vault"),
                                   );
                                 }
                               }}
@@ -4891,9 +5064,7 @@ export function SettingsView() {
                                   );
                                 } catch (e) {
                                   setError(
-                                    e instanceof Error
-                                      ? e.message
-                                      : "Failed to migrate to encrypted storage",
+                                    settingsErrorMessage(e, "Failed to migrate to encrypted storage"),
                                   );
                                 }
                               }}
@@ -4985,9 +5156,7 @@ export function SettingsView() {
                               );
                             } catch (error) {
                               setError(
-                                error instanceof Error
-                                  ? error.message
-                                  : "Could not approve the export folder",
+                                settingsErrorMessage(error, "Could not approve the export folder"),
                               );
                             }
                           }}
@@ -5007,7 +5176,7 @@ export function SettingsView() {
                         "Keep dictation audio". Both say so, because two
                         identical controls a reader cannot connect is the thing
                         that made this screen confusing. */}
-                    <SettingsSelect
+                    <SettingsOptionSelect
                       label="Auto-delete dictation recordings"
                       description="Deletes the whole dictation once it is this old — the text in History and any audio kept for it. The same setting appears in Dictation; changing it in either place changes both."
                       value={
@@ -5060,9 +5229,9 @@ export function SettingsView() {
                       <option value="72h">After 72 hours</option>
                       <option value="never">Never</option>
                       <option value="custom">Custom</option>
-                    </SettingsSelect>
+                    </SettingsOptionSelect>
 
-                    <SettingsSelect
+                    <SettingsOptionSelect
                       label="Meeting audio"
                       description="Whether a meeting keeps its sound file after the transcript is written. The transcript and the notes stay either way; deleting the audio means that meeting can never be transcribed again with another speech engine."
                       value={
@@ -5083,9 +5252,9 @@ export function SettingsView() {
                       <option value="transcript_only">
                         Delete it once the transcript is ready
                       </option>
-                    </SettingsSelect>
+                    </SettingsOptionSelect>
 
-                    <SettingsSelect
+                    <SettingsOptionSelect
                       label="Auto-delete meeting data"
                       description="How old a meeting has to get before Plainsong cleans it up. What it removes at that point is the next setting."
                       value={
@@ -5138,9 +5307,9 @@ export function SettingsView() {
                       <option value="3m">After 3 months</option>
                       <option value="never">Never</option>
                       <option value="custom">Custom</option>
-                    </SettingsSelect>
+                    </SettingsOptionSelect>
 
-                    <SettingsSelect
+                    <SettingsOptionSelect
                       label="When a meeting is auto-deleted, remove"
                       description="The audio only leaves the transcript, the notes and the meeting in your library. The audio and the transcript takes the whole meeting; nothing about it survives."
                       value={
@@ -5161,7 +5330,7 @@ export function SettingsView() {
                       <option value="audio_and_transcript">
                         The audio and the transcript
                       </option>
-                    </SettingsSelect>
+                    </SettingsOptionSelect>
 
                     <div className="border-t pt-4 space-y-3">
                       <div className="space-y-1">
@@ -5371,9 +5540,7 @@ export function SettingsView() {
                                   });
                                 } catch (error) {
                                   setError(
-                                    error instanceof Error
-                                      ? error.message
-                                      : "Could not approve the backup folder",
+                                    settingsErrorMessage(error, "Could not approve the backup folder"),
                                   );
                                 } finally {
                                   setBackupBusy(false);
@@ -5399,7 +5566,7 @@ export function SettingsView() {
                         />
 
                         <div className="grid grid-cols-2 gap-4">
-                          <SettingsSelect
+                          <SettingsOptionSelect
                             label="Cloud storage service"
                             description="Where an upload goes when you press one of the Sync buttons. Choosing one here uploads nothing on its own."
                             value={backupConfig.cloudProvider ?? ""}
@@ -5423,7 +5590,7 @@ export function SettingsView() {
                               Proton Drive
                             </option>
                             <option value="i_cloud">iCloud</option>
-                          </SettingsSelect>
+                          </SettingsOptionSelect>
 
                           <SettingsInput
                             label="Cloud folder"
@@ -5488,9 +5655,7 @@ export function SettingsView() {
                                 });
                               } catch (error) {
                                 setError(
-                                  error instanceof Error
-                                    ? error.message
-                                    : "Could not approve the cloud destination",
+                                  settingsErrorMessage(error, "Could not approve the cloud destination"),
                                 );
                               } finally {
                                 setBackupBusy(false);
@@ -5562,9 +5727,7 @@ export function SettingsView() {
                                 );
                               } catch (e) {
                                 setError(
-                                  e instanceof Error
-                                    ? e.message
-                                    : "Failed to save backup config",
+                                  settingsErrorMessage(e, "Failed to save backup config"),
                                 );
                               } finally {
                                 setBackupBusy(false);
@@ -5588,9 +5751,7 @@ export function SettingsView() {
                                 );
                               } catch (e) {
                                 setError(
-                                  e instanceof Error
-                                    ? e.message
-                                    : "Cloud verification failed",
+                                  settingsErrorMessage(e, "Cloud verification failed"),
                                 );
                               } finally {
                                 setBackupBusy(false);
@@ -5617,9 +5778,7 @@ export function SettingsView() {
                                 );
                               } catch (e) {
                                 setError(
-                                  e instanceof Error
-                                    ? e.message
-                                    : "Setup checks failed",
+                                  settingsErrorMessage(e, "Setup checks failed"),
                                 );
                               } finally {
                                 setBackupBusy(false);
@@ -5645,9 +5804,7 @@ export function SettingsView() {
                                 await refreshBackups();
                               } catch (e) {
                                 setError(
-                                  e instanceof Error
-                                    ? e.message
-                                    : "Settings snapshot failed",
+                                  settingsErrorMessage(e, "Settings snapshot failed"),
                                 );
                               } finally {
                                 setBackupBusy(false);
@@ -5678,9 +5835,7 @@ export function SettingsView() {
                                 );
                               } catch (e) {
                                 setError(
-                                  e instanceof Error
-                                    ? e.message
-                                    : "Settings snapshot sync failed",
+                                  settingsErrorMessage(e, "Settings snapshot sync failed"),
                                 );
                               } finally {
                                 setBackupBusy(false);
@@ -5713,9 +5868,7 @@ export function SettingsView() {
                                 );
                               } catch (e) {
                                 setError(
-                                  e instanceof Error
-                                    ? e.message
-                                    : "Settings snapshot restore failed",
+                                  settingsErrorMessage(e, "Settings snapshot restore failed"),
                                 );
                               } finally {
                                 setBackupBusy(false);
@@ -5739,9 +5892,7 @@ export function SettingsView() {
                                 await refreshBackups();
                               } catch (e) {
                                 setError(
-                                  e instanceof Error
-                                    ? e.message
-                                    : "Backup failed",
+                                  settingsErrorMessage(e, "Backup failed"),
                                 );
                               } finally {
                                 setBackupBusy(false);
@@ -5770,9 +5921,7 @@ export function SettingsView() {
                                 );
                               } catch (e) {
                                 setError(
-                                  e instanceof Error
-                                    ? e.message
-                                    : "Cloud sync failed",
+                                  settingsErrorMessage(e, "Cloud sync failed"),
                                 );
                               } finally {
                                 setBackupBusy(false);

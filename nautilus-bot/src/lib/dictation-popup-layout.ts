@@ -2,6 +2,57 @@ import type { DictationPhase } from "@/features/dictation/runtime";
 
 export type DictationPopupDisplayMode = "full" | "compact" | "minimal";
 
+type DictationPillSize = "small" | "default" | "large" | "xlarge";
+export type DictationPillDock = "bottom" | "left" | "right";
+
+/** Settings > General > Pill size. Absent or unrecognized reads as "default". */
+const DICTATION_PILL_SCALE: Record<DictationPillSize, number> = {
+  small: 0.85,
+  default: 1,
+  large: 1.15,
+  xlarge: 1.3,
+};
+
+export function resolveDictationPillScale(value: unknown): number {
+  return typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(DICTATION_PILL_SCALE, value)
+    ? DICTATION_PILL_SCALE[value as DictationPillSize]
+    : 1;
+}
+
+/** Settings > General > Pill position. Absent or unrecognized reads as "bottom". */
+export function resolveDictationPillDock(value: unknown): DictationPillDock {
+  return value === "left" || value === "right" ? value : "bottom";
+}
+
+/**
+ * The pill at 1x, in CSS pixels. Docked against a side of the screen it turns
+ * upright (glyph, trace and label stacked in a column), and the window's
+ * margins turn with it: 16px along the pill's length, 12px across it, so the
+ * soft shadow is never clipped.
+ */
+export const DICTATION_PILL_SIZE = {
+  horizontal: { width: 252, height: 40 },
+  vertical: { width: 72, height: 164 },
+} as const;
+const DICTATION_PILL_WINDOW_SIZE = {
+  horizontal: { width: 284, height: 64 },
+  vertical: { width: 96, height: 196 },
+} as const;
+
+/** The window the pill asks for at `scale`, upright when docked to a side. */
+function getPillWindowSize(
+  dock: DictationPillDock,
+  scale: number,
+): { width: number; height: number } {
+  const base =
+    DICTATION_PILL_WINDOW_SIZE[dock === "bottom" ? "horizontal" : "vertical"];
+  return {
+    width: Math.round(base.width * scale),
+    height: Math.round(base.height * scale),
+  };
+}
+
 // The height estimate below is what the overlay window is actually resized to,
 // so it must agree with what the DOM renders. Every preview/message paragraph
 // is line-clamped; without the same cap here a long partial (they arrive every
@@ -62,8 +113,8 @@ const CAPTURE_PREVIEW_LINE = 24; // text-sm leading-6, line-clamp-4
 // lines at the narrower compact width.
 const CAPTURE_STATUS_LINES = { full: 2, compact: 3 } as const;
 
-const PROCESSING_HEAD = 42; // settled waveform + mb-1.5 + text-sm title
-const PROCESSING_DETAIL_LINE = 16; // text-xs detail paragraph, line-clamp-6
+const PROCESSING_HEAD = 16; // my-1.5 finish bar (the header carries the phase)
+const PROCESSING_DETAIL_LINE = 20; // text-sm detail paragraph, line-clamp-6
 const PROCESSING_ACTIVATION = 36; // mt-1 + the line-clamp-2 activation detail
 const PROCESSING_PREVIEW_CHROME = 48; // mt-2 + border x2 + py-2 x2 + label + mt-1
 const PROCESSING_PREVIEW_LINE = 20; // text-xs leading-relaxed, line-clamp-4
@@ -128,12 +179,14 @@ export function getPopupSize(
   phase: DictationPhase,
   message: string | null,
   preview: string | null,
+  pill: { dock: DictationPillDock; scale: number } = { dock: "bottom", scale: 1 },
 ) {
   if (displayMode === "minimal") {
-    // Wide enough for the longest state label ("Getting ready") beside the mic,
-    // the state neume, the waveform and the stop button — the pill clipped its
-    // own status text at the old 196px.
-    return { width: 260, height: 56 };
+    // The pill is a fixed size per preset and dock (see the minimal branch of
+    // DictationPopup), so the window is the same size in every state and
+    // never resizes mid session. The compact and full cards below ignore both
+    // settings: they stay horizontal at 1x.
+    return getPillWindowSize(pill.dock, pill.scale);
   }
 
   const mode: CardMode = displayMode === "compact" ? "compact" : "full";
@@ -187,11 +240,13 @@ export function getPopupSize(
   }
 
   if (phase === "done") {
-    // The done panel is a stack of chips, a result box, hint pills and an
-    // action grid inside an `overflow-hidden` card; it needs its own pass and
-    // keeps its existing allowance for now.
-    const contentLines = Math.max(messageLines, previewLines);
-    return { width: 432, height: Math.max(248, 198 + contentLines * 18) };
+    // Title, one chip row, a result box clamped to four lines and one row of
+    // actions: measured at 284-323px in a real render, plus the window's
+    // padding. The old 248px allowance clipped the actions off entirely.
+    // The card is bottom-anchored, so spare height sits above it, unseen.
+    // A flat 420 covers the tallest measured card plus three message lines
+    // and keeps the overlay cap's 48px of headroom.
+    return { width: 432, height: 420 };
   }
 
   return {

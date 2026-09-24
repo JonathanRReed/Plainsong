@@ -12,6 +12,10 @@ export interface WindowUiSettingsInput {
     alwaysOnTop?: boolean;
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
+    dictationSounds?: boolean;
+    dictationPillSize?: string;
+    dictationPillDock?: string;
+    muteMediaWhileDictating?: boolean;
   };
 }
 
@@ -20,11 +24,18 @@ export interface WindowUiSettings {
   alwaysOnTop: boolean;
   showDictationOverlay: boolean;
   showRecordingOverlay: boolean;
+  dictationSounds: boolean;
+  dictationPillSize: "small" | "default" | "large" | "xlarge";
+  dictationPillDock: "bottom" | "left" | "right";
 }
+
+const PILL_SIZES = ["small", "default", "large", "xlarge"] as const;
 
 /**
  * The overlays default to shown and the window behaviors default to off, so a
- * settings file written before these were read behaves exactly as it did.
+ * settings file written before these were read behaves exactly as it did. The
+ * pill defaults to its original size along the bottom, and an unrecognized
+ * value reads as that default rather than as a new shape.
  */
 export function resolveWindowUiSettings(
   settings: WindowUiSettingsInput | null | undefined,
@@ -35,6 +46,13 @@ export function resolveWindowUiSettings(
     alwaysOnTop: ui?.alwaysOnTop === true,
     showDictationOverlay: ui?.showDictationPopup !== false,
     showRecordingOverlay: ui?.showRecordingPopup !== false,
+    dictationSounds: ui?.dictationSounds !== false,
+    dictationPillSize:
+      PILL_SIZES.find((size) => size === ui?.dictationPillSize) ?? "default",
+    dictationPillDock:
+      ui?.dictationPillDock === "left" || ui?.dictationPillDock === "right"
+        ? ui.dictationPillDock
+        : "bottom",
   };
 }
 

@@ -610,6 +610,10 @@ pub struct Database {
     encrypted: bool,
 }
 
+/// Recording id to (text preview, app target), for dictation history lists.
+pub type DictationListPreviews =
+    std::collections::HashMap<String, (Option<String>, Option<String>)>;
+
 #[expect(
     dead_code,
     reason = "database module keeps migration and evidence-table helpers beyond current command usage"
@@ -1334,19 +1338,40 @@ impl Database {
                         END
                     ), 0),
                     COUNT(DISTINCT DATE(r.created_at)),
-                    COALESCE(SUM(CASE WHEN r.created_at >= ?1 THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN r.created_at >= ?1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(MAX(r.duration, 0)), 0)
              FROM recordings r
              LEFT JOIN transcripts t ON t.recording_id = r.id
              WHERE r.source_type = 'dictation'",
         )?;
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
-        let row: (i64, i64, i64, i64) = stmt.query_row(params![cutoff], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        let row: (i64, i64, i64, i64, i64) = stmt.query_row(params![cutoff], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })?;
         totals.total_dictations = row.0.max(0) as u64;
         totals.dictated_words = row.1.max(0) as u64;
         totals.active_days = row.2.max(0) as u64;
         totals.last_seven_days_dictations = row.3.max(0) as u64;
+        totals.spoken_seconds = row.4.max(0) as u64;
+
+        // The most recent local days with a dictation, newest first, for the
+        // streak. Bounded: a streak longer than a year still reads as 366.
+        let mut dates_stmt = self.conn.prepare(
+            "SELECT DISTINCT DATE(created_at, 'localtime') AS day
+             FROM recordings
+             WHERE source_type = 'dictation' AND day IS NOT NULL
+             ORDER BY day DESC
+             LIMIT 366",
+        )?;
+        totals.active_dates = dates_stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         // Insertion-action counters, scoped to the most recent action per
         // recording so a retried insert is not counted twice.
@@ -2775,6 +2800,36 @@ impl Database {
         tx.commit()
             .context("Failed to commit dictation recording, transcript and history text")?;
         Ok(())
+    }
+
+    /// A short preview of each dictation's delivered text and the app it went
+    /// into, keyed by recording id, for history lists. One query for every
+    /// dictation rather than one per row; the preview is capped at 240
+    /// characters so a long dictation does not bloat the list payload.
+    pub fn get_dictation_list_previews(&self) -> Result<DictationListPreviews> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.id,
+                    SUBSTR(TRIM(h.final_text), 1, 240),
+                    (SELECT NULLIF(TRIM(ia.app_target), '')
+                       FROM insertion_actions ia
+                      WHERE ia.recording_id = r.id
+                      ORDER BY ia.created_at DESC, ia.id DESC
+                      LIMIT 1)
+               FROM recordings r
+               LEFT JOIN dictation_history_text h ON h.recording_id = r.id
+              WHERE r.source_type = 'dictation'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, Option<String>>(1)?
+                        .filter(|text| !text.is_empty()),
+                    row.get::<_, Option<String>>(2)?,
+                ),
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     pub fn get_dictation_history_text(
@@ -7462,6 +7517,49 @@ mod tests {
             created_at,
         };
         (recording, transcript, history)
+    }
+
+    #[test]
+    fn dictation_list_previews_carry_the_words_and_the_app() {
+        let mut db = in_memory_db();
+        let (recording, transcript, history) =
+            dictation_fixture("d-1", Utc::now(), "Ship it today.", "ship it today");
+        db.create_dictation_history_entry(&recording, &transcript, &history, None)
+            .expect("save dictation");
+        let previews = db.get_dictation_list_previews().expect("previews");
+        assert_eq!(
+            previews.get("d-1"),
+            Some(&(Some("Ship it today.".to_string()), None))
+        );
+    }
+
+    #[test]
+    fn dictation_insights_count_speaking_time_and_the_local_days_used() {
+        let mut db = in_memory_db();
+        let now = Utc::now();
+        for (id, created_at) in [
+            ("d-today", now),
+            ("d-today-2", now),
+            ("d-earlier", now - chrono::Duration::days(3)),
+        ] {
+            let (recording, transcript, history) = dictation_fixture(
+                id,
+                created_at,
+                "Four words right here.",
+                "four words right here",
+            );
+            db.create_dictation_history_entry(&recording, &transcript, &history, None)
+                .expect("save dictation");
+        }
+        let totals = db.get_dictation_insight_totals().expect("totals");
+        assert_eq!(totals.dictated_words, 12);
+        assert_eq!(totals.spoken_seconds, 12, "three 4 s fixtures");
+        assert_eq!(
+            totals.active_dates.len(),
+            2,
+            "two distinct days, newest first"
+        );
+        assert!(totals.active_dates[0] > totals.active_dates[1]);
     }
 
     fn seed_dictation_history(db: &mut Database) {
