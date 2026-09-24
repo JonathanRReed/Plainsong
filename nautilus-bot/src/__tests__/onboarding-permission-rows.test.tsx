@@ -93,6 +93,9 @@ const settings = {
 
 vi.mock("@/lib/backend/settings", () => ({
   recordOnboardingState: vi.fn(async () => ({})),
+  getDictationShortcutCapabilityStatus: vi.fn(async () => ({
+    nativeShortcutAvailable: true,
+  })),
   getPermissionDiagnostics: vi.fn(async () => ({
     microphoneReady: true,
     microphonePermissionReady: true,

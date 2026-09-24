@@ -32,14 +32,14 @@ Better = clearly ahead, Level = same class, Behind = a real gap.
 | Dictionary | Manual, snippets, opt-in learning from corrections | Auto-adds corrected words | Auto-learn, starred terms, team dictionary | Level; learning is opt-in here by design |
 | Per-app tone | Per-app styles | App-aware | Four app categories | Level |
 | Meetings | Local capture, diarization, notes | None | Notetaker | **Better** |
-| HUD | Pill with live trace, finishing bar, honest errors; now "Still working" on slow runs | Voice bar | Flow Bar: draggable, size presets, hover actions | Level; Wispr's size presets and side docking are not matched |
+| HUD | Pill with live trace, finishing bar, honest errors, "Still working" on slow runs, four sizes, docks upright to a screen edge | Voice bar | Flow Bar: draggable, size presets, hover actions | Level; no hover actions yet |
 | Hotkey gestures | Toggle, hold, hands-free (voice start); now hold or tap to lock | Press to start, press to finish | Hold, double-tap to lock, Fn+Space | Level after this round |
-| Sounds | Now: start, finish, failure | Start and finish | Start and finish, optional music mute | Level; no music auto-mute yet |
+| Sounds | Start, finish, failure; optional mute of other audio while dictating | Start and finish, mute when dictating | Start and finish, optional music mute | Level |
 | Casing and spacing to fit the sentence | Now, on macOS | Not documented | Yes | Level after this round |
 | Paste fallback | Copies, says "Not inserted", history keeps it | Unknown | Auto-copies, Paste button for 5 s | Level |
 | Stats and motivation | Now: words, pace, time saved, streak, on Home and Dictation | Words, WPM, time saved | WPM gauge, words, streak heatmap, sharing | Level; no heatmap or share card |
 | History | Now: grouped by day, the words and the app on each row, copy on hover, show more | On-device history | Date-grouped, click to copy, retry failed | Level; no retry of a failed dictation from saved audio |
-| Onboarding | Model, practice dictation, use everywhere, meetings | Permissions, mic test, first dictation | Sign-in, permissions, mic test, mode choice, practice | Level after the wizard fixes; no live mic-level step |
+| Onboarding | Model, live mic check with picker and named errors, practice dictation, hotkey and mode choice, meetings, a Ready summary | Permissions, mic test, first dictation | Sign-in, permissions, mic test, mode choice, practice | Level |
 | Platforms | macOS | Mac, Windows, iOS, Android | Mac, Windows, iOS, Android | **Behind** |
 | Teams, SSO, compliance | None | Team billing | Shared dictionary, SSO, SOC 2, HIPAA | **Behind** (not a goal yet) |
 | Resource use | Native Rust sidecar; local models cost RAM while loaded | Light client, cloud work | Electron; users report ~800 MB | Level to better for dictation-only use |
@@ -89,12 +89,12 @@ Better = clearly ahead, Level = same class, Behind = a real gap.
 2. **Windows and iPhone.** The biggest reach gap. The Rust side already
    builds off macOS; the renderer is Electron. Worth a plan once Mac is
    launched.
-3. **Wispr's Flow Bar niceties**: size presets, docking to the left or right
-   edge, hover actions. Our pill drags; the rest is small follow-up work.
-4. **Music auto-mute while dictating** (Wispr and Typeless both offer it).
-5. **A live mic-level step in onboarding** with a microphone picker and
-   named errors ("in use by another app").
-6. **Streak heatmap and a share card** for stats.
+3. **Streak heatmap and a share card** for stats.
+
+Closed in the final pass: pill size presets and edge docking, muting other
+audio while dictating, a live mic-level step in onboarding, and a
+menu-bar item that shows a running clock and controls dictation and
+meetings.
 
 ## Sources
 

@@ -184,6 +184,7 @@ import { SupportBundlePanel } from "@/components/settings/support-bundle-panel";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import type { ReadinessAssessment } from "@/features/readiness/product-readiness";
 import { formatDateTime } from "@/lib/format-locale";
+import { micErrorMessage, useMicLevel } from "@/hooks/use-mic-level";
 
 type TabId = SettingsTabId;
 type QueuedSettingsSave = {
@@ -664,9 +665,9 @@ export function SettingsView() {
   >([]);
   const [sileroVadAvailable, setSileroVadAvailable] = useState(false);
   const [sileroVadDownloading, setSileroVadDownloading] = useState(false);
-  const [micTestActive, setMicTestActive] = useState(false);
-  const [micTestError, setMicTestError] = useState<string | null>(null);
-  const [micTestLevel, setMicTestLevel] = useState(0);
+  const micTest = useMicLevel();
+  const micTestActive = micTest.state === "live";
+  const micTestLevel = Math.round(micTest.level * 100);
   const [micTestRecording, setMicTestRecording] = useState(false);
   const [micTestPlaybackUrl, setMicTestPlaybackUrl] = useState<string | null>(
     null,
@@ -677,9 +678,6 @@ export function SettingsView() {
     useState<SystemAudioCapability | null>(null);
   const [systemAudioTestLoading, setSystemAudioTestLoading] = useState(false);
   const [systemAudioTestStatus, setSystemAudioTestStatus] = useState<string | null>(null);
-  const micTestContextRef = useRef<AudioContext | null>(null);
-  const micTestAnimFrameRef = useRef<number | null>(null);
-  const micTestStreamRef = useRef<MediaStream | null>(null);
   const micTestRecorderRef = useRef<MediaRecorder | null>(null);
   const micTestChunksRef = useRef<BlobPart[]>([]);
   const backupConfigLoadInFlightRef = useRef(false);
@@ -2001,12 +1999,9 @@ export function SettingsView() {
     [flushPendingSettingsSave],
   );
 
+  // useMicLevel releases the microphone itself on unmount.
   useEffect(() => {
     return () => {
-      if (micTestAnimFrameRef.current !== null)
-        cancelAnimationFrame(micTestAnimFrameRef.current);
-      micTestStreamRef.current?.getTracks().forEach((t) => t.stop());
-      micTestContextRef.current?.close().catch(() => {});
       if (micTestPlaybackUrl) URL.revokeObjectURL(micTestPlaybackUrl);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2017,79 +2012,35 @@ export function SettingsView() {
     void refreshSystemAudioCapability();
   }, [refreshAudioDevices, refreshSystemAudioCapability]);
 
+  const { start: startMicLevel, stop: stopMicLevel, getStream: getMicTestStream } =
+    micTest;
+
   const stopMicTest = useCallback(() => {
-    if (micTestAnimFrameRef.current !== null) {
-      cancelAnimationFrame(micTestAnimFrameRef.current);
-      micTestAnimFrameRef.current = null;
-    }
-    if (micTestStreamRef.current) {
-      micTestStreamRef.current.getTracks().forEach((t) => t.stop());
-      micTestStreamRef.current = null;
-    }
-    if (micTestContextRef.current) {
-      micTestContextRef.current.close().catch(() => {});
-      micTestContextRef.current = null;
-    }
-    setMicTestActive(false);
-    setMicTestLevel(0);
+    stopMicLevel();
     setMicTestRecording(false);
-  }, []);
+  }, [stopMicLevel]);
 
   const startMicTest = useCallback(async () => {
-    setMicTestError(null);
-    try {
-      const preferredDeviceId = settings?.audio.dictationInputOverrideEnabled
-        ? settings.audio.dictationInputDevice?.deviceId
-        : settings?.audio.preferredInputDevice?.deviceId;
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: preferredDeviceId
-          ? { deviceId: { ideal: preferredDeviceId } }
-          : true,
-        video: false,
-      });
-      micTestStreamRef.current = stream;
-      const ctx = new AudioContext();
-      micTestContextRef.current = ctx;
-      const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 256;
-      source.connect(analyser);
-      const buf = new Float32Array(analyser.fftSize);
-      const tick = () => {
-        analyser.getFloatTimeDomainData(buf);
-        const rms = Math.sqrt(
-          buf.reduce((sum, v) => sum + v * v, 0) / buf.length,
-        );
-        const db = 20 * Math.log10(Math.max(rms, 1e-6));
-        const pct = Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
-        setMicTestLevel(Math.round(pct));
-        micTestAnimFrameRef.current = requestAnimationFrame(tick);
-      };
-      tick();
-      setMicTestActive(true);
-    } catch (err) {
-      console.error("Mic test failed:", err);
-      // Mic failure is exactly what this test exists to diagnose — name it.
-      setMicTestError(
-        err instanceof DOMException && err.name === "NotAllowedError"
-          ? "Microphone access was denied. Allow it in System Settings → Privacy & Security → Microphone, then try again."
-          : "Microphone unavailable — check that the device is connected and not in use by another app.",
-      );
-    }
+    const preferredDevice = settings?.audio.dictationInputOverrideEnabled
+      ? settings.audio.dictationInputDevice
+      : settings?.audio.preferredInputDevice;
+    await startMicLevel(preferredDevice ?? null);
   }, [
-    settings?.audio.dictationInputDevice?.deviceId,
+    settings?.audio.dictationInputDevice,
     settings?.audio.dictationInputOverrideEnabled,
-    settings?.audio.preferredInputDevice?.deviceId,
+    settings?.audio.preferredInputDevice,
+    startMicLevel,
   ]);
 
   const recordMicTest = useCallback(async () => {
-    if (!micTestStreamRef.current) return;
+    const stream = getMicTestStream();
+    if (!stream) return;
     if (micTestPlaybackUrl) {
       URL.revokeObjectURL(micTestPlaybackUrl);
       setMicTestPlaybackUrl(null);
     }
     micTestChunksRef.current = [];
-    const recorder = new MediaRecorder(micTestStreamRef.current);
+    const recorder = new MediaRecorder(stream);
     micTestRecorderRef.current = recorder;
     recorder.ondataavailable = (e) => micTestChunksRef.current.push(e.data);
     recorder.onstop = () => {
@@ -2104,7 +2055,7 @@ export function SettingsView() {
         micTestRecorderRef.current.stop();
       }
     }, 3000);
-  }, [micTestPlaybackUrl]);
+  }, [getMicTestStream, micTestPlaybackUrl]);
 
   // The live answer, from the same `findConflictingShortcuts` Electron runs
   // at registration time (imported from the electron module, so the two
@@ -2709,11 +2660,13 @@ export function SettingsView() {
               <option value="toggle">
                 Press to start, press again to stop
               </option>
-              {nativeShortcutAvailable && (
-                <option value="hold_to_talk">
-                  Hold to record, release to stop
-                </option>
-              )}
+              {/* Always listed, so a saved hold-to-talk choice never shows
+                  as an empty box while the key helper is down or starting. */}
+              <option value="hold_to_talk" disabled={!nativeShortcutAvailable}>
+                {nativeShortcutAvailable
+                  ? "Hold to record, release to stop"
+                  : "Hold to record, release to stop (needs the key helper)"}
+              </option>
               <option value="hands_free">
                 Start on its own when you speak
               </option>
@@ -3161,9 +3114,14 @@ export function SettingsView() {
                 </Button>
               </div>
 
-              {micTestError && !micTestActive && (
-                <p className="mt-3 rounded-md bg-rust/10 p-2 text-sm text-rust">
-                  {micTestError}
+              {micTest.error && !micTestActive && (
+                // Mic failure is exactly what this test exists to diagnose,
+                // so it says which failure it was.
+                <p
+                  role="alert"
+                  className="mt-3 rounded-md bg-rust/10 p-2 text-sm text-rust"
+                >
+                  {micErrorMessage(micTest.error)}
                 </p>
               )}
 
@@ -3970,6 +3928,12 @@ export function SettingsView() {
                                 {renderDeviceOptionLabel(device)}
                               </option>
                             ))}
+                            {appWideDeviceId &&
+                            !currentAudioDevices.some((device) => device.deviceId === appWideDeviceId) ? (
+                              <option value={appWideDeviceId}>
+                                {`${settings.audio.preferredInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                              </option>
+                            ) : null}
                           </OptionSelect>
                         </div>
 
@@ -4049,6 +4013,12 @@ export function SettingsView() {
                                 {renderDeviceOptionLabel(device)}
                               </option>
                             ))}
+                            {dictationDeviceId &&
+                            !currentAudioDevices.some((device) => device.deviceId === dictationDeviceId) ? (
+                              <option value={dictationDeviceId}>
+                                {`${settings.audio.dictationInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                              </option>
+                            ) : null}
                           </OptionSelect>
                         </div>
 
@@ -4127,6 +4097,12 @@ export function SettingsView() {
                                 {renderDeviceOptionLabel(device)}
                               </option>
                             ))}
+                            {meetingDeviceId &&
+                            !currentAudioDevices.some((device) => device.deviceId === meetingDeviceId) ? (
+                              <option value={meetingDeviceId}>
+                                {`${settings.audio.meetingInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                              </option>
+                            ) : null}
                           </OptionSelect>
                         </div>
                       </div>

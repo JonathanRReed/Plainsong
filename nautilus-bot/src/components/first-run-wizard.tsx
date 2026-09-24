@@ -21,6 +21,7 @@ import {
 } from "@/lib/backend/asr";
 import { listen } from "@/lib/electron";
 import {
+  getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,
   getSettings,
   openInstalledPlainsongApp,
@@ -49,12 +50,12 @@ import {
   type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import {
+  getDictationAudioLevel,
   startDictation,
   stopDictation,
 } from "@/lib/backend/dictation";
 import {
   defaultDictationShortcut,
-  dictationInstruction,
   formatShortcutForDisplay,
   normalizeShortcut,
 } from "@/lib/shortcuts";
@@ -77,6 +78,8 @@ import {
 } from "@/components/models/ai-lanes";
 import { requestReadinessDestination } from "@/lib/navigation";
 import { findConflictingShortcuts } from "../../electron/shortcut-registration";
+import { MicLevelMeter } from "@/components/onboarding/mic-level-meter";
+import { MicrophoneStep } from "@/components/onboarding/microphone-step";
 
 type Props = {
   mode?: OnboardingMode;
@@ -93,6 +96,7 @@ type Props = {
 };
 
 type Step =
+  | "microphone"
   | "try-dictation"
   | "use-everywhere"
   | "ready"
@@ -193,6 +197,7 @@ const PERMISSION_GATE_ICONS: Record<string, ReactNode> = {
 };
 
 const STEP_LABELS: Record<Step, string> = {
+  microphone: "Microphone check",
   "try-dictation": "Try dictation here",
   "use-everywhere": "Use it everywhere",
   ready: "Ready",
@@ -203,14 +208,15 @@ const STEP_LABELS: Record<Step, string> = {
   "ai-notes": "Meeting notes",
 };
 
-// Mirrors settings-view-simple.tsx's dictationShortcutBehaviorHint copy, so
-// the wizard describes whichever mode is actually configured (hold-to-talk
-// and hands-free are real, working modes, not stubs) instead of assuming
-// everyone is on toggle.
-const HOTKEY_MODE_LABELS: Record<"hold_to_talk" | "toggle" | "hands_free", { name: string; hint: string }> = {
-  toggle: { name: "Toggle", hint: "press to start, press again to stop" },
-  hold_to_talk: { name: "Hold to talk", hint: "hold the shortcut to record, release to stop" },
-  hands_free: { name: "Hands-free", hint: "starts automatically when you speak, stops on silence" },
+type HotkeyMode = "hold_to_talk" | "toggle" | "hands_free";
+
+// The same three behaviors Settings > Dictation offers (see
+// settings-view-simple.tsx's "How the dictation shortcut works"), written
+// the same way, so the wizard and Settings describe one feature.
+const HOTKEY_MODE_LABELS: Record<HotkeyMode, { name: string; hint: string }> = {
+  hold_to_talk: { name: "Hold to talk", hint: "Hold the shortcut while you speak, and let go to paste." },
+  toggle: { name: "Press to toggle", hint: "Press once to start, and press again to paste." },
+  hands_free: { name: "Hands-free", hint: "Starts on its own when you speak, and stops when you pause." },
 };
 
 export function dictationShortcutConflictMessage(
@@ -413,12 +419,19 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const initialDictationModelIdRef = useRef<string | null>(null);
 
   const [shortcutValue, setShortcutValue] = useState(defaultDictationShortcut());
-  // Hold-to-talk and hands-free are real, working modes configured from
-  // Settings (see settings-view-simple.tsx's resolveDictationHotkeyBehavior);
-  // this wizard step only manages the key combo, so it reads the existing
-  // mode to describe it accurately instead of assuming toggle.
-  const [hotkeyMode, setHotkeyMode] = useState<"hold_to_talk" | "toggle" | "hands_free">("toggle");
-  const [hotkeyDemoActive, setHotkeyDemoActive] = useState(false);
+  // Opens on whatever is already configured (see settings-view-simple.tsx's
+  // resolveDictationHotkeyBehavior), so re-running setup never quietly
+  // switches someone's hold-to-talk back to toggle.
+  const [hotkeyMode, setHotkeyMode] = useState<HotkeyMode>("toggle");
+  // Hands-free is only offered to someone who already turned it on.
+  const [handsFreeConfigured, setHandsFreeConfigured] = useState(false);
+  // Absent means on, as in Settings.
+  const [tapToLock, setTapToLock] = useState(true);
+  // Hold-to-talk needs the native key helper to see the key go up. null is
+  // "not checked", which never hides the option.
+  const [holdToTalkAvailable, setHoldToTalkAvailable] = useState<boolean | null>(null);
+  // Set by the microphone step once the reader has been heard.
+  const [micHeard, setMicHeard] = useState<{ deviceName: string | null } | null>(null);
   const [scratchState, setScratchState] =
     useState<ScratchDictationState>("idle");
   const [scratchText, setScratchText] = useState("");
@@ -463,8 +476,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     // The notes step sits after meeting setup because it is only about what
     // happens once a meeting is captured, and before "ready" so the summary
     // there can tell the truth about whether notes will be written.
+    // The microphone check comes before the first practice dictation, so a
+    // wrong or silent mic is caught while it is the only thing on screen.
     return [
       "dictation-model",
+      "microphone",
       "try-dictation",
       "use-everywhere",
       "meeting-setup",
@@ -586,6 +602,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               ? "hold_to_talk"
               : "toggle"
         );
+        setHandsFreeConfigured(Boolean(settings.transcription.dictationHandsFreeEnabled));
+        setTapToLock(settings.transcription.dictationTapToLock !== false);
         setModelSelectionHydration(providers ? "ready" : "error");
       })
       .catch(() => {
@@ -597,6 +615,22 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         }
       });
 
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    getDictationShortcutCapabilityStatus()
+      .then((status) => {
+        if (mounted && typeof status?.nativeShortcutAvailable === "boolean") {
+          setHoldToTalkAvailable(status.nativeShortcutAvailable);
+        }
+      })
+      .catch(() => {
+        // Unknown stays unknown; the option stays on offer.
+      });
     return () => {
       mounted = false;
     };
@@ -724,7 +758,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         routeReady
           ? null
           : verification?.summary ??
-              "Meetings need a meeting-grade ASR route plus a ready microphone and permission. System audio is optional for Me + Them capture."
+              "Meetings need a meeting transcription model. Download it below, or choose one later in Models."
       );
       setMeetingSystemAudioCapability(systemAudioCapability);
       setMeetingRecommendedRoute(getRecommendedMeetingRoute(providers));
@@ -789,7 +823,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     try {
       const diagnostics = await requestDictationPermissions();
       setPerms(diagnostics);
-      setPermissionRequestStatus("Requested macOS permissions and refreshed Plainsong readiness.");
+      setPermissionRequestStatus("Asked macOS for permission and checked again.");
     } catch (error) {
       setPermissionRequestError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1029,6 +1063,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       }
       settings.shortcuts.toggleDictation = toggleDictation;
       settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
+      // The same two fields Settings writes for this choice.
+      settings.transcription.dictationPushToTalk = hotkeyMode === "hold_to_talk";
+      settings.transcription.dictationHandsFreeEnabled = hotkeyMode === "hands_free";
+      if (hotkeyMode === "hold_to_talk") {
+        settings.transcription.dictationTapToLock = tapToLock;
+      }
       await saveSettings(settings);
       return true;
     } catch (error) {
@@ -1038,7 +1078,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     } finally {
       setSaveBusy(false);
     }
-  }, [autoRequestPermissions, shortcutValue]);
+  }, [autoRequestPermissions, hotkeyMode, shortcutValue, tapToLock]);
 
   const applyRecommendedMeetingRoute = useCallback(async () => {
     if (!meetingRecommendedRoute) {
@@ -1333,10 +1373,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
   };
 
-  const subtitle =
-    step === "meeting-setup"
-      ? "Meetings can be configured now or revisited later from Setup."
-      : `Step ${stepIndex + 1} of ${steps.length}`;
+  const subtitle = `Step ${stepIndex + 1} of ${steps.length}`;
 
   const nextLabel =
     step === "dictation-model" && mode === "full" && modelState !== "done"
@@ -1365,6 +1402,16 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     scratchState === "listening" ||
     scratchState === "transcribing";
   const wizardTitle = STEP_LABELS[step];
+  const hotkeyModeChoice = (
+    <HotkeyModeChoice
+      mode={hotkeyMode}
+      onModeChange={setHotkeyMode}
+      offerHandsFree={handsFreeConfigured}
+      holdToTalkAvailable={holdToTalkAvailable}
+      tapToLock={tapToLock}
+      onTapToLockChange={setTapToLock}
+    />
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
@@ -1424,6 +1471,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             key={step}
             className="flex flex-col gap-6 animate-in fade-in-0 slide-in-from-bottom-1 duration-200 motion-reduce:animate-none"
           >
+            {step === "microphone" ? (
+              <MicrophoneStep
+                onHeard={(deviceName) => setMicHeard({ deviceName })}
+                onOpenMicrophoneSettings={() =>
+                  void openMicrophoneSettingsFromWizard()
+                }
+              />
+            ) : null}
+
             {step === "try-dictation" ? (
               <TryDictationStep
                 perms={perms}
@@ -1445,6 +1501,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 scratchError={scratchError}
                 onStartScratch={() => void startScratchDictation()}
                 onFinishScratch={() => void finishScratchDictation()}
+                displayShortcut={displayShortcut}
               />
             ) : null}
 
@@ -1458,14 +1515,18 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 }
                 displayShortcut={displayShortcut}
                 onShortcutChange={setShortcutValue}
-                hotkeyMode={hotkeyMode}
+                modeChoice={hotkeyModeChoice}
                 saveError={saveError}
               />
             ) : null}
 
             {step === "ready" ? (
               <ReadyStep
+                shortcutValue={shortcutValue}
                 displayShortcut={displayShortcut}
+                tapToLock={tapToLock}
+                micHeardOn={micHeard}
+                aiNotesChoice={aiNotesChoice}
                 hotkeyMode={hotkeyMode}
                 modelState={modelState}
                 modelError={modelError}
@@ -1536,12 +1597,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
             {step === "hotkey" ? (
               <HotkeyStep
-                active={hotkeyDemoActive}
-                onToggle={() => setHotkeyDemoActive((value) => !value)}
                 displayShortcut={displayShortcut}
                 onShortcutChange={setShortcutValue}
-                hotkeyMode={hotkeyMode}
-                includeMeetings={false}
+                modeChoice={hotkeyModeChoice}
                 saveError={saveError}
               />
             ) : null}
@@ -1619,7 +1677,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         <div className="flex shrink-0 justify-between gap-2 border-t border-border/60 px-8 py-4">
           <div className="flex gap-2">
             {mode === "full" ? (
-              step === "dictation-model" && modelState !== "done" ? (
+              // The last step has nothing left to skip.
+              step === "ready" ? null : step === "dictation-model" &&
+                modelState !== "done" ? (
                 <Button
                   variant="ghost"
                   onClick={skipModelDownload}
@@ -1715,6 +1775,7 @@ function TryDictationStep({
   scratchError,
   onStartScratch,
   onFinishScratch,
+  displayShortcut,
 }: {
   perms: PermissionDiagnostics | null;
   permsLoading: boolean;
@@ -1733,84 +1794,130 @@ function TryDictationStep({
   scratchError: string | null;
   onStartScratch(): void;
   onFinishScratch(): void;
+  displayShortcut: string;
 }) {
   const microphoneReady =
     perms?.microphonePermissionReady ?? perms?.microphoneReady;
   const scratchInFlight =
     scratchState === "starting" || scratchState === "transcribing";
+  // The rows only earn their place when something still blocks the test.
+  const setupNeeded = !microphoneReady || modelState !== "done";
+  const wordCount = scratchText ? scratchText.split(/\s+/).filter(Boolean).length : 0;
+
+  // While the test listens, the meter follows the level the dictation engine
+  // itself hears (the same reading the dictation pill uses), not a second
+  // copy of the microphone.
+  const [listeningLevel, setListeningLevel] = useState(0);
+  // The result is the reward for this step, so bring it on screen. Smooth
+  // scrolling is motion, and reduced motion jumps instead.
+  const resultRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (scratchState !== "complete") {
+      return;
+    }
+    const reduceMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    resultRef.current?.scrollIntoView?.({
+      block: "nearest",
+      behavior: reduceMotion ? "auto" : "smooth",
+    });
+  }, [scratchState]);
+  useEffect(() => {
+    if (scratchState !== "listening") {
+      setListeningLevel(0);
+      return;
+    }
+    let mounted = true;
+    const timer = window.setInterval(() => {
+      void getDictationAudioLevel()
+        .then((raw) => {
+          if (mounted) {
+            setListeningLevel(Math.min(1, raw < 0.03 ? 0 : raw * 1.9));
+          }
+        })
+        .catch(() => {});
+    }, 90);
+    return () => {
+      mounted = false;
+      window.clearInterval(timer);
+    };
+  }, [scratchState]);
 
   return (
     <div className="space-y-5">
       <p className="max-w-xl text-sm text-muted-foreground">
-        Try one sentence here before Plainsong types into other apps. It runs
-        exactly like real dictation, on this Mac, and the result stays inside
-        Plainsong.
+        Now try a real dictation. It runs exactly as it will in other apps, on
+        this Mac, but the text stays here in Plainsong.
       </p>
 
-      <div className="divide-y divide-border rounded-xl border border-border">
-        <div className="flex items-start justify-between gap-4 p-4">
-          <div className="flex min-w-0 gap-3">
-            <span className="mt-0.5 text-muted-foreground">
-              <Mic className="h-4 w-4" />
-            </span>
-            <div>
-              <p className="text-sm font-medium">Dictation permissions</p>
-              <p className="text-sm text-muted-foreground">
-                {microphoneReady
-                  ? "The microphone is ready for this test."
-                  : "macOS may ask for Microphone so Plainsong can hear you, then Accessibility so it can insert text in other apps."}
-              </p>
-            </div>
-          </div>
-          {permsLoading || permissionRequestBusy ? (
-            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-          ) : microphoneReady ? (
-            <span className="neume neume-lit mt-1" aria-label="Microphone ready" />
-          ) : (
-            <div className="flex shrink-0 gap-2">
-              <Button size="sm" variant="outline" onClick={onRequestPermissions}>
-                Request dictation permissions
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={onOpenMicrophoneSettings}
-              >
-                Open Settings
-              </Button>
+      {setupNeeded ? (
+        <div className="divide-y divide-border rounded-xl border border-border">
+          {microphoneReady ? null : (
+            <div className="flex gap-3 p-4">
+              <span className="mt-0.5 text-muted-foreground">
+                <Mic className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex-1 space-y-3">
+                <div>
+                  <p className="text-sm font-medium">Dictation permissions</p>
+                  <p className="text-sm text-muted-foreground">
+                    macOS may ask for Microphone so Plainsong can hear you, then
+                    Accessibility so it can insert text in other apps.
+                  </p>
+                </div>
+                {permsLoading || permissionRequestBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={onRequestPermissions}>
+                      Request dictation permissions
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={onOpenMicrophoneSettings}>
+                      Open Settings
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={onRefreshPermissions}
+                      disabled={permsLoading}
+                    >
+                      Check again
+                    </Button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
-        </div>
 
-        <div className="flex items-start justify-between gap-4 p-4">
-          <div className="flex min-w-0 gap-3">
-            <span className="mt-0.5 text-muted-foreground">
-              <Download className="h-4 w-4" />
-            </span>
-            <div>
-              <p className="text-sm font-medium">Speech model</p>
-              <p className="text-sm text-muted-foreground">
-                Fast and accurate, and runs on this Mac: a{" "}
-                {powerModelSize(POWER_MODEL_OPTIONS[0])} download (Parakeet TDT
-                0.6B v3). A smaller {powerModelSize(POWER_MODEL_OPTIONS[1])}{" "}
-                option is available later, with less accuracy on unfamiliar
-                words.
-              </p>
+          {modelState === "done" ? null : (
+            <div className="flex items-start justify-between gap-4 p-4">
+              <div className="flex min-w-0 gap-3">
+                <span className="mt-0.5 text-muted-foreground">
+                  <Download className="h-4 w-4" />
+                </span>
+                <div>
+                  <p className="text-sm font-medium">Speech model</p>
+                  <p className="text-sm text-muted-foreground">
+                    The test needs the recommended model first: a{" "}
+                    {powerModelSize(POWER_MODEL_OPTIONS[0])} download that runs
+                    on this Mac.
+                  </p>
+                </div>
+              </div>
+              {modelState === "downloading" ? (
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {modelPercent === null ? "Downloading" : `${Math.round(modelPercent)}%`}
+                </span>
+              ) : (
+                <Button size="sm" variant="outline" onClick={onDownloadModel}>
+                  {modelState === "error" ? "Retry download" : "Download"}
+                </Button>
+              )}
             </div>
-          </div>
-          {modelState === "done" ? (
-            <span className="neume neume-lit mt-1" aria-label="Model ready" />
-          ) : modelState === "downloading" ? (
-            <span className="shrink-0 text-xs text-muted-foreground">
-              {modelPercent === null ? "Downloading" : `${Math.round(modelPercent)}%`}
-            </span>
-          ) : (
-            <Button size="sm" variant="outline" onClick={onDownloadModel}>
-              {modelState === "error" ? "Retry download" : "Download"}
-            </Button>
           )}
         </div>
-      </div>
+      ) : null}
 
       {modelState === "downloading" ? (
         <Progress value={modelPercent} className="h-1.5" />
@@ -1820,44 +1927,97 @@ function TryDictationStep({
           Model download failed: {modelError}
         </p>
       ) : null}
+      {permissionRequestStatus || permissionRequestError ? (
+        <p
+          className={`text-xs ${permissionRequestError ? "text-destructive" : "text-muted-foreground"}`}
+          role={permissionRequestError ? "alert" : "status"}
+        >
+          {permissionRequestError ?? permissionRequestStatus}
+        </p>
+      ) : null}
 
-      <div className="rounded-xl border border-primary/30 bg-primary/5 p-5">
+      <div
+        className={`rounded-xl border p-6 transition-colors motion-reduce:transition-none ${
+          scratchState === "complete" && scratchText
+            ? "border-gold/40 bg-gold/5"
+            : "border-primary/30 bg-primary/5"
+        }`}
+      >
         <div className="flex flex-col items-center text-center">
-          <div
-            className={`mb-4 flex h-16 w-16 items-center justify-center rounded-full border ${
-              scratchState === "listening"
-                ? "border-primary bg-primary text-primary-foreground"
-                : "border-border bg-background text-muted-foreground"
-            }`}
-          >
-            {scratchInFlight ? (
-              <Loader2 className="h-6 w-6 animate-spin" />
-            ) : (
-              <Mic className="h-6 w-6" />
-            )}
-          </div>
-          <p className="font-serif text-lg font-semibold">
+          {scratchState === "listening" ? (
+            <MicLevelMeter level={listeningLevel} active className="mb-3" />
+          ) : scratchState === "complete" && scratchText ? null : (
+            <div
+              className={`mb-4 flex h-16 w-16 items-center justify-center rounded-full border ${
+                scratchState === "complete" && scratchText
+                  ? "border-gold/50 bg-gold/10 text-gold-text"
+                  : "border-border bg-background text-muted-foreground"
+              }`}
+            >
+              {scratchInFlight ? (
+                <Loader2 className="h-6 w-6 animate-spin" />
+              ) : (
+                <Mic className="h-6 w-6" />
+              )}
+            </div>
+          )}
+          <p className="flex items-center gap-2 font-serif text-lg font-semibold">
+            {scratchState === "complete" && scratchText ? (
+              <CheckCircle2 className="h-5 w-5 text-gold-text" aria-hidden="true" />
+            ) : null}
             {scratchState === "listening"
               ? "Listening"
               : scratchState === "transcribing"
-                ? "Turning speech into text"
+                ? "Writing it down"
                 : scratchState === "complete"
-                  ? "That worked"
+                  ? scratchText
+                    ? "That worked"
+                    : "Nothing came through"
                   : "Say one sentence"}
           </p>
-          <p className="mt-1 max-w-md text-sm text-muted-foreground">
-            {scratchState === "listening"
-              ? "Speak naturally, then finish when you are done."
-              : scratchState === "complete" || scratchState === "transcribing"
-                ? "This result is saved locally. It will not touch the clipboard or another app."
-                : "Try: “Um, let’s meet on Tuesday, no wait, Wednesday.” Plainsong drops the um and keeps the day you meant."}
-          </p>
+          {scratchState === "complete" ? null : (
+            <p className="mt-1 max-w-md text-sm text-muted-foreground">
+              {scratchState === "listening"
+                ? "Speak naturally, then choose Finish."
+                : scratchState === "transcribing"
+                  ? "This takes a moment the first time while the model loads."
+                  : "Try: “Um, let’s meet on Tuesday, no wait, Wednesday.” Plainsong drops the um and keeps the day you meant."}
+            </p>
+          )}
+
+          {scratchState === "complete" ? (
+            <div
+              ref={resultRef}
+              className="mt-4 w-full text-left"
+              role="status"
+              aria-live="polite"
+            >
+              {scratchText ? (
+                <>
+                  <blockquote className="rounded-lg border border-border border-l-2 border-l-gold bg-background/80 px-4 py-3 font-serif text-base leading-relaxed text-foreground">
+                    {scratchText}
+                  </blockquote>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {wordCount === 1 ? "1 word" : `${wordCount} words`}, written
+                    on this Mac. Soon you will do this in any app with{" "}
+                    {displayShortcut}.
+                  </p>
+                </>
+              ) : (
+                <p className="text-center text-sm text-muted-foreground">
+                  No speech was detected. Try again and speak a little closer to
+                  the microphone.
+                </p>
+              )}
+            </div>
+          ) : null}
 
           <div className="mt-4">
             {scratchState === "listening" ? (
               <Button onClick={onFinishScratch}>Finish and transcribe</Button>
             ) : (
               <Button
+                variant={scratchState === "complete" && scratchText ? "outline" : "default"}
                 onClick={onStartScratch}
                 disabled={scratchInFlight || modelState !== "done"}
               >
@@ -1871,48 +2031,130 @@ function TryDictationStep({
           </div>
         </div>
 
-        {scratchState === "complete" ? (
-          <div
-            className="mt-5 rounded-lg border border-border bg-background/70 p-4 text-left"
-            role="status"
-            aria-live="polite"
-          >
-            {scratchText ? (
-              <p className="text-sm leading-relaxed text-foreground">
-                {scratchText}
-              </p>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                No speech was detected. Try again and speak a little closer to
-                the microphone.
-              </p>
-            )}
-          </div>
-        ) : null}
-
         {scratchError ? (
-          <p className="mt-4 text-sm text-destructive" role="alert">
+          <p className="mt-4 text-center text-sm text-destructive" role="alert">
             {scratchError}
           </p>
         ) : null}
       </div>
+    </div>
+  );
+}
 
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-muted-foreground">
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={onRefreshPermissions}
-          disabled={permsLoading}
-        >
-          Re-check microphone
-        </Button>
-        {permissionRequestStatus ? <span>{permissionRequestStatus}</span> : null}
-        {permissionRequestError ? (
-          <span className="text-destructive" role="alert">
-            {permissionRequestError}
-          </span>
-        ) : null}
+/**
+ * Hold to talk or press to toggle: the one choice competitors ask about
+ * before anything else, because it changes how every dictation feels.
+ */
+function HotkeyModeChoice({
+  mode,
+  onModeChange,
+  offerHandsFree,
+  holdToTalkAvailable,
+  tapToLock,
+  onTapToLockChange,
+}: {
+  mode: HotkeyMode;
+  onModeChange(mode: HotkeyMode): void;
+  offerHandsFree: boolean;
+  holdToTalkAvailable: boolean | null;
+  tapToLock: boolean;
+  onTapToLockChange(next: boolean): void;
+}) {
+  const options: HotkeyMode[] = offerHandsFree
+    ? ["hold_to_talk", "toggle", "hands_free"]
+    : ["hold_to_talk", "toggle"];
+  return (
+    <div className="space-y-2">
+      <p className="text-sm font-medium" id="first-run-hotkey-mode-label">
+        How the shortcut works
+      </p>
+      <div
+        role="radiogroup"
+        aria-labelledby="first-run-hotkey-mode-label"
+        className={`grid gap-2 ${options.length === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}
+      >
+        {options.map((option) => (
+          <button
+            key={option}
+            type="button"
+            role="radio"
+            aria-checked={mode === option}
+            onClick={() => onModeChange(option)}
+            className={`rounded-lg border-2 p-3 text-left transition-colors motion-reduce:transition-none ${
+              mode === option
+                ? "border-primary bg-primary/5"
+                : "border-border hover:border-primary/40"
+            }`}
+          >
+            <p className="text-sm font-medium">{HOTKEY_MODE_LABELS[option].name}</p>
+            <p className="text-xs text-muted-foreground">{HOTKEY_MODE_LABELS[option].hint}</p>
+          </button>
+        ))}
       </div>
+      {mode === "hold_to_talk" ? (
+        <>
+          <label className="flex items-start gap-2 pt-1 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 accent-gold"
+              checked={tapToLock}
+              onChange={(event) => onTapToLockChange(event.target.checked)}
+            />
+            <span>
+              <span className="font-medium">Tap to lock</span>
+              <span className="block text-xs text-muted-foreground">
+                A quick tap keeps listening without holding the key. Tap again to
+                finish.
+              </span>
+            </span>
+          </label>
+          {holdToTalkAvailable === false ? (
+            <p className="text-xs text-rust">
+              Hold to talk is not available on this Mac right now, so the
+              shortcut works as press to toggle until it is.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function ShortcutRecorder({
+  inputId,
+  displayShortcut,
+  onShortcutChange,
+}: {
+  inputId: string;
+  displayShortcut: string;
+  onShortcutChange(value: string): void;
+}) {
+  return (
+    <div className="space-y-2">
+      <label htmlFor={inputId} className="text-sm font-medium">
+        Dictation shortcut
+      </label>
+      <Input
+        id={inputId}
+        aria-describedby={`${inputId}-hint`}
+        value={displayShortcut}
+        readOnly
+        onKeyDown={(event) => {
+          if (event.key === "Tab") return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.key === "Escape") return;
+          const parsed = formatShortcutFromKeyboardEvent(event);
+          if (parsed) {
+            onShortcutChange(parsed);
+          }
+        }}
+        className="font-mono text-center"
+      />
+      <p id={`${inputId}-hint`} className="text-xs text-muted-foreground">
+        To change it, click the field and press the keys you want, with at
+        least one of Command, Control, Option or Shift.
+      </p>
     </div>
   );
 }
@@ -1924,7 +2166,7 @@ function UseEverywhereStep({
   onOpenAccessibilitySettings,
   displayShortcut,
   onShortcutChange,
-  hotkeyMode,
+  modeChoice,
   saveError,
 }: {
   perms: PermissionDiagnostics | null;
@@ -1933,14 +2175,14 @@ function UseEverywhereStep({
   onOpenAccessibilitySettings(): void;
   displayShortcut: string;
   onShortcutChange(value: string): void;
-  hotkeyMode: "hold_to_talk" | "toggle" | "hands_free";
+  modeChoice: ReactNode;
   saveError: string | null;
 }) {
   return (
     <div className="space-y-5">
       <p className="max-w-xl text-sm text-muted-foreground">
-        The first test stayed in Plainsong. To dictate at the cursor in any app,
-        macOS needs one cursor-control grant and a shortcut you can remember.
+        To type into other apps, macOS has to let Plainsong control the cursor.
+        Then choose the shortcut you will press to dictate, and how it works.
       </p>
 
       <div className="space-y-3">
@@ -1960,49 +2202,23 @@ function UseEverywhereStep({
             registerRef={() => {}}
           />
         ))}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onRefreshPermissions}
+          disabled={permsLoading}
+        >
+          Check again
+        </Button>
       </div>
 
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={onRefreshPermissions}
-        disabled={permsLoading}
-      >
-        Re-check cursor access
-      </Button>
-
-      <div className="space-y-3 border-t border-border pt-5">
-        <div className="flex items-baseline justify-between gap-4">
-          <div>
-            <p className="text-sm font-medium">Your dictation shortcut</p>
-            <p className="text-xs text-muted-foreground">
-              {dictationInstruction(displayShortcut, hotkeyMode)}
-            </p>
-          </div>
-          <span className="rubric-muted text-[0.65rem]">
-            {HOTKEY_MODE_LABELS[hotkeyMode].name}
-          </span>
-        </div>
-        <Input
-          aria-label="Dictation shortcut"
-          value={displayShortcut}
-          readOnly
-          onKeyDown={(event) => {
-            if (event.key === "Tab") return;
-            event.preventDefault();
-            event.stopPropagation();
-            if (event.key === "Escape") return;
-            const parsed = formatShortcutFromKeyboardEvent(event);
-            if (parsed) {
-              onShortcutChange(parsed);
-            }
-          }}
-          className="font-mono text-center"
+      <div className="space-y-4 border-t border-border pt-5">
+        <ShortcutRecorder
+          inputId="first-run-everywhere-shortcut"
+          displayShortcut={displayShortcut}
+          onShortcutChange={onShortcutChange}
         />
-        <p className="text-xs text-muted-foreground">
-          Click the field, then press the key combination you want. After setup,
-          place the cursor in any text field and use this shortcut.
-        </p>
+        {modeChoice}
       </div>
 
       {saveError ? (
@@ -2014,9 +2230,31 @@ function UseEverywhereStep({
   );
 }
 
+/** The shortcut as keycaps, one per key, in the platform's own symbols. */
+function ShortcutKeys({ shortcut }: { shortcut: string }) {
+  const keys = normalizeShortcut(shortcut).split("+").filter(Boolean);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5" aria-label={formatShortcutForDisplay(shortcut)}>
+      {keys.map((key, index) => (
+        <kbd
+          key={`${key}-${index}`}
+          aria-hidden="true"
+          className="min-w-9 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-center font-mono text-base font-medium text-gold-text shadow-sm"
+        >
+          {formatShortcutForDisplay(key)}
+        </kbd>
+      ))}
+    </span>
+  );
+}
+
 function ReadyStep({
+  shortcutValue,
   displayShortcut,
   hotkeyMode,
+  tapToLock,
+  micHeardOn,
+  aiNotesChoice,
   modelState,
   modelError,
   modelSkipped,
@@ -2027,8 +2265,12 @@ function ReadyStep({
   meetingReady,
   fullMeetingCaptureReady,
 }: {
+  shortcutValue: string;
   displayShortcut: string;
-  hotkeyMode: "hold_to_talk" | "toggle" | "hands_free";
+  hotkeyMode: HotkeyMode;
+  tapToLock: boolean;
+  micHeardOn: { deviceName: string | null } | null;
+  aiNotesChoice: AiNotesChoice;
   modelState: "idle" | "downloading" | "done" | "error";
   modelError: string | null;
   modelSkipped: boolean;
@@ -2042,12 +2284,12 @@ function ReadyStep({
   const localDictation =
     scratchCompleted
       ? {
-          detail: "First transcript completed inside Plainsong.",
+          detail: "Ready, and your test dictation worked.",
           tone: "ready" as const,
         }
       : modelState === "downloading"
         ? {
-            detail: "Downloading Parakeet TDT 0.6B v3 in the background.",
+            detail: "Still downloading. You can finish setup; dictation works once it is done.",
             tone: "progress" as const,
           }
         : modelState === "error"
@@ -2056,62 +2298,83 @@ function ReadyStep({
                 ? "The download was skipped after it failed. Download the model here or from Dictation before using the shortcut."
                 : modelError
                   ? `Model download failed: ${modelError}`
-                  : "The local model download needs another try.",
+                  : "The model download needs another try.",
               tone: "attention" as const,
             }
           : modelState === "done"
             ? {
-                detail: "Parakeet TDT 0.6B v3 is ready for your first dictation.",
+                detail: "Ready, and it runs on this Mac.",
                 tone: "ready" as const,
               }
             : {
                 detail: modelSkipped
                   ? "The model download was skipped. Download it here or from Dictation before using the shortcut."
-                  : "The local model has not been downloaded yet.",
+                  : "The model has not been downloaded yet.",
                 tone: "attention" as const,
               };
+  const modeSummary =
+    hotkeyMode === "hold_to_talk" && tapToLock
+      ? `${HOTKEY_MODE_LABELS[hotkeyMode].hint} A quick tap locks it on.`
+      : HOTKEY_MODE_LABELS[hotkeyMode].hint;
   const rows = [
     {
-      label: "Local dictation",
+      label: "Speech model",
       ...localDictation,
     },
     {
       label: "Microphone",
-      detail: microphoneReady
-        ? "Permission is ready."
-        : "macOS permission still needs attention.",
-      tone: microphoneReady ? ("ready" as const) : ("attention" as const),
+      detail: micHeardOn
+        ? micHeardOn.deviceName
+          ? `Heard you on ${micHeardOn.deviceName}.`
+          : "Heard you clearly."
+        : microphoneReady
+          ? "Access is on."
+          : "macOS access still needs attention.",
+      tone: micHeardOn || microphoneReady ? ("ready" as const) : ("attention" as const),
     },
     {
-      label: displayShortcut,
-      detail: `${HOTKEY_MODE_LABELS[hotkeyMode].name}: ${HOTKEY_MODE_LABELS[hotkeyMode].hint}.`,
-      tone: "ready" as const,
-    },
-    {
-      label: "System-wide insertion",
+      label: "Typing into other apps",
       detail: insertionReady
-        ? "Cursor control is ready."
-        : "Finish the Accessibility grant before relying on insertion.",
+        ? "Accessibility is on, so your words land at the cursor."
+        : "Turn on Accessibility first. Until then your words are copied for you to paste.",
       tone: insertionReady ? ("ready" as const) : ("attention" as const),
     },
     {
       label: "Meetings",
       detail: fullMeetingCaptureReady
-        ? "Mic and system audio are verified for Me + Them capture."
+        ? "Records both you and the other people on the call."
         : meetingReady
-          ? "Mic-only capture is ready. You can verify system audio later from Setup."
-          : "Meeting capture still needs a meeting-ready transcription route.",
+          ? "Records your microphone. Check system audio later in Setup to capture the other side."
+          : "Needs the meeting model. You can download it later in Setup.",
       tone: meetingReady ? ("ready" as const) : ("attention" as const),
+    },
+    {
+      label: "Meeting notes",
+      detail:
+        aiNotesChoice === "none"
+          ? "Off. Meetings get transcripts only."
+          : aiNotesChoice === "byok"
+            ? "Written by the cloud provider you set up in AI & Keys."
+            : "Written on this Mac with Ollama, when it is running.",
+      tone: "neutral" as const,
     },
   ];
 
   return (
     <div className="space-y-5">
-      <p className="max-w-xl text-sm text-muted-foreground">
-        Plainsong saves every finished dictation before it attempts delivery.
-        If another app rejects insertion, your words remain in dictation
-        history.
-      </p>
+      <div className="rounded-xl border border-gold/30 bg-gold/5 p-5 text-center">
+        <p className="text-sm text-muted-foreground">
+          Put the cursor in any text field and press
+        </p>
+        <div className="mt-3 flex justify-center">
+          <ShortcutKeys shortcut={shortcutValue} />
+        </div>
+        <p className="mt-3 text-sm text-foreground">
+          <span className="font-medium">{HOTKEY_MODE_LABELS[hotkeyMode].name}.</span>{" "}
+          <span className="text-muted-foreground">{modeSummary}</span>
+        </p>
+        <p className="sr-only">Your dictation shortcut is {displayShortcut}.</p>
+      </div>
 
       <div className="divide-y divide-border rounded-xl border border-border">
         {rows.map((row) => (
@@ -2150,8 +2413,9 @@ function ReadyStep({
         <div>
           <p className="text-sm font-medium">Both ways of working stay local by default</p>
           <p className="text-xs text-muted-foreground">
-            Dictation and meeting audio remain on this Mac unless you explicitly
-            enable a remote transcription or analysis provider.
+            Dictation and meeting audio stay on this Mac unless you turn on a
+            cloud provider. Every dictation is also saved in History, so nothing
+            is lost if an app refuses the paste.
           </p>
         </div>
       </div>
@@ -2193,11 +2457,9 @@ function PermissionsStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        The first three are what dictation runs on; the rest each unlock one
-        feature and are marked optional. Every row says what Plainsong does with
-        the grant and what still works without it. Each button goes straight to
-        that switch in System Settings, and Plainsong re-checks when you come
-        back here.
+        Dictation needs the first three. The others each turn on one feature
+        and are optional. Each button opens the right switch in System
+        Settings, and Plainsong checks again when you come back.
       </p>
 
       {revocationNotice ? (
@@ -2250,9 +2512,9 @@ function PermissionsStep({
       <div className="rounded-lg border border-border p-3 space-y-3">
         <label className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-sm font-medium">Auto-request permissions before dictation</p>
+            <p className="text-sm font-medium">Ask macOS for permission when needed</p>
             <p className="text-sm text-muted-foreground">
-              Prompt for microphone access, plus Speech Recognition only when the selected dictation route needs it. Leave this off if you are not at the Mac to respond to system prompts.
+              Requests microphone access before dictation starts, and Speech Recognition only if you have chosen Apple Speech. Turn this off if nobody will be at the Mac to answer the prompts.
             </p>
           </div>
           <input
@@ -2478,16 +2740,16 @@ function DictationModelStep({
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Downloading {selectedOption?.label}
-            {percent !== null ? ` — ${Math.round(percent)}%` : "…"}
+            {percent !== null ? `: ${Math.round(percent)}%` : "…"}
           </div>
           <Progress value={percent} className="h-2" />
         </div>
       ) : null}
 
       {state === "done" ? (
-        <div className="flex items-center gap-2 text-sm text-gold-text">
+        <div className="flex items-center gap-2 text-sm text-gold-text" role="status">
           <CheckCircle2 className="h-4 w-4" />
-          Local dictation route downloaded and selected.
+          Downloaded and ready to use.
         </div>
       ) : null}
 
@@ -2512,119 +2774,38 @@ function DictationModelStep({
 
       <p className="text-sm text-muted-foreground">
         {downloadFromFooter
-          ? "Download the selected model to continue, or choose Skip model download. Dictation will keep showing a download reminder until a model is ready."
-          : "Start the download here, or keep your existing dictation model. You can change models later in Settings."}
+          ? "You can skip this and download later, but dictation will not work until a model is ready."
+          : "Start the download here, or keep the model you already use. You can change models later in Settings."}
       </p>
     </div>
   );
 }
 
 function HotkeyStep({
-  active,
-  onToggle,
   displayShortcut,
   onShortcutChange,
-  hotkeyMode,
-  includeMeetings,
+  modeChoice,
   saveError,
 }: {
-  active: boolean;
-  onToggle(): void;
   displayShortcut: string;
   onShortcutChange(value: string): void;
-  hotkeyMode: "hold_to_talk" | "toggle" | "hands_free";
-  includeMeetings: boolean;
+  modeChoice: ReactNode;
   saveError: string | null;
 }) {
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <p className="text-sm text-muted-foreground">
-        {dictationInstruction(displayShortcut, hotkeyMode)}
+        Choose the shortcut you press to dictate in any app, and how it works.
+        Both can be changed later in Settings &gt; Dictation.
       </p>
 
-      <div className="space-y-2 rounded-lg border border-border p-3">
-        <label
-          htmlFor="first-run-dictation-shortcut"
-          className="text-xs font-medium text-muted-foreground"
-        >
-          Dictation shortcut
-        </label>
-        <Input
-          id="first-run-dictation-shortcut"
-          aria-label="Dictation shortcut"
-          value={displayShortcut}
-          readOnly
-          onKeyDown={(event) => {
-            if (event.key === "Tab") return;
-            event.preventDefault();
-            event.stopPropagation();
-            if (event.key === "Escape") return;
-            const parsed = formatShortcutFromKeyboardEvent(event);
-            if (!parsed) return;
-            onShortcutChange(parsed);
-          }}
-          className="font-mono text-center"
-        />
-        <p className="text-xs text-muted-foreground">
-          Click the field and press the shortcut you want Plainsong to use.
-        </p>
-      </div>
+      <ShortcutRecorder
+        inputId="first-run-dictation-shortcut"
+        displayShortcut={displayShortcut}
+        onShortcutChange={onShortcutChange}
+      />
 
-      <div className="space-y-2 rounded-lg border border-border p-3">
-        <p className="rubric-muted text-[0.65rem]">Hotkey behavior</p>
-        <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-foreground">
-          {HOTKEY_MODE_LABELS[hotkeyMode].name}{" "}
-          <span className="text-muted-foreground">— {HOTKEY_MODE_LABELS[hotkeyMode].hint}</span>
-        </p>
-        <p className="text-xs text-muted-foreground">
-          Change this in Settings → Dictation if you want a different behavior.
-        </p>
-      </div>
-
-      <button
-        type="button"
-        id="hotkey-demo-btn"
-        onClick={onToggle}
-        className={`relative w-full rounded-xl border-2 p-6 text-center transition-all duration-200 ${
-          active
-            ? "border-primary bg-primary/5 shadow-[0_0_20px_hsl(var(--primary)/0.3)]"
-            : "border-border bg-muted/30 hover:border-primary/40"
-        }`}
-      >
-        <div
-          className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-all ${
-            active ? "bg-primary text-primary-foreground scale-105" : "bg-muted text-muted-foreground"
-          }`}
-        >
-          <KeyRound className="h-4 w-4" />
-          {active ? "Listening preview…" : "Click to preview"}
-        </div>
-        <p className="mt-2 text-xs text-muted-foreground">
-          {active ? "Click again to dismiss demo" : "The real hotkey works system-wide"}
-        </p>
-      </button>
-
-      <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
-        <p className="text-xs font-medium">After this step:</p>
-        <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
-          <div className="flex items-center gap-1.5">
-            <Mic className="h-3 w-3 shrink-0" />
-            <span>Dictation is ready to test</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <ShieldCheck className="h-3 w-3 shrink-0" />
-            <span>Permissions can be revisited later</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Users className="h-3 w-3 shrink-0" />
-            <span>{includeMeetings ? "Next: meeting setup" : "Meetings can be configured later"}</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Brain className="h-3 w-3 shrink-0" />
-            <span>AI/analysis setup stays optional</span>
-          </div>
-        </div>
-      </div>
+      {modeChoice}
 
       {saveError ? (
         <p className="text-xs text-destructive" role="alert">
@@ -2654,7 +2835,7 @@ const AI_NOTES_OPTIONS: Array<{
   },
   {
     id: "none",
-    label: "Transcripts only — no AI notes",
+    label: "Transcripts only, no AI notes",
     detail:
       "Meetings are still recorded, transcribed and searchable. No summary, action items or auto-title.",
   },
@@ -2693,8 +2874,9 @@ function AiNotesStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Meeting summaries, action items and automatic titles are written by an AI
-        route you choose. Capture and the transcript never depend on it.
+        After a meeting, Plainsong can write a summary, action items and a
+        title. Choose what writes them. Recording and transcripts work either
+        way.
       </p>
 
       {/*
@@ -2706,10 +2888,10 @@ function AiNotesStep({
         three answers below.
       */}
       <p className="text-sm text-muted-foreground">
-        Dictation cleanup is separate. It uses a small built-in model that runs
-        on this Mac with nothing to install — it tidies punctuation, fillers and
-        spoken numbers, but it cannot write meeting notes. Change either lane
-        later in Models.
+        Dictation cleanup is separate and already works. A small built-in model
+        tidies punctuation, filler words and spoken numbers on this Mac, with
+        nothing to install. It does not write meeting notes. You can change
+        either one later in Models.
       </p>
 
       <div
@@ -2890,26 +3072,27 @@ function MeetingSetupStep({
 }) {
   const systemAudioBackendLabel =
     systemAudioCapability?.backend === "core_audio_process_tap"
-      ? "Core Audio process tap"
+      ? "macOS audio capture"
       : systemAudioCapability?.backend === "virtual_loopback"
-        ? "virtual loopback"
-        : "no route";
+        ? "a virtual loopback device"
+        : null;
   const systemAudioRouteAvailable =
     Boolean(systemAudioCapability) && systemAudioCapability?.backend !== "none";
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Meetings work best with a meeting-grade ASR route and, when available, both microphone and system audio capture.
-        Parakeet is the recommended local route; for a language it does not cover, whisper.cpp small, medium,
-        large-v3 or large-v3-turbo can run meetings too (100 languages, on the GPU, slower than Parakeet).
+        Plainsong can also record and transcribe meetings on this Mac. It hears
+        you through the microphone and the other people through your Mac&apos;s
+        sound output. Parakeet is the recommended meeting model; for a language
+        it does not cover, choose a Whisper model later in Models.
       </p>
 
       <div className="space-y-3">
         <div className="rounded-lg border border-border p-3">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <p className="text-sm font-medium">Meeting transcription route</p>
+              <p className="text-sm font-medium">Meeting transcription</p>
               <p className="text-xs text-muted-foreground">{routeSummary}</p>
             </div>
             {loading ? (
@@ -2967,25 +3150,25 @@ function MeetingSetupStep({
             <div>
               <p className="text-sm font-medium">System audio capture</p>
               {systemAudioCapability === null ? (
-                <p className="text-xs text-muted-foreground">Checking routes…</p>
+                <p className="text-xs text-muted-foreground">Checking…</p>
               ) : systemAudioCapability.ready ? (
                 <p className="text-xs text-gold-text">
-                  Verified via {systemAudioBackendLabel}
+                  Working. Plainsong can hear the other people on a call
                   {systemAudioCapability.routeDevice
-                    ? ` on ${systemAudioCapability.routeDevice}`
-                    : ""}
-                  {systemAudioCapability.nativeSampleRate && systemAudioCapability.nativeChannels
-                    ? ` · ${systemAudioCapability.nativeSampleRate} Hz / ${systemAudioCapability.nativeChannels} ch`
+                    ? ` through ${systemAudioCapability.routeDevice}`
                     : ""}
                   .
                 </p>
               ) : systemAudioRouteAvailable ? (
                 <p className="text-xs text-rust">
-                  Route detected via {systemAudioBackendLabel}, but permission and non-silent audio are not verified yet.
+                  Found {systemAudioBackendLabel ?? "a way to capture it"}, but
+                  permission and non-silent audio are not verified yet. Run the
+                  test below.
                 </p>
               ) : (
                 <p className="text-xs text-rust">
-                  No usable system-audio route is ready. Mic-only meetings still work.
+                  No way to capture your Mac&apos;s sound yet. Meetings still
+                  record your microphone.
                 </p>
               )}
             </div>
@@ -3005,7 +3188,9 @@ function MeetingSetupStep({
             </p>
           ) : null}
           <p className="mt-2 text-xs text-muted-foreground">
-            macOS may ask for system-audio permission the first time. Plainsong stops waiting if macOS does not finish setup, so you can open Privacy Settings and try again. Plainsong plays a brief low-volume tone only for the native Core Audio process tap. Virtual loopback routes must carry external audio during the test. A route is only marked ready after callbacks contain the expected non-silent verification signal.
+            {systemAudioCapability?.backend === "virtual_loopback"
+              ? "Play some audio through that device during the test. It is marked ready only once Plainsong actually hears it."
+              : "The test plays a short, quiet tone and checks that Plainsong hears it. macOS may ask for permission the first time."}
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <Button
@@ -3044,15 +3229,15 @@ function MeetingSetupStep({
       </div>
 
       <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
-        <p className="text-xs font-medium">Meeting storage defaults</p>
+        <p className="text-xs font-medium">What Plainsong keeps</p>
         {/* One sentence, because it is the one thing here the reader did not
             ask for: the app will notice a call and offer. It never records
             without a click. */}
         <p className="text-sm text-muted-foreground">
           Plainsong also notices when a Zoom, Teams, Meet, Webex, Slack,
           Discord or FaceTime call is in progress on this Mac and offers to
-          record it; it never starts on its own, and you can turn the offer off
-          in Settings › General.
+          record it. It never starts on its own, and you can turn the offer off
+          in Settings &gt; General.
         </p>
         <div className="space-y-2">
           <label
@@ -3155,7 +3340,7 @@ function MeetingSetupStep({
           Re-check meeting setup
         </Button>
         <span className="text-xs text-muted-foreground self-center">
-          You can reopen this flow anytime from Setup if system audio or meeting models change later.
+          You can come back to this any time from Setup.
         </span>
       </div>
     </div>

@@ -11,6 +11,21 @@ signed candidate being notarized, stapled, installed, and exercised on Apple
 Silicon. See `LAUNCH.md` for that boundary.
 
 ### Feel: matching Typeless and Wispr Flow
+- The dictation pill has four sizes and can dock upright to the left or
+  right screen edge; drop it near an edge to dock it there.
+- Mute other audio while dictating (off by default): music and videos go
+  quiet while the mic is live and come back after.
+- The menu-bar item shows a dot and a running clock while dictating or
+  recording a meeting, and its menu can cancel a dictation, stop or start
+  a meeting, and paste or copy recent results.
+- Onboarding has a live microphone check with a level meter, a microphone
+  picker and named errors; a clear hold-to-talk or press-to-toggle choice;
+  and a Ready step that shows your hotkey and what is set up.
+- Fixed: mid-sentence fitting no longer lowercases names; undo removes the
+  fitted text; a Voice Edit that gets nothing back from the model changes
+  nothing instead of pasting the instruction.
+- Every push to a work branch builds an unsigned test app on GitHub
+  (Actions, Test build).
 - Dictation sounds (on by default): a tick when the mic goes live, a pop
   when the words land, a low tone on failure.
 - Hold to talk, tap to lock: a quick tap on the hold key keeps listening
