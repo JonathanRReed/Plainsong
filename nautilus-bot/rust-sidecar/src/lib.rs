@@ -62,9 +62,9 @@ mod backup;
 mod crypto;
 mod db;
 mod diarization;
+mod dictation_cleanup;
 mod dictation_commands;
 pub mod dictation_correction_capture;
-mod dictation_cleanup;
 mod dictation_dictionary_csv;
 mod dictation_fidelity;
 mod dictation_live_preview;
@@ -1111,6 +1111,12 @@ struct DictationOverlayState {
     dictation_resolved_hosting: Option<String>,
     model_readiness: Option<String>,
     capture_ready: bool,
+    /// Finishing-bar state, so an overlay that remounts mid-session (display
+    /// mode switch, window reload) rehydrates the stage and its estimates
+    /// instead of restarting from a default plan.
+    processing_stage: Option<String>,
+    expected_transcribe_ms: Option<u64>,
+    expected_polish_ms: Option<u64>,
 }
 
 impl Default for DictationOverlayState {
@@ -1147,6 +1153,9 @@ impl Default for DictationOverlayState {
             dictation_resolved_hosting: None,
             model_readiness: None,
             capture_ready: false,
+            processing_stage: None,
+            expected_transcribe_ms: None,
+            expected_polish_ms: None,
         }
     }
 }

@@ -30,9 +30,11 @@ const ASR_OVERHEAD_SECONDS: f64 = 1.0;
 const LOCAL_ASR_PRIOR_MS_PER_SECOND: f64 = 60.0;
 const CLOUD_ASR_PRIOR_MS_PER_SECOND: f64 = 220.0;
 
-/// Prior for one pre-insert AI pass. Bundled cleanup measured ~414 ms p50 on
-/// Metal; remote passes are budgeted up to 2.5 s.
-const POLISH_PRIOR_MS: f64 = 700.0;
+/// Priors for the pre-insert AI stage. Bundled cleanup measured ~414 ms p50
+/// on Metal; remote passes add a network round trip and are budgeted up to
+/// 2.5 s.
+const LOCAL_POLISH_PRIOR_MS: f64 = 600.0;
+const REMOTE_POLISH_PRIOR_MS: f64 = 1100.0;
 
 /// Clamp so a pathological sample (a cold model load, a stalled network)
 /// cannot make the next bar crawl for a minute.
@@ -42,15 +44,32 @@ const MAX_EXPECTED_MS: u64 = 30_000;
 #[derive(Default)]
 struct Estimator {
     asr_ms_per_second: HashMap<String, f64>,
-    polish_ms: Option<f64>,
+    /// Keyed by whether the AI provider is remote: a local and a cloud model
+    /// differ by far more than one average can describe.
+    polish_ms: HashMap<bool, f64>,
 }
 
 static ESTIMATOR: LazyLock<Mutex<Estimator>> = LazyLock::new(|| Mutex::new(Estimator::default()));
 
-fn blend(previous: Option<f64>, sample: f64) -> f64 {
-    match previous {
-        Some(previous) => previous + EWMA_ALPHA * (sample - previous),
-        None => sample,
+/// The prior counts as the first observation, so one cold model load or
+/// network stall moves the estimate part of the way, not all of it.
+fn blend(previous: f64, sample: f64) -> f64 {
+    previous + EWMA_ALPHA * (sample - previous)
+}
+
+fn asr_prior(is_cloud: bool) -> f64 {
+    if is_cloud {
+        CLOUD_ASR_PRIOR_MS_PER_SECOND
+    } else {
+        LOCAL_ASR_PRIOR_MS_PER_SECOND
+    }
+}
+
+fn polish_prior(remote: bool) -> f64 {
+    if remote {
+        REMOTE_POLISH_PRIOR_MS
+    } else {
+        LOCAL_POLISH_PRIOR_MS
     }
 }
 
@@ -71,36 +90,48 @@ pub(crate) fn expected_transcribe_ms(route_key: &str, is_cloud: bool, audio_seco
         .lock()
         .ok()
         .and_then(|estimator| estimator.asr_ms_per_second.get(route_key).copied())
-        .unwrap_or(if is_cloud {
-            CLOUD_ASR_PRIOR_MS_PER_SECOND
-        } else {
-            LOCAL_ASR_PRIOR_MS_PER_SECOND
-        });
+        .unwrap_or_else(|| asr_prior(is_cloud));
     clamp_ms(rate * (audio_seconds.max(0.0) + ASR_OVERHEAD_SECONDS))
 }
 
-pub(crate) fn record_transcribe_ms(route_key: &str, audio_seconds: f64, measured_ms: u64) {
+pub(crate) fn record_transcribe_ms(
+    route_key: &str,
+    is_cloud: bool,
+    audio_seconds: f64,
+    measured_ms: u64,
+) {
     let sample = measured_ms as f64 / (audio_seconds.max(0.0) + ASR_OVERHEAD_SECONDS);
     if let Ok(mut estimator) = ESTIMATOR.lock() {
-        let previous = estimator.asr_ms_per_second.get(route_key).copied();
+        let previous = estimator
+            .asr_ms_per_second
+            .get(route_key)
+            .copied()
+            .unwrap_or_else(|| asr_prior(is_cloud));
         estimator
             .asr_ms_per_second
             .insert(route_key.to_string(), blend(previous, sample));
     }
 }
 
-/// Expected time for one pre-insert AI pass.
-pub(crate) fn expected_polish_ms() -> u64 {
+/// Expected time for the pre-insert AI stage on a local or remote provider.
+pub(crate) fn expected_polish_ms(remote: bool) -> u64 {
     let learned = ESTIMATOR
         .lock()
         .ok()
-        .and_then(|estimator| estimator.polish_ms);
-    clamp_ms(learned.unwrap_or(POLISH_PRIOR_MS))
+        .and_then(|estimator| estimator.polish_ms.get(&remote).copied());
+    clamp_ms(learned.unwrap_or_else(|| polish_prior(remote)))
 }
 
-pub(crate) fn record_polish_ms(measured_ms: u64) {
+pub(crate) fn record_polish_ms(remote: bool, measured_ms: u64) {
     if let Ok(mut estimator) = ESTIMATOR.lock() {
-        estimator.polish_ms = Some(blend(estimator.polish_ms, measured_ms as f64));
+        let previous = estimator
+            .polish_ms
+            .get(&remote)
+            .copied()
+            .unwrap_or_else(|| polish_prior(remote));
+        estimator
+            .polish_ms
+            .insert(remote, blend(previous, measured_ms as f64));
     }
 }
 
@@ -117,19 +148,30 @@ mod tests {
     }
 
     #[test]
-    fn a_measurement_replaces_the_prior_and_later_ones_blend() {
+    fn measurements_blend_from_the_prior_so_one_outlier_moves_it_partway() {
         let key = "test-learn:model";
-        record_transcribe_ms(key, 9.0, 1000);
-        assert_eq!(expected_transcribe_ms(key, false, 9.0), 1000);
-        record_transcribe_ms(key, 9.0, 2000);
-        // 100 ms/s blended 35% toward 200 ms/s = 135 ms/s over 10 s.
-        assert_eq!(expected_transcribe_ms(key, false, 9.0), 1350);
+        record_transcribe_ms(key, false, 9.0, 1000);
+        // Prior 60 ms/s blended 35% toward 100 ms/s = 74 ms/s over 10 s.
+        assert_eq!(expected_transcribe_ms(key, false, 9.0), 740);
+        record_transcribe_ms(key, false, 9.0, 2000);
+        // 74 blended 35% toward 200 = 118.1 ms/s.
+        assert_eq!(expected_transcribe_ms(key, false, 9.0), 1181);
+    }
+
+    #[test]
+    fn local_and_remote_polish_estimates_are_kept_apart() {
+        assert_eq!(expected_polish_ms(true), 1100);
+        record_polish_ms(false, 400);
+        assert_eq!(expected_polish_ms(false), 530);
+        assert_eq!(expected_polish_ms(true), 1100);
     }
 
     #[test]
     fn estimates_stay_inside_the_clamp() {
         let key = "test-clamp:model";
-        record_transcribe_ms(key, 0.0, 10_000_000);
+        for _ in 0..40 {
+            record_transcribe_ms(key, false, 0.0, 10_000_000);
+        }
         assert_eq!(expected_transcribe_ms(key, false, 600.0), MAX_EXPECTED_MS);
         assert_eq!(
             expected_transcribe_ms("test-clamp:tiny", false, 0.0),

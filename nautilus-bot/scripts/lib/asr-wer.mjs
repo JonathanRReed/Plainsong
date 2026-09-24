@@ -2,58 +2,197 @@
  * Word error rate against a human reference, for comparing ASR routes on the
  * same audio. Used by scripts/eval-asr-wer.mjs.
  *
- * Normalization follows the usual Open ASR Leaderboard shape, kept small:
- * case, punctuation and spoken-vs-written numbers are not errors, word
- * substitutions, deletions and insertions are. Formatting that the dictation
+ * Normalization follows the usual Open ASR Leaderboard shape: case,
+ * punctuation and spoken-vs-written numbers (including phone numbers,
+ * thousands, decimals, percentages, currency and ordinals) are not errors;
+ * word substitutions, deletions and insertions are. Formatting that the dictation
  * pipeline adds later (capitals, commas, digits) is scored separately by the
  * dictation quality fixtures, not here.
  */
 
-const ONES = [
-  "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
-  "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
-  "seventeen", "eighteen", "nineteen",
-];
-const TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+const UNITS = new Map(
+  [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+    "seventeen", "eighteen", "nineteen",
+  ].map((word, value) => [word, value]),
+);
+const TENS = new Map(
+  ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"].map(
+    (word, index) => [word, (index + 2) * 10],
+  ),
+);
+const MULTIPLIERS = new Map([
+  ["hundred", 100],
+  ["thousand", 1000],
+  ["million", 1_000_000],
+]);
+const ORDINALS = new Map(
+  [
+    ["first", 1], ["second", 2], ["third", 3], ["fourth", 4], ["fifth", 5], ["sixth", 6],
+    ["seventh", 7], ["eighth", 8], ["ninth", 9], ["tenth", 10], ["eleventh", 11],
+    ["twelfth", 12], ["thirteenth", 13], ["fourteenth", 14], ["fifteenth", 15],
+    ["sixteenth", 16], ["seventeenth", 17], ["eighteenth", 18], ["nineteenth", 19],
+    ["twentieth", 20], ["thirtieth", 30],
+  ],
+);
 
-const NUMBER_WORDS = new Map();
-ONES.forEach((word, value) => NUMBER_WORDS.set(word, value));
-TENS.forEach((word, index) => {
-  if (word) NUMBER_WORDS.set(word, index * 10);
-});
+function ordinalSuffix(value) {
+  const lastTwo = value % 100;
+  if (lastTwo >= 11 && lastTwo <= 13) return "th";
+  return { 1: "st", 2: "nd", 3: "rd" }[value % 10] ?? "th";
+}
 
-/** "twenty five" / "twenty-five" -> "25", "three" -> "3"; larger numbers are left alone. */
-function collapseNumberWords(tokens) {
+const isNumberWord = (token) =>
+  UNITS.has(token) || TENS.has(token) || MULTIPLIERS.has(token);
+
+/**
+ * Turns every spoken number into digits and joins numbers read one after the
+ * other, so "five five five one two three four", "555-1234" and "5551234"
+ * all become "5551234", "twenty twenty" becomes "2020", "four oh one" becomes
+ * "401", "eight point two" becomes "8.2", and "twenty first" becomes "21st".
+ */
+function normalizeNumbers(tokens) {
   const out = [];
-  for (let index = 0; index < tokens.length; index += 1) {
+  let index = 0;
+  const pushNumber = (digits) => {
+    const previous = out[out.length - 1];
+    if (previous !== undefined && /^\d+(\.\d+)?$/.test(previous) && !previous.includes(".")) {
+      out[out.length - 1] = previous + digits;
+    } else {
+      out.push(digits);
+    }
+  };
+  while (index < tokens.length) {
     const token = tokens[index];
-    const value = NUMBER_WORDS.get(token);
-    if (value === undefined) {
-      out.push(token);
+    const nextIsNumeric = (at) =>
+      at < tokens.length && (isNumberWord(tokens[at]) || /^\d/.test(tokens[at]));
+
+    if (/^\d+(\.\d+)?$/.test(token)) {
+      pushNumber(token);
+      index += 1;
       continue;
     }
-    const next = NUMBER_WORDS.get(tokens[index + 1] ?? "");
-    if (value >= 20 && value % 10 === 0 && next !== undefined && next > 0 && next < 10) {
-      out.push(String(value + next));
+    // "oh" counts as zero only inside a run of spoken digits.
+    if (token === "oh" && out.length > 0 && /^\d+$/.test(out[out.length - 1]) && nextIsNumeric(index + 1)) {
+      pushNumber("0");
       index += 1;
-    } else {
-      out.push(String(value));
+      continue;
     }
+    // "point" between two numbers is a decimal point.
+    if (token === "point" && out.length > 0 && /^\d+$/.test(out[out.length - 1]) && nextIsNumeric(index + 1)) {
+      let decimals = "";
+      index += 1;
+      while (index < tokens.length && (UNITS.get(tokens[index]) ?? 10) < 10) {
+        decimals += String(UNITS.get(tokens[index]));
+        index += 1;
+      }
+      out[out.length - 1] += `.${decimals}`;
+      continue;
+    }
+    // "twenty first" -> "21st".
+    if (TENS.has(token) && ORDINALS.has(tokens[index + 1] ?? "") && ORDINALS.get(tokens[index + 1]) < 10) {
+      const value = TENS.get(token) + ORDINALS.get(tokens[index + 1]);
+      out.push(`${value}${ordinalSuffix(value)}`);
+      index += 2;
+      continue;
+    }
+    if (ORDINALS.has(token)) {
+      const value = ORDINALS.get(token);
+      out.push(`${value}${ordinalSuffix(value)}`);
+      index += 1;
+      continue;
+    }
+    if (!isNumberWord(token)) {
+      out.push(token);
+      index += 1;
+      continue;
+    }
+
+    // One cardinal group: "four thousand two hundred and fifty" -> 4250.
+    // A word that cannot extend the group ("two" after "two", "fourteen"
+    // after "two") closes it, and the next group is joined on as digits.
+    let total = 0;
+    let small = 0;
+    let last = null; // "unit" | "teen" | "tens" | "mult"
+    while (index < tokens.length) {
+      const word = tokens[index];
+      const unit = UNITS.get(word);
+      const tens = TENS.get(word);
+      const mult = MULTIPLIERS.get(word);
+      if (word === "and" && last === "mult" && isNumberWord(tokens[index + 1] ?? "")) {
+        index += 1;
+        continue;
+      }
+      if (unit !== undefined && unit < 10) {
+        if (last === null || last === "mult" || (last === "tens" && small % 10 === 0)) {
+          small += unit;
+          last = "unit";
+          index += 1;
+          continue;
+        }
+        break;
+      }
+      if (unit !== undefined) {
+        if (last === null || last === "mult") {
+          small += unit;
+          last = "teen";
+          index += 1;
+          continue;
+        }
+        break;
+      }
+      if (tens !== undefined) {
+        if (last === null || last === "mult") {
+          small += tens;
+          last = "tens";
+          index += 1;
+          continue;
+        }
+        break;
+      }
+      if (mult !== undefined && last !== null && last !== "mult") {
+        if (mult === 100) {
+          small *= 100;
+        } else {
+          total += small * mult;
+          small = 0;
+        }
+        last = "mult";
+        index += 1;
+        continue;
+      }
+      break;
+    }
+    if (last === null) {
+      // A bare multiplier ("hundred") with nothing to multiply.
+      out.push(token);
+      index += 1;
+      continue;
+    }
+    pushNumber(String(total + small));
   }
   return out;
 }
 
 export function normalizeForWer(text) {
+  const prepared = String(text ?? "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[‘’]/g, "'")
+    // Written forms that read as words: "$12" -> "12 dollars", "8%" ->
+    // "8 percent", "4,250" -> "4250", "3:30" -> "330" (a spoken "three
+    // thirty" joins the same way).
+    .replace(/\$(\d[\d,]*(?:\.\d+)?)/g, "$1 dollars")
+    .replace(/%/g, " percent")
+    .replace(/(\d),(?=\d{3}\b)/g, "$1")
+    .replace(/(\d):(\d)/g, "$1$2")
+    // Hyphens and slashes split words ("twenty-five", "555-1234", "and/or").
+    .replace(/[-/]/g, " ");
   const tokens =
-    String(text ?? "")
-      .normalize("NFKC")
-      .toLocaleLowerCase("en-US")
-      .replace(/[‘’]/g, "'")
-      // Hyphens and slashes split words ("twenty-five", "and/or").
-      .replace(/[-/]/g, " ")
-      // Keep in-word apostrophes ("don't"), drop every other symbol.
-      .match(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu) ?? [];
-  return collapseNumberWords(tokens);
+    // Keep decimals ("8.2") and in-word apostrophes ("don't") whole.
+    prepared.match(/\p{N}+(?:\.\p{N}+)+|[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu) ?? [];
+  return normalizeNumbers(tokens.map((token) => (token === "ok" ? "okay" : token)));
 }
 
 /**

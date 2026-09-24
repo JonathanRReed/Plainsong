@@ -1068,16 +1068,25 @@ fn dictation_polish_expected(
 }
 
 /// Moves the HUD from Transcribing to Polishing just before a pre-insert AI
-/// pass starts. Returns when the stage started, for the timing estimate.
+/// pass starts. Returns when the stage started and whether the provider is
+/// remote, for the timing estimate.
 fn emit_dictation_polishing_stage(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
     session_id: u64,
-) -> std::time::Instant {
+    remote: bool,
+) -> (std::time::Instant, bool) {
     const POLISHING_MESSAGE: &str = "Polishing…";
+    let expected_polish_ms = crate::dictation_progress::expected_polish_ms(remote);
+    let mut expected_transcribe_ms = None;
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.message = Some(POLISHING_MESSAGE.to_string());
+        overlay.processing_stage = Some("polishing".to_string());
+        overlay.expected_polish_ms = Some(expected_polish_ms);
+        expected_transcribe_ms = overlay.expected_transcribe_ms;
     }
+    // Repeats the transcription estimate so a HUD that mounted mid-session
+    // still places the stage boundary where the first event put it.
     handle.emit_event(
         "dictation-state-changed",
         serde_json::json!({
@@ -1085,10 +1094,11 @@ fn emit_dictation_polishing_stage(
             "sessionId": session_id,
             "message": POLISHING_MESSAGE,
             "processingStage": "polishing",
-            "expectedPolishMs": crate::dictation_progress::expected_polish_ms(),
+            "expectedTranscribeMs": expected_transcribe_ms,
+            "expectedPolishMs": expected_polish_ms,
         }),
     );
-    std::time::Instant::now()
+    (std::time::Instant::now(), remote)
 }
 
 /// Sidecar-compatible stop_dictation.
@@ -1234,6 +1244,9 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // Emit stopping phase so the UI shows feedback immediately.
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "stopping".to_string();
+        overlay.processing_stage = None;
+        overlay.expected_transcribe_ms = None;
+        overlay.expected_polish_ms = None;
     }
     handle.emit_event(
         "dictation-state-changed",
@@ -1426,12 +1439,21 @@ pub(crate) async fn stop_dictation_for_sidecar(
         progress_audio_seconds,
     );
     let expected_polish_ms =
-        dictation_polish_expected(&settings_snapshot, &dictation_options, translation_route)
-            .then(crate::dictation_progress::expected_polish_ms);
+        dictation_polish_expected(&settings_snapshot, &dictation_options, translation_route).then(
+            || {
+                let remote = dictation_session_ai_selection(&settings_snapshot)
+                    .map(|(provider, _, _)| provider.is_remote())
+                    .unwrap_or(false);
+                crate::dictation_progress::expected_polish_ms(remote)
+            },
+        );
 
     if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
         overlay.phase = "transcribing".to_string();
         overlay.message = Some("Transcribing…".to_string());
+        overlay.processing_stage = Some("transcribing".to_string());
+        overlay.expected_transcribe_ms = Some(expected_transcribe_ms);
+        overlay.expected_polish_ms = expected_polish_ms;
     }
     let transcribe_started_at = std::time::Instant::now();
     handle.emit_event(
@@ -1499,6 +1521,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // the second says the dictionary reached the recognizer.
     crate::dictation_progress::record_transcribe_ms(
         &progress_route_key,
+        provider_type.is_remote(),
         progress_audio_seconds,
         transcribe_started_at
             .elapsed()
@@ -1696,7 +1719,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // is left. See `DictationPreInsertBudget`.
     let mut pre_insert_budget = crate::dictation_timing::DictationPreInsertBudget::new();
     // Set when the first AI pass starts; the HUD switches to Polishing then.
-    let mut polish_started_at: Option<std::time::Instant> = None;
+    let mut polish_started_at: Option<(std::time::Instant, bool)> = None;
 
     // Translate-to-English through the AI lane (B7a). Runs before the mode
     // transform / Smart Format pass so that pass formats English, out of the
@@ -1721,7 +1744,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
                     std::time::Instant::now(),
                 );
                 polish_started_at.get_or_insert_with(|| {
-                    emit_dictation_polishing_stage(state, handle, session_id)
+                    emit_dictation_polishing_stage(state, handle, session_id, provider.is_remote())
                 });
                 let translated = tokio::time::timeout(
                     format_timeout,
@@ -1808,7 +1831,12 @@ pub(crate) async fn stop_dictation_for_sidecar(
                                 std::time::Instant::now(),
                             );
                             polish_started_at.get_or_insert_with(|| {
-                                emit_dictation_polishing_stage(state, handle, session_id)
+                                emit_dictation_polishing_stage(
+                                    state,
+                                    handle,
+                                    session_id,
+                                    provider.is_remote(),
+                                )
                             });
                             let transform = tokio::time::timeout(
                                 format_timeout,
@@ -1917,7 +1945,12 @@ pub(crate) async fn stop_dictation_for_sidecar(
                                 std::time::Instant::now(),
                             );
                             polish_started_at.get_or_insert_with(|| {
-                                emit_dictation_polishing_stage(state, handle, session_id)
+                                emit_dictation_polishing_stage(
+                                    state,
+                                    handle,
+                                    session_id,
+                                    prepared.provider.is_remote(),
+                                )
                             });
                             let formatting = tokio::time::timeout(
                                 format_timeout,
@@ -2005,8 +2038,13 @@ pub(crate) async fn stop_dictation_for_sidecar(
     let format_complete_ms = (format_outcome
         != crate::dictation_timing::DictationFormatOutcome::NotApplicable)
         .then(elapsed_since_stop);
-    if let Some(started_at) = polish_started_at {
+    // A pass that failed fast says nothing about how long a real pass takes;
+    // a timeout does, so it is kept.
+    if let Some((started_at, remote)) = polish_started_at
+        .filter(|_| format_outcome != crate::dictation_timing::DictationFormatOutcome::Failed)
+    {
         crate::dictation_progress::record_polish_ms(
+            remote,
             started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         );
     }

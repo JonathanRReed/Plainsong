@@ -24,6 +24,13 @@ mod speakrs_backend;
 
 /// EXPERIMENTAL Nemotron 3 Diarization backend, eval harness only. Off by default.
 #[cfg(feature = "diarization-nemotron")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "only the ignored eval harness calls it until the model has a pinned download"
+    )
+)]
 mod nemotron_backend;
 
 /// Turn normalization shared by the end-to-end backends above.

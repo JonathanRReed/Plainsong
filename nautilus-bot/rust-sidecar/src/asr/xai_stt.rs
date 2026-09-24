@@ -53,6 +53,9 @@ pub struct XaiSttProvider {
 
 #[derive(Deserialize)]
 struct XaiSttResponse {
+    /// Defaulted so silent audio reads as an empty transcript ("no speech")
+    /// rather than a failed request.
+    #[serde(default)]
     text: String,
     language: Option<String>,
     words: Option<Vec<XaiSttWord>>,
@@ -92,13 +95,20 @@ impl XaiSttProvider {
         audio_data: &[u8],
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
-        let api_key = Self::api_key().context("XAI_API_KEY environment variable not set")?;
+        let api_key = Self::api_key()
+            .context("No xAI API key: add one in Settings, API Keys, or set XAI_API_KEY")?;
         let start = std::time::Instant::now();
 
         let part = reqwest::multipart::Part::bytes(audio_data.to_vec())
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
         let mut form = reqwest::multipart::Form::new().part("file", part);
+        // Only a concrete language: leaving it out is how the endpoint
+        // auto-detects, and "auto" is Plainsong's name for that.
+        let requested_language = xai_language(options.language.as_deref());
+        if let Some(language) = requested_language.as_deref() {
+            form = form.text("language", language.to_string());
+        }
 
         let mut vocabulary_hint_terms_applied = 0usize;
         if let Some(hint) = options.vocabulary_hint.as_ref() {
@@ -138,10 +148,13 @@ impl XaiSttProvider {
         Ok(TranscriptionResult {
             text: result.text,
             segments,
+            // What xAI detected, else what was asked for; never a guessed
+            // "en" that would hide auto-detection from later stages.
             language: result
                 .language
                 .filter(|language| !language.trim().is_empty())
-                .unwrap_or_else(|| "en".to_string()),
+                .or(requested_language)
+                .unwrap_or_default(),
             confidence: XAI_SEGMENT_CONFIDENCE,
             processing_time_ms: start.elapsed().as_millis() as u64,
             model_name: "xAI Grok speech-to-text".to_string(),
@@ -216,6 +229,13 @@ impl AsrProvider for XaiSttProvider {
     }
 }
 
+fn xai_language(language: Option<&str>) -> Option<String> {
+    language
+        .map(str::trim)
+        .filter(|language| !language.is_empty() && !language.eq_ignore_ascii_case("auto"))
+        .map(str::to_string)
+}
+
 /// Trimmed, de-duplicated, non-empty terms, capped at [`MAX_KEYTERMS`].
 fn xai_keyterms(terms: &[String]) -> Vec<String> {
     let mut kept: Vec<String> = Vec::new();
@@ -263,6 +283,20 @@ mod tests {
                 .expect("bare reply");
         assert!(bare.words.is_none());
         assert!(bare.language.is_none());
+    }
+
+    #[test]
+    fn language_is_sent_only_when_concrete() {
+        assert_eq!(xai_language(Some("de")), Some("de".to_string()));
+        assert_eq!(xai_language(Some(" auto ")), None);
+        assert_eq!(xai_language(Some("")), None);
+        assert_eq!(xai_language(None), None);
+    }
+
+    #[test]
+    fn a_reply_without_text_is_an_empty_transcript_not_an_error() {
+        let reply: XaiSttResponse = serde_json::from_str(r#"{"language":"en"}"#).expect("no text");
+        assert!(reply.text.is_empty());
     }
 
     #[test]

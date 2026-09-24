@@ -44,21 +44,70 @@ const REPAIR_CUES: &[(&[&str], bool)] = &[
 ];
 
 const WEEKDAYS: &[&str] = &[
-    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
 ];
 const MONTHS: &[&str] = &[
-    "january", "february", "march", "april", "may", "june", "july", "august", "september",
-    "october", "november", "december",
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
 ];
 const DAYPARTS: &[&str] = &[
-    "today", "tomorrow", "tonight", "yesterday", "morning", "afternoon", "evening", "noon",
+    "today",
+    "tomorrow",
+    "tonight",
+    "yesterday",
+    "morning",
+    "afternoon",
+    "evening",
+    "noon",
     "midnight",
 ];
 const NUMBER_WORDS: &[&str] = &[
-    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
-    "nineteen", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
-    "hundred", "thousand",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+    "thirty",
+    "forty",
+    "fifty",
+    "sixty",
+    "seventy",
+    "eighty",
+    "ninety",
+    "hundred",
+    "thousand",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,8 +186,7 @@ fn is_hesitation(piece: &Piece) -> bool {
     // Lowercase or sentence case only: "UM" may be an acronym.
     let mut chars = piece.core.chars();
     let first = chars.next();
-    first.is_some_and(|ch| ch.is_lowercase() || ch.is_uppercase())
-        && chars.all(char::is_lowercase)
+    first.is_some_and(|ch| ch.is_lowercase() || ch.is_uppercase()) && chars.all(char::is_lowercase)
 }
 
 fn capitalize_first(word: &mut String) {
@@ -351,7 +399,10 @@ mod tests {
         assert_eq!(clean("Yes, uh, I agree."), "Yes, I agree.");
         assert_eq!(clean("We went there uh."), "We went there.");
         assert_eq!(clean("Um. Let's go."), "Let's go.");
-        assert_eq!(clean("First point, um\nsecond point"), "First point,\nsecond point");
+        assert_eq!(
+            clean("First point, um\nsecond point"),
+            "First point,\nsecond point"
+        );
         for kept in [
             "Ah, now I see.",
             "UM and ER are acronyms.",
@@ -384,11 +435,26 @@ mod tests {
 
     #[test]
     fn typed_repairs_replace_only_like_for_like() {
-        assert_eq!(clean("Meet on Tuesday, sorry, Wednesday."), "Meet on Wednesday.");
-        assert_eq!(clean("It costs 5, actually 6 dollars."), "It costs 6 dollars.");
-        assert_eq!(clean("Call me tomorrow, I mean tonight."), "Call me tonight.");
-        assert_eq!(clean("Ship it in March, or rather April."), "Ship it in April.");
-        assert_eq!(clean("Monday, no, Tuesday, sorry, Friday works"), "Friday works");
+        assert_eq!(
+            clean("Meet on Tuesday, sorry, Wednesday."),
+            "Meet on Wednesday."
+        );
+        assert_eq!(
+            clean("It costs 5, actually 6 dollars."),
+            "It costs 6 dollars."
+        );
+        assert_eq!(
+            clean("Call me tomorrow, I mean tonight."),
+            "Call me tonight."
+        );
+        assert_eq!(
+            clean("Ship it in March, or rather April."),
+            "Ship it in April."
+        );
+        assert_eq!(
+            clean("Monday, no, Tuesday, sorry, Friday works"),
+            "Friday works"
+        );
         assert_eq!(clean("at three no wait four"), "at four");
         assert_eq!(clean("Tuesday no wait Wednesday"), "Wednesday");
         for kept in [

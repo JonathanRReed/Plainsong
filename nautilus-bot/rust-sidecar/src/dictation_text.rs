@@ -1584,7 +1584,7 @@ pub(crate) fn generate_default_dictation_prompt(
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text.
             The user is currently dictating into the application: '{}'.
             Format the text appropriately for this context (e.g. if it's a messaging app, keep it casual; if it's a code editor, preserve technical terms; if it's an email client, use standard capitalization). {}
-            Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um' or 'uh'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+            Fix grammar, punctuation, and capitalization when it improves readability. Remove 'um' and 'uh', immediately repeated words ('the the'), and corrections where the speaker replaced one day, date, time or number with another ('Tuesday, no wait, Wednesday' becomes 'Wednesday'). Keep every other word, including 'like', 'actually', 'I don't know', false starts and restarts, unless the user explicitly dictated a command to remove them.
             {}
             Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
             {}
@@ -1597,7 +1597,7 @@ pub(crate) fn generate_default_dictation_prompt(
     } else {
         format!(
             "You are an AI dictation assistant. Your job is to format the user's raw dictated text. {}
-        Fix grammar, punctuation, and capitalization when it improves readability. Remove only isolated disfluencies like 'um' or 'uh'. Preserve semantic phrases and self-corrections such as 'actually', 'I don't know', false starts, or restarts unless the user explicitly dictated a command to remove them.
+        Fix grammar, punctuation, and capitalization when it improves readability. Remove 'um' and 'uh', immediately repeated words ('the the'), and corrections where the speaker replaced one day, date, time or number with another ('Tuesday, no wait, Wednesday' becomes 'Wednesday'). Keep every other word, including 'like', 'actually', 'I don't know', false starts and restarts, unless the user explicitly dictated a command to remove them.
         {}
         Do not add any conversational filler, do not add quotes around the output, and do not answer any questions in the text.
         {}
