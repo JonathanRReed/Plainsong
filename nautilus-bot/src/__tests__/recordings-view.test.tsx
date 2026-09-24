@@ -2286,7 +2286,7 @@ describe("RecordingsView", () => {
   it("starts meeting capture after consent and stops an active meeting", async () => {
     startMeeting.mockResolvedValueOnce("r-live");
 
-    render(<RecordingsView />);
+    const firstView = render(<RecordingsView />);
 
     fireEvent.click(screen.getByRole("button", { name: "New meeting" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm meeting consent" }));
@@ -2306,6 +2306,9 @@ describe("RecordingsView", () => {
       formattedDuration: "02:04",
     };
 
+    // Otherwise the first view shows its own Stop button once it re-renders
+    // with the live state, and this fails or passes depending on timing.
+    firstView.unmount();
     render(<RecordingsView />);
     fireEvent.click(screen.getByRole("button", { name: "Stop meeting" }));
 
