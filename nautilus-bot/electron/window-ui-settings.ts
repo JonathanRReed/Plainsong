@@ -13,6 +13,9 @@ export interface WindowUiSettingsInput {
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
     dictationSounds?: boolean;
+    dictationPillSize?: string;
+    dictationPillDock?: string;
+    muteMediaWhileDictating?: boolean;
   };
 }
 

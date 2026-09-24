@@ -738,6 +738,15 @@ pub struct UiSettings {
     /// Soft sounds when dictation starts, finishes and fails (played by the
     /// Electron main process). On by default, like Wispr Flow and Typeless.
     pub dictation_sounds: bool,
+    /// Size preset for the dictation pill: "small", "default", "large" or
+    /// "xlarge" (0.85x, 1x, 1.15x, 1.3x). Read by the overlay window.
+    pub dictation_pill_size: String,
+    /// Where the dictation pill sits: "bottom" (centered), "left" or "right"
+    /// (docked to that screen edge, vertical). A drag snaps to one of these.
+    pub dictation_pill_dock: String,
+    /// Mute other audio (music, videos) while the microphone is live, and
+    /// restore it afterwards. Off by default.
+    pub mute_media_while_dictating: bool,
 }
 
 impl Default for UiSettings {
@@ -749,6 +758,9 @@ impl Default for UiSettings {
             show_recording_popup: true,
             color_scheme: "default".to_string(),
             dictation_sounds: true,
+            dictation_pill_size: "default".to_string(),
+            dictation_pill_dock: "bottom".to_string(),
+            mute_media_while_dictating: false,
         }
     }
 }

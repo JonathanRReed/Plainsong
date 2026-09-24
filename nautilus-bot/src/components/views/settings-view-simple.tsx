@@ -4651,6 +4651,61 @@ export function SettingsView() {
                           })
                         }
                       />
+
+                      <SettingsOptionSelect
+                        label="Dictation pill size"
+                        description="How big the dictation pill is on screen."
+                        value={settings.ui.dictationPillSize ?? "default"}
+                        onChange={(value) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              dictationPillSize: value as NonNullable<Settings["ui"]["dictationPillSize"]>,
+                            },
+                          })
+                        }
+                      >
+                        <option value="small">Small</option>
+                        <option value="default">Default</option>
+                        <option value="large">Large</option>
+                        <option value="xlarge">Extra large</option>
+                      </SettingsOptionSelect>
+
+                      <SettingsOptionSelect
+                        label="Dictation pill position"
+                        description="Bottom center, or docked to the left or right edge of the screen. Dragging the pill near an edge docks it there too."
+                        value={settings.ui.dictationPillDock ?? "bottom"}
+                        onChange={(value) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              dictationPillDock: value as NonNullable<Settings["ui"]["dictationPillDock"]>,
+                            },
+                          })
+                        }
+                      >
+                        <option value="bottom">Bottom center</option>
+                        <option value="left">Left edge</option>
+                        <option value="right">Right edge</option>
+                      </SettingsOptionSelect>
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Mute other audio while dictating"
+                        description="Silences music and videos while the microphone is live, then turns them back on. Plainsong only restores audio it muted itself."
+                        checked={settings.ui.muteMediaWhileDictating === true}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              muteMediaWhileDictating: checked,
+                            },
+                          })
+                        }
+                      />
                     </div>
 
                     <div className="pt-4 border-t space-y-4">

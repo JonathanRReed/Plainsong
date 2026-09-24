@@ -401,6 +401,12 @@ interface UiSettings {
   colorScheme: string;
   /** Start, finish and failure sounds for dictation. Absent means on. */
   dictationSounds?: boolean;
+  /** Dictation pill size preset. Absent means "default". */
+  dictationPillSize?: "small" | "default" | "large" | "xlarge";
+  /** Where the dictation pill is docked. Absent means "bottom". */
+  dictationPillDock?: "bottom" | "left" | "right";
+  /** Mute other audio while the microphone is live. Absent means off. */
+  muteMediaWhileDictating?: boolean;
 }
 
 // Transitional empty container -- kept because Settings.export is a required

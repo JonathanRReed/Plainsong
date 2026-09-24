@@ -489,6 +489,9 @@ type AppSettings = {
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
     dictationSounds?: boolean;
+    dictationPillSize?: string;
+    dictationPillDock?: string;
+    muteMediaWhileDictating?: boolean;
   };
   notifications?: {
     meetingEvents?: boolean;
