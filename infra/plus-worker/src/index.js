@@ -3,10 +3,16 @@
 //
 //   GET  /v1/status                 launch state and published fair-use caps
 //   POST /v1/activate               license key -> 24 h entitlement token
+//   POST /v1/checkout               a hosted checkout page (Stripe; Polar link)
+//   GET  /v1/checkout/done          Stripe only: shows the new license key
+//   POST /v1/billing/portal         manage or cancel the subscription
 //   POST /v1/audio/transcriptions   OpenAI-shaped speech-to-text relay
 //   POST /v1/chat/completions       OpenAI-shaped chat relay (two aliases)
 //   GET  /v1/usage                  this month's usage against the caps
-//   POST /v1/webhooks/polar         subscription status from Polar
+//   POST /v1/webhooks/<provider>    subscription status from Polar or Stripe
+//
+// BILLING_PROVIDER ("polar" | "stripe") picks the billing backend; see
+// billing.js.
 //
 // Privacy: audio and text are streamed to the model provider and back. The
 // Worker never logs or stores them; it stores usage counters and
@@ -15,13 +21,9 @@
 import { signToken, verifyToken, TOKEN_LIFETIME_SECONDS } from "./token.js";
 import { MONTHLY_CAPS, REQUEST_LIMITS, launchAllows, remainingAllowance, usagePeriod } from "./policy.js";
 import { d1Store } from "./store.js";
-import {
-  activateLicense,
-  statusGrantsAccess,
-  subscriptionStatusFromEvent,
-  validateLicense,
-  verifyWebhook,
-} from "./polar.js";
+import { statusGrantsAccess } from "./polar.js";
+import { activate, applyWebhook, billingProvider, issueStripeLicense } from "./billing.js";
+import { completedCheckoutCustomer, createCheckout, createPortal } from "./stripe.js";
 import { chat, transcribe, UpstreamError } from "./providers.js";
 
 function json(body, status = 200) {
@@ -78,29 +80,78 @@ async function handleActivate(request, env) {
   const body = await request.json().catch(() => null);
   const licenseKey = typeof body?.licenseKey === "string" ? body.licenseKey.trim() : "";
   if (!licenseKey) return error(400, "missing_license", "A license key is required.");
-  let activationId = typeof body?.activationId === "string" ? body.activationId : null;
-  if (!activationId) {
-    const activation = await activateLicense(env, licenseKey, body?.deviceLabel);
-    if (!activation.ok) {
-      return activation.reason === "activation_limit"
-        ? error(403, "activation_limit", "This license is active on too many Macs. Remove one from your account.")
-        : error(403, "invalid_license", "That license key is not valid.");
-    }
-    activationId = activation.activationId;
+  const activationId = typeof body?.activationId === "string" ? body.activationId : null;
+  const store = storeFor(env);
+  const license = await activate(env, store, licenseKey, activationId, body?.deviceLabel);
+  if (!license.ok) {
+    return license.reason === "activation_limit"
+      ? error(403, "activation_limit", "This license is active on too many Macs. Remove one from your account.")
+      : error(403, license.reason ?? "invalid_license", "That license key is not valid or has expired.");
   }
-  const license = await validateLicense(env, licenseKey, activationId);
-  if (!license.ok) return error(403, license.reason, "That license key is not valid or has expired.");
   if (!launchAllows(env, license.customerId)) return NOT_LAUNCHED();
-  const status = await storeFor(env).getSubscriptionStatus(license.customerId);
+  const status = await store.getSubscriptionStatus(license.customerId);
   if (!statusGrantsAccess(status)) {
     return error(402, "subscription_inactive", "Your Plainsong Plus subscription is not active.");
   }
-  const token = await signToken({ sub: license.customerId, act: activationId }, env.TOKEN_SECRET);
+  const token = await signToken({ sub: license.customerId, act: license.activationId }, env.TOKEN_SECRET);
   return json({
     token,
-    activationId,
+    activationId: license.activationId,
     expiresAt: new Date(Date.now() + TOKEN_LIFETIME_SECONDS * 1000).toISOString(),
   });
+}
+
+async function handleCheckout(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const plan = body?.plan === "yearly" ? "yearly" : "monthly";
+  if (billingProvider(env) === "polar") {
+    const url = plan === "yearly" ? env.POLAR_CHECKOUT_URL_YEARLY : env.POLAR_CHECKOUT_URL_MONTHLY;
+    return url ? json({ url }) : error(501, "checkout_unavailable", "Checkout is not set up yet.");
+  }
+  const checkout = await createCheckout(env, new URL(request.url).origin, plan);
+  return checkout.ok ? json({ url: checkout.url }) : error(502, "checkout_unavailable", "Checkout is unavailable right now.");
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
+}
+
+function page(title, message, detail = "") {
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(title)}</title><style>
+body{font:16px/1.5 -apple-system,BlinkMacSystemFont,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1rem;color:#1f1d1a;background:#faf8f4}
+@media (prefers-color-scheme:dark){body{color:#ece8e1;background:#161513}code{background:#26241f}}
+code{display:block;font-size:1.25rem;letter-spacing:.04em;padding:1rem;border-radius:.5rem;background:#efe9df;user-select:all;margin:1rem 0}
+</style></head><body><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p>${detail}</body></html>`;
+  return new Response(html, {
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" },
+  });
+}
+
+async function handleCheckoutDone(request, env) {
+  if (billingProvider(env) !== "stripe") return error(404, "not_found", "Unknown route.");
+  const sessionId = new URL(request.url).searchParams.get("session_id");
+  const customerId = await completedCheckoutCustomer(env, sessionId);
+  if (!customerId) {
+    return page("Payment not finished", "This checkout is not complete. If you were charged, contact support.");
+  }
+  const key = await issueStripeLicense(env, storeFor(env), customerId);
+  return page(
+    "Welcome to Plainsong Plus",
+    "Copy this license key into Plainsong, Settings, Plainsong Plus. It works on up to three Macs. Opening this page again shows the same key.",
+    `<code>${escapeHtml(key)}</code>`,
+  );
+}
+
+async function handlePortal(request, env) {
+  const token = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+  const claims = await verifyToken(token, env.TOKEN_SECRET);
+  if (!claims) return error(401, "invalid_token", "Sign in to Plainsong Plus again.");
+  if (billingProvider(env) === "polar") {
+    return env.POLAR_PORTAL_URL ? json({ url: env.POLAR_PORTAL_URL }) : error(501, "portal_unavailable", "Not set up yet.");
+  }
+  const url = await createPortal(env, claims.sub);
+  return url ? json({ url }) : error(502, "portal_unavailable", "The billing page is unavailable right now.");
 }
 
 async function handleTranscription(request, env, customerId) {
@@ -161,12 +212,8 @@ async function handleChat(request, env, customerId) {
 }
 
 async function handleWebhook(request, env) {
-  const body = await request.text();
-  const event = await verifyWebhook(env.POLAR_WEBHOOK_SECRET, request.headers, body);
-  if (!event) return error(401, "invalid_signature", "Bad webhook signature.");
-  const change = subscriptionStatusFromEvent(event);
-  if (change) await storeFor(env).setSubscriptionStatus(change.customerId, change.status, change.updatedAt);
-  return json({ received: true }, 202);
+  const applied = await applyWebhook(env, storeFor(env), request);
+  return applied ? json({ received: true }, 202) : error(401, "invalid_signature", "Bad webhook signature.");
 }
 
 export default {
@@ -178,9 +225,12 @@ export default {
         const state = String(env.PLUS_LAUNCH_STATE ?? "off");
         return json({ launched: state === "on", state, caps: MONTHLY_CAPS });
       }
-      if (route === "POST /v1/webhooks/polar") return await handleWebhook(request, env);
+      if (route === `POST /v1/webhooks/${billingProvider(env)}`) return await handleWebhook(request, env);
       if (String(env.PLUS_LAUNCH_STATE ?? "off") === "off") return NOT_LAUNCHED();
       if (route === "POST /v1/activate") return await handleActivate(request, env);
+      if (route === "POST /v1/checkout") return await handleCheckout(request, env);
+      if (route === "GET /v1/checkout/done") return await handleCheckoutDone(request, env);
+      if (route === "POST /v1/billing/portal") return await handlePortal(request, env);
 
       const auth = await authenticate(request, env);
       if (auth.response) return auth.response;

@@ -70,9 +70,11 @@ Polar ──webhooks──▶ Worker ──▶ D1 (subscription status, monthly 
   for streaming only, are rarely usage-scoped, and would tie the app to one
   vendor. The relay meters exactly, keeps every provider key server-side
   and lets us switch models without a release.
-- **Billing: Polar** as merchant of record. It handles worldwide VAT and
-  sales tax, issues license keys, limits activations (set 3 Macs) and gives
-  customers a portal. Lemon Squeezy is the alternative with the same shape.
+- **Billing: Polar or Stripe**, chosen by `BILLING_PROVIDER`. Polar is a
+  merchant of record: it handles worldwide VAT and sales tax, issues license
+  keys, limits activations (set 3 Macs) and has a customer portal. Stripe
+  keeps $9.41 of $10 instead of $9.00 but leaves tax registration and
+  filing to you; with Stripe the Worker issues the license keys itself.
 - **Entitlement:** the Worker signs its own 24 h token after checking the
   license with Polar and the subscription status from webhooks. The app
   keeps the license key and activation id in the Keychain and the token in
@@ -135,15 +137,21 @@ launch and list them next to this paragraph.
    Anthropic ZDR; ElevenLabs retention (ZDR is enterprise-only).
 2. Run the WER harness on Grok, Scribe v2 and MAI-Transcribe-2 with real
    dictation audio.
-3. Create the Polar products ($10/month, $96/year) with the license key
-   benefit, then the webhook (see `infra/plus-worker/README.md`).
-4. Deploy the Worker with `PLUS_LAUNCH_STATE = "testers"` and a handful of
+3. Pick billing: Polar (merchant of record, handles tax) or Stripe
+   (cheaper, you handle tax). The Worker supports both through
+   `BILLING_PROVIDER`; set up the products, prices and webhook per
+   `infra/plus-worker/README.md`.
+4. Add Subscribe and Manage subscription buttons to the Plus settings
+   section. They call `/v1/checkout` and `/v1/billing/portal`, and need the
+   checkout and portal hosts added to `electron/external-url-policy.ts` in
+   the same change.
+5. Deploy the Worker with `PLUS_LAUNCH_STATE = "testers"` and a handful of
    tester customer ids.
-5. Build a tester app with `--features plainsong-plus` and dogfood for two
+6. Build a tester app with `--features plainsong-plus` and dogfood for two
    weeks.
-6. Add meetings to the Plus route (chunked uploads with `purpose=meeting`).
-7. Publish the terms, the fair-use caps and the privacy copy.
-8. Add `plainsong-plus` to `MACOS_SIDECAR_CARGO_FEATURES`, flip
+7. Add meetings to the Plus route (chunked uploads with `purpose=meeting`).
+8. Publish the terms, the fair-use caps and the privacy copy.
+9. Add `plainsong-plus` to `MACOS_SIDECAR_CARGO_FEATURES`, flip
    `PLUS_LAUNCH_STATE` to `on`, and release.
 
 ## 7. What else would make Plainsong the most premium

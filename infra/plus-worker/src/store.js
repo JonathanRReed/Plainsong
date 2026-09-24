@@ -1,6 +1,7 @@
 // Usage and subscription state. The Worker talks to this interface, backed
-// by D1 in production and by an in-memory map in tests. It stores counters
-// and subscription status only: never audio, transcripts or prompts.
+// by D1 in production and by an in-memory map in tests. It stores counters,
+// subscription status and, for Stripe billing, license key hashes and
+// activations: never audio, transcripts, prompts or a usable license key.
 
 export function d1Store(db) {
   return {
@@ -53,15 +54,41 @@ export function d1Store(db) {
         .bind(customerId, status, updatedAt)
         .run();
     },
+    async getLicense(keyHash) {
+      const row = await db.prepare("SELECT customer_id FROM licenses WHERE key_hash = ?").bind(keyHash).first();
+      return row ? { customerId: row.customer_id } : null;
+    },
+    async putLicense(keyHash, customerId, createdAt) {
+      await db
+        .prepare("INSERT INTO licenses (key_hash, customer_id, created_at) VALUES (?, ?, ?) ON CONFLICT (key_hash) DO NOTHING")
+        .bind(keyHash, customerId, createdAt)
+        .run();
+    },
+    async listActivations(keyHash) {
+      const { results } = await db
+        .prepare("SELECT activation_id FROM activations WHERE key_hash = ? ORDER BY created_at")
+        .bind(keyHash)
+        .all();
+      return (results ?? []).map((row) => row.activation_id);
+    },
+    async addActivation(keyHash, activationId, label, createdAt) {
+      await db
+        .prepare("INSERT INTO activations (key_hash, activation_id, label, created_at) VALUES (?, ?, ?, ?)")
+        .bind(keyHash, activationId, label, createdAt)
+        .run();
+    },
   };
 }
 
 export function memoryStore() {
   const usage = new Map();
   const subscriptions = new Map();
+  const licenses = new Map();
+  const activations = new Map();
   return {
     usage,
     subscriptions,
+    licenses,
     async getUsage(customerId, period) {
       return { dictationSeconds: 0, meetingSeconds: 0, llmTokens: 0, ...usage.get(`${customerId}:${period}`) };
     },
@@ -79,6 +106,18 @@ export function memoryStore() {
     async setSubscriptionStatus(customerId, status, updatedAt) {
       const current = subscriptions.get(customerId);
       if (!current || updatedAt >= current.updatedAt) subscriptions.set(customerId, { status, updatedAt });
+    },
+    async getLicense(keyHash) {
+      return licenses.get(keyHash) ?? null;
+    },
+    async putLicense(keyHash, customerId) {
+      if (!licenses.has(keyHash)) licenses.set(keyHash, { customerId });
+    },
+    async listActivations(keyHash) {
+      return [...(activations.get(keyHash) ?? [])];
+    },
+    async addActivation(keyHash, activationId) {
+      activations.set(keyHash, [...(activations.get(keyHash) ?? []), activationId]);
     },
   };
 }
