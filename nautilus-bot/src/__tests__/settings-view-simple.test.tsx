@@ -6,6 +6,21 @@ import { OPEN_ONBOARDING_EVENT } from "@/lib/onboarding";
 import { OPEN_MAIN_VIEW_EVENT } from "@/lib/navigation";
 import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
 
+/**
+ * Settings uses the custom Select (a Radix listbox) rather than a native
+ * `<select>`, so a choice is made the way a reader makes it: open the menu,
+ * pick the option.
+ */
+async function openOptionSelect(trigger: HTMLElement): Promise<HTMLElement> {
+  fireEvent.click(trigger);
+  return screen.findByRole("listbox");
+}
+
+async function chooseOption(trigger: HTMLElement, name: string | RegExp) {
+  const listbox = await openOptionSelect(trigger);
+  fireEvent.click(within(listbox).getByRole("option", { name }));
+}
+
 const readinessContext = vi.hoisted(() => ({
   productReadiness: {
     evidenceObservedAt: 1,
@@ -354,6 +369,101 @@ describe("SettingsView performance behavior", () => {
     await waitFor(() => {
       expect(backend.listBackups).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("moves between sections with the arrow keys and names the open one", async () => {
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    const tablist = screen.getByRole("tablist", { name: "Settings sections" });
+    const general = within(tablist).getByRole("tab", { name: "General" });
+    expect(general).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tabpanel")).toHaveAttribute(
+      "aria-labelledby",
+      general.id,
+    );
+    // Only the open section sits in the Tab order; arrows do the rest.
+    expect(
+      within(tablist)
+        .getAllByRole("tab")
+        .filter((tab) => tab.getAttribute("tabindex") === "0"),
+    ).toEqual([general]);
+
+    fireEvent.keyDown(general, { key: "ArrowRight" });
+    const security = within(tablist).getByRole("tab", {
+      name: "Privacy & Security",
+    });
+    expect(security).toHaveAttribute("aria-selected", "true");
+    expect(security).toHaveFocus();
+    await screen.findByText("macOS permissions");
+
+    fireEvent.keyDown(security, { key: "Home" });
+    expect(within(tablist).getByRole("tab", { name: "Models" })).toHaveFocus();
+    fireEvent.keyDown(document.activeElement as Element, { key: "ArrowRight" });
+    expect(
+      within(tablist).getByRole("tab", { name: "Transcription" }),
+    ).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("keeps Settings on screen when the sidecar replies without a conflicts list", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getShortcutConflicts).mockResolvedValueOnce(
+      {} as Awaited<ReturnType<typeof backend.getShortcutConflicts>>,
+    );
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    await waitFor(() => {
+      expect(backend.getShortcutConflicts).toHaveBeenCalled();
+    });
+    // The broadcast can be just as short.
+    await act(async () => {
+      electronEventListeners.get("shortcut-conflicts-changed")?.({
+        payload: {},
+      });
+    });
+    expect(await screen.findByText("Dictation bindings")).toBeInTheDocument();
+  });
+
+  it("turns a renderer bug into a plain sentence instead of engine text", async () => {
+    const backend = await import("@/lib/backend");
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    vi.mocked(backend.getSecurityStatus).mockRejectedValueOnce(
+      new TypeError("Cannot read properties of null (reading 'token')"),
+    );
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("Privacy & Security"));
+
+    expect(
+      await screen.findByText("Failed to load security details"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Cannot read properties/)).not.toBeInTheDocument();
+    expect(consoleError).toHaveBeenCalled();
+    consoleError.mockRestore();
+  });
+
+  it("still shows a backend's own explanation when it has one", async () => {
+    const backend = await import("@/lib/backend");
+    vi.mocked(backend.getSecurityStatus).mockRejectedValueOnce(
+      new Error("The vault is busy migrating. Try again in a minute."),
+    );
+
+    render(<ToastProvider><SettingsView /></ToastProvider>);
+
+    await screen.findByText("How Plainsong listens, writes, and what it keeps.");
+    fireEvent.click(screen.getByText("Privacy & Security"));
+
+    expect(
+      await screen.findByText(
+        "The vault is busy migrating. Try again in a minute.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows a plain retry path when the initial settings load fails", async () => {
@@ -853,19 +963,18 @@ describe("SettingsView performance behavior", () => {
     const hotkeySelect = await screen.findByLabelText(
       "How the dictation shortcut works",
     );
-    expect(hotkeySelect.tagName).toBe("SELECT");
+    expect(hotkeySelect).toHaveAttribute("role", "combobox");
+    const hotkeyOptions = await openOptionSelect(hotkeySelect);
     expect(
-      within(hotkeySelect as HTMLSelectElement).getByText(
-        "Hold to record, release to stop",
-      ),
+      within(hotkeyOptions).getByRole("option", {
+        name: "Start on its own when you speak",
+      }),
     ).toBeInTheDocument();
-    expect(
-      within(hotkeySelect as HTMLSelectElement).getByText(
-        "Start on its own when you speak",
-      ),
-    ).toBeInTheDocument();
-
-    fireEvent.change(hotkeySelect, { target: { value: "hold_to_talk" } });
+    fireEvent.click(
+      within(hotkeyOptions).getByRole("option", {
+        name: "Hold to record, release to stop",
+      }),
+    );
 
     await waitFor(() => {
       expect(backend.saveSettings).toHaveBeenCalled();
@@ -899,21 +1008,22 @@ describe("SettingsView performance behavior", () => {
     const hotkeySelect = await screen.findByLabelText(
       "How the dictation shortcut works",
     );
-    expect(hotkeySelect.tagName).toBe("SELECT");
+    expect(hotkeySelect).toHaveAttribute("role", "combobox");
+    const hotkeyOptions = await openOptionSelect(hotkeySelect);
     expect(
-      within(hotkeySelect as HTMLSelectElement).queryByText(
-        "Hold to record, release to stop",
-      ),
+      within(hotkeyOptions).queryByRole("option", {
+        name: "Hold to record, release to stop",
+      }),
     ).not.toBeInTheDocument();
     expect(
-      within(hotkeySelect as HTMLSelectElement).getByText(
-        "Press to start, press again to stop",
-      ),
+      within(hotkeyOptions).getByRole("option", {
+        name: "Press to start, press again to stop",
+      }),
     ).toBeInTheDocument();
     expect(
-      within(hotkeySelect as HTMLSelectElement).getByText(
-        "Start on its own when you speak",
-      ),
+      within(hotkeyOptions).getByRole("option", {
+        name: "Start on its own when you speak",
+      }),
     ).toBeInTheDocument();
     expect(
       screen.getAllByText(/Press to start, press again to stop/).length,
@@ -942,7 +1052,7 @@ describe("SettingsView performance behavior", () => {
     const hotkeySelect = await screen.findByLabelText(
       "How the dictation shortcut works",
     );
-    fireEvent.change(hotkeySelect, { target: { value: "hands_free" } });
+    await chooseOption(hotkeySelect, "Start on its own when you speak");
 
     await waitFor(() => {
       expect(backend.saveSettings).toHaveBeenCalled();
@@ -1250,16 +1360,16 @@ describe("SettingsView performance behavior", () => {
     const analysisDisclosure = screen
       .getByText("Summarize every meeting automatically")
       .closest(".flex.items-start.justify-between") as HTMLElement;
-    const credentialProviderSelect = screen
-      .getByText("API keys")
-      .closest("div")
-      ?.querySelector("select") as HTMLSelectElement;
+    const credentialProviderSelect = screen.getByRole("combobox", {
+      name: "API key service",
+    });
     expect(analysisDisclosure.textContent).toContain("Ollama on this machine");
 
     const saveCallsBeforeChange = vi.mocked(backend.saveSettings).mock.calls.length;
-    fireEvent.change(credentialProviderSelect, {
-      target: { value: "anthropic" },
-    });
+    // Synchronous open-and-pick: `findBy*` polls on real timers, which are
+    // faked here.
+    fireEvent.click(credentialProviderSelect);
+    fireEvent.click(screen.getByRole("option", { name: "Anthropic" }));
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(400);
@@ -1268,7 +1378,7 @@ describe("SettingsView performance behavior", () => {
       await Promise.resolve();
     });
 
-    expect(credentialProviderSelect.value).toBe("anthropic");
+    expect(credentialProviderSelect).toHaveTextContent("Anthropic");
     // Picking a different provider to manage credentials for must not
     // silently steer the app's actual analysis provider away from ollama --
     // this selector no longer writes settings.privacy.meetingsAi, so it must
@@ -1367,11 +1477,9 @@ describe("SettingsView performance behavior", () => {
     // provider (anthropic here), so the warning should already be visible
     // without any manual provider selection.
     await screen.findByText(/No key saved for/);
-    const credentialProviderSelect = screen
-      .getByText("API keys")
-      .closest("div")
-      ?.querySelector("select") as HTMLSelectElement;
-    expect(credentialProviderSelect.value).toBe("anthropic");
+    expect(
+      screen.getByRole("combobox", { name: "API key service" }),
+    ).toHaveTextContent("Anthropic");
 
     fireEvent.change(screen.getByPlaceholderText("Paste the key here"), {
       target: { value: "sk-test-123" },
@@ -1652,21 +1760,19 @@ describe("SettingsView performance behavior", () => {
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await screen.findByText("Dictation bindings");
 
-    const primaryAction = (await screen.findByLabelText(
-      "Dictation action",
-    )) as HTMLSelectElement;
-    expect(primaryAction.value).toBe("dictation");
-    const secondAction = (await screen.findByLabelText(
-      "Binding 2 action",
-    )) as HTMLSelectElement;
-    expect(secondAction.value).toBe("dictation:email");
-    expect(
-      (screen.getByLabelText("Binding 2 behavior") as HTMLSelectElement).value,
-    ).toBe("hold");
-    const thirdAction = (await screen.findByLabelText(
-      "Binding 3 action",
-    )) as HTMLSelectElement;
-    expect(thirdAction.value).toBe("cycleMode");
+    // Each menu shows the option its stored value names.
+    expect(await screen.findByLabelText("Dictation action")).toHaveTextContent(
+      "Dictation in the selected profile",
+    );
+    expect(await screen.findByLabelText("Binding 2 action")).toHaveTextContent(
+      "Dictation · Writing",
+    );
+    expect(screen.getByLabelText("Binding 2 behavior")).toHaveTextContent(
+      "Hold to record, release to stop",
+    );
+    expect(await screen.findByLabelText("Binding 3 action")).toHaveTextContent(
+      "Next profile",
+    );
 
     // The third binding is Ctrl+Shift+Space written in a different order, so
     // it collides with the primary one and says so in the row.
@@ -1852,16 +1958,16 @@ describe("SettingsView performance behavior", () => {
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
     await screen.findByText("Dictation bindings");
 
-    const behavior = (await screen.findByLabelText(
-      "Dictation behavior",
-    )) as HTMLSelectElement;
+    const behavior = await screen.findByLabelText("Dictation behavior");
     // The stored value is still what the row shows, and the option it names
     // exists -- disabled, saying why.
-    expect(behavior.value).toBe("hold");
-    const holdOption = within(behavior).getByRole("option", {
-      name: "Hold to record (needs the native helper)",
-    }) as HTMLOptionElement;
-    expect(holdOption.disabled).toBe(true);
+    expect(behavior).toHaveTextContent("Hold to record (needs the native helper)");
+    const behaviorOptions = await openOptionSelect(behavior);
+    expect(
+      within(behaviorOptions).getByRole("option", {
+        name: "Hold to record (needs the native helper)",
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
     expect(
       screen.getByText(
         /Hold needs the native shortcut helper, which is not running, so this binding presses to start and presses again to stop until it is\./,

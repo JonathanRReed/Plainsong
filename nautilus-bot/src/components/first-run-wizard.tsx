@@ -62,6 +62,7 @@ import {
   buildAsrRouteCatalog,
   getRecommendedLaneRoute,
 } from "@/lib/asr-route-catalog";
+import { formatModelSize, getAsrModelCapability } from "@/lib/asr-capabilities";
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -118,11 +119,16 @@ type ScratchDictationState =
 // -- including "Plainsong" itself, per this repo's own benchmark -- so it is
 // offered as the small-download alternative, not the default. Model weights
 // are downloaded on demand; none ship inside the app bundle.
+//
+// A first run reads `title` and `desc`, which say what the choice means for
+// the reader. The model's own name (`label`) and download size are the small
+// print under them. Sizes come from the capability table through
+// `formatModelSize`, so every row uses the same unit as the rest of the app.
 const POWER_MODEL_OPTIONS: Array<{
   id: string;
   providerType: AsrProviderType;
   label: string;
-  size: string;
+  title: string;
   desc: string;
   recommended?: boolean;
 }> = [
@@ -130,32 +136,38 @@ const POWER_MODEL_OPTIONS: Array<{
     id: "parakeet-tdt-0.6b-v3",
     providerType: "parakeet",
     label: "Parakeet TDT 0.6B v3",
-    size: "640 MB",
-    desc: "Recommended default — more accurate transcription, works for meetings too",
+    title: "Fast and accurate",
+    desc: "Runs on this Mac and handles meetings too. The right choice for most people.",
     recommended: true,
   },
   {
     id: "base.en",
     providerType: "whisper",
     label: "Whisper base.en",
-    size: "142 MB",
-    desc: "Smaller download (142 MB vs. 640 MB), but less accurate on unfamiliar words",
+    title: "Smallest download",
+    desc: "English only, and more likely to miss names and unusual words.",
   },
   {
     id: "distil-large-v3.5",
     providerType: "distil_whisper",
     label: "Distil Whisper",
-    size: "2.8 GiB",
-    desc: "Accuracy upgrade for demanding solo dictation",
+    title: "Extra accuracy for long dictation",
+    desc: "A much larger download that takes longer to set up.",
   },
   {
     id: "moonshine-base",
     providerType: "moonshine",
     label: "Moonshine Base",
-    size: "246 MB",
-    desc: "Lightweight alternative for lower-end machines",
+    title: "Easy on older Macs",
+    desc: "A light model for slower machines, at some cost to accuracy.",
   },
 ];
+
+function powerModelSize(option: (typeof POWER_MODEL_OPTIONS)[number]): string {
+  return formatModelSize(
+    getAsrModelCapability(option.providerType, option.id)?.sizeMib ?? 0,
+  );
+}
 
 // The rows themselves live in features/onboarding/permission-gates.ts, with
 // the sentence each one owes the reader: what Plainsong does with the grant,
@@ -305,6 +317,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // inside it so keyboard users can't Tab into the obscured app behind it.
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const stepBodyRef = useRef<HTMLDivElement | null>(null);
   const titleId = useId();
 
   // The model download can run for minutes, and the wizard unmounts the moment
@@ -461,13 +474,18 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   }, [mode]);
 
   const stepIndex = steps.indexOf(step);
-  const progress = steps.length > 1 ? ((stepIndex + 1) / steps.length) * 100 : 100;
   const isLastStep = stepIndex === steps.length - 1;
   const stepAnnouncement = `Step ${stepIndex + 1} of ${steps.length}: ${STEP_LABELS[step]}`;
 
+  // A new step starts at the top of the scrolling body, and focus moves to
+  // its heading without scrolling anything: letting focus() scroll pushed the
+  // heading to the top edge and cut off the label above it.
   useEffect(() => {
+    if (stepBodyRef.current) {
+      stepBodyRef.current.scrollTop = 0;
+    }
     const frame = requestAnimationFrame(() => {
-      stepHeadingRef.current?.focus();
+      stepHeadingRef.current?.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
   }, [step]);
@@ -1357,9 +1375,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         aria-labelledby={titleId}
         tabIndex={-1}
         onKeyDown={trapDialogFocus}
-        className="relative flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col gap-6 overflow-y-auto rounded-2xl border border-border bg-card/95 p-8 text-card-foreground shadow-2xl"
+        className="relative flex max-h-[calc(100vh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-card/95 text-card-foreground shadow-2xl"
       >
-        <div className="flex items-center justify-between gap-4">
+        {/* Header and footer stay put; only the step body scrolls, so the
+            title, the progress and the buttons are always on screen. */}
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-border/60 px-8 pb-5 pt-7">
           <div className="min-w-0 space-y-1">
             <p className="rubric">
               {mode === "meetings" ? "MEETINGS" : mode === "dictation" ? "DICTATION" : "ONBOARDING"}
@@ -1368,7 +1388,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               ref={stepHeadingRef}
               id={titleId}
               tabIndex={-1}
-              className="font-serif text-xl font-semibold text-card-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              // Focus lands here only so screen readers start at the new
+              // step (the live region below announces it); it is not a
+              // control, so it shows no focus ring.
+              className="font-serif text-xl font-semibold text-card-foreground outline-none"
             >
               {wizardTitle}
             </h2>
@@ -1378,7 +1401,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             </p>
           </div>
           {steps.length > 1 ? (
-            <div className="flex gap-2">
+            <div className="flex shrink-0 gap-2" aria-hidden="true">
               {steps.map((currentStep, index) => (
                 <div
                   key={currentStep}
@@ -1391,199 +1414,209 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
           ) : null}
         </div>
 
-        {steps.length > 1 ? <Progress value={progress} className="h-1" /> : null}
-
-        {step === "try-dictation" ? (
-          <TryDictationStep
-            perms={perms}
-            permsLoading={permsLoading}
-            onRefreshPermissions={() => void refreshPerms()}
-            onRequestPermissions={() => void requestPermissionsNow()}
-            onOpenMicrophoneSettings={() =>
-              void openMicrophoneSettingsFromWizard()
-            }
-            permissionRequestBusy={permissionRequestBusy}
-            permissionRequestError={permissionRequestError}
-            permissionRequestStatus={permissionRequestStatus}
-            modelState={modelState}
-            modelError={modelError}
-            modelPercent={downloadPercent}
-            onDownloadModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
-            scratchState={scratchState}
-            scratchText={scratchText}
-            scratchError={scratchError}
-            onStartScratch={() => void startScratchDictation()}
-            onFinishScratch={() => void finishScratchDictation()}
-          />
-        ) : null}
-
-        {step === "use-everywhere" ? (
-          <UseEverywhereStep
-            perms={perms}
-            permsLoading={permsLoading}
-            onRefreshPermissions={() => void refreshPerms()}
-            onOpenAccessibilitySettings={() =>
-              void openAccessibilitySettingsFromWizard()
-            }
-            displayShortcut={displayShortcut}
-            onShortcutChange={setShortcutValue}
-            hotkeyMode={hotkeyMode}
-            saveError={saveError}
-          />
-        ) : null}
-
-        {step === "ready" ? (
-          <ReadyStep
-            displayShortcut={displayShortcut}
-            hotkeyMode={hotkeyMode}
-            modelState={modelState}
-            modelError={modelError}
-            modelSkipped={modelSkipped}
-            onRetryModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
-            microphoneReady={
-              perms?.microphonePermissionReady ?? perms?.microphoneReady
-            }
-            insertionReady={
-              Boolean(perms?.accessibilityReady) &&
-              Boolean(perms?.postEventReady)
-            }
-            scratchCompleted={scratchState === "complete"}
-            meetingReady={meetingRouteReady === true}
-            fullMeetingCaptureReady={meetingSystemAudioCapability?.ready === true}
-          />
-        ) : null}
-
-        {step === "permissions" ? (
-          <PermissionsStep
-            perms={perms}
-            observations={permissionObservations}
-            loading={permsLoading}
-            onRefresh={() => void refreshPerms()}
-            autoRequestPermissions={autoRequestPermissions}
-            onAutoRequestPermissionsChange={setAutoRequestPermissions}
-            onRequestNow={() => void requestPermissionsNow()}
-            onOpenPermissionSettings={(gate) =>
-              void openPermissionSettingsFromWizard(gate)
-            }
-            onOpenInstalledApp={() => void openInstalledAppFromWizard()}
-            requestBusy={permissionRequestBusy}
-            requestError={permissionRequestError}
-            requestStatus={permissionRequestStatus}
-            revocationNotice={permissionRevocation}
-            registerCardRef={(key, node) => {
-              permRowRefs.current[key] = node;
-            }}
-          />
-        ) : null}
-
-        {step === "dictation-model" ? (
-          <>
-            <DictationModelStep
-              state={modelState}
-              error={modelError}
-              percent={downloadPercent}
-              selectedId={selectedModelId}
-              downloadFromFooter={mode === "full"}
-              downloadDisabled={modelSelectionHydration !== "ready"}
-              onSelect={(modelId) => {
-                modelSelectionChangedRef.current = true;
-                setSelectedModelId(modelId);
-              }}
-              onDownload={() => void startModelDownload(selectedModelId)}
-            />
-            {modelSelectionHydration === "error" ? (
-              <p
-                role="alert"
-                aria-label="Model setup unavailable"
-                className="text-sm text-destructive"
-              >
-                Model setup could not be loaded. Reopen onboarding and try again.
-              </p>
-            ) : null}
-          </>
-        ) : null}
-
-        {step === "hotkey" ? (
-          <HotkeyStep
-            active={hotkeyDemoActive}
-            onToggle={() => setHotkeyDemoActive((value) => !value)}
-            displayShortcut={displayShortcut}
-            onShortcutChange={setShortcutValue}
-            hotkeyMode={hotkeyMode}
-            includeMeetings={false}
-            saveError={saveError}
-          />
-        ) : null}
-
-        {step === "meeting-setup" ? (
-          <MeetingSetupStep
-            loading={meetingSetupLoading}
-            routeSummary={meetingRouteSummary}
-            routeReady={meetingRouteReady}
-            routeError={meetingRouteError}
-            verificationDetails={meetingVerificationDetails}
-            systemAudioCapability={meetingSystemAudioCapability}
-            systemAudioTestLoading={systemAudioTestLoading}
-            systemAudioTestStatus={systemAudioTestStatus}
-            meetingModelState={meetingModelState}
-            meetingModelError={meetingModelError}
-            meetingDownloadPercent={meetingDownloadPercent}
-            onTestSystemAudio={() => void testMeetingSystemAudio()}
-            meetingAudioStorageMode={meetingAudioStorageMode}
-            onMeetingAudioStorageModeChange={setMeetingAudioStorageMode}
-            meetingRetentionPreset={meetingRetentionPreset}
-            onMeetingRetentionPresetChange={setMeetingRetentionPreset}
-            meetingRetentionCustomMonths={meetingRetentionCustomMonths}
-            onMeetingRetentionCustomMonthsChange={setMeetingRetentionCustomMonths}
-            meetingRetentionDeleteMode={meetingRetentionDeleteMode}
-            onMeetingRetentionDeleteModeChange={setMeetingRetentionDeleteMode}
-            onRefresh={() => void refreshMeetingSetup()}
-            onApplyRecommendedRoute={
-              meetingRecommendedRoute ? () => void applyRecommendedMeetingRoute() : undefined
-            }
-            recommendedRouteSummary={
-              meetingRecommendedRoute
-                ? summarizeMeetingRoute(
-                    meetingRecommendedRoute.providerType,
-                    meetingRecommendedRoute.modelId,
-                    []
-                  )
-                : null
-            }
-            saveError={saveError}
-            saveErrorContext={saveErrorContext}
-          />
-        ) : null}
-
-        {step === "ai-notes" ? (
-          <AiNotesStep
-            choice={aiNotesChoice}
-            onChoiceChange={setAiNotesChoice}
-            configuredProvider={aiNotesProvider}
-            localAiReady={localAiReady}
-            localAiChecking={localAiChecking}
-            onRecheckLocalAi={() => void checkLocalAiRuntime()}
-            onOpenAiSettings={() => {
-              void (async () => {
-                // Save the choice before leaving, or a reader who went to add a
-                // key would come back to a wizard that forgot they had decided.
-                const saved = await persistAiNotesStep();
-                if (!saved) {
-                  return;
+        <div
+          ref={stepBodyRef}
+          className="min-h-0 flex-1 overflow-y-auto px-8 py-6"
+        >
+          {/* Keyed on the step so each one arrives with a short fade and rise;
+              reduced motion drops it. */}
+          <div
+            key={step}
+            className="flex flex-col gap-6 animate-in fade-in-0 slide-in-from-bottom-1 duration-200 motion-reduce:animate-none"
+          >
+            {step === "try-dictation" ? (
+              <TryDictationStep
+                perms={perms}
+                permsLoading={permsLoading}
+                onRefreshPermissions={() => void refreshPerms()}
+                onRequestPermissions={() => void requestPermissionsNow()}
+                onOpenMicrophoneSettings={() =>
+                  void openMicrophoneSettingsFromWizard()
                 }
-                completeWizard({
-                  markOnboardingComplete: mode === "full",
-                  meetingsCompleted: mode === "meetings",
-                });
-                requestReadinessDestination("ai");
-              })();
-            }}
-            saveError={saveError}
-            saveErrorContext={saveErrorContext}
-          />
-        ) : null}
+                permissionRequestBusy={permissionRequestBusy}
+                permissionRequestError={permissionRequestError}
+                permissionRequestStatus={permissionRequestStatus}
+                modelState={modelState}
+                modelError={modelError}
+                modelPercent={downloadPercent}
+                onDownloadModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
+                scratchState={scratchState}
+                scratchText={scratchText}
+                scratchError={scratchError}
+                onStartScratch={() => void startScratchDictation()}
+                onFinishScratch={() => void finishScratchDictation()}
+              />
+            ) : null}
 
-        <div className="flex justify-between">
+            {step === "use-everywhere" ? (
+              <UseEverywhereStep
+                perms={perms}
+                permsLoading={permsLoading}
+                onRefreshPermissions={() => void refreshPerms()}
+                onOpenAccessibilitySettings={() =>
+                  void openAccessibilitySettingsFromWizard()
+                }
+                displayShortcut={displayShortcut}
+                onShortcutChange={setShortcutValue}
+                hotkeyMode={hotkeyMode}
+                saveError={saveError}
+              />
+            ) : null}
+
+            {step === "ready" ? (
+              <ReadyStep
+                displayShortcut={displayShortcut}
+                hotkeyMode={hotkeyMode}
+                modelState={modelState}
+                modelError={modelError}
+                modelSkipped={modelSkipped}
+                onRetryModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
+                microphoneReady={
+                  perms?.microphonePermissionReady ?? perms?.microphoneReady
+                }
+                insertionReady={
+                  Boolean(perms?.accessibilityReady) &&
+                  Boolean(perms?.postEventReady)
+                }
+                scratchCompleted={scratchState === "complete"}
+                meetingReady={meetingRouteReady === true}
+                fullMeetingCaptureReady={meetingSystemAudioCapability?.ready === true}
+              />
+            ) : null}
+
+            {step === "permissions" ? (
+              <PermissionsStep
+                perms={perms}
+                observations={permissionObservations}
+                loading={permsLoading}
+                onRefresh={() => void refreshPerms()}
+                autoRequestPermissions={autoRequestPermissions}
+                onAutoRequestPermissionsChange={setAutoRequestPermissions}
+                onRequestNow={() => void requestPermissionsNow()}
+                onOpenPermissionSettings={(gate) =>
+                  void openPermissionSettingsFromWizard(gate)
+                }
+                onOpenInstalledApp={() => void openInstalledAppFromWizard()}
+                requestBusy={permissionRequestBusy}
+                requestError={permissionRequestError}
+                requestStatus={permissionRequestStatus}
+                revocationNotice={permissionRevocation}
+                registerCardRef={(key, node) => {
+                  permRowRefs.current[key] = node;
+                }}
+              />
+            ) : null}
+
+            {step === "dictation-model" ? (
+              <>
+                <DictationModelStep
+                  state={modelState}
+                  error={modelError}
+                  percent={downloadPercent}
+                  selectedId={selectedModelId}
+                  downloadFromFooter={mode === "full"}
+                  downloadDisabled={modelSelectionHydration !== "ready"}
+                  onSelect={(modelId) => {
+                    modelSelectionChangedRef.current = true;
+                    setSelectedModelId(modelId);
+                  }}
+                  onDownload={() => void startModelDownload(selectedModelId)}
+                />
+                {modelSelectionHydration === "error" ? (
+                  <p
+                    role="alert"
+                    aria-label="Model setup unavailable"
+                    className="text-sm text-destructive"
+                  >
+                    Model setup could not be loaded. Reopen onboarding and try again.
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+
+            {step === "hotkey" ? (
+              <HotkeyStep
+                active={hotkeyDemoActive}
+                onToggle={() => setHotkeyDemoActive((value) => !value)}
+                displayShortcut={displayShortcut}
+                onShortcutChange={setShortcutValue}
+                hotkeyMode={hotkeyMode}
+                includeMeetings={false}
+                saveError={saveError}
+              />
+            ) : null}
+
+            {step === "meeting-setup" ? (
+              <MeetingSetupStep
+                loading={meetingSetupLoading}
+                routeSummary={meetingRouteSummary}
+                routeReady={meetingRouteReady}
+                routeError={meetingRouteError}
+                verificationDetails={meetingVerificationDetails}
+                systemAudioCapability={meetingSystemAudioCapability}
+                systemAudioTestLoading={systemAudioTestLoading}
+                systemAudioTestStatus={systemAudioTestStatus}
+                meetingModelState={meetingModelState}
+                meetingModelError={meetingModelError}
+                meetingDownloadPercent={meetingDownloadPercent}
+                onTestSystemAudio={() => void testMeetingSystemAudio()}
+                meetingAudioStorageMode={meetingAudioStorageMode}
+                onMeetingAudioStorageModeChange={setMeetingAudioStorageMode}
+                meetingRetentionPreset={meetingRetentionPreset}
+                onMeetingRetentionPresetChange={setMeetingRetentionPreset}
+                meetingRetentionCustomMonths={meetingRetentionCustomMonths}
+                onMeetingRetentionCustomMonthsChange={setMeetingRetentionCustomMonths}
+                meetingRetentionDeleteMode={meetingRetentionDeleteMode}
+                onMeetingRetentionDeleteModeChange={setMeetingRetentionDeleteMode}
+                onRefresh={() => void refreshMeetingSetup()}
+                onApplyRecommendedRoute={
+                  meetingRecommendedRoute ? () => void applyRecommendedMeetingRoute() : undefined
+                }
+                recommendedRouteSummary={
+                  meetingRecommendedRoute
+                    ? summarizeMeetingRoute(
+                        meetingRecommendedRoute.providerType,
+                        meetingRecommendedRoute.modelId,
+                        []
+                      )
+                    : null
+                }
+                saveError={saveError}
+                saveErrorContext={saveErrorContext}
+              />
+            ) : null}
+
+            {step === "ai-notes" ? (
+              <AiNotesStep
+                choice={aiNotesChoice}
+                onChoiceChange={setAiNotesChoice}
+                configuredProvider={aiNotesProvider}
+                localAiReady={localAiReady}
+                localAiChecking={localAiChecking}
+                onRecheckLocalAi={() => void checkLocalAiRuntime()}
+                onOpenAiSettings={() => {
+                  void (async () => {
+                    // Save the choice before leaving, or a reader who went to add a
+                    // key would come back to a wizard that forgot they had decided.
+                    const saved = await persistAiNotesStep();
+                    if (!saved) {
+                      return;
+                    }
+                    completeWizard({
+                      markOnboardingComplete: mode === "full",
+                      meetingsCompleted: mode === "meetings",
+                    });
+                    requestReadinessDestination("ai");
+                  })();
+                }}
+                saveError={saveError}
+                saveErrorContext={saveErrorContext}
+              />
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex shrink-0 justify-between gap-2 border-t border-border/60 px-8 py-4">
           <div className="flex gap-2">
             {mode === "full" ? (
               step === "dictation-model" && modelState !== "done" ? (
@@ -1757,9 +1790,11 @@ function TryDictationStep({
             <div>
               <p className="text-sm font-medium">Speech model</p>
               <p className="text-sm text-muted-foreground">
-                The recommended model is a 640 MB download and runs on this Mac.
-                A smaller 142 MB one is available later, with less accuracy on
-                unfamiliar words.
+                Fast and accurate, and runs on this Mac: a{" "}
+                {powerModelSize(POWER_MODEL_OPTIONS[0])} download (Parakeet TDT
+                0.6B v3). A smaller {powerModelSize(POWER_MODEL_OPTIONS[1])}{" "}
+                option is available later, with less accuracy on unfamiliar
+                words.
               </p>
             </div>
           </div>
@@ -2384,10 +2419,9 @@ function DictationModelStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Choose the local model Plainsong will use for dictation. Parakeet TDT 0.6B v3 is the
-        recommended default and downloads on demand; Whisper base.en is a smaller download with
-        less accuracy on unfamiliar words, and the larger choices trade space and time for
-        accuracy.
+        Plainsong turns your voice into text on this Mac, so it needs a speech
+        model first. The recommended one suits most people and downloads on
+        demand. You can switch later in Settings.
       </p>
 
       <div className="space-y-2">
@@ -2395,30 +2429,34 @@ function DictationModelStep({
           <button
             key={option.id}
             type="button"
+            aria-pressed={selectedId === option.id}
             onClick={() => {
               if (state !== "downloading") {
                 onSelect(option.id);
               }
             }}
-            className={`flex w-full items-center justify-between rounded-lg border-2 p-3 text-left transition-all ${
+            className={`flex w-full items-start justify-between gap-4 rounded-lg border-2 p-3 text-left transition-all ${
               selectedId === option.id
                 ? "border-primary bg-primary/5"
                 : "border-border hover:border-primary/40"
             }`}
           >
-            <div>
-              <p className="text-sm font-medium">
-                {option.label}
+            <div className="min-w-0 space-y-0.5">
+              <p className="flex flex-wrap items-center gap-x-2 text-sm font-medium">
                 {option.recommended ? (
-                  <span className="ml-1.5 inline-flex items-center gap-1 text-xs font-medium text-foreground">
+                  <span className="inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-gold-text">
                     <span className="neume neume-lit" aria-hidden="true" />
-                    Fast default
+                    Recommended
                   </span>
                 ) : null}
+                {option.title}
               </p>
               <p className="text-xs text-muted-foreground">{option.desc}</p>
             </div>
-            <span className="text-xs text-muted-foreground">{option.size}</span>
+            <span className="flex shrink-0 flex-col items-end pt-0.5 text-xs text-muted-foreground">
+              <span>{option.label}</span>
+              <span>{powerModelSize(option)}</span>
+            </span>
           </button>
         ))}
       </div>
