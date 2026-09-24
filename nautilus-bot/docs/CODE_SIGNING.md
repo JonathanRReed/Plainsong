@@ -287,6 +287,18 @@ building or distributing anything.
   `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID`.** Run
   `bun run gate:release-credentials:preflight` first; see "Credential
   preflight" above and `scripts/release-credentials-preflight.mjs`.
+  On this Mac the keychain profile is `plainsong-notary`, with
+  `CSC_NAME="Jonathan Reed (AJ9VWBRNZN)"` and `APPLE_TEAM_ID=AJ9VWBRNZN`.
+- **Package outside an iCloud-synced folder.** With Desktop & Documents in
+  iCloud, the File Provider tags every `.app` electron-builder writes under
+  `release/` with `com.apple.FinderInfo`, and codesign stops with "resource
+  fork, Finder information, or similar detritus not allowed". After the
+  compile steps of `release:mac`, rerun only the packaging step elsewhere:
+  `bunx electron-builder --mac --publish never
+  --config.directories.output="$HOME/Library/Caches/Plainsong-release"`.
+  electron-builder notarizes the app but not the DMG; notarize and staple
+  the DMG with `xcrun notarytool submit … --wait` and `xcrun stapler staple`
+  before the trust gate, which checks both.
 - **`updates.plainsong.jonathanrreed.com` currently has no DNS record.**
   Verified directly (`host updates.plainsong.jonathanrreed.com`) on
   2026-08-27: NXDOMAIN. `electron-builder.yml`'s `publish.url` and
