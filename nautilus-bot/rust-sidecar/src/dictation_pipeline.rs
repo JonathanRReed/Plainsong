@@ -24,6 +24,10 @@ pub struct DictationPipelineInput<'a> {
     pub app_target: Option<&'a str>,
     pub mode_preset: &'a str,
     pub smart_formatting_enabled: bool,
+    /// Local disfluency cleanup (`dictation_cleanup`): hesitations, stutters
+    /// and like-for-like spoken corrections. The user's
+    /// `dictation_remove_disfluencies` setting on the live path.
+    pub clean_disfluencies: bool,
     /// Inverse text normalization: turn spoken numbers into written form
     /// ("twelve dollars fifty" -> "$12.50"). Resolved per dictation profile
     /// (`resolve_dictation_numbers_as_digits` in `lib.rs`), which is why it
@@ -73,6 +77,18 @@ pub fn apply_dictation_pipeline(input: DictationPipelineInput<'_>) -> DictationP
             text = repaired;
             formatting_applied = true;
             pipeline_stage_keys.push("spoken_correction".to_string());
+        }
+    }
+
+    // Before the dictionary and commands, so a stutter or "um" cannot split a
+    // dictionary phrase or a command. Never empties the text: a dictation of
+    // only "um" stays as spoken rather than inserting nothing silently.
+    if input.clean_disfluencies {
+        let cleaned = crate::dictation_cleanup::clean_disfluencies(&text);
+        if cleaned != text && !cleaned.trim().is_empty() {
+            text = cleaned;
+            formatting_applied = true;
+            pipeline_stage_keys.push("disfluency_cleanup".to_string());
         }
     }
 
@@ -524,6 +540,7 @@ mod tests {
                 app_target: None,
                 mode_preset: "voice",
                 smart_formatting_enabled: smart,
+                clean_disfluencies: false,
                 numbers_as_digits: false,
                 recent_inserted_text: Some("Do not touch this previous insertion."),
                 command_mode_enabled: false,
@@ -600,6 +617,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -624,6 +642,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -643,6 +662,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -666,6 +686,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -694,6 +715,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -718,6 +740,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: Some("we need two servers"),
             command_mode_enabled: true,
@@ -743,6 +766,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: Some("we need twenty five servers"),
             command_mode_enabled: true,
@@ -767,6 +791,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -794,6 +819,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -815,6 +841,7 @@ mod tests {
             app_target: Some("Terminal"),
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -836,6 +863,7 @@ mod tests {
             app_target: Some("Notes"),
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -857,6 +885,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: Some("we need twenty five servers"),
             command_mode_enabled: true,
@@ -876,6 +905,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: true,
+            clean_disfluencies: false,
             numbers_as_digits: true,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -895,6 +925,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it today"),
             command_mode_enabled: true,
@@ -920,6 +951,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it today"),
             command_mode_enabled: false,
@@ -941,6 +973,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it Friday"),
             command_mode_enabled: true,
@@ -966,6 +999,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow"),
             command_mode_enabled: true,
@@ -991,6 +1025,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -1016,6 +1051,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it today"),
             command_mode_enabled: true,
@@ -1031,6 +1067,45 @@ mod tests {
         assert!(result.undo_previous_insert);
     }
 
+    fn default_path_input(text: &str) -> DictationPipelineInput<'_> {
+        // What the live dictation path passes on a fresh install.
+        DictationPipelineInput {
+            text,
+            dictionary_entries: &[],
+            snippets: &[],
+            app_target: None,
+            mode_preset: "voice",
+            smart_formatting_enabled: true,
+            clean_disfluencies: crate::settings::TranscriptionSettings::default()
+                .dictation_remove_disfluencies,
+            numbers_as_digits: false,
+            recent_inserted_text: None,
+            command_mode_enabled: false,
+            destination_category: DictationAppCategory::Other,
+        }
+    }
+
+    #[test]
+    fn default_path_removes_hesitations_stutters_and_typed_corrections() {
+        let result = apply_dictation_pipeline(default_path_input(
+            "Um, so I think we should, uh, meet on Tuesday, no wait, Wednesday at 3 and bring the the slides.",
+        ));
+        assert_eq!(
+            result.text,
+            "So I think we should meet on Wednesday at 3 and bring the slides."
+        );
+        assert!(result
+            .pipeline_stage_keys
+            .iter()
+            .any(|key| key == "disfluency_cleanup"));
+    }
+
+    #[test]
+    fn default_path_never_empties_a_dictation_of_only_a_hesitation() {
+        let result = apply_dictation_pipeline(default_path_input("Um."));
+        assert!(!result.text.trim().is_empty());
+    }
+
     #[test]
     fn pipeline_applies_dictionary_before_scratch_that_replacement() {
         let result = apply_dictation_pipeline(DictationPipelineInput {
@@ -1040,6 +1115,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("sam is ready"),
             command_mode_enabled: true,
@@ -1063,6 +1139,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
             command_mode_enabled: true,
@@ -1091,6 +1168,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("前のテキスト"),
             command_mode_enabled: true,
@@ -1122,6 +1200,7 @@ mod tests {
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             numbers_as_digits: false,
             recent_inserted_text: Some("ship it tomorrow morning"),
             command_mode_enabled: true,
@@ -1236,6 +1315,7 @@ mod fixture_evals {
             app_target: None,
             mode_preset,
             smart_formatting_enabled: true,
+            clean_disfluencies: false,
             numbers_as_digits,
             recent_inserted_text: None,
             command_mode_enabled: true,
@@ -1330,6 +1410,7 @@ mod fixture_evals {
                 app_target,
                 mode_preset: "voice",
                 smart_formatting_enabled: false,
+                clean_disfluencies: false,
                 numbers_as_digits: true,
                 recent_inserted_text: None,
                 command_mode_enabled: true,

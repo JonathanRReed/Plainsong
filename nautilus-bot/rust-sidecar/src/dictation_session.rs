@@ -1656,6 +1656,9 @@ pub(crate) async fn stop_dictation_for_sidecar(
                 app_target: app_target.as_deref(),
                 mode_preset: effective_mode.as_str(),
                 smart_formatting_enabled: true,
+                clean_disfluencies: settings_snapshot
+                    .transcription
+                    .dictation_remove_disfluencies,
                 numbers_as_digits: resolve_dictation_numbers_as_digits(&settings_snapshot),
                 recent_inserted_text,
                 command_mode_enabled: settings_snapshot

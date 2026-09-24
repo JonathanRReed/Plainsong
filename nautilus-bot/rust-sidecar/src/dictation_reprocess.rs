@@ -347,6 +347,7 @@ pub(crate) async fn reprocess_dictation_impl(
             app_target: app_target.as_deref(),
             mode_preset: base_preset.as_str(),
             smart_formatting_enabled: true,
+            clean_disfluencies: settings_snapshot.transcription.dictation_remove_disfluencies,
             recent_inserted_text: None,
             command_mode_enabled: false,
             destination_category,

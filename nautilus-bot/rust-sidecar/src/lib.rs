@@ -64,6 +64,7 @@ mod db;
 mod diarization;
 mod dictation_commands;
 pub mod dictation_correction_capture;
+mod dictation_cleanup;
 mod dictation_dictionary_csv;
 mod dictation_fidelity;
 mod dictation_live_preview;

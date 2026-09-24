@@ -2675,6 +2675,22 @@ export function SettingsView() {
           <>
             <SettingsSwitch
               className="py-0"
+              label="Remove filler words"
+              description="Drops um and uh, repeated words like “the the”, and corrections like “Tuesday, no wait, Wednesday” on this Mac. Anything unclear is left as you said it."
+              checked={settings.transcription.dictationRemoveDisfluencies ?? true}
+              onCheckedChange={(checked) =>
+                void updateSettings({
+                  ...settings,
+                  transcription: {
+                    ...settings.transcription,
+                    dictationRemoveDisfluencies: checked,
+                  },
+                })
+              }
+            />
+
+            <SettingsSwitch
+              className="py-0"
               label="Smart Format"
               description="Tidy up punctuation, grammar, and layout before the text is pasted, using the AI service set in AI & Keys."
               checked={settings.transcription.dictationAiFormatting}

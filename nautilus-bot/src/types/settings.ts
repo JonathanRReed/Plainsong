@@ -296,6 +296,13 @@ export interface TranscriptionSettings {
   dictationLivePreviewEngine?: "auto" | "redecode" | "streaming";
   dictationAiFormatting: boolean;
   /**
+   * Remove um/uh, stuttered words ("the the") and like-for-like spoken
+   * corrections ("Tuesday, no wait, Wednesday") on this Mac before insert.
+   * Optional so older settings payloads still type-check; the sidecar
+   * defaults it to true. Mirrors `dictation_remove_disfluencies`.
+   */
+  dictationRemoveDisfluencies?: boolean;
+  /**
    * Translate-to-English for the built-in modes (a saved custom mode carries
    * its own `translateToEnglish`). Mirrors `dictation_translate_to_english`
    * in rust-sidecar/src/settings.rs. How it runs depends on the model: see

@@ -648,6 +648,7 @@ async fn run_fixture_benchmark(
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: false,
+            clean_disfluencies: false,
             // The "voice" preset ships with numbers as digits off, so the
             // baseline measures what that preset actually runs.
             numbers_as_digits: false,
@@ -665,6 +666,7 @@ async fn run_fixture_benchmark(
             app_target: None,
             mode_preset: "voice",
             smart_formatting_enabled: true,
+            clean_disfluencies: true,
             // Formatting on measures the full local text pipeline, inverse
             // text normalization included.
             numbers_as_digits: true,

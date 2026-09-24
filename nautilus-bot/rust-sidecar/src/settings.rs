@@ -382,6 +382,10 @@ pub struct TranscriptionSettings {
     pub dictation_live_preview_engine: String,
     /// Dictation: Smart Format, LLM polishes text before insert
     pub dictation_ai_formatting: bool,
+    /// Dictation: remove um/uh, stuttered function words ("the the") and
+    /// like-for-like spoken corrections ("Tuesday, no wait, Wednesday") on
+    /// this Mac before insert. On by default; see `dictation_cleanup.rs`.
+    pub dictation_remove_disfluencies: bool,
     /// Dictation: translate whatever was spoken into English before the text
     /// is formatted and inserted. This is the built-in modes' setting; a saved
     /// custom mode carries its own `translate_to_english` flag instead. How
@@ -604,6 +608,7 @@ impl Default for TranscriptionSettings {
             dictation_live_preview_enabled: true,
             dictation_live_preview_engine: "auto".to_string(),
             dictation_ai_formatting: false,
+            dictation_remove_disfluencies: true,
             dictation_translate_to_english: false,
             dictation_mode_preset: "voice".to_string(),
             dictation_numbers_as_digits: HashMap::new(),
