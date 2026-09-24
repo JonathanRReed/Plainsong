@@ -7494,15 +7494,23 @@ mod tests {
             ("d-today-2", now),
             ("d-earlier", now - chrono::Duration::days(3)),
         ] {
-            let (recording, transcript, history) =
-                dictation_fixture(id, created_at, "Four words right here.", "four words right here");
+            let (recording, transcript, history) = dictation_fixture(
+                id,
+                created_at,
+                "Four words right here.",
+                "four words right here",
+            );
             db.create_dictation_history_entry(&recording, &transcript, &history, None)
                 .expect("save dictation");
         }
         let totals = db.get_dictation_insight_totals().expect("totals");
         assert_eq!(totals.dictated_words, 12);
         assert_eq!(totals.spoken_seconds, 12, "three 4 s fixtures");
-        assert_eq!(totals.active_dates.len(), 2, "two distinct days, newest first");
+        assert_eq!(
+            totals.active_dates.len(),
+            2,
+            "two distinct days, newest first"
+        );
         assert!(totals.active_dates[0] > totals.active_dates[1]);
     }
 
