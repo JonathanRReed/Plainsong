@@ -205,7 +205,7 @@ export function DictationCaptureHero({
           ) : isBusy ? (
             <Button variant="outline" size="lg" disabled>
               <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-              {phase === "delivering" ? "Inserting..." : "Working..."}
+              {phase === "delivering" ? "Inserting…" : "Working…"}
             </Button>
           ) : isUnavailable ? (
             <Button

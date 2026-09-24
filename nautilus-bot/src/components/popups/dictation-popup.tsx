@@ -62,6 +62,7 @@ import type {
   DictationProgressPlan,
 } from "@/lib/dictation-progress";
 import { describePillStatus } from "@/lib/dictation-hud-status";
+import { SLOW_STAGE_LABEL, slowStageThresholdMs } from "@/lib/dictation-slow-stage";
 import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = DictationPopupDisplayMode;
@@ -1085,12 +1086,7 @@ export function DictationPopup() {
   const hudState = resolveHudState(phase);
   const finishStage: DictationProcessingStage =
     phase === "stopping" ? "stopping" : processingStage;
-  const finishStageLabel =
-    finishStage === "stopping"
-      ? "Finishing"
-      : finishStage === "polishing"
-        ? "Polishing"
-        : "Transcribing";
+  const stageKeyForSlow = `${lastSessionIdRef.current ?? ""}:${finishStage}`;
   const stageKey = `${lastSessionIdRef.current ?? ""}:${
     phase === "stopping" || phase === "transcribing" ? finishStage : phase
   }`;
@@ -1099,6 +1095,33 @@ export function DictationPopup() {
     stageStartRef.current = { key: stageKey, at: performance.now() };
   }
   const stageStartedAt = stageStartRef.current.at;
+  // "Still working": once the current processing stage runs well past what
+  // this Mac usually takes (dictation-slow-stage.ts), the label says so.
+  const processingPhase = phase === "stopping" || phase === "transcribing";
+  const stageExpectedMs =
+    finishStage === "polishing"
+      ? progressPlan.expectedPolishMs
+      : finishStage === "transcribing"
+        ? progressPlan.expectedTranscribeMs
+        : null;
+  const [slowStageKey, setSlowStageKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!processingPhase) return;
+    const elapsed = performance.now() - stageStartedAt;
+    const timer = globalThis.setTimeout(
+      () => setSlowStageKey(stageKeyForSlow),
+      Math.max(0, slowStageThresholdMs(stageExpectedMs) - elapsed),
+    );
+    return () => globalThis.clearTimeout(timer);
+  }, [processingPhase, stageKeyForSlow, stageExpectedMs, stageStartedAt]);
+  const slowStage = processingPhase && slowStageKey === stageKeyForSlow;
+  const finishStageLabel = slowStage
+    ? SLOW_STAGE_LABEL
+    : finishStage === "stopping"
+      ? "Finishing"
+      : finishStage === "polishing"
+        ? "Polishing"
+        : "Transcribing";
   const captureControlHint = formatCaptureControlHint(
     hudState,
     dictationShortcut,
@@ -1281,7 +1304,7 @@ export function DictationPopup() {
   // Fixed width with fixed slots (glyph, trace, label, action), so the pill
   // never jitters as its label changes between states.
   if (displayMode === "minimal") {
-    const pill = describePillStatus({ phase, stage: finishStage, outcome, message });
+    const pill = describePillStatus({ phase, stage: finishStage, outcome, message, slow: slowStage });
     const pillNeume =
       pill.tone === "live"
         ? "neume neume-lit neume-live"

@@ -43,6 +43,15 @@ describe("dictation pill status", () => {
     ]);
   });
 
+  it("says a long-running stage is still working, and keeps the bar", () => {
+    const slow = describePillStatus({ phase: "transcribing", stage: "polishing", outcome: null, message: null, slow: true });
+    expect(slow.label).toBe("Still working");
+    expect(slow.detail).toBe("Taking longer than usual. Your words are safe.");
+    expect(slow.showBar).toBe(true);
+    // A slow flag outside processing changes nothing.
+    expect(describePillStatus({ phase: "recording", stage: "transcribing", outcome: null, message: null, slow: true }).label).toBe("Listening");
+  });
+
   it("turns an error message into a short cause", () => {
     expect(shortErrorLabel("Microphone access is off. Turn it on in System Settings.")).toBe("Mic blocked");
     expect(shortErrorLabel("Plainsong needs Accessibility access to insert text.")).toBe("Needs access");

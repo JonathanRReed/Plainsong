@@ -7,6 +7,7 @@
  * message stays available as the pill's tooltip and accessible name.
  */
 import type { DictationProcessingStage } from "@/lib/dictation-progress";
+import { SLOW_STAGE_DETAIL, SLOW_STAGE_LABEL } from "@/lib/dictation-slow-stage";
 
 export type HudTone = "live" | "settling" | "success" | "quiet" | "alert";
 
@@ -46,8 +47,10 @@ export function describePillStatus(input: {
   stage: DictationProcessingStage;
   outcome: string | null;
   message: string | null;
+  /** The current processing stage has run well past its expected time. */
+  slow?: boolean;
 }): PillStatus {
-  const { phase, stage, outcome, message } = input;
+  const { phase, stage, outcome, message, slow } = input;
   switch (phase) {
     case "preparing":
       return { label: "Starting", tone: "quiet", showBar: false, barComplete: false, detail: null };
@@ -58,11 +61,17 @@ export function describePillStatus(input: {
     case "stopping":
     case "transcribing":
       return {
-        label: stage === "stopping" ? "Finishing" : stage === "polishing" ? "Polishing" : "Transcribing",
+        label: slow
+          ? SLOW_STAGE_LABEL
+          : stage === "stopping"
+            ? "Finishing"
+            : stage === "polishing"
+              ? "Polishing"
+              : "Transcribing",
         tone: "settling",
         showBar: true,
         barComplete: false,
-        detail: null,
+        detail: slow ? SLOW_STAGE_DETAIL : null,
       };
     case "delivering":
       return { label: "Inserting", tone: "settling", showBar: true, barComplete: false, detail: null };
