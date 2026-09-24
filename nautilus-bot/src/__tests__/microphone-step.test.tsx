@@ -46,6 +46,7 @@ vi.mock("@/lib/backend/recordings", () => ({
 
 const stopTrack = vi.fn();
 const getUserMedia = vi.fn();
+const enumerateDevices = vi.fn();
 
 /** An analyser that always reads a steady tone at `amplitude`. */
 function installFakeAudio(amplitude: number) {
@@ -75,14 +76,13 @@ beforeEach(() => {
   stopTrack.mockReset();
   getUserMedia.mockReset();
   getUserMedia.mockResolvedValue({
-    getTracks: () => [{ stop: stopTrack }],
+    getTracks: () => [{ stop: stopTrack, addEventListener: () => {} }],
   });
+  enumerateDevices.mockReset();
+  enumerateDevices.mockResolvedValue([]);
   vi.stubGlobal("navigator", {
     ...navigator,
-    mediaDevices: {
-      getUserMedia,
-      enumerateDevices: vi.fn(async () => []),
-    },
+    mediaDevices: { getUserMedia, enumerateDevices },
   });
   let clock = 0;
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
@@ -101,8 +101,8 @@ afterEach(() => {
 
 describe("MicrophoneStep", () => {
   it("lists the microphones and says so once it hears the reader", async () => {
-    const onHeard = vi.fn();
-    render(<MicrophoneStep onHeard={onHeard} onOpenMicrophoneSettings={vi.fn()} />);
+    const onHeardChange = vi.fn();
+    render(<MicrophoneStep onHeardChange={onHeardChange} onOpenMicrophoneSettings={vi.fn()} />);
 
     const picker = await screen.findByLabelText("Microphone");
     await waitFor(() => expect(picker).toBeEnabled());
@@ -116,11 +116,14 @@ describe("MicrophoneStep", () => {
     expect(screen.getByRole("meter", { name: "Microphone level" })).toBeInTheDocument();
 
     expect(await screen.findByText("We hear you")).toBeInTheDocument();
-    expect(onHeard).toHaveBeenCalledWith("MacBook Pro Microphone");
+    expect(onHeardChange).toHaveBeenLastCalledWith({ deviceName: "MacBook Pro Microphone" });
   });
 
   it("saves the chosen microphone where Settings keeps it and reopens on it", async () => {
-    render(<MicrophoneStep onHeard={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    enumerateDevices.mockResolvedValue([
+      { deviceId: "browser-podcast", kind: "audioinput", label: "Podcast Mic (USB)" },
+    ]);
+    render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
 
     const picker = await screen.findByLabelText("Microphone");
     await waitFor(() => expect(picker).toBeEnabled());
@@ -138,11 +141,56 @@ describe("MicrophoneStep", () => {
       });
     });
     expect(getUserMedia).toHaveBeenLastCalledWith({
-      audio: { deviceId: { ideal: "usb-podcast-mic" } },
+      audio: { deviceId: { exact: "browser-podcast" } },
       video: false,
     });
+    expect(screen.queryByText(/can't be checked here/)).not.toBeInTheDocument();
     // The first stream was released before the second one opened.
     expect(stopTrack).toHaveBeenCalled();
+  });
+
+  it("takes back a heard check when the reader switches to a silent microphone", async () => {
+    enumerateDevices.mockResolvedValue([
+      { deviceId: "browser-podcast", kind: "audioinput", label: "Podcast Mic (USB)" },
+    ]);
+    const onHeardChange = vi.fn();
+    render(<MicrophoneStep onHeardChange={onHeardChange} onOpenMicrophoneSettings={vi.fn()} />);
+    expect(await screen.findByText("We hear you")).toBeInTheDocument();
+    expect(onHeardChange).toHaveBeenLastCalledWith({ deviceName: "MacBook Pro Microphone" });
+
+    installFakeAudio(0);
+    const picker = screen.getByLabelText("Microphone");
+    await act(async () => {
+      fireEvent.click(picker);
+      const listbox = await screen.findByRole("listbox");
+      fireEvent.click(within(listbox).getByRole("option", { name: "Podcast Mic" }));
+    });
+
+    await waitFor(() => expect(onHeardChange).toHaveBeenLastCalledWith(null));
+    expect(await screen.findByText("Using Podcast Mic.")).toBeInTheDocument();
+    expect(screen.queryByText("We hear you")).not.toBeInTheDocument();
+  });
+
+  it("names the default, not the chosen microphone, when it can only open the default", async () => {
+    const onHeardChange = vi.fn();
+    render(<MicrophoneStep onHeardChange={onHeardChange} onOpenMicrophoneSettings={vi.fn()} />);
+    await screen.findByText("We hear you");
+
+    const picker = screen.getByLabelText("Microphone");
+    await act(async () => {
+      fireEvent.click(picker);
+      const listbox = await screen.findByRole("listbox");
+      fireEvent.click(within(listbox).getByRole("option", { name: "Podcast Mic" }));
+    });
+
+    expect(getUserMedia).toHaveBeenLastCalledWith({ audio: true, video: false });
+    expect(
+      await screen.findByText(/Podcast Mic can't be checked here, so this is the system default/),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(onHeardChange).toHaveBeenLastCalledWith({ deviceName: "MacBook Pro Microphone" }),
+    );
+    expect(onHeardChange).not.toHaveBeenCalledWith({ deviceName: "Podcast Mic" });
   });
 
   it("writes the dictation-only microphone when that override is on", async () => {
@@ -153,7 +201,7 @@ describe("MicrophoneStep", () => {
         dictationInputDevice: null,
       },
     };
-    render(<MicrophoneStep onHeard={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
 
     const picker = await screen.findByLabelText("Microphone");
     await waitFor(() => expect(picker).toBeEnabled());
@@ -177,7 +225,7 @@ describe("MicrophoneStep", () => {
     getUserMedia.mockRejectedValue(new DOMException("failed", errorName));
     const onOpenMicrophoneSettings = vi.fn();
     render(
-      <MicrophoneStep onHeard={vi.fn()} onOpenMicrophoneSettings={onOpenMicrophoneSettings} />,
+      <MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={onOpenMicrophoneSettings} />,
     );
 
     expect(await screen.findByText(title)).toBeInTheDocument();
@@ -195,7 +243,7 @@ describe("MicrophoneStep", () => {
   it("releases the microphone when the reader leaves the step", async () => {
     installFakeAudio(0);
     const { unmount } = render(
-      <MicrophoneStep onHeard={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />,
+      <MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />,
     );
     await screen.findByText("Listening");
     unmount();

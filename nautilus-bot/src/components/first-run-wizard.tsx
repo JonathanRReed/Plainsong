@@ -167,6 +167,11 @@ const POWER_MODEL_OPTIONS: Array<{
   },
 ];
 
+/** The option for a model id, or the recommended default for an unknown one. */
+function powerModelOption(modelId: string | undefined): (typeof POWER_MODEL_OPTIONS)[number] {
+  return POWER_MODEL_OPTIONS.find((candidate) => candidate.id === modelId) ?? POWER_MODEL_OPTIONS[0];
+}
+
 function powerModelSize(option: (typeof POWER_MODEL_OPTIONS)[number]): string {
   return formatModelSize(
     getAsrModelCapability(option.providerType, option.id)?.sizeMib ?? 0,
@@ -402,6 +407,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // Start on the fresh-install default, then keep model actions gated until
   // persisted settings have had a chance to restore an existing selection.
   const [selectedModelId, setSelectedModelId] = useState("parakeet-tdt-0.6b-v3");
+  const selectedModelOption = powerModelOption(selectedModelId);
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
   const [meetingModelState, setMeetingModelState] = useState<
@@ -430,7 +436,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // Hold-to-talk needs the native key helper to see the key go up. null is
   // "not checked", which never hides the option.
   const [holdToTalkAvailable, setHoldToTalkAvailable] = useState<boolean | null>(null);
-  // Set by the microphone step once the reader has been heard.
+  // The microphone the reader was heard on, from the microphone step; cleared
+  // when that step starts over on another microphone.
   const [micHeard, setMicHeard] = useState<{ deviceName: string | null } | null>(null);
   const [scratchState, setScratchState] =
     useState<ScratchDictationState>("idle");
@@ -963,8 +970,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     if (modelSelectionHydration !== "ready") {
       return false;
     }
-    const option =
-      POWER_MODEL_OPTIONS.find((candidate) => candidate.id === modelId) ?? POWER_MODEL_OPTIONS[0];
+    const option = powerModelOption(modelId);
     modelInteractionStartedRef.current = true;
     setModelSkipped(false);
     setModelState("downloading");
@@ -973,20 +979,16 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     downloadingProviderTypeRef.current = option.providerType;
     try {
       await downloadAsrModels(option.providerType, option.id);
-      if (!mountedRef.current) {
-        return false;
-      }
       // Read settings *after* the download, never before it. save_settings is
       // a whole-struct replace, so a snapshot taken before a multi-minute
       // fetch would roll back everything written while it ran -- the hotkey
       // this wizard just taught the user, the auto-request-permissions
       // toggle, the meeting storage/retention answers, the repaired meeting
       // route. Only the ASR fields this step actually owns are mutated on the
-      // fresh copy.
+      // fresh copy. It saves even if the wizard has closed meanwhile: Ready
+      // lets the reader finish while this runs, and the finished model is
+      // only any use once it is the dictation route.
       const settings = await getSettings();
-      if (!mountedRef.current) {
-        return false;
-      }
       settings.transcription.useSharedAsrSelection = false;
       settings.transcription.defaultProvider = option.providerType;
       settings.transcription.selectedModelId = option.id;
@@ -1473,7 +1475,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
           >
             {step === "microphone" ? (
               <MicrophoneStep
-                onHeard={(deviceName) => setMicHeard({ deviceName })}
+                onHeardChange={setMicHeard}
                 onOpenMicrophoneSettings={() =>
                   void openMicrophoneSettingsFromWizard()
                 }
@@ -1495,7 +1497,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 modelState={modelState}
                 modelError={modelError}
                 modelPercent={downloadPercent}
-                onDownloadModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
+                modelSize={powerModelSize(selectedModelOption)}
+                onDownloadModel={() => void startModelDownload(selectedModelId)}
                 scratchState={scratchState}
                 scratchText={scratchText}
                 scratchError={scratchError}
@@ -1531,7 +1534,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 modelState={modelState}
                 modelError={modelError}
                 modelSkipped={modelSkipped}
-                onRetryModel={() => void startModelDownload("parakeet-tdt-0.6b-v3")}
+                onRetryModel={() => void startModelDownload(selectedModelId)}
                 microphoneReady={
                   perms?.microphonePermissionReady ?? perms?.microphoneReady
                 }
@@ -1735,15 +1738,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               (step === "dictation-model" && modelSelectionHydration !== "ready") ||
               (step === "meeting-setup" && meetingModelState === "downloading") ||
               // Only block Continue for a download in progress while the
-              // user is still on a visible, foreground model surface.
+              // user is still on a model surface they have to wait on. Ready
+              // never blocks: it is the last step and has no Skip, so a slow
+              // or failed download would otherwise hold the reader in the
+              // modal. The download carries on, and Dictation retries it.
               (modelState === "downloading" &&
-                (step === "dictation-model" ||
-                  step === "try-dictation" ||
-                  step === "ready")) ||
-              ((modelState === "idle" || modelState === "error") &&
-                step === "ready" &&
-                !modelSkipped &&
-                scratchState !== "complete") ||
+                (step === "dictation-model" || step === "try-dictation")) ||
               meetingSetupLoading
             }
           >
@@ -1769,6 +1769,7 @@ function TryDictationStep({
   modelState,
   modelError,
   modelPercent,
+  modelSize,
   onDownloadModel,
   scratchState,
   scratchText,
@@ -1788,6 +1789,7 @@ function TryDictationStep({
   modelState: "idle" | "downloading" | "done" | "error";
   modelError: string | null;
   modelPercent: number | null;
+  modelSize: string;
   onDownloadModel(): void;
   scratchState: ScratchDictationState;
   scratchText: string;
@@ -1899,9 +1901,8 @@ function TryDictationStep({
                 <div>
                   <p className="text-sm font-medium">Speech model</p>
                   <p className="text-sm text-muted-foreground">
-                    The test needs the recommended model first: a{" "}
-                    {powerModelSize(POWER_MODEL_OPTIONS[0])} download that runs
-                    on this Mac.
+                    The test needs your speech model first: a {modelSize}{" "}
+                    download that runs on this Mac.
                   </p>
                 </div>
               </div>
@@ -2297,8 +2298,8 @@ function ReadyStep({
               detail: modelSkipped
                 ? "The download was skipped after it failed. Download the model here or from Dictation before using the shortcut."
                 : modelError
-                  ? `Model download failed: ${modelError}`
-                  : "The model download needs another try.",
+                  ? `Model download failed: ${modelError.replace(/\.$/, "")}. Try again here or later from Dictation.`
+                  : "The model download needs another try, here or later from Dictation.",
               tone: "attention" as const,
             }
           : modelState === "done"
@@ -2309,7 +2310,7 @@ function ReadyStep({
             : {
                 detail: modelSkipped
                   ? "The model download was skipped. Download it here or from Dictation before using the shortcut."
-                  : "The model has not been downloaded yet.",
+                  : "The model has not been downloaded yet. Download it here or later from Dictation.",
                 tone: "attention" as const,
               };
   const modeSummary =

@@ -640,6 +640,108 @@ describe("FirstRunWizard", () => {
     expect(downloadAsrModels).not.toHaveBeenCalled();
   });
 
+  /** Skip the model, then walk every step through to the closing summary. */
+  async function reachReadyAfterSkippingModel() {
+    await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/^continue$/i);
+    expect(
+      await screen.findByRole("heading", { name: /meeting setup/i }),
+    ).toBeInTheDocument();
+    await clickPrimary(/download meeting model/i);
+    await passMeetingNotesStep();
+    expect(
+      await screen.findByRole("heading", { name: /^ready$/i }),
+    ).toBeInTheDocument();
+  }
+
+  it("lets the reader finish on Ready while the model downloads, and keeps their model", async () => {
+    const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    const download = deferred<void>();
+    downloadAsrModels.mockImplementationOnce(() => download.promise);
+
+    // Apple Speech has no row on the model step, so it opens on base.en; a
+    // retry has to fetch that, not the Parakeet default.
+    const { unmount } = render(<FirstRunWizard onComplete={onComplete} />);
+    await reachReadyAfterSkippingModel();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /download local model/i }));
+    });
+    expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
+    expect(await screen.findByText(/still downloading/i)).toBeInTheDocument();
+
+    await clickPrimary(/start using plainsong/i);
+    expect(onComplete).toHaveBeenCalledWith({
+      markOnboardingComplete: true,
+      meetingsCompleted: true,
+      deferred: false,
+    });
+
+    // Finishing closes the wizard; the download still becomes the route.
+    unmount();
+    await act(async () => {
+      download.resolve();
+    });
+    await waitFor(() => {
+      expect(currentSettings.transcription.dictationProvider).toBe("whisper");
+    });
+    expect(currentSettings.transcription.dictationModelId).toBe("base.en");
+    expect(downloadAsrModels).not.toHaveBeenCalledWith("parakeet", expect.anything());
+  });
+
+  it("lets the reader finish on Ready after a failed download", async () => {
+    const onComplete = vi.fn();
+    const asrBackend = await import("@/lib/backend/asr");
+    vi.mocked(asrBackend.downloadAsrModels).mockRejectedValueOnce(
+      new Error("Network unavailable"),
+    );
+
+    render(<FirstRunWizard onComplete={onComplete} />);
+    await reachReadyAfterSkippingModel();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /download local model/i }));
+    });
+    expect(
+      await screen.findByText(/model download failed: network unavailable\. try again/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /retry local model download/i }),
+    ).toBeInTheDocument();
+
+    await clickPrimary(/start using plainsong/i);
+    expect(onComplete).toHaveBeenCalledWith({
+      markOnboardingComplete: true,
+      meetingsCompleted: true,
+      deferred: false,
+    });
+  });
+
+  it("downloads the reader's selected model from the practice step", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);
+    currentSettings.transcription.dictationProvider = "moonshine";
+    currentSettings.transcription.dictationModelId = "moonshine-base";
+
+    render(<FirstRunWizard onComplete={vi.fn()} />);
+    await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
+    expect(
+      await screen.findByRole("heading", { name: /try dictation here/i }),
+    ).toBeInTheDocument();
+    await clickPrimary(/^download$/i);
+
+    expect(downloadAsrModels).toHaveBeenCalledWith("moonshine", "moonshine-base");
+    await waitFor(() => {
+      expect(currentSettings.transcription.dictationProvider).toBe("moonshine");
+    });
+    expect(currentSettings.transcription.dictationModelId).toBe("moonshine-base");
+  });
+
   it("downloads the selected model before the primary action advances", async () => {
     const asrBackend = await import("@/lib/backend/asr");
     const downloadAsrModels = vi.mocked(asrBackend.downloadAsrModels);

@@ -57,16 +57,19 @@ function toPreference(device: AudioInputDeviceInfo | undefined): DevicePreferenc
  * device is released as soon as the reader leaves this step.
  */
 export function MicrophoneStep({
-  onHeard,
+  onHeardChange,
   onOpenMicrophoneSettings,
 }: {
-  /** Called once the reader has been heard, with the microphone's name. */
-  onHeard(deviceName: string | null): void;
+  /**
+   * Called with the microphone the reader was heard on, and with null when
+   * the check starts over on another one.
+   */
+  onHeardChange(heardOn: { deviceName: string | null } | null): void;
   onOpenMicrophoneSettings(): void;
 }) {
   const pickerId = useId();
   const mic = useMicLevel();
-  const { start, state, level, heard, error } = mic;
+  const { start, state, level, heard, error, usingSystemDefault } = mic;
   const [devices, setDevices] = useState<AudioInputDeviceInfo[]>([]);
   const [selected, setSelected] = useState<DevicePreference>(null);
   const [loaded, setLoaded] = useState(false);
@@ -106,13 +109,20 @@ export function MicrophoneStep({
   }, [start]);
 
   const defaultDevice = devices.find((device) => device.isDefault);
-  const listeningName = selected?.deviceName ?? defaultDevice?.deviceName ?? null;
+  // The microphone the meter is really reading, which is the default when
+  // the browser could not open the chosen one.
+  const listeningName =
+    (usingSystemDefault ? null : selected?.deviceName) ?? defaultDevice?.deviceName ?? null;
+  const fallbackNote =
+    usingSystemDefault && selected
+      ? `${selected.deviceName} can't be checked here, so this is the system default. Dictation still uses ${selected.deviceName}.`
+      : null;
 
   useEffect(() => {
-    if (heard) {
-      onHeard(listeningName);
-    }
-    // Report the device the reader was heard on, once, when it happens.
+    // Every start clears `heard`, so switching microphones takes back a
+    // "heard you" that belonged to the previous one.
+    onHeardChange(heard ? { deviceName: listeningName } : null);
+    // Report on the transition only; the name is read as it stands then.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [heard]);
 
@@ -188,6 +198,9 @@ export function MicrophoneStep({
                   ? `${listeningName} is working. Continue when you are ready.`
                   : "Your microphone is working. Continue when you are ready."}
               </p>
+              {fallbackNote ? (
+                <p className="mt-1 max-w-md text-xs text-muted-foreground">{fallbackNote}</p>
+              ) : null}
             </>
           ) : state === "live" ? (
             <>
@@ -199,6 +212,9 @@ export function MicrophoneStep({
                     ? `Using ${listeningName}.`
                     : "Using the system default microphone."}
               </p>
+              {fallbackNote ? (
+                <p className="mt-1 max-w-md text-xs text-muted-foreground">{fallbackNote}</p>
+              ) : null}
             </>
           ) : (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">

@@ -15,7 +15,11 @@ import {
 } from "react";
 import { listen } from "@/lib/electron";
 import { scheduleAfterPaint } from "@/lib/post-paint";
-import { isPrimaryScroll, restoreViewScroll } from "@/lib/view-scroll-memory";
+import {
+  readViewScroll,
+  restoreViewScroll,
+  type ViewScrollPosition,
+} from "@/lib/view-scroll-memory";
 import { useSidebarCollapsed } from "@/hooks/use-sidebar-collapsed";
 import {
   normalizeCallCaptureRequest,
@@ -283,7 +287,7 @@ function AppShell() {
   const navigationFocusReadyRef = useRef(false);
   const interactiveMarkedRef = useRef(false);
   const activeViewRef = useRef(activeView);
-  const viewScrollRef = useRef(new Map<ViewId, number>());
+  const viewScrollRef = useRef(new Map<ViewId, ViewScrollPosition>());
 
   // A transition keeps the current view on screen until the next one is
   // ready, instead of blanking the workspace to a loading line.
@@ -349,8 +353,9 @@ function AppShell() {
     const main = mainRef.current;
     if (!main) return;
     const handleScroll = (event: Event) => {
-      if (isPrimaryScroll(main, event.target)) {
-        viewScrollRef.current.set(activeViewRef.current, event.target.scrollTop);
+      const position = readViewScroll(main, event.target);
+      if (position) {
+        viewScrollRef.current.set(activeViewRef.current, position);
       }
     };
     main.addEventListener("scroll", handleScroll, { capture: true, passive: true });
@@ -360,9 +365,9 @@ function AppShell() {
   useLayoutEffect(() => {
     activeViewRef.current = activeView;
     const main = mainRef.current;
-    const top = viewScrollRef.current.get(activeView);
-    if (!main || !top) return;
-    return restoreViewScroll(main, top);
+    const position = viewScrollRef.current.get(activeView);
+    if (!main || !position?.top) return;
+    return restoreViewScroll(main, position);
   }, [activeView]);
 
   // The reader closed setup and something is still missing — a model download

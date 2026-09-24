@@ -3127,6 +3127,13 @@ export function SettingsView() {
 
               {micTestActive && (
                 <>
+                  {micTest.usingSystemDefault ? (
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      The chosen microphone can&apos;t be checked here, so
+                      this is the system default. Dictation still uses the
+                      one you chose.
+                    </p>
+                  ) : null}
                   <div className="mt-4 space-y-1">
                     <div className="flex items-center justify-between text-sm text-muted-foreground">
                       <span>Level</span>

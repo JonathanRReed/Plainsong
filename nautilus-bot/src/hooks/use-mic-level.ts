@@ -98,12 +98,12 @@ export type MicDevicePreference = {
 };
 
 /**
- * Find the browser's id for a microphone the settings chose.
+ * Find the browser's id for a microphone the settings chose, or null when the
+ * browser cannot name it.
  *
- * Settings store the Core Audio device id, which the browser does not share.
- * Once the reader has granted access the browser exposes device labels, so
- * the name is matched instead; before that, the stored id is passed as a
- * hint and the system default answers.
+ * Settings store the Core Audio device id, which the browser does not share,
+ * so the name is matched against device labels. Labels only appear once the
+ * reader has granted access, so before that nothing matches.
  */
 async function resolveCaptureDeviceId(
   preference: MicDevicePreference | null | undefined,
@@ -121,10 +121,24 @@ async function resolveCaptureDeviceId(
       (name
         ? inputs.find((device) => device.label.trim().toLowerCase().startsWith(name))
         : undefined);
-    return match?.deviceId ?? preference.deviceId;
+    return match?.deviceId ?? null;
   } catch {
-    return preference.deviceId;
+    return null;
   }
+}
+
+function openCapture(deviceId: string | null): Promise<MediaStream> {
+  // `exact`, never `ideal`: Chromium treats an ideal deviceId as a
+  // suggestion and quietly opens the default, and the meter would then
+  // measure a microphone other than the one on screen.
+  return navigator.mediaDevices.getUserMedia({
+    audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+    video: false,
+  });
+}
+
+function stopStream(stream: MediaStream): void {
+  stream.getTracks().forEach((track) => track.stop());
 }
 
 export type MicLevelState = "idle" | "starting" | "live" | "error";
@@ -134,6 +148,9 @@ export function useMicLevel() {
   const [level, setLevel] = useState(0);
   const [heard, setHeard] = useState(false);
   const [error, setError] = useState<MicErrorKind | null>(null);
+  // A microphone was asked for but the browser could not name it, so the
+  // meter is reading the system default instead.
+  const [usingSystemDefault, setUsingSystemDefault] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const contextRef = useRef<AudioContext | null>(null);
@@ -169,16 +186,28 @@ export function useMicLevel() {
       setError(null);
       setLevel(0);
       setHeard(false);
+      setUsingSystemDefault(false);
       try {
-        const deviceId = await resolveCaptureDeviceId(device);
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: deviceId ? { deviceId: { ideal: deviceId } } : true,
-          video: false,
-        });
+        let deviceId = await resolveCaptureDeviceId(device);
+        let stream = await openCapture(deviceId);
         if (generation !== generationRef.current) {
-          stream.getTracks().forEach((track) => track.stop());
+          stopStream(stream);
           return;
         }
+        if (device?.deviceId && !deviceId) {
+          // On a first run the labels only appear once this open has been
+          // allowed, so look again before settling for the default.
+          deviceId = await resolveCaptureDeviceId(device);
+          if (deviceId) {
+            stopStream(stream);
+            stream = await openCapture(deviceId);
+            if (generation !== generationRef.current) {
+              stopStream(stream);
+              return;
+            }
+          }
+        }
+        setUsingSystemDefault(Boolean(device?.deviceId) && !deviceId);
         streamRef.current = stream;
         const context = new AudioContext();
         contextRef.current = context;
@@ -211,6 +240,20 @@ export function useMicLevel() {
           frameRef.current = requestAnimationFrame(tick);
         };
         frameRef.current = requestAnimationFrame(tick);
+        // Unplugging a USB or Bluetooth mic ends the track without an error;
+        // left alone the meter would sit "live" on silence.
+        for (const track of stream.getTracks()) {
+          track.addEventListener("ended", () => {
+            if (generation !== generationRef.current) {
+              return;
+            }
+            generationRef.current += 1;
+            release();
+            setLevel(0);
+            setError("no-device");
+            setState("error");
+          });
+        }
         setState("live");
       } catch (caught) {
         if (generation !== generationRef.current) {
@@ -234,5 +277,5 @@ export function useMicLevel() {
 
   const getStream = useCallback(() => streamRef.current, []);
 
-  return { state, level, heard, error, start, stop, getStream };
+  return { state, level, heard, error, usingSystemDefault, start, stop, getStream };
 }

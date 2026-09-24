@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   accumulateHeardMs,
   classifyMicError,
@@ -7,6 +8,7 @@ import {
   MIC_HEARD_LEVEL,
   micErrorMessage,
   smoothLevel,
+  useMicLevel,
 } from "@/hooks/use-mic-level";
 
 function tone(amplitude: number, length = 1024): Float32Array {
@@ -98,5 +100,132 @@ describe("classifyMicError", () => {
     expect(micErrorMessage("denied")).toMatch(/Privacy & Security > Microphone/);
     expect(micErrorMessage("no-device")).toMatch(/^No microphone found/);
     expect(micErrorMessage("busy")).toMatch(/in use by another app/);
+  });
+});
+
+describe("useMicLevel", () => {
+  type FakeTrack = { stop: ReturnType<typeof vi.fn>; end(): void };
+  let tracks: FakeTrack[];
+  const getUserMedia = vi.fn();
+  const enumerateDevices = vi.fn();
+  const cancelFrame = vi.fn();
+
+  /** A stream whose one track can be ended, as unplugging a mic does. */
+  function fakeStream() {
+    const listeners: Array<() => void> = [];
+    const track = {
+      stop: vi.fn(),
+      addEventListener: (type: string, listener: () => void) => {
+        if (type === "ended") listeners.push(listener);
+      },
+      end: () => listeners.forEach((listener) => listener()),
+    };
+    tracks.push(track);
+    return { getTracks: () => [track] };
+  }
+
+  const podcastMic = { deviceId: "usb-podcast-mic", deviceName: "Podcast Mic" };
+  const browserPodcastMic = {
+    deviceId: "browser-podcast",
+    kind: "audioinput",
+    label: "Podcast Mic (USB)",
+  };
+
+  beforeEach(() => {
+    tracks = [];
+    getUserMedia.mockReset();
+    getUserMedia.mockImplementation(async () => fakeStream());
+    enumerateDevices.mockReset();
+    enumerateDevices.mockResolvedValue([]);
+    cancelFrame.mockReset();
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      mediaDevices: { getUserMedia, enumerateDevices },
+    });
+    vi.stubGlobal(
+      "AudioContext",
+      class {
+        createAnalyser() {
+          return { fftSize: 1024, getFloatTimeDomainData: () => {} };
+        }
+        createMediaStreamSource() {
+          return { connect: () => {} };
+        }
+        close() {
+          return Promise.resolve();
+        }
+      },
+    );
+    vi.stubGlobal("requestAnimationFrame", () => 1);
+    vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("opens the chosen microphone exactly once the browser can name it", async () => {
+    enumerateDevices.mockResolvedValue([browserPodcastMic]);
+    const { result } = renderHook(() => useMicLevel());
+
+    await act(() => result.current.start(podcastMic));
+
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: { deviceId: { exact: "browser-podcast" } },
+      video: false,
+    });
+    expect(result.current.state).toBe("live");
+    expect(result.current.usingSystemDefault).toBe(false);
+  });
+
+  it("says it is reading the system default when the chosen microphone has no match", async () => {
+    const { result } = renderHook(() => useMicLevel());
+
+    await act(() => result.current.start(podcastMic));
+
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true, video: false });
+    expect(result.current.state).toBe("live");
+    expect(result.current.usingSystemDefault).toBe(true);
+  });
+
+  it("looks again once the first open reveals device labels", async () => {
+    enumerateDevices
+      .mockResolvedValueOnce([{ ...browserPodcastMic, label: "" }])
+      .mockResolvedValueOnce([browserPodcastMic]);
+    const { result } = renderHook(() => useMicLevel());
+
+    await act(() => result.current.start(podcastMic));
+
+    expect(getUserMedia).toHaveBeenNthCalledWith(1, { audio: true, video: false });
+    expect(getUserMedia).toHaveBeenNthCalledWith(2, {
+      audio: { deviceId: { exact: "browser-podcast" } },
+      video: false,
+    });
+    expect(tracks[0].stop).toHaveBeenCalled();
+    expect(result.current.usingSystemDefault).toBe(false);
+  });
+
+  it("does not claim the default is a chosen microphone when none was chosen", async () => {
+    const { result } = renderHook(() => useMicLevel());
+
+    await act(() => result.current.start(null));
+
+    expect(enumerateDevices).not.toHaveBeenCalled();
+    expect(result.current.usingSystemDefault).toBe(false);
+  });
+
+  it("stops and reports a missing microphone when the device goes away mid-check", async () => {
+    const { result } = renderHook(() => useMicLevel());
+    await act(() => result.current.start(null));
+    expect(result.current.state).toBe("live");
+
+    act(() => tracks[0].end());
+
+    await waitFor(() => expect(result.current.state).toBe("error"));
+    expect(result.current.error).toBe("no-device");
+    expect(result.current.level).toBe(0);
+    expect(cancelFrame).toHaveBeenCalled();
+    expect(result.current.getStream()).toBeNull();
   });
 });
