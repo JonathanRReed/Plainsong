@@ -2798,6 +2798,38 @@ impl Database {
         Ok(())
     }
 
+    /// A short preview of each dictation's delivered text and the app it went
+    /// into, keyed by recording id, for history lists. One query for every
+    /// dictation rather than one per row; the preview is capped at 240
+    /// characters so a long dictation does not bloat the list payload.
+    pub fn get_dictation_list_previews(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (Option<String>, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.id,
+                    SUBSTR(TRIM(h.final_text), 1, 240),
+                    (SELECT NULLIF(TRIM(ia.app_target), '')
+                       FROM insertion_actions ia
+                      WHERE ia.recording_id = r.id
+                      ORDER BY ia.created_at DESC, ia.id DESC
+                      LIMIT 1)
+               FROM recordings r
+               LEFT JOIN dictation_history_text h ON h.recording_id = r.id
+              WHERE r.source_type = 'dictation'",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, Option<String>>(1)?
+                        .filter(|text| !text.is_empty()),
+                    row.get::<_, Option<String>>(2)?,
+                ),
+            ))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn get_dictation_history_text(
         &self,
         recording_id: &str,
@@ -7483,6 +7515,20 @@ mod tests {
             created_at,
         };
         (recording, transcript, history)
+    }
+
+    #[test]
+    fn dictation_list_previews_carry_the_words_and_the_app() {
+        let mut db = in_memory_db();
+        let (recording, transcript, history) =
+            dictation_fixture("d-1", Utc::now(), "Ship it today.", "ship it today");
+        db.create_dictation_history_entry(&recording, &transcript, &history, None)
+            .expect("save dictation");
+        let previews = db.get_dictation_list_previews().expect("previews");
+        assert_eq!(
+            previews.get("d-1"),
+            Some(&(Some("Ship it today.".to_string()), None))
+        );
     }
 
     #[test]

@@ -83,3 +83,16 @@ describe("dictation history groups", () => {
     expect(dictationHistoryAppName(withApp)).toBe("Slack");
   });
 });
+
+describe("list previews from the sidecar", () => {
+  it("prefers the delivered text and app the recordings list carries", () => {
+    const row = {
+      id: "d1",
+      title: "Dictation - 2026-09-24 14:37",
+      dictationPreview: "Ship it today.",
+      dictationAppTarget: "Slack",
+    } as unknown as Parameters<typeof dictationHistoryPreview>[0];
+    expect(dictationHistoryPreview(row)).toBe("Ship it today.");
+    expect(dictationHistoryAppName(row)).toBe("Slack");
+  });
+});

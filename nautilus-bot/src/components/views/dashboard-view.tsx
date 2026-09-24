@@ -525,7 +525,7 @@ export function DashboardView() {
                             >
                               <KindIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                               <div className="min-w-0 flex-1">
-                                <p className="truncate font-medium">{recording.title}</p>
+                                <p className="truncate font-medium">{(isDictation && recording.dictationPreview?.trim()) || recording.title}</p>
                                 <p className="text-xs text-muted-foreground">
                                   {isDictation ? "Dictation" : "Meeting"} · {formatShortTime(recording.createdAt)}
                                 </p>

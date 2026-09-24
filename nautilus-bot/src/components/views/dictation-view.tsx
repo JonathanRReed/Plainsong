@@ -194,7 +194,7 @@ import {
   type DictationModePreset,
   type DictationPhase,
 } from "@/features/dictation/runtime";
-import { compareStrings, formatDateTime } from "@/lib/format-locale";
+import { compareStrings, formatDateTime, formatNumber } from "@/lib/format-locale";
 
 function getSafeLocalStorage(): Pick<Storage, "getItem" | "setItem"> | null {
   if (typeof window === "undefined") {
@@ -4241,12 +4241,12 @@ export function DictationView() {
                 <DictationStats insights={dictationInsights} />
                 <div className="flex flex-wrap gap-x-6 gap-y-2 px-1 text-xs text-muted-foreground">
                   {[
-                    { label: "Last 7 days", value: String(dictationInsights.lastSevenDaysDictations) },
-                    { label: "Active days", value: String(dictationInsights.activeDays) },
-                    { label: "Average words", value: String(dictationInsights.averageWordsPerDictation) },
-                    { label: "Commands used", value: String(dictationInsights.commandsUsed) },
-                    { label: "Backtracks", value: String(dictationInsights.backtracksUsed) },
-                    { label: "Phrases expanded", value: String(dictationInsights.snippetsTriggered) },
+                    { label: "Last 7 days", value: formatNumber(Math.round(dictationInsights.lastSevenDaysDictations)) },
+                    { label: "Active days", value: formatNumber(Math.round(dictationInsights.activeDays)) },
+                    { label: "Average words", value: formatNumber(Math.round(dictationInsights.averageWordsPerDictation)) },
+                    { label: "Commands used", value: formatNumber(Math.round(dictationInsights.commandsUsed)) },
+                    { label: "Backtracks", value: formatNumber(Math.round(dictationInsights.backtracksUsed)) },
+                    { label: "Phrases expanded", value: formatNumber(Math.round(dictationInsights.snippetsTriggered)) },
                     {
                       label: "Top app",
                       value: dictationInsights.topAppTarget

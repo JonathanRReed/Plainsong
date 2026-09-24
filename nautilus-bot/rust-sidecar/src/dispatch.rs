@@ -342,7 +342,23 @@ pub async fn dispatch_command(
             let recs = db
                 .get_recordings(project_id.as_deref())
                 .map_err(|e| e.to_string())?;
-            serde_json::to_value(recs).map_err(|e| e.to_string())
+            let mut value = serde_json::to_value(recs).map_err(|e| e.to_string())?;
+            // Dictation rows carry a text preview and the app they went into,
+            // so history lists can show the words instead of "Dictation - <date>".
+            if let Ok(previews) = db.get_dictation_list_previews() {
+                if let Some(rows) = value.as_array_mut() {
+                    for row in rows {
+                        let Some(id) = row.get("id").and_then(|id| id.as_str()) else {
+                            continue;
+                        };
+                        if let Some((preview, app)) = previews.get(id).cloned() {
+                            row["dictationPreview"] = serde_json::json!(preview);
+                            row["dictationAppTarget"] = serde_json::json!(app);
+                        }
+                    }
+                }
+            }
+            Ok(value)
         }
         "get_recording" => {
             let recording_id: String =

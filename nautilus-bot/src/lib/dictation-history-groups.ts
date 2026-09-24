@@ -79,6 +79,7 @@ export function formatHistoryTime(value: string): string {
  */
 export function dictationHistoryPreview(recording: Recording): string {
   return (
+    recording.dictationPreview?.trim() ||
     recording.transcript?.fullText?.trim() ||
     recording.summary?.trim() ||
     recording.title
@@ -90,6 +91,7 @@ export function dictationHistoryPreview(recording: Recording): string {
  * not always carry it, so its absence means "not recorded here", not "none".
  */
 export function dictationHistoryAppName(recording: Recording): string | null {
+  if (recording.dictationAppTarget?.trim()) return recording.dictationAppTarget.trim();
   const metadata = recording.metadata as { appTarget?: unknown } | undefined;
   const app = metadata?.appTarget;
   return typeof app === "string" && app.trim() ? app.trim() : null;
