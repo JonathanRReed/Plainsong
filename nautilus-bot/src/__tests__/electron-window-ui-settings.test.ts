@@ -12,6 +12,8 @@ describe("resolveWindowUiSettings", () => {
       showDictationOverlay: true,
       showRecordingOverlay: true,
       dictationSounds: true,
+      dictationPillSize: "default",
+      dictationPillDock: "bottom",
     });
   });
 
@@ -24,6 +26,8 @@ describe("resolveWindowUiSettings", () => {
           showDictationPopup: false,
           showRecordingPopup: false,
           dictationSounds: false,
+          dictationPillSize: "xlarge",
+          dictationPillDock: "right",
         },
       })
     ).toEqual({
@@ -32,7 +36,21 @@ describe("resolveWindowUiSettings", () => {
       showDictationOverlay: false,
       showRecordingOverlay: false,
       dictationSounds: false,
+      dictationPillSize: "xlarge",
+      dictationPillDock: "right",
     });
+  });
+
+  it("reads an unrecognized pill size or dock as the default", () => {
+    const resolved = resolveWindowUiSettings({
+      ui: { dictationPillSize: "huge", dictationPillDock: "top" },
+    });
+
+    expect(resolved.dictationPillSize).toBe("default");
+    expect(resolved.dictationPillDock).toBe("bottom");
+    expect(
+      resolveWindowUiSettings({ ui: { dictationPillSize: "small", dictationPillDock: "left" } }),
+    ).toMatchObject({ dictationPillSize: "small", dictationPillDock: "left" });
   });
 
   it("treats a missing overlay flag as shown, not as hidden", () => {

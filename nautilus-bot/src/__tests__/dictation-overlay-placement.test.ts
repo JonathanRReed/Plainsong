@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  OVERLAY_DOCK_SNAP_DISTANCE,
   isOverlayAnchorOnScreen,
+  resolveDockedOverlayBounds,
   resolveInitialOverlayAnchor,
   resolveOverlayBounds,
+  resolveOverlayDockOnRelease,
   resolveSavedOverlayAnchor,
   withOverlayDisplayMode,
   type OverlayWorkArea,
@@ -12,6 +15,8 @@ import {
   POPUP_PREVIEW_LINE_CLAMP,
   estimatePopupTextLines,
   getPopupSize,
+  resolveDictationPillDock,
+  resolveDictationPillScale,
 } from "@/lib/dictation-popup-layout";
 
 // A few real-world work areas: a notched laptop, an external 4K, a small
@@ -317,5 +322,160 @@ describe("saved overlay placements", () => {
 
     expect(toggled).toEqual({ bottom: 800, left: 600, displayMode: "minimal" });
     expect(resolveSavedOverlayAnchor(toggled, WORK_AREAS)).toEqual(dragged);
+  });
+});
+
+describe("dictation pill size and dock", () => {
+  it("reads the saved size and dock, defaulting anything unrecognized", () => {
+    expect(resolveDictationPillScale(undefined)).toBe(1);
+    expect(resolveDictationPillScale("small")).toBe(0.85);
+    expect(resolveDictationPillScale("large")).toBe(1.15);
+    expect(resolveDictationPillScale("xlarge")).toBe(1.3);
+    expect(resolveDictationPillScale("huge")).toBe(1);
+    expect(resolveDictationPillScale("toString")).toBe(1);
+    expect(resolveDictationPillDock(undefined)).toBe("bottom");
+    expect(resolveDictationPillDock("left")).toBe("left");
+    expect(resolveDictationPillDock("right")).toBe("right");
+    expect(resolveDictationPillDock("top")).toBe("bottom");
+  });
+
+  it("keeps the 1x bottom pill at its original window size", () => {
+    expect(getPopupSize("minimal", "recording", null, null)).toEqual({
+      width: 284,
+      height: 64,
+    });
+    expect(
+      getPopupSize("minimal", "recording", null, null, { dock: "bottom", scale: 1 }),
+    ).toEqual({ width: 284, height: 64 });
+  });
+
+  it("scales the pill window by the size preset", () => {
+    for (const [scale, expected] of [
+      [0.85, { width: 241, height: 54 }],
+      [1.15, { width: 327, height: 74 }],
+      [1.3, { width: 369, height: 83 }],
+    ] as const) {
+      expect(
+        getPopupSize("minimal", "done", null, null, { dock: "bottom", scale }),
+      ).toEqual(expected);
+    }
+  });
+
+  it("turns the pill window upright when docked to a side", () => {
+    for (const dock of ["left", "right"] as const) {
+      const upright = getPopupSize("minimal", "recording", null, null, {
+        dock,
+        scale: 1,
+      });
+      expect(upright.height).toBeGreaterThan(upright.width);
+      expect(
+        getPopupSize("minimal", "recording", null, null, { dock, scale: 1.3 }),
+      ).toEqual({
+        width: Math.round(upright.width * 1.3),
+        height: Math.round(upright.height * 1.3),
+      });
+    }
+  });
+
+  it("leaves the compact and full cards alone", () => {
+    for (const displayMode of ["compact", "full"] as const) {
+      expect(
+        getPopupSize(displayMode, "recording", null, "partial words", {
+          dock: "left",
+          scale: 1.3,
+        }),
+      ).toEqual(getPopupSize(displayMode, "recording", null, "partial words"));
+    }
+  });
+});
+
+describe("resolveDockedOverlayBounds", () => {
+  const size = { width: 96, height: 196 };
+
+  it("centers the pill vertically against the chosen side of every work area", () => {
+    for (const workArea of WORK_AREAS) {
+      const left = resolveDockedOverlayBounds({ workArea, size, dock: "left" });
+      const right = resolveDockedOverlayBounds({ workArea, size, dock: "right" });
+
+      for (const bounds of [left, right]) {
+        expect(bounds.x).toBeGreaterThanOrEqual(workArea.x);
+        expect(bounds.x + bounds.width).toBeLessThanOrEqual(workArea.x + workArea.width);
+        expect(bounds.y).toBeGreaterThanOrEqual(workArea.y);
+        expect(bounds.y + bounds.height).toBeLessThanOrEqual(workArea.y + workArea.height);
+        const above = bounds.y - workArea.y;
+        const below = workArea.y + workArea.height - (bounds.y + bounds.height);
+        expect(Math.abs(above - below)).toBeLessThanOrEqual(1);
+      }
+      expect(left.x - workArea.x).toBeLessThan(OVERLAY_DOCK_SNAP_DISTANCE);
+      expect(workArea.x + workArea.width - (right.x + right.width)).toBe(
+        left.x - workArea.x,
+      );
+    }
+  });
+
+  it("follows the pill's scale", () => {
+    const workArea = WORK_AREAS[0];
+    const large = { width: 125, height: 255 };
+    const bounds = resolveDockedOverlayBounds({ workArea, size: large, dock: "right" });
+    expect(bounds.width).toBe(125);
+    expect(bounds.height).toBe(255);
+    expect(bounds.x + bounds.width).toBe(
+      resolveDockedOverlayBounds({ workArea, size, dock: "right" }).x + size.width,
+    );
+  });
+
+  it("stays inside a work area shorter than the pill", () => {
+    const workArea = { x: 0, y: 25, width: 1280, height: 150 };
+    const bounds = resolveDockedOverlayBounds({ workArea, size, dock: "left" });
+    expect(bounds.y).toBe(25);
+    expect(bounds.height).toBe(150);
+  });
+});
+
+describe("resolveOverlayDockOnRelease", () => {
+  const workArea = { x: -1920, y: -240, width: 1920, height: 1080 };
+  const pill = { width: 284, height: 64, y: 400 };
+
+  it("docks to a side the pill is let go near", () => {
+    expect(
+      resolveOverlayDockOnRelease({ workArea, bounds: { ...pill, x: -1920 } }),
+    ).toBe("left");
+    expect(
+      resolveOverlayDockOnRelease({
+        workArea,
+        bounds: { ...pill, x: -1920 + OVERLAY_DOCK_SNAP_DISTANCE },
+      }),
+    ).toBe("left");
+    expect(
+      resolveOverlayDockOnRelease({ workArea, bounds: { ...pill, x: -284 - 40 } }),
+    ).toBe("right");
+  });
+
+  it("goes back to the bottom placement anywhere else", () => {
+    expect(
+      resolveOverlayDockOnRelease({
+        workArea,
+        bounds: { ...pill, x: -1920 + OVERLAY_DOCK_SNAP_DISTANCE + 1 },
+      }),
+    ).toBe("bottom");
+    expect(
+      resolveOverlayDockOnRelease({ workArea, bounds: { ...pill, x: -1100 } }),
+    ).toBe("bottom");
+  });
+
+  it("picks the closer side on a work area too narrow to tell", () => {
+    const narrow = { x: 0, y: 0, width: 300, height: 800 };
+    expect(
+      resolveOverlayDockOnRelease({
+        workArea: narrow,
+        bounds: { x: 4, y: 100, width: 284, height: 64 },
+      }),
+    ).toBe("left");
+    expect(
+      resolveOverlayDockOnRelease({
+        workArea: narrow,
+        bounds: { x: 12, y: 100, width: 284, height: 64 },
+      }),
+    ).toBe("right");
   });
 });

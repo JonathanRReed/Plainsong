@@ -46,7 +46,11 @@ import {
 } from "@/lib/text-to-speech";
 import { playDictationEarcon } from "@/lib/dictation-earcons";
 import {
+  DICTATION_PILL_SIZE,
   getPopupSize,
+  resolveDictationPillDock,
+  resolveDictationPillScale,
+  type DictationPillDock,
   type DictationPopupDisplayMode,
 } from "@/lib/dictation-popup-layout";
 import { formatShortcutForDisplay } from "@/lib/shortcuts";
@@ -448,6 +452,10 @@ export function DictationPopup() {
   // is happening in one word and stays out of the way. The full card is one
   // double-click away and remembered once chosen.
   const [displayMode, setDisplayMode] = useState<DisplayMode>("minimal");
+  // Settings > General. The main process places the window (bottom, or
+  // against a side); this only decides the pill's shape and scale.
+  const [pillScale, setPillScale] = useState(1);
+  const [pillDock, setPillDock] = useState<DictationPillDock>("bottom");
   const [_handsFreeEnabled, _setHandsFreeEnabled] = useState(false);
   const [handsFreeSilenceTimeoutSeconds, setHandsFreeSilenceTimeoutSeconds] =
     useState(0);
@@ -498,8 +506,14 @@ export function DictationPopup() {
   const sessionClockStartedAtRef = useRef<number | null>(null);
   const previousPhaseRef = useRef<DictationPhase>("idle");
 
+  const applyPillSettings = (ui: { dictationPillSize?: unknown; dictationPillDock?: unknown } | undefined) => {
+    setPillScale(resolveDictationPillScale(ui?.dictationPillSize));
+    setPillDock(resolveDictationPillDock(ui?.dictationPillDock));
+  };
+
   const refreshPopupSettings = async () => {
     const settings = await getSettings();
+    applyPillSettings(settings.ui);
     _setHandsFreeEnabled(
       Boolean(settings.transcription.dictationHandsFreeEnabled),
     );
@@ -766,6 +780,34 @@ export function DictationPopup() {
     return () => {
       stopSpeakingText();
     };
+  }, []);
+
+  // Pill size and position change from Settings, or from the main process
+  // when the user drops the pill against a side of the screen. Either way
+  // the saved settings come back through this broadcast.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ ui?: { dictationPillSize?: unknown; dictationPillDock?: unknown } }>(
+      "settings-changed",
+      (event) => {
+        if (!disposed && event.payload && typeof event.payload === "object") {
+          applyPillSettings(event.payload.ui);
+        }
+      },
+    ).then((dispose) => {
+      if (disposed) {
+        dispose();
+      } else {
+        unlisten = dispose;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+    // applyPillSettings reads only setters; it is stable for the window's life.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // The overlay is a small card inside a full-screen transparent window. Left
@@ -1148,11 +1190,12 @@ export function DictationPopup() {
       phase,
       message,
       preview,
+      { dock: pillDock, scale: pillScale },
     );
     void window.setSize(new LogicalSize(width, height)).catch((error) => {
       console.error("Failed to resize dictation popup:", error);
     });
-  }, [displayMode, message, phase, preview, window]);
+  }, [displayMode, message, phase, preview, pillDock, pillScale, window]);
 
   const openMainApp = async (
     view?: "dictation" | "settings" | "recordings",
@@ -1301,8 +1344,11 @@ export function DictationPopup() {
   }
 
   // ── Minimal pill mode ────────────────────────────────────────────────────
-  // Fixed width with fixed slots (glyph, trace, label, action), so the pill
-  // never jitters as its label changes between states.
+  // Fixed size with fixed slots (glyph, trace, label, action), so the pill
+  // never jitters as its label changes between states. Docked against a side
+  // of the screen the same slots stack into an upright column, and the trace
+  // turns with them. The size preset scales the whole pill (type, trace and
+  // padding together) through `zoom`, which the window size already matches.
   if (displayMode === "minimal") {
     const pill = describePillStatus({ phase, stage: finishStage, outcome, message, slow: slowStage });
     const pillNeume =
@@ -1315,6 +1361,45 @@ export function DictationPopup() {
             : pill.tone === "quiet"
               ? "neume neume-hollow"
               : "neume";
+    const vertical = pillDock !== "bottom";
+    const pillSize = DICTATION_PILL_SIZE[vertical ? "vertical" : "horizontal"];
+    const trace = pill.showBar ? (
+      <DictationFinishBar
+        stage={finishStage}
+        plan={progressPlan}
+        complete={pill.barComplete}
+        stageStartedAt={stageStartedAt}
+      />
+    ) : (
+      <AudioWaveform
+        levels={levelHistory}
+        active={phase === "recording"}
+        envelope={false}
+        size="sm"
+        barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
+      />
+    );
+    const statusLabel = (
+      <span
+        role="status"
+        aria-live="polite"
+        aria-label={pill.detail ? `${pill.label}. ${pill.detail}` : undefined}
+        className={cn(
+          "font-medium",
+          vertical
+            ? "line-clamp-2 w-full text-center text-[11px] leading-tight"
+            : "min-w-0 flex-1 truncate text-sm",
+          pill.tone === "alert"
+            ? "text-rust"
+            : pill.tone === "live" || pill.tone === "success"
+              ? "text-foreground"
+              : "text-muted-foreground",
+        )}
+        data-testid="dictation-hud-status"
+      >
+        {sourceNotice ?? pill.label}
+      </span>
+    );
 
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-transparent">
@@ -1322,50 +1407,39 @@ export function DictationPopup() {
           data-hud-card
           data-drag-region
           data-tone={pill.tone}
+          data-dock={pillDock}
           onDoubleClick={() => void cycleDisplayMode()}
           title={pill.detail ?? "Double-click for details"}
+          style={{ width: pillSize.width, height: pillSize.height, zoom: pillScale }}
           className={cn(
-            "flex h-10 w-[252px] items-center gap-2.5 rounded-full border bg-popover pl-3.5 pr-1.5 shadow-[0_4px_14px_hsl(34_26%_4%/0.3)] transition-smooth",
+            "flex shrink-0 items-center rounded-full border bg-popover shadow-[0_4px_14px_hsl(34_26%_4%/0.3)] transition-smooth",
+            vertical ? "flex-col gap-2.5 px-1 pb-1.5 pt-4" : "gap-2.5 pl-3.5 pr-1.5",
             pill.tone === "alert" ? "border-rust/35" : "border-foreground/10",
           )}
         >
           <span aria-hidden="true" className={cn(pillNeume, "shrink-0")} />
-          {pill.tone !== "alert" && (
-          <div className="flex h-4 w-16 shrink-0 items-center justify-center">
-            {pill.showBar ? (
-              <DictationFinishBar
-                stage={finishStage}
-                plan={progressPlan}
-                complete={pill.barComplete}
-                stageStartedAt={stageStartedAt}
-              />
+          {pill.tone !== "alert" &&
+            (vertical ? (
+              // The horizontal trace turned a quarter so it reads bottom to
+              // top: the finish bar fills upward and the newest level sample
+              // sits at the top.
+              <div className="flex h-12 w-4 shrink-0 items-center justify-center">
+                <div className="flex h-4 w-12 shrink-0 -rotate-90 items-center justify-center">
+                  {trace}
+                </div>
+              </div>
             ) : (
-              <AudioWaveform
-                levels={levelHistory}
-                active={phase === "recording"}
-                envelope={false}
-                size="sm"
-                barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
-              />
-            )}
-          </div>
+              <div className="flex h-4 w-16 shrink-0 items-center justify-center">
+                {trace}
+              </div>
+            ))}
+          {vertical ? (
+            <div className="flex min-h-0 w-full flex-1 items-center justify-center">
+              {statusLabel}
+            </div>
+          ) : (
+            statusLabel
           )}
-          <span
-            role="status"
-            aria-live="polite"
-            aria-label={pill.detail ? `${pill.label}. ${pill.detail}` : undefined}
-            className={cn(
-              "min-w-0 flex-1 truncate text-sm font-medium",
-              pill.tone === "alert"
-                ? "text-rust"
-                : pill.tone === "live" || pill.tone === "success"
-                  ? "text-foreground"
-                  : "text-muted-foreground",
-            )}
-            data-testid="dictation-hud-status"
-          >
-            {sourceNotice ?? pill.label}
-          </span>
           {/* The pill has no room for a separate Stop, so while capture is
               live this button stops the session instead of only hiding the
               HUD — dismissing alone would leave the microphone open with no

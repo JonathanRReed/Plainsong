@@ -2,6 +2,57 @@ import type { DictationPhase } from "@/features/dictation/runtime";
 
 export type DictationPopupDisplayMode = "full" | "compact" | "minimal";
 
+type DictationPillSize = "small" | "default" | "large" | "xlarge";
+export type DictationPillDock = "bottom" | "left" | "right";
+
+/** Settings > General > Pill size. Absent or unrecognized reads as "default". */
+const DICTATION_PILL_SCALE: Record<DictationPillSize, number> = {
+  small: 0.85,
+  default: 1,
+  large: 1.15,
+  xlarge: 1.3,
+};
+
+export function resolveDictationPillScale(value: unknown): number {
+  return typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(DICTATION_PILL_SCALE, value)
+    ? DICTATION_PILL_SCALE[value as DictationPillSize]
+    : 1;
+}
+
+/** Settings > General > Pill position. Absent or unrecognized reads as "bottom". */
+export function resolveDictationPillDock(value: unknown): DictationPillDock {
+  return value === "left" || value === "right" ? value : "bottom";
+}
+
+/**
+ * The pill at 1x, in CSS pixels. Docked against a side of the screen it turns
+ * upright (glyph, trace and label stacked in a column), and the window's
+ * margins turn with it: 16px along the pill's length, 12px across it, so the
+ * soft shadow is never clipped.
+ */
+export const DICTATION_PILL_SIZE = {
+  horizontal: { width: 252, height: 40 },
+  vertical: { width: 72, height: 164 },
+} as const;
+const DICTATION_PILL_WINDOW_SIZE = {
+  horizontal: { width: 284, height: 64 },
+  vertical: { width: 96, height: 196 },
+} as const;
+
+/** The window the pill asks for at `scale`, upright when docked to a side. */
+function getPillWindowSize(
+  dock: DictationPillDock,
+  scale: number,
+): { width: number; height: number } {
+  const base =
+    DICTATION_PILL_WINDOW_SIZE[dock === "bottom" ? "horizontal" : "vertical"];
+  return {
+    width: Math.round(base.width * scale),
+    height: Math.round(base.height * scale),
+  };
+}
+
 // The height estimate below is what the overlay window is actually resized to,
 // so it must agree with what the DOM renders. Every preview/message paragraph
 // is line-clamped; without the same cap here a long partial (they arrive every
@@ -128,12 +179,14 @@ export function getPopupSize(
   phase: DictationPhase,
   message: string | null,
   preview: string | null,
+  pill: { dock: DictationPillDock; scale: number } = { dock: "bottom", scale: 1 },
 ) {
   if (displayMode === "minimal") {
-    // The pill is a fixed 252x40 (see the minimal branch of DictationPopup),
-    // so the window is the same size in every state and never resizes mid
-    // session; the margin keeps its soft shadow from being clipped.
-    return { width: 284, height: 64 };
+    // The pill is a fixed size per preset and dock (see the minimal branch of
+    // DictationPopup), so the window is the same size in every state and
+    // never resizes mid session. The compact and full cards below ignore both
+    // settings: they stay horizontal at 1x.
+    return getPillWindowSize(pill.dock, pill.scale);
   }
 
   const mode: CardMode = displayMode === "compact" ? "compact" : "full";

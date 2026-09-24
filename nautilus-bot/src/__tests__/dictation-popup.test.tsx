@@ -604,6 +604,48 @@ describe("DictationPopup", () => {
     expect(status).toHaveAttribute("role", "status");
   });
 
+  it("sizes and docks the pill from settings, and follows a later change", async () => {
+    const original = popupMocks.invoke.getMockImplementation();
+    onTestFinished(() => {
+      if (original) popupMocks.invoke.mockImplementation(original);
+    });
+    popupMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_dictation_overlay_state") {
+        return { phase: "recording", startedAtMs: Date.now(), sessionId: 13 };
+      }
+      return null;
+    });
+    popupMocks.getSettings.mockResolvedValueOnce({
+      transcription: {},
+      ui: { dictationPillSize: "xlarge", dictationPillDock: "left" },
+    } as never);
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+
+    await waitFor(() =>
+      expect(popupMocks.windowHandle.setSize).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 125, height: 255 }),
+      ),
+    );
+    const card = document.querySelector("[data-hud-card]") as HTMLElement;
+    expect(card).toHaveAttribute("data-dock", "left");
+    expect(card.style.zoom).toBe("1.3");
+
+    await act(async () => {
+      popupMocks.listeners.get("settings-changed")?.({
+        payload: { ui: { dictationPillSize: "small", dictationPillDock: "bottom" } },
+      });
+    });
+    expect(popupMocks.windowHandle.setSize).toHaveBeenLastCalledWith(
+      expect.objectContaining({ width: 241, height: 54 }),
+    );
+    expect(document.querySelector("[data-hud-card]")).toHaveAttribute(
+      "data-dock",
+      "bottom",
+    );
+  });
+
   it("never shows the pill's success bar for a refused delivery", async () => {
     const original = popupMocks.invoke.getMockImplementation();
     onTestFinished(() => {

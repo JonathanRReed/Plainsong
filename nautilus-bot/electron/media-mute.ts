@@ -13,7 +13,7 @@ import { execFile } from "child_process";
 type RunAppleScript = (script: string) => Promise<string>;
 
 const LIVE_PHASES = new Set(["primed", "recording"]);
-export const MUTE_DELAY_MS = 250;
+const MUTE_DELAY_MS = 250;
 
 export function runAppleScript(script: string): Promise<string> {
   return new Promise((resolve, reject) => {

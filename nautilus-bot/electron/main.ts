@@ -88,10 +88,13 @@ import {
 } from "./shortcut-registration";
 import {
   clampOverlaySize,
+  resolveDockedOverlayBounds,
   resolveInitialOverlayAnchor,
   resolveOverlayBounds,
+  resolveOverlayDockOnRelease,
   resolveSavedOverlayAnchor,
   withOverlayDisplayMode,
+  type OverlayDock,
   type OverlayKind,
   type OverlayPlacement,
   type OverlayWorkArea,
@@ -1280,6 +1283,26 @@ function applyOverlayBounds(
   win.setBounds(bounds);
 }
 
+// Settings > General > Pill position, or the side the user last dropped the
+// pill against. Only the minimal pill docks; the compact and full cards keep
+// the bottom placement whatever this says.
+let dictationPillDock: OverlayDock = "bottom";
+// Whether the dictation overlay was last placed docked, so the first resize
+// after it stops being docked (a mode toggle, or the setting going back to
+// "bottom") moves it to its bottom placement instead of growing in place
+// against the side.
+let dictationOverlayPlacedDocked = false;
+let dictationDragSettleTimer: NodeJS.Timeout | null = null;
+
+function activeDictationDock(kind: OverlayKind): "left" | "right" | null {
+  if (kind !== "dictation" || dictationPillDock === "bottom") {
+    return null;
+  }
+  // The renderer starts in the pill when nothing has been saved.
+  const displayMode = overlayPlacements.get("dictation")?.displayMode ?? "minimal";
+  return displayMode === "minimal" ? dictationPillDock : null;
+}
+
 function positionOverlayOnActiveDisplay(win: BrowserWindow): void {
   const kind = getOverlayKind(win);
   if (!kind) {
@@ -1288,6 +1311,20 @@ function positionOverlayOnActiveDisplay(win: BrowserWindow): void {
 
   try {
     const [width, height] = win.getSize();
+    const dock = activeDictationDock(kind);
+    if (dock) {
+      const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+      dictationOverlayPlacedDocked = true;
+      applyOverlayBounds(
+        win,
+        kind,
+        resolveDockedOverlayBounds({ workArea, size: { width, height }, dock }),
+      );
+      return;
+    }
+    if (kind === "dictation") {
+      dictationOverlayPlacedDocked = false;
+    }
     const { anchor, workArea } = resolveOverlayAnchor(kind, { width, height });
     applyOverlayBounds(
       win,
@@ -1317,6 +1354,32 @@ function resizeOverlayKeepingBottomEdge(
       x: Math.round(current.x + current.width / 2),
       y: Math.round(current.y + current.height / 2),
     });
+    // A docked pill stays centered against its side on the display it is on.
+    const dock = activeDictationDock(kind);
+    if (dock) {
+      dictationOverlayPlacedDocked = true;
+      applyOverlayBounds(
+        win,
+        kind,
+        resolveDockedOverlayBounds({
+          workArea,
+          size: clampOverlaySize(kind, size),
+          dock,
+        }),
+      );
+      return;
+    }
+    if (kind === "dictation" && dictationOverlayPlacedDocked) {
+      dictationOverlayPlacedDocked = false;
+      const clamped = clampOverlaySize(kind, size);
+      const placement = resolveOverlayAnchor(kind, clamped);
+      applyOverlayBounds(
+        win,
+        kind,
+        resolveOverlayBounds({ ...placement, size: clamped }),
+      );
+      return;
+    }
     applyOverlayBounds(
       win,
       kind,
@@ -1345,11 +1408,81 @@ function applyUiSettings(settings: AppSettings | null | undefined): void {
   showDictationOverlayEnabled = resolved.showDictationOverlay;
   showRecordingOverlayEnabled = resolved.showRecordingOverlay;
   dictationSoundsEnabled = resolved.dictationSounds;
+  if (resolved.dictationPillDock !== dictationPillDock) {
+    dictationPillDock = resolved.dictationPillDock;
+    replaceDictationOverlayForDock();
+  }
   muteMediaWhileDictatingEnabled = settings?.ui?.muteMediaWhileDictating === true;
   notificationSettings = resolveNotificationSettings(settings);
   localToolsEnabled = settings?.automation?.localToolsEnabled === true;
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(alwaysOnTopEnabled);
+  }
+}
+
+// Re-place a showing dictation pill after its dock changes. The renderer also
+// resizes it into its new shape, which re-places it again through the same
+// path; doing it here as well covers a move between two sides, where the size
+// does not change.
+function replaceDictationOverlayForDock(): void {
+  const overlay = findWindowByLabel(OVERLAY_LABELS.dictation);
+  if (!overlay || overlay.isDestroyed() || !overlay.isVisible()) {
+    return;
+  }
+  const [width, height] = overlay.getSize();
+  resizeOverlayKeepingBottomEdge(overlay, "dictation", { width, height });
+}
+
+function persistDictationPillDock(dock: OverlayDock): void {
+  if (!ipcBridge) {
+    return;
+  }
+  const bridge = ipcBridge;
+  void (async () => {
+    const fresh = (await bridge.invoke("get_settings")) as AppSettings;
+    await bridge.invoke("save_settings", {
+      settings: { ...fresh, ui: { ...fresh.ui, dictationPillDock: dock } },
+    });
+  })().catch((error) => {
+    console.error("[main] Failed to save the dictation pill position:", error);
+  });
+}
+
+// The end of a drag of the dictation pill. Dropped within reach of a side it
+// docks there; dropped anywhere else it goes back to the bottom placement at
+// the position it was dragged to (which the `moved` handler has already
+// saved). macOS reports `moved` all through a drag and nothing at the end, so
+// the drag counts as over once the window has been still for a moment.
+function settleDictationOverlayDrag(overlay: BrowserWindow): void {
+  if (overlay.isDestroyed()) {
+    return;
+  }
+  const placement = overlayPlacements.get("dictation");
+  if ((placement?.displayMode ?? "minimal") !== "minimal") {
+    return;
+  }
+  const bounds = overlay.getBounds();
+  const { workArea } = screen.getDisplayNearestPoint({
+    x: Math.round(bounds.x + bounds.width / 2),
+    y: Math.round(bounds.y + bounds.height / 2),
+  });
+  const dock = resolveOverlayDockOnRelease({ workArea, bounds });
+  if (dock !== "bottom") {
+    // A docked pill is not a dragged position: going back to "bottom" later
+    // should find the default placement, not a spot against the side.
+    overlayPlacements.set(
+      "dictation",
+      placement?.displayMode ? { displayMode: placement.displayMode } : {},
+    );
+    scheduleOverlayPlacementSave();
+  }
+  const changed = dock !== dictationPillDock;
+  dictationPillDock = dock;
+  if (dock !== "bottom") {
+    replaceDictationOverlayForDock();
+  }
+  if (changed) {
+    persistDictationPillDock(dock);
   }
 }
 
@@ -1462,6 +1595,15 @@ function createOverlayWindow(kind: OverlayKind): BrowserWindow {
       left: bounds.x,
     });
     scheduleOverlayPlacementSave();
+    if (kind === "dictation") {
+      if (dictationDragSettleTimer) {
+        clearTimeout(dictationDragSettleTimer);
+      }
+      dictationDragSettleTimer = setTimeout(() => {
+        dictationDragSettleTimer = null;
+        settleDictationOverlayDrag(overlay);
+      }, 300);
+    }
   });
 
   const query = { overlay: kind };

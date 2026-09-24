@@ -58,8 +58,9 @@ export const OVERLAY_BASE_SIZE: Record<OverlayKind, OverlaySize> = {
  * numbers. The binding cases are:
  *
  * - dictation: `getPopupSize` (src/lib/dictation-popup-layout.ts) tops out at
- *   432x396 — the full-mode processing card with a six-line message and a
- *   four-line preview.
+ *   432x420, the full-mode done card. The pill size presets scale only the
+ *   minimal pill, whose largest window (xlarge, docked upright) is 125x255,
+ *   so they need no extra headroom.
  * - recording: 470x228, the expanded chip in recording-popup.tsx.
  *
  * Clamping BELOW those would clip the card rather than contain an attack, and
@@ -225,4 +226,68 @@ export function withOverlayDisplayMode(
   displayMode: string,
 ): OverlayPlacement {
   return { ...(placement ?? {}), displayMode };
+}
+
+/**
+ * Where the dictation pill sits: along the bottom (the default placement, or
+ * wherever the user dragged it) or docked upright against a side of the work
+ * area. Only the minimal pill docks; the compact and full cards always use the
+ * bottom placement.
+ */
+export type OverlayDock = "bottom" | "left" | "right";
+
+/** Gap between a docked pill's window and the side of the work area. */
+const OVERLAY_DOCK_MARGIN = 8;
+
+/**
+ * How close to a side the user has to let go of the pill for it to dock
+ * there. Measured from the window's edge, which already carries the pill's
+ * shadow margin.
+ */
+export const OVERLAY_DOCK_SNAP_DISTANCE = 80;
+
+/**
+ * Bounds for a pill docked against the left or right side of `workArea`,
+ * vertically centered. Like {@link resolveOverlayBounds}, the result is always
+ * fully inside the work area.
+ */
+export function resolveDockedOverlayBounds(options: {
+  workArea: OverlayWorkArea;
+  size: OverlaySize;
+  dock: "left" | "right";
+}): OverlayBounds {
+  const { workArea, size, dock } = options;
+  const width = Math.min(Math.round(size.width), workArea.width);
+  const height = Math.min(Math.round(size.height), workArea.height);
+  const x =
+    dock === "left"
+      ? workArea.x + OVERLAY_DOCK_MARGIN
+      : workArea.x + workArea.width - width - OVERLAY_DOCK_MARGIN;
+  const y = workArea.y + Math.round((workArea.height - height) / 2);
+  return {
+    x: clamp(x, workArea.x, workArea.x + workArea.width - width),
+    y: clamp(y, workArea.y, workArea.y + workArea.height - height),
+    width,
+    height,
+  };
+}
+
+/**
+ * The dock a drag of the pill ends in: the side of `workArea` the window was
+ * let go within {@link OVERLAY_DOCK_SNAP_DISTANCE} of, or "bottom" anywhere
+ * else. When a window is somehow near both sides the closer one wins.
+ */
+export function resolveOverlayDockOnRelease(options: {
+  workArea: OverlayWorkArea;
+  bounds: OverlayBounds;
+}): OverlayDock {
+  const { workArea, bounds } = options;
+  const toLeft = bounds.x - workArea.x;
+  const toRight = workArea.x + workArea.width - (bounds.x + bounds.width);
+  const nearLeft = toLeft <= OVERLAY_DOCK_SNAP_DISTANCE;
+  const nearRight = toRight <= OVERLAY_DOCK_SNAP_DISTANCE;
+  if (nearLeft && (!nearRight || toLeft <= toRight)) {
+    return "left";
+  }
+  return nearRight ? "right" : "bottom";
 }

@@ -93,6 +93,15 @@ describe("overlay size containment", () => {
       }
     }
 
+    // Every pill size preset in every dock, including the largest (xlarge,
+    // upright against a side).
+    for (const dock of ["bottom", "left", "right"] as const) {
+      for (const scale of [0.85, 1, 1.15, 1.3]) {
+        const size = getPopupSize("minimal", "recording", null, null, { dock, scale });
+        expect(clampOverlaySize("dictation", size)).toEqual(size);
+      }
+    }
+
     // Recorded so a layout change that outgrows the cap fails here with the
     // number, not as a clipped card in a packaged build.
     expect(tallest.height).toBeLessThanOrEqual(OVERLAY_MAX_SIZE.dictation.height);
