@@ -13,6 +13,8 @@ pub mod openai_cloud;
 pub mod parakeet;
 #[cfg(feature = "asr-parakeet")]
 pub mod parakeet_tdt;
+#[cfg(feature = "plainsong-plus")]
+pub mod plainsong_plus;
 pub mod platform;
 pub mod qwen3_asr;
 #[cfg(feature = "asr-transcribe-cpp")]
@@ -1457,6 +1459,11 @@ pub enum AsrProviderType {
     /// a default build cannot name it, offer it, or persist it.
     #[cfg(feature = "asr-transcribe-cpp")]
     TranscribeCpp,
+    /// Plainsong Plus, the paid hosted tier (feature `plainsong-plus`, OFF
+    /// and NOT LAUNCHED). Exists only in builds that compile Plus in; see
+    /// `asr/plainsong_plus.rs` and `infra/plus-worker`.
+    #[cfg(feature = "plainsong-plus")]
+    PlainsongPlus,
 }
 
 impl AsrProviderType {
@@ -1481,6 +1488,8 @@ impl AsrProviderType {
             AsrProviderType::XaiStt,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp,
+            #[cfg(feature = "plainsong-plus")]
+            AsrProviderType::PlainsongPlus,
         ]
     }
 
@@ -1505,6 +1514,8 @@ impl AsrProviderType {
             AsrProviderType::XaiStt => "xAI Grok",
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => "transcribe.cpp (experimental)",
+            #[cfg(feature = "plainsong-plus")]
+            AsrProviderType::PlainsongPlus => "Plainsong Plus",
         }
     }
 
@@ -1552,6 +1563,8 @@ impl AsrProviderType {
             AsrProviderType::XaiStt => xai_stt::XAI_STT_MODEL_ID,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
+            #[cfg(feature = "plainsong-plus")]
+            AsrProviderType::PlainsongPlus => plainsong_plus::PLUS_STT_MODEL_ID,
         }
     }
 
@@ -1579,6 +1592,9 @@ impl AsrProviderType {
             // local route.
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => None,
+            // A license key in its own internal slot, not a provider key.
+            #[cfg(feature = "plainsong-plus")]
+            AsrProviderType::PlainsongPlus => None,
         }
     }
 
@@ -1750,6 +1766,11 @@ impl AsrProviderType {
             }],
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::route_model_options(),
+            #[cfg(feature = "plainsong-plus")]
+            AsrProviderType::PlainsongPlus => vec![ModelOption {
+                id: plainsong_plus::PLUS_STT_MODEL_ID.to_string(),
+                label: "Best available (included with Plus)".to_string(),
+            }],
         }
     }
 }
@@ -1811,6 +1832,10 @@ impl AsrProviderFactory {
             AsrProviderType::XaiStt => Box::new(xai_stt::XaiSttProvider::new(selected_model_id)),
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => Box::new(transcribe_cpp::TranscribeCppProvider::new(
+                selected_model_id,
+            )),
+            #[cfg(feature = "plainsong-plus")]
+            AsrProviderType::PlainsongPlus => Box::new(plainsong_plus::PlainsongPlusProvider::new(
                 selected_model_id,
             )),
         }

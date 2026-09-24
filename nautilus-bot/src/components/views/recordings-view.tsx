@@ -440,6 +440,7 @@ const CLOUD_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   mistral_voxtral: "Mistral Voxtral",
   gemini_transcribe: "Gemini Transcribe",
   xai_stt: "xAI Grok",
+  plainsong_plus: "Plainsong Plus",
 };
 
 /**

@@ -37,6 +37,8 @@
  *   Runtime as the shipped embedders. Eval harness only until its model file
  *   has a pinned download and it has been scored against ECAPA and speakrs.
  *   See docs/typeless-parity-and-model-refresh-2026-09.md.
+ * - `plainsong-plus` (deliberately NOT shipped): the optional paid hosted
+ *   tier. Not launched; see infra/plus-worker and docs/plainsong-plus.md.
  *
  * The measurements behind this list are in
  * artifacts/qa/acceleration-receipt-2026-09-01.md.

@@ -39,6 +39,7 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   mistral_voxtral: true,
   xai_stt: true,
   transcribe_cpp: true,
+  plainsong_plus: true,
 } satisfies Record<AsrProviderType, true>;
 
 export const ASR_PROVIDER_TYPES = Object.keys(
@@ -116,6 +117,8 @@ const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
   "whisper_candle",
   // Until xAI's per-request size and duration limits are confirmed.
   "xai_stt",
+  // The relay's meeting purpose exists; the app does not send meetings yet.
+  "plainsong_plus",
 ]);
 
 /**
@@ -159,6 +162,7 @@ const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
   "gemini_transcribe",
   "mistral_voxtral",
   "xai_stt",
+  "plainsong_plus",
 ]);
 
 export function isDownloadableProvider(providerType: AsrProviderType) {

@@ -1461,6 +1461,8 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         // fallback below rather than become a ghost route in the settings file.
         #[cfg(feature = "asr-transcribe-cpp")]
         "transcribe_cpp" => "transcribe_cpp".to_string(),
+        #[cfg(feature = "plainsong-plus")]
+        "plainsong_plus" => "plainsong_plus".to_string(),
         _ => "whisper".to_string(),
     }
 }
@@ -1551,6 +1553,8 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         "transcribe_cpp" => crate::asr::transcribe_cpp::route_spec_for(model_id)
             .model_id
             .to_string(),
+        #[cfg(feature = "plainsong-plus")]
+        "plainsong_plus" => crate::asr::plainsong_plus::PLUS_STT_MODEL_ID.to_string(),
         _ => "base.en".to_string(),
     }
 }
@@ -2221,6 +2225,13 @@ const KNOWN_AI_PROVIDERS: [&str; 8] = [
     "ollama-cloud",
 ];
 
+/// Plus is known only to a build that compiled it in; any other build resets
+/// a lane naming it, like any other unknown provider.
+fn is_known_ai_provider(provider: &str) -> bool {
+    KNOWN_AI_PROVIDERS.contains(&provider)
+        || (cfg!(feature = "plainsong-plus") && provider == "plainsong-plus")
+}
+
 fn normalize_ai_lane_settings(lane: &mut AiLaneSettings, which: AiLane) {
     // Normalize LLM provider to ensure it's a valid value
     lane.provider = lane.provider.trim().to_lowercase();
@@ -2237,7 +2248,7 @@ fn normalize_ai_lane_settings(lane: &mut AiLaneSettings, which: AiLane) {
         AiLane::Dictation => DEFAULT_DICTATION_AI_PROVIDER,
         AiLane::Meetings => "ollama",
     };
-    if lane.provider.is_empty() || !KNOWN_AI_PROVIDERS.contains(&lane.provider.as_str()) {
+    if lane.provider.is_empty() || !is_known_ai_provider(&lane.provider) {
         lane.provider = fallback.to_string();
     }
     if which == AiLane::Meetings && DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str()) {

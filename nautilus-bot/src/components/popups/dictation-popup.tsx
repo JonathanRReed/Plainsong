@@ -145,6 +145,7 @@ const CLOUD_PROVIDER_LABELS: Record<string, string> = {
   mistral_voxtral: "Mistral Voxtral",
   gemini_transcribe: "Gemini",
   xai_stt: "xAI Grok",
+  plainsong_plus: "Plainsong Plus",
 };
 
 function formatRouteLabel(

@@ -40,6 +40,8 @@ describe("sidecar cargo feature set", () => {
       "asr-transcribe-cpp",
       "diarization-speakrs",
       "diarization-nemotron",
+      // Plainsong Plus is not launched: no build users get compiles it in.
+      "plainsong-plus",
     ]) {
       expect(cargoToml).toMatch(new RegExp(`^${feature} = \\[`, "m"));
       expect(defaultLine).not.toContain(feature);

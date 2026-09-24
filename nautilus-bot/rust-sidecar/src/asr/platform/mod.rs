@@ -129,7 +129,17 @@ impl AsrProviderType {
                 | AsrProviderType::GeminiTranscribe
                 | AsrProviderType::MistralVoxtral
                 | AsrProviderType::XaiStt
-        )
+        ) || self.is_plainsong_plus()
+    }
+
+    #[cfg(feature = "plainsong-plus")]
+    fn is_plainsong_plus(self) -> bool {
+        self == AsrProviderType::PlainsongPlus
+    }
+
+    #[cfg(not(feature = "plainsong-plus"))]
+    fn is_plainsong_plus(self) -> bool {
+        false
     }
 
     pub fn is_local(self) -> bool {

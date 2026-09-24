@@ -193,7 +193,11 @@ export type AsrProviderType =
   // the release feature list), so no shipped build ever sends it -- but the
   // renderer has to be able to render it honestly when a developer build does,
   // instead of dropping an unknown provider out of the picker.
-  | "transcribe_cpp";
+  | "transcribe_cpp"
+  // Plainsong Plus, the paid hosted tier. Like `transcribe_cpp`, only a
+  // sidecar built with `--features plainsong-plus` reports it, and no release
+  // is. Not launched.
+  | "plainsong_plus";
 
 // LLM Types
 export interface LlmAnalysisResult {

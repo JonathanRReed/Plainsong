@@ -90,6 +90,11 @@ pub enum Provider {
     Gemini,
     DeepSeek,
     OllamaCloud,
+    /// Plainsong Plus, the paid hosted tier (feature `plainsong-plus`, OFF
+    /// and NOT LAUNCHED). Its "key" is the entitlement token from
+    /// `crate::plus`, and its models are the relay's two aliases.
+    #[cfg(feature = "plainsong-plus")]
+    PlainsongPlus,
 }
 
 impl Provider {
@@ -103,6 +108,8 @@ impl Provider {
             "gemini" => Ok(Self::Gemini),
             "deepseek" => Ok(Self::DeepSeek),
             "ollama-cloud" => Ok(Self::OllamaCloud),
+            #[cfg(feature = "plainsong-plus")]
+            "plainsong-plus" => Ok(Self::PlainsongPlus),
             unknown => Err(format!(
                 "Unsupported analysis provider '{}'. Choose bundled_local, apple_language_model, ollama, openai, anthropic, gemini, deepseek, or ollama-cloud.",
                 unknown
@@ -120,6 +127,8 @@ impl Provider {
             Self::Gemini => "gemini",
             Self::DeepSeek => "deepseek",
             Self::OllamaCloud => "ollama-cloud",
+            #[cfg(feature = "plainsong-plus")]
+            Self::PlainsongPlus => "plainsong-plus",
         }
     }
 
@@ -164,6 +173,8 @@ impl Provider {
             Self::DeepSeek => Some("deepseek"),
             Self::OllamaCloud => Some("ollama-cloud"),
             Self::Ollama => None,
+            #[cfg(feature = "plainsong-plus")]
+            Self::PlainsongPlus => None,
         }
     }
 
@@ -176,6 +187,8 @@ impl Provider {
             Self::DeepSeek => Some("DEEPSEEK_API_KEY"),
             Self::OllamaCloud => Some("OLLAMA_CLOUD_API_KEY"),
             Self::Ollama => None,
+            #[cfg(feature = "plainsong-plus")]
+            Self::PlainsongPlus => None,
         }
     }
 
@@ -209,6 +222,8 @@ impl Provider {
             Self::Gemini => "gemini-3.7-flash",
             Self::DeepSeek => "deepseek-v4-flash",
             Self::OllamaCloud => "qwen3.5:4b",
+            #[cfg(feature = "plainsong-plus")]
+            Self::PlainsongPlus => crate::plus::PLUS_FAST_MODEL,
         }
     }
 
@@ -223,6 +238,10 @@ impl Provider {
             Self::AppleLanguageModel => super::apple_language_model::CONTEXT_WINDOW_TOKENS,
             Self::Ollama => model_context_hint(&normalized).unwrap_or(4_096),
             Self::OllamaCloud => model_context_hint(&normalized).unwrap_or(32_768),
+            // Both aliases sit on 128K+ windows; the relay caps input at 400K
+            // characters, about 100K tokens.
+            #[cfg(feature = "plainsong-plus")]
+            Self::PlainsongPlus => 100_000,
             Self::OpenAi => {
                 // The gpt-5.x family (shipped under codenames -- gpt-5.6-sol,
                 // -terra, -luna, -cyber -- see
@@ -600,6 +619,10 @@ impl ProviderTransport {
             Provider::Gemini => Self::Gemini(GeminiClient::with_api_key(api_key)),
             Provider::DeepSeek => Self::DeepSeek(DeepSeekClient::with_api_key(api_key)),
             Provider::OllamaCloud => Self::OllamaCloud(OllamaCloudClient::with_api_key(api_key)),
+            #[cfg(feature = "plainsong-plus")]
+            Provider::PlainsongPlus => {
+                Self::OllamaCloud(OllamaCloudClient::for_plainsong_plus(api_key))
+            }
         }
     }
 }
@@ -615,7 +638,8 @@ impl CompletionTransport for ProviderTransport {
             Self::Anthropic(_) => Provider::Anthropic,
             Self::Gemini(_) => Provider::Gemini,
             Self::DeepSeek(_) => Provider::DeepSeek,
-            Self::OllamaCloud(_) => Provider::OllamaCloud,
+            // Plainsong Plus shares this client; it knows which it is.
+            Self::OllamaCloud(client) => client.provider(),
         }
     }
 

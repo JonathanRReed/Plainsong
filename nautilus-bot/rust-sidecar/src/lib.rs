@@ -94,6 +94,7 @@ mod ort_utils;
 mod paths;
 mod permissions;
 mod playback;
+mod plus;
 mod provider_models;
 mod recording_audio;
 mod recording_lifecycle;
@@ -2274,6 +2275,29 @@ fn missing_provider_secret_error(provider: AnalysisProvider) -> String {
     )
 }
 
+/// Plus has no API key: its credential is the entitlement token.
+#[cfg(feature = "plainsong-plus")]
+fn plainsong_plus_provider(provider: AnalysisProvider) -> bool {
+    provider == AnalysisProvider::PlainsongPlus
+}
+
+#[cfg(not(feature = "plainsong-plus"))]
+fn plainsong_plus_provider(_provider: AnalysisProvider) -> bool {
+    false
+}
+
+#[cfg(feature = "plainsong-plus")]
+async fn plus_access_token() -> Result<String, String> {
+    plus::access_token()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "plainsong-plus"))]
+async fn plus_access_token() -> Result<String, String> {
+    Err("This build does not include Plainsong Plus.".to_string())
+}
+
 fn provider_secret_for(provider: AnalysisProvider) -> Result<String, String> {
     let Some(secret_name) = provider.provider_secret_name() else {
         return Err(format!(
@@ -2345,7 +2369,9 @@ async fn analysis_runtime_for_provider(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| provider.default_model())
         .to_string();
-    let api_key = if provider.is_remote() {
+    let api_key = if plainsong_plus_provider(provider) {
+        Some(plus_access_token().await?)
+    } else if provider.is_remote() {
         Some(provider_secret_for(provider)?)
     } else {
         None
@@ -4010,6 +4036,11 @@ async fn reset_app_state_for_sidecar(
 
     let (cleared_provider_secrets, failed_provider_secret_clears) =
         clear_registered_provider_secrets_with(secrets::clear_provider_secret);
+    // A reset also forgets a Plainsong Plus license on this Mac.
+    #[cfg(feature = "plainsong-plus")]
+    if let Err(error) = plus::sign_out() {
+        tracing::warn!("Reset could not clear the Plainsong Plus license: {error}");
+    }
 
     handle.emit_event(
         "dictation-state-changed",

@@ -1973,6 +1973,36 @@ fn runtime_diagnostics_for_provider(
                 },
             }
         }
+        #[cfg(feature = "plainsong-plus")]
+        AsrProviderType::PlainsongPlus => {
+            let signed_in = crate::plus::is_signed_in();
+            RuntimeDiagnosticsInternal {
+                runtime_status: if signed_in {
+                    RuntimeStatus::Ready
+                } else {
+                    RuntimeStatus::MissingModel
+                },
+                runtime_message: Some(if signed_in {
+                    "Plainsong Plus is ready for dictation.".to_string()
+                } else {
+                    "Sign in to Plainsong Plus to use hosted transcription.".to_string()
+                }),
+                runtime_details: RuntimeDetails {
+                    model_path: None,
+                    python_path: None,
+                    missing_files: if signed_in {
+                        Vec::new()
+                    } else {
+                        vec!["Plainsong Plus license".to_string()]
+                    },
+                    setup_action: if signed_in {
+                        None
+                    } else {
+                        Some("Enter your license key in Settings -> Plainsong Plus.".to_string())
+                    },
+                },
+            }
+        }
         AsrProviderType::Deepgram => {
             let has_key = has_provider_secret_or_env("deepgram", "DEEPGRAM_API_KEY");
             RuntimeDiagnosticsInternal {

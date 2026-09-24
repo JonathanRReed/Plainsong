@@ -3678,6 +3678,31 @@ pub async fn dispatch_command(
             secrets::clear_provider_secret(normalized).map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
         }
+        // ── Plainsong Plus (not launched) ──────────────────────────────────
+        // Present in every build so the IPC contract is the same everywhere;
+        // only a `plainsong-plus` build answers anything but "not available".
+        "plus_get_status" => Ok(crate::plus::status().await),
+        "plus_activate" => {
+            #[cfg(feature = "plainsong-plus")]
+            {
+                let license_key: String = serde_json::from_value(params["licenseKey"].clone())
+                    .map_err(|e| e.to_string())?;
+                crate::plus::activate(&license_key)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            #[cfg(not(feature = "plainsong-plus"))]
+            {
+                Err("This build does not include Plainsong Plus.".to_string())
+            }
+        }
+        "plus_sign_out" => {
+            #[cfg(feature = "plainsong-plus")]
+            {
+                crate::plus::sign_out().map_err(|e| e.to_string())?;
+            }
+            Ok(serde_json::Value::Null)
+        }
         "get_security_status" => {
             let result = build_security_status(state.as_ref()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())

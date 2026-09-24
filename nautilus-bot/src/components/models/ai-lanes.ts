@@ -7,6 +7,8 @@
 // Models screen is now the one place either lane is chosen, and the Settings
 // view still imports `describeAnalysisDestination` for the disclosures that
 // name where a finished meeting goes.
+import { PLUS_ANALYSIS_PROVIDER, PLUS_CHAT_MODELS } from "@/lib/plus";
+
 export const AI_LANE_KEYS = ["dictationAi", "meetingsAi"] as const;
 export type AiLaneKey = (typeof AI_LANE_KEYS)[number];
 
@@ -30,6 +32,7 @@ const ANALYSIS_PROVIDER_DESTINATIONS: Record<
   gemini: { label: "Google Gemini", remote: true },
   deepseek: { label: "DeepSeek", remote: true },
   "ollama-cloud": { label: "Ollama Cloud", remote: true },
+  [PLUS_ANALYSIS_PROVIDER]: { label: "Plainsong Plus", remote: true },
 };
 
 export const ANALYSIS_PROVIDER_OPTIONS: ReadonlyArray<{
@@ -82,13 +85,18 @@ export function isZeroSetupAnalysisProvider(
 /** The provider choices a lane may offer. */
 export function analysisProviderOptionsForLane(
   lane: AiLaneKey,
+  plusAvailable = false,
 ): ReadonlyArray<{ value: string; label: string }> {
+  // Plus is offered only by a build that compiled it in (see lib/plus.ts).
+  const options = plusAvailable
+    ? [...ANALYSIS_PROVIDER_OPTIONS, { value: PLUS_ANALYSIS_PROVIDER, label: "Plainsong Plus" }]
+    : ANALYSIS_PROVIDER_OPTIONS;
   if (lane === "meetingsAi") {
-    return ANALYSIS_PROVIDER_OPTIONS.filter(
+    return options.filter(
       (option) => !isDictationOnlyAnalysisProvider(option.value),
     );
   }
-  return ANALYSIS_PROVIDER_OPTIONS;
+  return options;
 }
 
 /**
@@ -178,6 +186,9 @@ export function analysisModelChoices(
         .sort();
     case "gemini":
       return models.filter((model) => model.includes("gemini")).filter(canWriteCompletions);
+    // The relay's two aliases; it has no catalogue endpoint.
+    case PLUS_ANALYSIS_PROVIDER:
+      return [...PLUS_CHAT_MODELS];
     default:
       return models.filter(canWriteCompletions);
   }

@@ -28,6 +28,7 @@ import {
   SettingsSwitch,
 } from "@/components/ui/settings-control";
 import { CalendarSettingsSection } from "@/components/meetings/calendar-settings-section";
+import { PlusSettingsSection } from "@/components/plus-settings-section";
 import { LocalToolsSection } from "@/components/local-tools-section";
 import { RememberedVoicesSection } from "@/components/remembered-voices-section";
 import { Input } from "@/components/ui/input";
@@ -4488,6 +4489,10 @@ export function SettingsView() {
                         it improves; this is only where a granted calendar gets
                         narrowed or switched back off. */}
                     <CalendarSettingsSection />
+
+                    {/* Plainsong Plus is not launched: this renders nothing
+                        unless the sidecar was built with it. */}
+                    <PlusSettingsSection />
 
                     <div className="pt-4 border-t space-y-4">
                       <div className="space-y-1">
