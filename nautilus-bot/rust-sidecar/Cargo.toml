@@ -319,6 +319,13 @@ codegen-units = 1
 panic = "unwind"
 strip = true
 
+# Build scripts and proc macros run only while compiling and never ship, so
+# they gain nothing from `strip`. With Command Line Tools 27, `strip` leaves a
+# proc-macro dylib that dyld refuses ("mis-aligned LINKEDIT string pool"),
+# and every crate using that macro then fails with "can't find crate".
+[profile.release.build-override]
+strip = false
+
 [profile.dev]
 opt-level = 1
 
