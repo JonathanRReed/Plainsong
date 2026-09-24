@@ -105,7 +105,7 @@ export function isAllowedExternalUrl(rawUrl: string): boolean {
     return false;
   }
 
-  // Strip trailing dot if present so DNS root-relative hostnames (e.g., github.com.) normalize properly
-  const hostname = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
+  // Strip trailing dots if present so DNS root-relative hostnames (e.g., github.com. or github.com..) normalize properly
+  const hostname = url.hostname.replace(/\.+$/, "");
   return ALLOWED_EXTERNAL_HOST_SET.has(hostname);
 }
