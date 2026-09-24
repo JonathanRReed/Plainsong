@@ -1334,19 +1334,40 @@ impl Database {
                         END
                     ), 0),
                     COUNT(DISTINCT DATE(r.created_at)),
-                    COALESCE(SUM(CASE WHEN r.created_at >= ?1 THEN 1 ELSE 0 END), 0)
+                    COALESCE(SUM(CASE WHEN r.created_at >= ?1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(MAX(r.duration, 0)), 0)
              FROM recordings r
              LEFT JOIN transcripts t ON t.recording_id = r.id
              WHERE r.source_type = 'dictation'",
         )?;
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
-        let row: (i64, i64, i64, i64) = stmt.query_row(params![cutoff], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        let row: (i64, i64, i64, i64, i64) = stmt.query_row(params![cutoff], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })?;
         totals.total_dictations = row.0.max(0) as u64;
         totals.dictated_words = row.1.max(0) as u64;
         totals.active_days = row.2.max(0) as u64;
         totals.last_seven_days_dictations = row.3.max(0) as u64;
+        totals.spoken_seconds = row.4.max(0) as u64;
+
+        // The most recent local days with a dictation, newest first, for the
+        // streak. Bounded: a streak longer than a year still reads as 366.
+        let mut dates_stmt = self.conn.prepare(
+            "SELECT DISTINCT DATE(created_at, 'localtime') AS day
+             FROM recordings
+             WHERE source_type = 'dictation' AND day IS NOT NULL
+             ORDER BY day DESC
+             LIMIT 366",
+        )?;
+        totals.active_dates = dates_stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         // Insertion-action counters, scoped to the most recent action per
         // recording so a retried insert is not counted twice.
@@ -7462,6 +7483,27 @@ mod tests {
             created_at,
         };
         (recording, transcript, history)
+    }
+
+    #[test]
+    fn dictation_insights_count_speaking_time_and_the_local_days_used() {
+        let mut db = in_memory_db();
+        let now = Utc::now();
+        for (id, created_at) in [
+            ("d-today", now),
+            ("d-today-2", now),
+            ("d-earlier", now - chrono::Duration::days(3)),
+        ] {
+            let (recording, transcript, history) =
+                dictation_fixture(id, created_at, "Four words right here.", "four words right here");
+            db.create_dictation_history_entry(&recording, &transcript, &history, None)
+                .expect("save dictation");
+        }
+        let totals = db.get_dictation_insight_totals().expect("totals");
+        assert_eq!(totals.dictated_words, 12);
+        assert_eq!(totals.spoken_seconds, 12, "three 4 s fixtures");
+        assert_eq!(totals.active_dates.len(), 2, "two distinct days, newest first");
+        assert!(totals.active_dates[0] > totals.active_dates[1]);
     }
 
     fn seed_dictation_history(db: &mut Database) {

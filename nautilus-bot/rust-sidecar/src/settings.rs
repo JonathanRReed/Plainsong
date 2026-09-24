@@ -726,6 +726,9 @@ pub struct UiSettings {
     pub show_recording_popup: bool,
     /// Selected premium color scheme applied via `data-theme`
     pub color_scheme: String,
+    /// Soft sounds when dictation starts, finishes and fails (played by the
+    /// Electron main process). On by default, like Wispr Flow and Typeless.
+    pub dictation_sounds: bool,
 }
 
 impl Default for UiSettings {
@@ -736,6 +739,7 @@ impl Default for UiSettings {
             show_dictation_popup: true,
             show_recording_popup: true,
             color_scheme: "default".to_string(),
+            dictation_sounds: true,
         }
     }
 }

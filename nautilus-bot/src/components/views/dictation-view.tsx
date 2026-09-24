@@ -162,6 +162,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { DictationStats } from "@/components/views/dictation/dictation-stats";
 import { DictationCaptureHero } from "@/components/views/dictation/dictation-capture-hero";
 import { DictationHistoryDialog } from "@/components/views/dictation/dictation-history-dialog";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
@@ -4207,52 +4208,29 @@ export function DictationView() {
               </Button>
             </div>
             {dictationInsights ? (
-              <div className="flex flex-wrap gap-x-6 gap-y-3 border-y border-border/60 py-3">
-                {[
-                  {
-                    label: "Total dictations",
-                    value: String(dictationInsights.totalDictations),
-                  },
-                  {
-                    label: "Words dictated",
-                    value: String(dictationInsights.dictatedWords),
-                  },
-                  {
-                    label: "Average words",
-                    value: String(dictationInsights.averageWordsPerDictation),
-                  },
-                  {
-                    label: "Active days",
-                    value: String(dictationInsights.activeDays),
-                  },
-                  {
-                    label: "Last 7 days",
-                    value: String(dictationInsights.lastSevenDaysDictations),
-                  },
-                  {
-                    label: "Commands used",
-                    value: String(dictationInsights.commandsUsed),
-                  },
-                  {
-                    label: "Backtracks",
-                    value: String(dictationInsights.backtracksUsed),
-                  },
-                  {
-                    label: "Phrases expanded",
-                    value: String(dictationInsights.snippetsTriggered),
-                  },
-                  {
-                    label: "Top app",
-                    value: dictationInsights.topAppTarget
-                      ? `${dictationInsights.topAppTarget} (${dictationInsights.topAppTargetCount})`
-                      : "None yet",
-                  },
-                ].map((stat) => (
-                  <div key={stat.label}>
-                    <p className="rubric-muted">{stat.label}</p>
-                    <p className="mt-0.5 text-sm font-medium">{stat.value}</p>
-                  </div>
-                ))}
+              <div className="space-y-3">
+                <DictationStats insights={dictationInsights} />
+                <div className="flex flex-wrap gap-x-6 gap-y-2 px-1 text-xs text-muted-foreground">
+                  {[
+                    { label: "Last 7 days", value: String(dictationInsights.lastSevenDaysDictations) },
+                    { label: "Active days", value: String(dictationInsights.activeDays) },
+                    { label: "Average words", value: String(dictationInsights.averageWordsPerDictation) },
+                    { label: "Commands used", value: String(dictationInsights.commandsUsed) },
+                    { label: "Backtracks", value: String(dictationInsights.backtracksUsed) },
+                    { label: "Phrases expanded", value: String(dictationInsights.snippetsTriggered) },
+                    {
+                      label: "Top app",
+                      value: dictationInsights.topAppTarget
+                        ? `${dictationInsights.topAppTarget} (${dictationInsights.topAppTargetCount})`
+                        : "None yet",
+                    },
+                  ].map((stat) => (
+                    <span key={stat.label}>
+                      {stat.label}{" "}
+                      <span className="font-medium text-foreground">{stat.value}</span>
+                    </span>
+                  ))}
+                </div>
               </div>
             ) : (
               <p className="text-sm text-muted-foreground">

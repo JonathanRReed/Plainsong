@@ -11,6 +11,7 @@ describe("resolveWindowUiSettings", () => {
       alwaysOnTop: false,
       showDictationOverlay: true,
       showRecordingOverlay: true,
+      dictationSounds: true,
     });
   });
 
@@ -22,6 +23,7 @@ describe("resolveWindowUiSettings", () => {
           alwaysOnTop: true,
           showDictationPopup: false,
           showRecordingPopup: false,
+          dictationSounds: false,
         },
       })
     ).toEqual({
@@ -29,6 +31,7 @@ describe("resolveWindowUiSettings", () => {
       alwaysOnTop: true,
       showDictationOverlay: false,
       showRecordingOverlay: false,
+      dictationSounds: false,
     });
   });
 

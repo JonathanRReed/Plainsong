@@ -22,6 +22,7 @@ import {
 } from "electron/main";
 import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
+import { dictationSoundForTransition, playDictationSound } from "./dictation-sounds";
 import {
   createReadStream,
   appendFileSync,
@@ -381,6 +382,7 @@ let minimizeToTrayEnabled = false;
 // persisted and never read, so the switch moved but nothing happened.
 let alwaysOnTopEnabled = false;
 let showDictationOverlayEnabled = true;
+let dictationSoundsEnabled = true;
 let showRecordingOverlayEnabled = true;
 // Mirror of `automation.localToolsEnabled`. Gates every `plainsong://` deep
 // link; the CLI/MCP read the same switch from settings.json themselves.
@@ -485,6 +487,7 @@ type AppSettings = {
     alwaysOnTop?: boolean;
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
+    dictationSounds?: boolean;
   };
   notifications?: {
     meetingEvents?: boolean;
@@ -1246,6 +1249,7 @@ function applyUiSettings(settings: AppSettings | null | undefined): void {
   alwaysOnTopEnabled = resolved.alwaysOnTop;
   showDictationOverlayEnabled = resolved.showDictationOverlay;
   showRecordingOverlayEnabled = resolved.showRecordingOverlay;
+  dictationSoundsEnabled = resolved.dictationSounds;
   notificationSettings = resolveNotificationSettings(settings);
   localToolsEnabled = settings?.automation?.localToolsEnabled === true;
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -3511,6 +3515,16 @@ async function bootstrap() {
       typeof (payload as { phase?: unknown }).phase === "string"
     ) {
       const nextPhase = (payload as { phase: string }).phase;
+      const sound = dictationSoundsEnabled
+        ? dictationSoundForTransition(
+            dictationPhase,
+            nextPhase,
+            (payload as { outcome?: unknown }).outcome,
+          )
+        : null;
+      if (sound) {
+        playDictationSound(sound);
+      }
       if (dictationShortcutFailureResetTimer) {
         clearTimeout(dictationShortcutFailureResetTimer);
         dictationShortcutFailureResetTimer = null;

@@ -395,6 +395,8 @@ interface UiSettings {
   showDictationPopup: boolean;
   showRecordingPopup: boolean;
   colorScheme: string;
+  /** Start, finish and failure sounds for dictation. Absent means on. */
+  dictationSounds?: boolean;
 }
 
 // Transitional empty container -- kept because Settings.export is a required

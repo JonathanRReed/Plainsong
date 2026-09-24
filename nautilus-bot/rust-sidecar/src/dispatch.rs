@@ -3213,6 +3213,11 @@ pub async fn dispatch_command(
                 snippets_triggered: totals.snippets_triggered,
                 top_app_target: totals.top_app_target,
                 top_app_target_count: totals.top_app_target_count,
+                spoken_seconds: totals.spoken_seconds,
+                current_streak_days: models::current_streak_days(
+                    &totals.active_dates,
+                    chrono::Local::now().date_naive(),
+                ),
             };
             serde_json::to_value(insights).map_err(|e| e.to_string())
         }

@@ -626,6 +626,59 @@ pub struct DictationInsights {
     pub snippets_triggered: u64,
     pub top_app_target: Option<String>,
     pub top_app_target_count: u64,
+    /// Seconds of audio behind `dictated_words`.
+    pub spoken_seconds: u64,
+    /// Consecutive local days with a dictation, ending today or yesterday.
+    pub current_streak_days: u64,
+}
+
+/// Consecutive days with a dictation, counting back from `today`. A streak
+/// that last ran yesterday still counts until today ends, so opening the app
+/// in the morning does not read as a broken streak. `dates` are
+/// `YYYY-MM-DD`, newest first.
+pub fn current_streak_days(dates: &[String], today: chrono::NaiveDate) -> u64 {
+    let parsed = dates
+        .iter()
+        .filter_map(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok());
+    let mut expected = today;
+    let mut streak = 0u64;
+    for (index, date) in parsed.enumerate() {
+        if index == 0 && date == today - chrono::Duration::days(1) {
+            expected = date;
+        }
+        if date != expected {
+            break;
+        }
+        streak += 1;
+        expected = date - chrono::Duration::days(1);
+    }
+    streak
+}
+
+#[cfg(test)]
+mod streak_tests {
+    use super::current_streak_days;
+    use chrono::NaiveDate;
+
+    fn days(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn counts_back_from_today_or_yesterday_and_stops_at_a_gap() {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 24).unwrap();
+        assert_eq!(current_streak_days(&[], today), 0);
+        assert_eq!(
+            current_streak_days(&days(&["2026-09-24", "2026-09-23", "2026-09-21"]), today),
+            2
+        );
+        assert_eq!(
+            current_streak_days(&days(&["2026-09-23", "2026-09-22"]), today),
+            2,
+            "a streak last extended yesterday is still alive"
+        );
+        assert_eq!(current_streak_days(&days(&["2026-09-22"]), today), 0);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4534,6 +4534,22 @@ export function SettingsView() {
                           })
                         }
                       />
+
+                      <SettingsSwitch
+                        className="py-0"
+                        label="Dictation sounds"
+                        description="A soft tick when the microphone goes live, a pop when your words land, and a low tone if a dictation fails, so you never have to look."
+                        checked={settings.ui.dictationSounds !== false}
+                        onCheckedChange={(checked) =>
+                          void updateSettings({
+                            ...settings,
+                            ui: {
+                              ...settings.ui,
+                              dictationSounds: checked,
+                            },
+                          })
+                        }
+                      />
                     </div>
 
                     <div className="pt-4 border-t space-y-4">

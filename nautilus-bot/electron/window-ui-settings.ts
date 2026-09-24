@@ -12,6 +12,7 @@ export interface WindowUiSettingsInput {
     alwaysOnTop?: boolean;
     showDictationPopup?: boolean;
     showRecordingPopup?: boolean;
+    dictationSounds?: boolean;
   };
 }
 
@@ -20,6 +21,7 @@ export interface WindowUiSettings {
   alwaysOnTop: boolean;
   showDictationOverlay: boolean;
   showRecordingOverlay: boolean;
+  dictationSounds: boolean;
 }
 
 /**
@@ -35,6 +37,7 @@ export function resolveWindowUiSettings(
     alwaysOnTop: ui?.alwaysOnTop === true,
     showDictationOverlay: ui?.showDictationPopup !== false,
     showRecordingOverlay: ui?.showRecordingPopup !== false,
+    dictationSounds: ui?.dictationSounds !== false,
   };
 }
 
