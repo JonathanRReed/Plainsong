@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
-import { useRecording } from "@/hooks/use-recording";
+import { RecordingDurationText, useRecordingSession } from "@/hooks/use-recording";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
 import {
@@ -828,7 +828,7 @@ export function DictationView() {
     stateEvent: dictationStateEvent,
     textReadyEvent: dictationTextReadyEvent,
   } = useDictationRuntime();
-  const { formattedDuration, startDictation, stopDictation } = useRecording();
+  const { startDictation, stopDictation } = useRecordingSession();
   const { toast } = useToast();
   const { projects } = useProjects();
   const {
@@ -3865,7 +3865,7 @@ export function DictationView() {
             unavailableRole={
               dictationReadiness.state === "unknown" ? "status" : "alert"
             }
-            formattedDuration={formattedDuration}
+            formattedDuration={<RecordingDurationText />}
             hotkeyInstruction={hotkeyInstruction}
             hotkeyPressed={hotkeyPressed}
             livePreview={dictationPhasePreview}

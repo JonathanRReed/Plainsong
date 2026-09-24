@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -26,7 +27,7 @@ interface DictationCaptureHeroProps {
   unavailableActionLabel: string;
   unavailableActionBusy: boolean;
   unavailableRole: "alert" | "status";
-  formattedDuration: string;
+  formattedDuration: ReactNode;
   hotkeyInstruction: string;
   hotkeyPressed: boolean;
   livePreview: string | null;

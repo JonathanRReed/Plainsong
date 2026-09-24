@@ -48,6 +48,11 @@ vi.mock("@/hooks/use-recording", () => ({
     formattedDuration: "0:00",
     recordingMode: "dictation",
   }),
+  useRecordingSession: () => ({
+    isRecording: false,
+    recordingMode: "dictation",
+  }),
+  RecordingDurationText: () => "0:00",
 }));
 
 vi.mock("@/lib/backend/settings", () => ({

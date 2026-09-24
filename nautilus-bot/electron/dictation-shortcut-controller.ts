@@ -228,7 +228,7 @@ export const DICTATION_HOLD_WATCHDOG_MS = 5 * 60 * 1000;
 // Tap to lock: a hold-to-talk press released sooner than this is a tap, and
 // a tap locks the microphone on until the next press, the way Wispr Flow's
 // double-tap and Typeless's press-to-toggle do. Anything longer is a hold.
-export const HOLD_TAP_LOCK_MS = 300;
+const HOLD_TAP_LOCK_MS = 300;
 
 /**
  * What a start issued by this controller tells the sidecar beyond "start":

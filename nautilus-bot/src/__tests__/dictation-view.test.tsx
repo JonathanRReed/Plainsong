@@ -254,6 +254,12 @@ vi.mock("@/hooks/use-recording", () => ({
     startDictation: backendMocks.startDictation,
     stopDictation: backendMocks.stopDictation,
   }),
+  useRecordingSession: () => ({
+    isRecording: false,
+    startDictation: backendMocks.startDictation,
+    stopDictation: backendMocks.stopDictation,
+  }),
+  RecordingDurationText: () => "0:00",
 }));
 
 vi.mock("@/hooks/use-projects", () => ({

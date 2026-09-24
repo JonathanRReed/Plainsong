@@ -33,7 +33,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { useRecording } from "@/hooks/use-recording";
+import { RecordingDurationText, useRecordingSession } from "@/hooks/use-recording";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import { selectReadinessForSurface } from "@/features/readiness/product-readiness";
 import { requestReadinessDestination } from "@/lib/navigation";
@@ -181,7 +181,7 @@ export function Sidebar({
     productReadiness,
     "sidebar",
   );
-  const { isRecording, formattedDuration, recordingMode } = useRecording();
+  const { isRecording, recordingMode } = useRecordingSession();
   const localModeStatus = settings
     ? deriveLocalModeStatus(
         settings.privacy.dictationAi?.provider,
@@ -467,7 +467,7 @@ export function Sidebar({
               {!isCollapsed && (
                 <span className="font-medium text-foreground">
                   {recordingMode === "meeting" ? "Meeting" : "Dictation"}{" "}
-                  <span className="time-spec">{formattedDuration}</span>
+                  <span className="time-spec"><RecordingDurationText /></span>
                 </span>
               )}
             </div>
