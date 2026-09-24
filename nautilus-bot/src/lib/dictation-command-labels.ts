@@ -12,6 +12,10 @@ export function formatAppliedDictationCommandLabel(
       return "Rewrite professional";
     case "bulletize_selection":
       return "Bulletize selection";
+    case "voice_edit":
+      return "Voice edit";
+    case "help_me_write":
+      return "Help me write";
     case "undo_last_insert":
     case "backtrack_undo_last_insert":
       return "Undo last insert";

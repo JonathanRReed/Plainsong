@@ -225,6 +225,12 @@ export interface DictationCustomMode {
    * modes use `TranscriptionSettings.dictationTranslateToEnglish` instead.
    */
   translateToEnglish?: boolean;
+  /**
+   * Voice Edit: the spoken words are an instruction applied to the selected
+   * text, or a request for a draft when nothing is selected. Mirrors
+   * `voice_edit` in rust-sidecar/src/settings.rs.
+   */
+  voiceEdit?: boolean;
 }
 
 /**

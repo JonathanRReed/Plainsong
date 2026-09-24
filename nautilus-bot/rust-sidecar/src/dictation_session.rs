@@ -1583,9 +1583,50 @@ pub(crate) async fn stop_dictation_for_sidecar(
     // (an empty transcript or a consumed command skips it entirely).
     let mut format_outcome = crate::dictation_timing::DictationFormatOutcome::NotApplicable;
 
-    if settings_snapshot
-        .transcription
-        .dictation_command_mode_enabled
+    // Voice Edit: the words are an instruction. Runs instead of the command
+    // grammar and the cleanup pipeline, and fails loudly rather than
+    // inserting the instruction itself into the user's document.
+    let voice_edit_mode = dictation_options
+        .resolved_custom_mode_id
+        .as_deref()
+        .and_then(|id| {
+            settings_snapshot
+                .transcription
+                .dictation_custom_modes
+                .iter()
+                .find(|mode| mode.id == id)
+        })
+        .is_some_and(|mode| mode.voice_edit);
+    if voice_edit_mode && !raw_transcribed_text.trim().is_empty() {
+        let ai_is_remote = dictation_session_ai_selection(&settings_snapshot)
+            .map(|(provider, _, _)| provider.is_remote())
+            .unwrap_or(false);
+        emit_dictation_polishing_stage(state, handle, session_id, ai_is_remote);
+        match crate::dictation_text::run_voice_edit(
+            state,
+            &settings_snapshot,
+            raw_transcribed_text.as_str(),
+            dictation_options.captured_context_text.as_deref(),
+        )
+        .await
+        {
+            Ok((output, kind)) => {
+                final_text = output;
+                command_applied = Some(kind.command_key().to_string());
+                pipeline_stage_keys.push(kind.command_key().to_string());
+            }
+            Err(error) => {
+                return Err(
+                    fail_dictation_stop(state, handle, &failure_context, None, error).await,
+                );
+            }
+        }
+    }
+
+    if command_applied.is_none()
+        && settings_snapshot
+            .transcription
+            .dictation_command_mode_enabled
     {
         if let Some((command_key, action)) = parse_dictation_command(
             raw_transcribed_text.as_str(),

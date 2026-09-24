@@ -2474,6 +2474,9 @@ export function DictationView() {
     dictationModelId: overrides?.dictationModelId ?? currentDictationModelId,
     aiProvider: overrides?.aiProvider ?? currentAiProvider,
     aiModelId: overrides?.aiModelId ?? currentAiModelId,
+    // Kept across edits: the editor has no control for it, and dropping it
+    // would silently turn a Voice Edit key back into plain dictation.
+    voiceEdit: overrides?.voiceEdit ?? selectedCustomMode?.voiceEdit ?? false,
     activationAppMatcher:
       overrides && "activationAppMatcher" in overrides
         ? (overrides.activationAppMatcher ?? null)
@@ -2666,6 +2669,7 @@ export function DictationView() {
       activationDomainMatcher: style.activationDomainMatcher ?? null,
       livePreviewEnabled:
         style.livePreviewEnabled ?? dictationLivePreviewEnabled,
+      voiceEdit: style.voiceEdit ?? false,
     });
     const nextModes = dictationCustomModes.some(
       (mode) => mode.id === nextMode.id,
@@ -2674,6 +2678,18 @@ export function DictationView() {
           mode.id === nextMode.id ? nextMode : mode,
         )
       : [...dictationCustomModes, nextMode];
+
+    if (nextMode.voiceEdit) {
+      // Voice Edit is a second key, never the main one: making it the active
+      // profile would turn every ordinary dictation into an instruction.
+      setDictationCustomModes(nextModes);
+      await persistDictationPreferences({ customModes: nextModes });
+      toast(
+        "Voice Edit is installed. Give it its own key in Settings, Shortcuts, then select text and say what to change.",
+        "success",
+      );
+      return;
+    }
 
     setDictationCustomModes(nextModes);
     setDictationModePreset("custom");
@@ -4717,9 +4733,13 @@ export function DictationView() {
                                 void handleInstallRecommendedStyle(style)
                               }
                             >
-                              {installedMode
-                                ? "Update and use"
-                                : "Install and use"}
+                              {style.voiceEdit
+                                ? installedMode
+                                  ? "Update"
+                                  : "Install"
+                                : installedMode
+                                  ? "Update and use"
+                                  : "Install and use"}
                             </Button>
                           </div>
                         </div>

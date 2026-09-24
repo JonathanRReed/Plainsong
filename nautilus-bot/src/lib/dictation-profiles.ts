@@ -50,7 +50,11 @@ export type RecommendedAppStyle = {
   activationAppMatcher?: string;
   activationDomainMatcher?: string;
   livePreviewEnabled?: boolean;
+  /** Installs as a Voice Edit profile; see `DictationCustomMode.voiceEdit`. */
+  voiceEdit?: boolean;
 };
+
+export const VOICE_EDIT_STYLE_ID = "builtin-voice-edit";
 
 /**
  * Icons are named here and resolved to components at the render site, so the
@@ -229,6 +233,23 @@ export const RECOMMENDED_APP_STYLES: RecommendedAppStyle[] = [
     copyToClipboard: false,
     commandModeEnabled: true,
     livePreviewEnabled: true,
+  },
+  {
+    id: VOICE_EDIT_STYLE_ID,
+    name: "Voice Edit",
+    description:
+      "Select text and say what to change: “make this friendlier”, “turn this into bullets”, “translate to Spanish”. With nothing selected, say what to write and it drafts it. Give it its own key in Settings, Shortcuts.",
+    baseModePreset: "voice",
+    customPrompt: "",
+    profile: "power_rewrite",
+    routePreference: "local",
+    insertionMode: "auto",
+    contextSource: "selected_text",
+    saveToInbox: true,
+    copyToClipboard: false,
+    commandModeEnabled: false,
+    livePreviewEnabled: false,
+    voiceEdit: true,
   },
 ];
 

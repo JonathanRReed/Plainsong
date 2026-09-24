@@ -552,6 +552,11 @@ pub struct DictationCustomMode {
     /// Translate the spoken words into English for this mode. Mirrors the
     /// built-in modes' `dictation_translate_to_english`.
     pub translate_to_english: bool,
+    /// Voice Edit: the spoken words are an instruction, not text. With a
+    /// selection, the instruction is applied to it and the result replaces
+    /// it ("make this friendlier"); with none, the instruction is written
+    /// out as a draft ("Help me write"). See `run_voice_edit`.
+    pub voice_edit: bool,
 }
 
 impl Default for TranscriptionSettings {
