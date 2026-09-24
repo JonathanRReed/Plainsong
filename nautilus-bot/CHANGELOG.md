@@ -10,6 +10,19 @@ hardening pass. The source version and numeric macOS build version are now
 signed candidate being notarized, stapled, installed, and exercised on Apple
 Silicon. See `LAUNCH.md` for that boundary.
 
+### Voice Edit, quiet speech and Plainsong Plus
+- New style, Voice Edit: select text, dictate an instruction ("make this
+  friendlier", "turn this into bullets") and the selection is rewritten in
+  place. With nothing selected it drafts what you ask for ("Help me write").
+  It needs an AI model (Ollama or a cloud provider) and is installed from
+  Dictation, recommended styles.
+- Dictation no longer runs a noise gate that clipped quiet consonants;
+  quiet recordings are instead brought to a steady level before
+  transcription, with a soft limiter so loud ones do not clip.
+- Not launched and not in any build users get: groundwork for Plainsong
+  Plus, an optional $10/month tier with hosted models. See
+  `docs/plainsong-plus.md`.
+
 ### Dictation cleanup and HUD
 - New, on by default: "Remove filler words" drops um/uh, stuttered words
   ("the the") and like-for-like corrections ("Tuesday, no wait, Wednesday"

@@ -3343,6 +3343,11 @@ fn reset_secret_registry_clears_every_remote_asr_provider_secret() {
         .into_iter()
         .filter(|provider| provider.is_remote())
     {
+        // Plus has no provider key; reset signs it out instead (`plus::sign_out`).
+        #[cfg(feature = "plainsong-plus")]
+        if provider == asr::AsrProviderType::PlainsongPlus {
+            continue;
+        }
         let secret_name = provider
             .provider_secret_name()
             .expect("every remote ASR provider must declare its credential slot");
@@ -7257,7 +7262,12 @@ fn renderer_provider_set(set_name: &str) -> std::collections::BTreeSet<String> {
 /// list alone fails here.
 #[test]
 fn every_cloud_provider_is_remote_in_both_languages() {
-    let renderer = renderer_provider_set("CLOUD_PROVIDER_SET");
+    // The renderer names Plainsong Plus so a Plus build is disclosed as
+    // remote; a build without the feature has no such route to compare.
+    let renderer = renderer_provider_set("CLOUD_PROVIDER_SET")
+        .into_iter()
+        .filter(|name| cfg!(feature = "plainsong-plus") || name != "plainsong_plus")
+        .collect::<std::collections::BTreeSet<String>>();
     let sidecar = asr::AsrProviderType::all()
         .into_iter()
         .filter(|provider| provider.is_remote())

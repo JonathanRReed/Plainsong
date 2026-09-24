@@ -301,8 +301,13 @@ kept, and a dictation of only "um" is never emptied.
 
 ### Next, by expected user impact
 
-1. Free-form voice edits on a selection, plus "Help me write" on an empty
-   one: the transform path already exists (`run_custom_dictation_transform_*`)
-   and skips the word-by-word check by design.
-2. Quiet-speech mode: normalize dictation audio gain before ASR, with a cap.
+1. ~~Free-form voice edits on a selection, plus "Help me write" on an empty
+   one.~~ Shipped in round 3 as the Voice Edit style.
+2. ~~Quiet-speech mode.~~ Shipped in round 3: the noise gate is off and
+   dictation audio is loudness-normalized with a soft limiter.
 3. Smart Format on by default once the cleanup model is downloaded (§6).
+
+## 8. Round 3: premium and Plainsong Plus
+
+The paid tier's model picks, economics, architecture and launch checklist,
+plus the remaining gaps against Typeless, are in `docs/plainsong-plus.md`.
