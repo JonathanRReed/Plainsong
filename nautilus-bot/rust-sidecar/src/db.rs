@@ -610,14 +610,14 @@ pub struct Database {
     encrypted: bool,
 }
 
-#[expect(
-    dead_code,
-    reason = "database module keeps migration and evidence-table helpers beyond current command usage"
-)]
 /// Recording id to (text preview, app target), for dictation history lists.
 pub type DictationListPreviews =
     std::collections::HashMap<String, (Option<String>, Option<String>)>;
 
+#[expect(
+    dead_code,
+    reason = "database module keeps migration and evidence-table helpers beyond current command usage"
+)]
 impl Database {
     /// Create new database connection with optional encryption
     pub fn new_with_key(key: Option<&str>) -> Result<Self> {
