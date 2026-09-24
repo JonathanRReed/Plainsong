@@ -1,0 +1,27 @@
+# Plainsong Plus: the optional paid cloud tier. NOT LAUNCHED.
+# Every route but /v1/status answers 503 while PLUS_LAUNCH_STATE is "off".
+# Deploying this does not change the app: the app side is compiled only
+# with the sidecar's `plainsong-plus` Cargo feature, which no release enables.
+name = "plainsong-plus"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+# routes = [{ pattern = "plus.plainsong.jonathanrreed.com", custom_domain = true }]
+
+[vars]
+PLUS_LAUNCH_STATE = "off"        # off | testers | on
+TESTER_CUSTOMER_IDS = ""         # comma-separated Polar customer ids for "testers"
+POLAR_ENVIRONMENT = "sandbox"    # sandbox | production
+POLAR_ORGANIZATION_ID = ""
+
+[[d1_databases]]
+binding = "DB"
+database_name = "plainsong-plus"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# Secrets (wrangler secret put <NAME>), never in this file:
+#   TOKEN_SECRET          32+ random characters, signs entitlement tokens
+#   POLAR_WEBHOOK_SECRET  from the Polar webhook settings
+#   XAI_API_KEY           Grok speech-to-text
+#   GROQ_API_KEY          plainsong-fast chat
+#   ANTHROPIC_API_KEY     plainsong-quality chat
+#   ELEVENLABS_API_KEY    optional speech-to-text fallback
