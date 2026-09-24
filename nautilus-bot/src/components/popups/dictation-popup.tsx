@@ -397,31 +397,22 @@ function PopupActionButton({
   onClick: () => void;
   tone?: "default" | "primary";
 }) {
+  // One compact row of actions: the done state is on screen for under two
+  // seconds, so a grid of tall tiles only pushed the result out of view.
   return (
     <button
       type="button"
+      title={detail}
       className={cn(
-        "group flex items-start gap-3 rounded-xl border px-3 py-3 text-left transition-colors",
+        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         tone === "primary"
-          ? "border-foreground/15 bg-foreground/8 hover:bg-foreground/12"
-          : "border-foreground/10 bg-foreground/4.5 hover:bg-foreground/7.5",
+          ? "border-foreground/15 bg-foreground/8 text-foreground hover:bg-foreground/12"
+          : "border-foreground/10 text-muted-foreground hover:bg-foreground/6 hover:text-foreground",
       )}
       onClick={onClick}
     >
-      <div
-        className={cn(
-          "mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
-          tone === "primary"
-            ? "bg-foreground/10 text-foreground"
-            : "bg-foreground/8 text-foreground",
-        )}
-      >
-        <Icon className="h-4 w-4" />
-      </div>
-      <div className="min-w-0">
-        <p className="text-sm font-medium text-foreground">{label}</p>
-        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{detail}</p>
-      </div>
+      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+      {label}
     </button>
   );
 }
@@ -1405,8 +1396,10 @@ export function DictationPopup() {
     return <div className="h-screen w-screen bg-transparent" />;
   }
 
+  // Bottom-anchored: the window sits just above the Dock, so a window taller
+  // than its card (a generous estimate) leaves the gap above, not below.
   return (
-    <div className="h-screen w-screen bg-transparent p-3">
+    <div className="flex h-screen w-screen flex-col justify-end bg-transparent p-3">
       <div
         data-hud-card
         className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover px-4 py-3.5 shadow-[0_6px_18px_hsl(34_26%_4%/0.35)]"
@@ -1629,11 +1622,11 @@ export function DictationPopup() {
         )}
 
         {phase === "done" && (
-          <div className="flex items-center gap-3 text-foreground">
+          <div className="flex items-start gap-3 text-foreground">
             {outcome === "error" || deliveryRefusal ? (
-              <TriangleAlert className="h-5 w-5 text-destructive" />
+              <TriangleAlert className="mt-1 h-5 w-5 shrink-0 text-rust" />
             ) : (
-              <CheckCircle2 className="h-5 w-5 text-foreground" />
+              <CheckCircle2 className="mt-1 h-5 w-5 shrink-0 text-foreground" />
             )}
             <div className="min-w-0 flex-1">
               <p className="manuscript text-base font-serif text-foreground">{doneTitle}</p>
@@ -1671,7 +1664,10 @@ export function DictationPopup() {
                       {formatLatencyMetric(insertLatencyMs)} insert
                     </span>
                   )}
-                  <span className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1">
+                  <span
+                    className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1"
+                    title={`Say: ${spokenEditHints.join(", ")}`}
+                  >
                     {deliveryRefusal
                       ? "Kept in history"
                       : outcome === "copied"
@@ -1691,25 +1687,8 @@ export function DictationPopup() {
                 </div>
               )}
               {!compact && (
-                <div className="mt-3 rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2">
-                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    Voice edits
-                  </p>
-                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-foreground">
-                    {spokenEditHints.map((hint) => (
-                      <span
-                        key={hint}
-                        className="rounded-full border border-foreground/10 bg-popover/95 px-2.5 py-1"
-                      >
-                        {hint}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {!compact && (
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <div className="grid w-full gap-2 sm:grid-cols-2">
+                <div className="mt-3">
+                  <div className="flex flex-wrap gap-1.5">
                     {finalText?.trim() && (
                       <PopupActionButton
                         icon={Clipboard}

@@ -251,3 +251,58 @@ are researched but not built:
   people notice, and Plainsong's version keeps the user's words.
 - **Granite 5 as the English dictation default** after the WER run.
 - **Nemotron 3 diarization as the meeting default** after the frame-error run.
+
+## 7. Adversarial pass against Typeless (round 2)
+
+Three read-only audits (feature parity, a bug hunt on round 1, and a HUD
+review with screenshots of every state in both themes) found that the
+biggest gap was not the models or the animation: **a fresh install removed
+nothing from messy speech.** "Um so I think we should uh meet on Tuesday no
+wait Wednesday at 3 and bring the the slides" went in verbatim, and turning
+on AI formatting did not help, because the fidelity check rejected every
+edit Typeless is known for, including edits the Apple on-device model was
+told to make.
+
+### Parity after this round
+
+| Typeless feature | Plainsong now | Where |
+| --- | --- | --- |
+| Removes um/uh | **On by default**, on this Mac | `dictation_cleanup.rs` |
+| Removes stutters ("the the") | **On by default**, function words only | `dictation_cleanup.rs` |
+| Keeps the final version of a correction | **On by default** for days, months, numbers and times, including "Tuesday. No wait, Wednesday." Untyped restarts go to the AI pass. | `dictation_cleanup.rs` |
+| AI polish | Optional; now allowed to make the same safe edits and write "three thirty" as "3:30", still rejects changed words and dropped negations | `dictation_fidelity.rs` |
+| Voice bar with Listening / Thinking | Pill by default: Listening trace, then Finishing, Transcribing, Polishing with a progress bar, then Inserted | `dictation-popup.tsx`, `dictation-hud-status.ts` |
+| Honest failure states | Better than Typeless: "Not inserted", "No speech", "Mic blocked" instead of a generic state | `dictation-hud-status.ts` |
+| Tone per app | Local punctuation per app category, now with whole-word matching and bundle ids for the common apps; full tone rewrite needs the AI pass | `text/format.rs` |
+| Spoken lists | Notes mode splits sentences and short item lists, no longer every comma | `dictation_text.rs` |
+| Works offline, audio stays local | Plainsong only | |
+| 100+ languages, auto-detect | Parakeet covers 25; Whisper and cloud routes cover more. Qwen3-ASR 1.7B is the planned local answer | §3 |
+| Whisper / quiet mode | Not built | next |
+| Free-form voice edit on a selection ("make this friendlier"), "Help me write" | Fixed command phrases only | next |
+
+Every cleanup rule was written against the existing fidelity promises and
+their tests: "Ah", "ER", quoted words, intentional "like", real doubles
+("had had", "that that") and repeated answers ("Agreed. Agreed.") are all
+kept, and a dictation of only "um" is never emptied.
+
+### Bugs fixed from the round 1 review
+
+- Pill showed a full gold bar and "Ready" after a secure-field refusal, an
+  empty result or an undo.
+- WER scorer counted a correct transcript that wrote "555-1234", "$4,250",
+  "8.2%" or "14th" as several errors, which would have ranked routes wrong.
+- A HUD reopened mid-session lost its stage and could stick at 94%.
+- The timing estimate let one cold start set it outright and mixed local
+  and remote AI times.
+- xAI ignored the language setting, mislabelled every result as English,
+  and failed on a reply with no text.
+- The waveform restarted its draw loop and blanked the canvas on every
+  level sample, a visible flicker.
+
+### Next, by expected user impact
+
+1. Free-form voice edits on a selection, plus "Help me write" on an empty
+   one: the transform path already exists (`run_custom_dictation_transform_*`)
+   and skips the word-by-word check by design.
+2. Quiet-speech mode: normalize dictation audio gain before ASR, with a cap.
+3. Smart Format on by default once the cleanup model is downloaded (§6).

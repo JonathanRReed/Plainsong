@@ -995,7 +995,10 @@ describe("DictationPopup", () => {
     expect(screen.getByText("2 snippets")).toBeInTheDocument();
     expect(screen.getByText("Target Slack")).toBeInTheDocument();
     expect(screen.getByText("Edit commands available")).toBeInTheDocument();
-    expect(screen.getByText("Voice edits")).toBeInTheDocument();
+    expect(screen.getByText("Edit commands available")).toHaveAttribute(
+      "title",
+      expect.stringContaining("scratch that"),
+    );
     expect(screen.getByText("Copy result")).toBeInTheDocument();
     expect(screen.getByText("Start again")).toBeInTheDocument();
     expect(screen.getByText("Open history")).toBeInTheDocument();

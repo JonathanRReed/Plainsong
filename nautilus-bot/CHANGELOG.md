@@ -10,6 +10,18 @@ hardening pass. The source version and numeric macOS build version are now
 signed candidate being notarized, stapled, installed, and exercised on Apple
 Silicon. See `LAUNCH.md` for that boundary.
 
+### Dictation cleanup and HUD
+- New, on by default: "Remove filler words" drops um/uh, stuttered words
+  ("the the") and like-for-like corrections ("Tuesday, no wait, Wednesday"
+  becomes "Wednesday") on this Mac. Ambiguous speech is left as said.
+- AI formatting can now make those same edits and write spoken numbers as
+  digits; it still cannot change, drop or reorder your words.
+- The dictation HUD opens as a compact pill with one honest word per state
+  and a live voice trace. A refused or empty delivery no longer looks like
+  success, and errors name their cause.
+- Notes mode no longer turns every comma into a bullet; app detection no
+  longer mistakes 1Password for a notes app.
+
 ### Dictation finishing and accuracy
 - After you stop speaking, the dictation HUD now shows Finishing, Transcribing
   and (when an AI pass runs) Polishing, with a bar that fills toward an

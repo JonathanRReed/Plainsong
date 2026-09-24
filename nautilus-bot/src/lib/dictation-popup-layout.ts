@@ -187,11 +187,13 @@ export function getPopupSize(
   }
 
   if (phase === "done") {
-    // The done panel is a stack of chips, a result box, hint pills and an
-    // action grid inside an `overflow-hidden` card; it needs its own pass and
-    // keeps its existing allowance for now.
-    const contentLines = Math.max(messageLines, previewLines);
-    return { width: 432, height: Math.max(248, 198 + contentLines * 18) };
+    // Title, one chip row, a result box clamped to four lines and one row of
+    // actions: measured at 284-323px in a real render, plus the window's
+    // padding. The old 248px allowance clipped the actions off entirely.
+    // The card is bottom-anchored, so spare height sits above it, unseen.
+    // A flat 420 covers the tallest measured card plus three message lines
+    // and keeps the overlay cap's 48px of headroom.
+    return { width: 432, height: 420 };
   }
 
   return {
