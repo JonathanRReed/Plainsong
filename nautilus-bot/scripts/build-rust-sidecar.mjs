@@ -48,6 +48,21 @@ if (result.status !== 0) {
   process.exit(result.status ?? 1);
 }
 
+// The release profile leaves stripping to this step (see `strip = false` in
+// Cargo.toml): rustc's own macOS stripper writes a symbol table dyld rejects.
+// Apple's /usr/bin/strip does not. Windows keeps its symbols in the PDB.
+if (process.platform !== "win32") {
+  const strip = process.platform === "darwin" ? "/usr/bin/strip" : "strip";
+  for (const binary of ["plainsong-sidecar", "plainsong-cli"]) {
+    const binaryPath = path.join(repoRoot, "rust-sidecar", "target", "release", binary);
+    const stripped = spawnSync(strip, [binaryPath], { stdio: "inherit" });
+    if (stripped.error || stripped.status !== 0) {
+      console.error(`Failed to strip ${binary}: ${stripped.error?.message ?? `exit ${stripped.status}`}`);
+      process.exit(1);
+    }
+  }
+}
+
 const auditArgs = [path.join(repoRoot, "scripts", "verify-macos-system-audio.mjs")];
 if (process.platform !== "darwin") {
   auditArgs.push("--source-only");

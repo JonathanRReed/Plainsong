@@ -317,13 +317,11 @@ codegen-units = 1
 # realtime audio callbacks we own, so those degrade to an inert stream instead
 # of reaching that abort at all.
 panic = "unwind"
-strip = true
-
-# Build scripts and proc macros run only while compiling and never ship, so
-# they gain nothing from `strip`. With Command Line Tools 27, `strip` leaves a
-# proc-macro dylib that dyld refuses ("mis-aligned LINKEDIT string pool"),
-# and every crate using that macro then fails with "can't find crate".
-[profile.release.build-override]
+# Not `true`: on macOS rustc strips with its bundled `rust-objcopy`, whose
+# output current dyld rejects ("mis-aligned LINKEDIT string pool"). That broke
+# every proc macro in a release build ("can't find crate for zerofrom_derive")
+# and left the sidecar unloadable by `dyld_info`. scripts/build-rust-sidecar.mjs
+# strips the shipped binaries with the platform's own `strip` instead.
 strip = false
 
 [profile.dev]
