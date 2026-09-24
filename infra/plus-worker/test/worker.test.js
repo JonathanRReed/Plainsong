@@ -2,6 +2,8 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import worker, { wavDurationSeconds } from "../src/index.js";
 import { memoryStore } from "../src/store.js";
+import { statusGrantsAccess, subscriptionStatusFromEvent, verifyWebhook } from "../src/polar.js";
+import { verifyStripeWebhook } from "../src/stripe.js";
 import { signToken, verifyToken } from "../src/token.js";
 import { MONTHLY_CAPS, usagePeriod } from "../src/policy.js";
 
@@ -31,6 +33,9 @@ function wav(seconds, rate = 16000) {
 }
 
 function env(overrides = {}) {
+  // cus_1 has a paid subscription unless a test says otherwise.
+  const store = memoryStore();
+  store.subscriptions.set("cus_1", { status: "active", updatedAt: "2026-01-01T00:00:00Z" });
   return {
     PLUS_LAUNCH_STATE: "on",
     TOKEN_SECRET: SECRET,
@@ -39,25 +44,30 @@ function env(overrides = {}) {
     XAI_API_KEY: "xai",
     GROQ_API_KEY: "groq",
     ANTHROPIC_API_KEY: "anthropic",
-    __store: memoryStore(),
+    __store: store,
     ...overrides,
   };
 }
 
-function call(e, method, path, { body, token, headers = {} } = {}) {
+async function call(e, method, path, { body, token, headers = {}, contentLength = true } = {}) {
   const init = { method, headers: { ...headers } };
   if (token) init.headers.authorization = `Bearer ${token}`;
-  if (body instanceof FormData) init.body = body;
-  else if (body !== undefined) {
+  if (body instanceof FormData) {
+    // A Request built from FormData has no Content-Length; a real client sends one.
+    const encoded = new Response(body);
+    init.body = await encoded.arrayBuffer();
+    init.headers["content-type"] = encoded.headers.get("content-type");
+    if (contentLength) init.headers["content-length"] = String(init.body.byteLength);
+  } else if (body !== undefined) {
     init.body = JSON.stringify(body);
     init.headers["content-type"] = "application/json";
   }
   return worker.fetch(new Request(`https://plus.example${path}`, init), e);
 }
 
-function audioForm(seconds, extra = {}) {
+function audioForm(seconds, extra = {}, bytes = wav(seconds)) {
   const form = new FormData();
-  form.append("file", new Blob([wav(seconds)], { type: "audio/wav" }), "a.wav");
+  form.append("file", new Blob([bytes], { type: "audio/wav" }), "a.wav");
   for (const [key, value] of Object.entries(extra)) {
     for (const item of [].concat(value)) form.append(key, item);
   }
@@ -143,8 +153,9 @@ test("transcription relays audio and dictionary terms, then meters the seconds",
   const sent = calls.find((c) => c.key === "api.x.ai/v1/stt").init.body;
   assert.deepEqual(sent.getAll("keyterm"), ["Plainsong", "Priya"]);
   assert.equal(sent.get("language"), "en");
+  // The provider said 4.5 s, but the header says 5: bill the larger.
   const usage = await e.__store.getUsage("cus_1", usagePeriod());
-  assert.equal(usage.dictationSeconds, 4.5);
+  assert.equal(usage.dictationSeconds, 5);
 });
 
 test("fair use: an exhausted allowance answers 429 without calling the provider", async () => {
@@ -242,4 +253,116 @@ test("tampered and expired tokens are rejected", async () => {
 test("WAV duration comes from the header", () => {
   assert.equal(wavDurationSeconds(wav(3)), 3);
   assert.equal(wavDurationSeconds(new Uint8Array([1, 2, 3])), null);
+});
+
+test("a WAV header with a forged byte rate is not metered and is refused", async () => {
+  const forged = wav(20 * 60);
+  new DataView(forged.buffer).setUint32(28, 0xffffffff, true);
+  assert.equal(wavDurationSeconds(forged), null);
+  const float = wav(2);
+  new DataView(float.buffer).setUint16(20, 3, true); // IEEE float, not PCM
+  assert.equal(wavDurationSeconds(float), null);
+  const truncated = wav(0).subarray(0, 30); // fmt chunk cut short
+  assert.equal(wavDurationSeconds(truncated), null);
+
+  const token = await signToken({ sub: "cus_1" }, SECRET);
+  const response = await call(env(), "POST", "/v1/audio/transcriptions", { token, body: audioForm(0, {}, forged) });
+  assert.equal(response.status, 415);
+  assert.equal(calls.length, 0);
+});
+
+test("audio that is not a PCM WAV is refused before reaching a provider", async () => {
+  const token = await signToken({ sub: "cus_1" }, SECRET);
+  const mp3ish = new Uint8Array(4096).fill(0xff);
+  const response = await call(env(), "POST", "/v1/audio/transcriptions", { token, body: audioForm(0, {}, mp3ish) });
+  assert.equal(response.status, 415);
+  assert.equal((await response.json()).error.code, "unsupported_audio");
+  assert.equal(calls.length, 0);
+});
+
+test("a provider that reports no duration is billed the header's duration", async () => {
+  upstream["api.x.ai/v1/stt"] = () => ({ status: 200, body: { text: "hi", words: [] } });
+  const e = env();
+  const token = await signToken({ sub: "cus_1" }, SECRET);
+  assert.equal((await call(e, "POST", "/v1/audio/transcriptions", { token, body: audioForm(7) })).status, 200);
+  assert.equal((await e.__store.getUsage("cus_1", usagePeriod())).dictationSeconds, 7);
+});
+
+test("an upload without a Content-Length is refused", async () => {
+  const token = await signToken({ sub: "cus_1" }, SECRET);
+  const response = await call(env(), "POST", "/v1/audio/transcriptions", {
+    token,
+    body: audioForm(2),
+    contentLength: false,
+  });
+  assert.equal(response.status, 411);
+  assert.equal(calls.length, 0);
+});
+
+test("a chat request whose worst case exceeds the remaining allowance answers 429", async () => {
+  const e = env();
+  // 10,000 tokens left; 36,000 characters (~9,000 tokens) plus 2,048 out is too much.
+  await e.__store.addUsage("cus_1", usagePeriod(), { llmTokens: MONTHLY_CAPS.llmTokens - 10_000 });
+  const token = await signToken({ sub: "cus_1" }, SECRET);
+  const big = { model: "plainsong-fast", messages: [{ role: "user", content: "x".repeat(36_000) }] };
+  const response = await call(e, "POST", "/v1/chat/completions", { token, body: big });
+  assert.equal(response.status, 429);
+  assert.equal((await response.json()).error.code, "fair_use_reached");
+  assert.equal(calls.length, 0);
+  const small = { ...big, max_tokens: 512 };
+  assert.equal((await call(e, "POST", "/v1/chat/completions", { token, body: small })).status, 200);
+});
+
+test("only a paid subscription grants access; no subscription row grants nothing", async () => {
+  assert.equal(statusGrantsAccess("active"), true);
+  assert.equal(statusGrantsAccess("past_due"), true);
+  assert.equal(statusGrantsAccess("canceled"), false);
+  assert.equal(statusGrantsAccess("revoked"), false);
+  assert.equal(statusGrantsAccess(null), false);
+
+  const e = env();
+  e.__store.subscriptions.delete("cus_1");
+  assert.equal((await call(e, "POST", "/v1/activate", { body: { licenseKey: "K" } })).status, 402);
+  const token = await signToken({ sub: "cus_1" }, SECRET);
+  assert.equal((await call(e, "GET", "/v1/usage", { token })).status, 402);
+});
+
+test("Polar's canceled status means ended; a cancel at period end keeps access", () => {
+  const event = (type, status) => ({
+    type,
+    data: { customer_id: "cus_1", status, modified_at: "2026-10-01T00:00:00Z" },
+  });
+  assert.equal(subscriptionStatusFromEvent(event("subscription.canceled", "active")).status, "active");
+  assert.equal(subscriptionStatusFromEvent(event("subscription.updated", "canceled")).status, "revoked");
+  assert.equal(subscriptionStatusFromEvent(event("subscription.updated", "trialing")).status, "active");
+  assert.equal(subscriptionStatusFromEvent(event("subscription.revoked", "active")).status, "revoked");
+  assert.equal(subscriptionStatusFromEvent(event("subscription.canceled", undefined)), null);
+});
+
+test("a revocation is not undone by a non-revoking event with the same timestamp", async () => {
+  const store = memoryStore();
+  await store.setSubscriptionStatus("cus_1", "revoked", "2026-10-01T00:00:00Z");
+  await store.setSubscriptionStatus("cus_1", "active", "2026-10-01T00:00:00Z");
+  assert.equal(await store.getSubscriptionStatus("cus_1"), "revoked");
+  await store.setSubscriptionStatus("cus_1", "active", "2026-10-02T00:00:00Z");
+  assert.equal(await store.getSubscriptionStatus("cus_1"), "active");
+  await store.setSubscriptionStatus("cus_1", "revoked", "2026-10-02T00:00:00Z");
+  assert.equal(await store.getSubscriptionStatus("cus_1"), "revoked");
+});
+
+test("webhooks with a non-numeric timestamp are rejected", async () => {
+  const payload = { type: "subscription.active", data: { customer_id: "cus_1" } };
+  const polar = await signedWebhook("whsec_test", payload, "soon");
+  assert.equal(await verifyWebhook("whsec_test", new Headers(polar.headers), polar.body), null);
+  const good = await signedWebhook("whsec_test", payload);
+  assert.ok(await verifyWebhook("whsec_test", new Headers(good.headers), good.body));
+  // Only v1 entries count: the same signature under another version is ignored.
+  const other = { ...good.headers, "webhook-signature": good.headers["webhook-signature"].replace(/^v1,/, "v1a,") };
+  assert.equal(await verifyWebhook("whsec_test", new Headers(other), good.body), null);
+
+  const body = "{}";
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("whsec_s"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`NaN.${body}`));
+  const hex = [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assert.equal(await verifyStripeWebhook("whsec_s", `t=NaN,v1=${hex}`, body), null);
 });

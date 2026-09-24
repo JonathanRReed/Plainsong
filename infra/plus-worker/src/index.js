@@ -44,7 +44,12 @@ function storeFor(env) {
   return env.__store ?? d1Store(env.DB);
 }
 
-/** Seconds of audio in a PCM WAV, from its header; null when not a WAV. */
+/**
+ * Seconds of audio in a 16-bit PCM WAV, from its header; null for anything
+ * else. The header is client-supplied and drives metering, so its fmt chunk
+ * must be self-consistent: a forged byteRate would otherwise shrink the
+ * estimate to nothing.
+ */
 export function wavDurationSeconds(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const tag = (at) => String.fromCharCode(...bytes.subarray(at, at + 4));
@@ -54,7 +59,24 @@ export function wavDurationSeconds(bytes) {
   while (offset + 8 <= bytes.byteLength) {
     const id = tag(offset);
     const size = view.getUint32(offset + 4, true);
-    if (id === "fmt " && offset + 16 <= bytes.byteLength) byteRate = view.getUint32(offset + 16, true);
+    if (id === "fmt ") {
+      if (size < 16 || offset + 24 > bytes.byteLength) return null;
+      const format = view.getUint16(offset + 8, true);
+      const channels = view.getUint16(offset + 10, true);
+      const sampleRate = view.getUint32(offset + 12, true);
+      const rate = view.getUint32(offset + 16, true);
+      const bits = view.getUint16(offset + 22, true);
+      const valid =
+        format === 1 &&
+        channels >= 1 &&
+        channels <= 2 &&
+        sampleRate >= 8000 &&
+        sampleRate <= 48000 &&
+        bits === 16 &&
+        rate === (sampleRate * channels * bits) / 8;
+      if (!valid) return null;
+      byteRate = rate;
+    }
     if (id === "data" && byteRate) {
       const dataBytes = Math.min(size, bytes.byteLength - offset - 8);
       return dataBytes / byteRate;
@@ -155,17 +177,24 @@ async function handlePortal(request, env) {
 }
 
 async function handleTranscription(request, env, customerId) {
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > REQUEST_LIMITS.maxAudioBytes) return error(413, "audio_too_large", "That recording is too large.");
+  // Without a length the body would be buffered unbounded before any check.
+  const lengthHeader = request.headers.get("content-length");
+  if (!/^\d+$/.test(lengthHeader ?? "")) return error(411, "length_required", "The upload needs a Content-Length.");
+  if (Number(lengthHeader) > REQUEST_LIMITS.maxAudioBytes) {
+    return error(413, "audio_too_large", "That recording is too large.");
+  }
   const form = await request.formData().catch(() => null);
   const file = form?.get("file");
   if (!file || typeof file === "string") return error(400, "missing_audio", "No audio was sent.");
   if (file.size > REQUEST_LIMITS.maxAudioBytes) return error(413, "audio_too_large", "That recording is too large.");
   const purpose = form.get("purpose") === "meeting" ? "meeting" : "dictation";
   const bytes = new Uint8Array(await file.arrayBuffer());
+  // The app only sends 16-bit PCM WAV; anything else could not be metered
+  // before it reaches the provider.
   const estimate = wavDurationSeconds(bytes);
+  if (estimate === null) return error(415, "unsupported_audio", "Send audio as 16-bit PCM WAV.");
   const perRequest = purpose === "meeting" ? REQUEST_LIMITS.meetingSeconds : REQUEST_LIMITS.dictationSeconds;
-  if (estimate !== null && estimate > perRequest) {
+  if (estimate > perRequest) {
     return error(413, "audio_too_long", "That recording is longer than one request allows.");
   }
 
@@ -173,7 +202,7 @@ async function handleTranscription(request, env, customerId) {
   const period = usagePeriod();
   const remaining = remainingAllowance(await store.getUsage(customerId, period));
   const allowance = purpose === "meeting" ? remaining.meetingSeconds : remaining.dictationSeconds;
-  if (allowance <= 0 || (estimate !== null && estimate > allowance)) {
+  if (allowance <= 0 || estimate > allowance) {
     return error(429, "fair_use_reached", "This month's Plainsong Plus allowance is used up. Local models take over.");
   }
 
@@ -181,7 +210,8 @@ async function handleTranscription(request, env, customerId) {
     language: typeof form.get("language") === "string" ? form.get("language") : null,
     keyterms: form.getAll("keyterm"),
   });
-  const seconds = result.duration ?? estimate ?? 0;
+  // Never bill less than the header says: a provider may report no duration.
+  const seconds = Math.max(result.duration ?? 0, estimate);
   await store.addUsage(customerId, period, purpose === "meeting" ? { meetingSeconds: seconds } : { dictationSeconds: seconds });
   return json({ text: result.text, language: result.language, duration: seconds, words: result.words });
 }
@@ -198,13 +228,16 @@ async function handleChat(request, env, customerId) {
   const store = storeFor(env);
   const period = usagePeriod();
   const remaining = remainingAllowance(await store.getUsage(customerId, period));
-  if (remaining.llmTokens <= 0) {
+  const maxTokens = Math.max(1, Math.min(Math.floor(Number(body.max_tokens)) || 2048, 8192));
+  // Rough worst case (about 4 characters a token), so one large request
+  // cannot run far past the cap on the last few tokens of allowance.
+  if (Math.ceil(inputChars / 4) + maxTokens > remaining.llmTokens) {
     return error(429, "fair_use_reached", "This month's Plainsong Plus allowance is used up. Local models take over.");
   }
   const response = await chat(env, {
     model: body.model,
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
-    max_tokens: Math.min(Number(body.max_tokens) || 2048, 8192),
+    max_tokens: maxTokens,
     temperature: typeof body.temperature === "number" ? body.temperature : 0.2,
   });
   await store.addUsage(customerId, period, { llmTokens: response.usage.total_tokens });

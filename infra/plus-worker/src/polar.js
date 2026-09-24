@@ -59,16 +59,18 @@ export async function verifyWebhook(secret, headers, body, now = Date.now()) {
   const timestamp = headers.get("webhook-timestamp");
   const signatures = headers.get("webhook-signature");
   if (!secret || !id || !timestamp || !signatures) return null;
-  if (Math.abs(now / 1000 - Number(timestamp)) > WEBHOOK_TOLERANCE_SECONDS) return null;
+  // Digits only: Number("x") is NaN, which slips past a > comparison.
+  if (!/^\d+$/.test(timestamp) || Math.abs(now / 1000 - Number(timestamp)) > WEBHOOK_TOLERANCE_SECONDS) return null;
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
     "sign",
   ]);
   const mac = await crypto.subtle.sign("HMAC", key, encoder.encode(`${id}.${timestamp}.${body}`));
   const expected = btoa(String.fromCharCode(...new Uint8Array(mac)));
+  // Space-separated "<version>,<base64>" entries; only v1 (HMAC) is ours.
   const matched = signatures
     .split(" ")
-    .map((entry) => entry.split(",")[1] ?? "")
-    .some((candidate) => timingSafeEqual(candidate, expected));
+    .map((entry) => entry.split(","))
+    .some(([version, candidate]) => version === "v1" && timingSafeEqual(candidate ?? "", expected));
   if (!matched) return null;
   try {
     return JSON.parse(body);
@@ -77,26 +79,55 @@ export async function verifyWebhook(secret, headers, body, now = Date.now()) {
   }
 }
 
+/**
+ * Polar subscription status to the stored status. As with Stripe, Polar's
+ * "canceled" means the subscription has ended; a cancel at period end stays
+ * "active" until then, when Polar also sends subscription.revoked.
+ */
+export function polarStatus(status) {
+  switch (status) {
+    case "active":
+    case "trialing":
+      return "active";
+    case "past_due":
+      return "past_due";
+    case "canceled":
+    case "unpaid":
+    case "incomplete_expired":
+      return "revoked";
+    default:
+      return null; // "incomplete" or missing: wait for the next event
+  }
+}
+
 /** Subscription events that change entitlement, mapped to a stored status. */
 export function subscriptionStatusFromEvent(event) {
-  const statusByType = {
+  // Every subscription.* payload carries the subscription, so its own status
+  // decides; the event type only fills in when that is missing. A
+  // subscription.canceled event can be a cancel at period end (still active).
+  const fallbackByType = {
     "subscription.active": "active",
     "subscription.uncanceled": "active",
     "subscription.created": null,
     "subscription.updated": null,
-    "subscription.canceled": "canceled", // still paid through the period
+    "subscription.canceled": null,
     "subscription.past_due": "past_due",
     "subscription.revoked": "revoked",
   };
-  if (!(event?.type in statusByType)) return null;
+  if (!(event?.type in fallbackByType)) return null;
   const data = event.data ?? {};
-  const status = statusByType[event.type] ?? data.status ?? null;
+  const status =
+    event.type === "subscription.revoked" ? "revoked" : (polarStatus(data.status) ?? fallbackByType[event.type]);
   const customerId = data.customer_id ?? data.customer?.id ?? null;
   if (!status || !customerId) return null;
   return { customerId, status, updatedAt: data.modified_at ?? data.created_at ?? new Date().toISOString() };
 }
 
-/** Statuses that still grant access. Canceled keeps access until revoked. */
+/**
+ * Statuses that grant access: paid, or past due while the provider retries
+ * the card. No recorded subscription (null) grants nothing: a granted license
+ * alone does not prove a Plus subscription.
+ */
 export function statusGrantsAccess(status) {
-  return status === null || status === "active" || status === "canceled" || status === "past_due";
+  return status === "active" || status === "past_due";
 }

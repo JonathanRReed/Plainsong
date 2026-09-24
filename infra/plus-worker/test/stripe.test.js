@@ -137,6 +137,9 @@ test("checkout, the success page and the billing portal go through Stripe", asyn
   const bad = await worker.fetch(new Request("https://plus.example/v1/checkout/done?session_id=../../x"), e);
   assert.match(await bad.text(), /not finished/);
 
+  // Access starts with the subscription webhook, not with the success page.
+  assert.equal((await activate(e, await licenseKeyFor(LICENSE_SECRET, "cus_s1"))).status, 402);
+  await worker.fetch(await stripeSigned("whsec_stripe", completed), e);
   const activation = await (await activate(e, await licenseKeyFor(LICENSE_SECRET, "cus_s1"))).json();
   const portal = await worker.fetch(
     new Request("https://plus.example/v1/billing/portal", { method: "POST", headers: { authorization: `Bearer ${activation.token}` } }),

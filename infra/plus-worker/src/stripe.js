@@ -55,7 +55,8 @@ export async function verifyStripeWebhook(secret, header, body, now = Date.now()
   const timestamp = parts.find(([name]) => name === "t")?.[1];
   const signatures = parts.filter(([name]) => name === "v1").map(([, value]) => value ?? "");
   if (!timestamp || signatures.length === 0) return null;
-  if (Math.abs(now / 1000 - Number(timestamp)) > WEBHOOK_TOLERANCE_SECONDS) return null;
+  // Digits only: Number("x") is NaN, which slips past a > comparison.
+  if (!/^\d+$/.test(timestamp) || Math.abs(now / 1000 - Number(timestamp)) > WEBHOOK_TOLERANCE_SECONDS) return null;
   const expected = toHex(await hmac(secret, `${timestamp}.${body}`));
   if (!signatures.some((candidate) => timingSafeEqual(candidate, expected))) return null;
   try {

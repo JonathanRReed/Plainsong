@@ -3,6 +3,16 @@
 // subscription status and, for Stripe billing, license key hashes and
 // activations: never audio, transcripts, prompts or a usable license key.
 
+// Webhooks can arrive out of order with equal timestamps; on a tie the more
+// restrictive status wins, so a revocation is never undone by its twin.
+const STATUS_RANK = { active: 0, past_due: 1, revoked: 2 };
+const STATUS_RANK_SQL = (column) => `CASE ${column} WHEN 'revoked' THEN 2 WHEN 'past_due' THEN 1 ELSE 0 END`;
+
+function statusWins(next, current) {
+  if (!current || next.updatedAt > current.updatedAt) return true;
+  return next.updatedAt === current.updatedAt && (STATUS_RANK[next.status] ?? 0) > (STATUS_RANK[current.status] ?? 0);
+}
+
 export function d1Store(db) {
   return {
     async getUsage(customerId, period) {
@@ -49,7 +59,9 @@ export function d1Store(db) {
         .prepare(
           `INSERT INTO subscriptions (customer_id, status, updated_at) VALUES (?, ?, ?)
            ON CONFLICT (customer_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at
-           WHERE excluded.updated_at >= subscriptions.updated_at`,
+           WHERE excluded.updated_at > subscriptions.updated_at
+              OR (excluded.updated_at = subscriptions.updated_at
+                  AND ${STATUS_RANK_SQL("excluded.status")} > ${STATUS_RANK_SQL("subscriptions.status")})`,
         )
         .bind(customerId, status, updatedAt)
         .run();
@@ -105,7 +117,7 @@ export function memoryStore() {
     },
     async setSubscriptionStatus(customerId, status, updatedAt) {
       const current = subscriptions.get(customerId);
-      if (!current || updatedAt >= current.updatedAt) subscriptions.set(customerId, { status, updatedAt });
+      if (statusWins({ status, updatedAt }, current)) subscriptions.set(customerId, { status, updatedAt });
     },
     async getLicense(keyHash) {
       return licenses.get(keyHash) ?? null;

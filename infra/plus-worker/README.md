@@ -18,7 +18,7 @@ Plan, model picks and economics: `nautilus-bot/docs/plainsong-plus.md`.
 | `POST /v1/checkout` | none | `{ plan: "monthly" \| "yearly" }` to a hosted checkout URL |
 | `GET /v1/checkout/done` | Stripe session id | Stripe only: the page that shows the new license key |
 | `POST /v1/billing/portal` | token | URL of the page to cancel, change plan or update the card |
-| `POST /v1/audio/transcriptions` | token | Multipart `file`, `purpose` (`dictation`/`meeting`), `language`, repeated `keyterm` |
+| `POST /v1/audio/transcriptions` | token | Multipart `file` (16-bit PCM WAV, with a `Content-Length`), `purpose` (`dictation`/`meeting`), `language`, repeated `keyterm` |
 | `POST /v1/chat/completions` | token | OpenAI-shaped chat; `model` is `plainsong-fast` or `plainsong-quality` |
 | `GET /v1/usage` | token | This month's usage and what is left |
 | `POST /v1/webhooks/polar` or `/v1/webhooks/stripe` | provider signature | Subscription status changes (only the configured provider's route exists) |
@@ -44,8 +44,10 @@ without an app update.
 
 - `off` (default): nobody gets in. Webhooks are still recorded.
 - `testers`: only the customer ids (Polar or Stripe) in `TESTER_CUSTOMER_IDS`.
-- `on`: anyone with a granted license and an active, canceled-but-paid, or
-  past-due subscription.
+- `on`: anyone with a granted license and an active (including canceled at
+  period end, until it ends) or past-due subscription. Access starts when the
+  provider's subscription webhook arrives; a customer with no recorded
+  subscription gets 402.
 
 ## Setup
 

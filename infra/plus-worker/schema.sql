@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS usage (
 
 CREATE TABLE IF NOT EXISTS subscriptions (
   customer_id TEXT PRIMARY KEY,
-  status TEXT NOT NULL,              -- active | canceled | past_due | revoked
+  status TEXT NOT NULL,              -- active | past_due | revoked
   updated_at TEXT NOT NULL           -- ISO timestamp of the webhook event
 );
 
