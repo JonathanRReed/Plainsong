@@ -1986,7 +1986,27 @@ pub(crate) async fn run_voice_edit(
         remote_processing_enabled,
     )
     .await?;
+    if !voice_edit_output_is_usable(kind, &input, &output) {
+        return Err(VOICE_EDIT_EMPTY_RESULT.to_string());
+    }
     Ok((output, kind))
+}
+
+const VOICE_EDIT_EMPTY_RESULT: &str =
+    "The AI model returned nothing to insert, so nothing was changed. Try again, or pick another model in Models.";
+
+/// The transform falls back to its input when the model returns nothing
+/// (`sanitize_dictation_output`). For a draft that input is the spoken
+/// instruction, so the fallback would paste "write a thank-you note" into
+/// the document. An empty result, or a draft that is only the instruction,
+/// is a failure the user must see. An edit that leaves a selection as it was
+/// is allowed: "fix the typos" on clean text has nothing to change.
+pub(crate) fn voice_edit_output_is_usable(kind: VoiceEditKind, input: &str, output: &str) -> bool {
+    let output = output.trim();
+    if output.is_empty() {
+        return false;
+    }
+    !(kind == VoiceEditKind::Draft && output == input.trim())
 }
 
 pub(crate) async fn run_custom_dictation_transform_with_provider(

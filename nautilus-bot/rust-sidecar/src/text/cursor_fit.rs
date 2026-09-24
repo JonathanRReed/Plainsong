@@ -7,10 +7,11 @@
 //! which the macOS insertion path reads through Accessibility and never
 //! stores.
 //!
-//! Conservative by design: it only adds a separating space, lowercases a
-//! plainly capitalized first word when the sentence is still going, and drops
-//! a trailing full stop when more of the sentence follows. "I", acronyms and
-//! mixed-case words (iPhone, McDonald) keep their casing.
+//! Conservative by design: it only adds a separating space, lowercases the
+//! first word when it is a common function word (the, we, and, but, ...)
+//! and the sentence is still going, and drops a trailing full stop when more
+//! of the sentence follows. Any other capitalized word may be a name
+//! ("Sarah", "Monday", "Paris"), so it keeps its capital.
 
 /// Characters after which a word needs no space before it.
 const NO_SPACE_AFTER: &[char] = &[
@@ -20,16 +21,18 @@ const NO_SPACE_AFTER: &[char] = &[
 /// Characters that end a sentence, so what follows starts one.
 const SENTENCE_END: &[char] = &['.', '!', '?', ':', '\u{2026}'];
 
-const KEEP_CAPITALIZED: &[&str] = &[
-    "I",
-    "I'm",
-    "I've",
-    "I'll",
-    "I'd",
-    "I\u{2019}m",
-    "I\u{2019}ve",
-    "I\u{2019}ll",
-    "I\u{2019}d",
+/// The only words lowercased mid-sentence: function words and common
+/// openers that are never names. A closed list, because the recognizer
+/// capitalizes names too and nothing here can tell them apart.
+const LOWERCASE_WHEN_CONTINUING: &[&str] = &[
+    "a", "about", "actually", "after", "all", "also", "an", "and", "any", "are", "as", "at", "be",
+    "because", "before", "but", "by", "can", "could", "did", "do", "does", "for", "from", "had",
+    "has", "have", "he", "her", "here", "his", "how", "if", "in", "into", "is", "it", "its",
+    "just", "let's", "like", "maybe", "me", "my", "no", "not", "now", "of", "on", "or", "our",
+    "please", "probably", "really", "she", "should", "so", "some", "soon", "still", "than", "that",
+    "the", "their", "them", "then", "there", "these", "they", "this", "those", "to", "too",
+    "until", "up", "very", "was", "we", "were", "what", "when", "where", "which", "while", "who",
+    "why", "will", "with", "would", "yes", "you", "your",
 ];
 
 pub fn fit_to_cursor(text: &str, before: &str, after: &str) -> String {
@@ -73,26 +76,22 @@ fn lowercase_first_word(text: &str) -> String {
         .map(|(index, _)| index)
         .unwrap_or(text.len());
     let (word, rest) = text.split_at(end);
-    let bare = word.trim_end_matches(|ch: char| !ch.is_alphanumeric());
-    if KEEP_CAPITALIZED.contains(&bare) {
+    let bare = word
+        .trim_end_matches(|ch: char| !ch.is_alphanumeric())
+        .replace('\u{2019}', "'");
+    // Only a plainly capitalized common word: "We", not "WE" or "Sarah".
+    let mut chars = bare.chars();
+    let plainly_capitalized = chars.next().is_some_and(char::is_uppercase)
+        && chars.all(|ch| !ch.is_alphabetic() || ch.is_lowercase());
+    if !plainly_capitalized || !LOWERCASE_WHEN_CONTINUING.contains(&bare.to_lowercase().as_str()) {
         return text.to_string();
     }
-    let mut chars = word.chars();
-    let Some(first) = chars.next() else {
-        return text.to_string();
-    };
-    // Only a plainly capitalized word: an uppercase letter followed by
-    // lowercase letters. Acronyms (NASA) and mixed case (iPhone, McDonald)
-    // are names, and keep their casing.
-    let tail_plain = chars
-        .clone()
-        .filter(|ch| ch.is_alphabetic())
-        .all(|ch| ch.is_lowercase());
-    let has_tail = chars.clone().any(|ch| ch.is_alphabetic());
-    if !first.is_uppercase() || !has_tail || !tail_plain {
-        return text.to_string();
-    }
-    format!("{}{}{}", first.to_lowercase(), chars.as_str(), rest)
+    let mut first = word.chars();
+    let head = first
+        .next()
+        .map(|ch| ch.to_lowercase().to_string())
+        .unwrap_or_default();
+    format!("{}{}{}", head, first.as_str(), rest)
 }
 
 #[cfg(test)]
@@ -139,13 +138,30 @@ mod tests {
 
     #[test]
     fn needs_no_space_after_an_opening_bracket_or_quote() {
-        assert_eq!(fit_to_cursor("See above.", "note (", ")"), "see above.");
-        assert_eq!(fit_to_cursor("Hello", "he said \u{201C}", ""), "hello");
+        assert_eq!(
+            fit_to_cursor("The one above.", "note (", ")"),
+            "the one above."
+        );
+        // Not a common word, so it keeps its capital.
+        assert_eq!(fit_to_cursor("Hello", "he said \u{201C}", ""), "Hello");
+    }
+
+    #[test]
+    fn keeps_names_weekdays_and_places_capitalized() {
+        assert_eq!(
+            fit_to_cursor("Sarah tomorrow.", "I'll send it to ", ""),
+            "Sarah tomorrow."
+        );
+        assert_eq!(fit_to_cursor("Monday works.", "so ", ""), "Monday works.");
+        assert_eq!(
+            fit_to_cursor("Paris next week.", "we fly to ", ""),
+            "Paris next week."
+        );
     }
 
     #[test]
     fn keeps_an_ellipsis_and_empty_text() {
-        assert_eq!(fit_to_cursor("Wait...", "and ", "then"), "wait... ");
+        assert_eq!(fit_to_cursor("Wait...", "and ", "then"), "Wait... ");
         assert_eq!(fit_to_cursor("   ", "and ", ""), "   ");
     }
 }

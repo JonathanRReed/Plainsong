@@ -2306,6 +2306,10 @@ pub(crate) async fn stop_dictation_for_sidecar(
     > = None;
     let mut pasted = false;
     let mut copied = false;
+    // What actually went into the field. Differs from `final_text` when the
+    // words were fitted to the text around the caret; undo and the
+    // correction anchor must look for this, not the unfitted text.
+    let mut inserted_text = final_text.clone();
     let mut paste_error: Option<String> = None;
     let mut actual_insertion_mode = requested_insertion_mode.clone();
     let mut outcome = "ready".to_string();
@@ -2454,17 +2458,21 @@ pub(crate) async fn stop_dictation_for_sidecar(
                             };
                             #[cfg(not(target_os = "macos"))]
                             let _ = match_surrounding_text;
-                            paste_text_systemwide(
+                            let outcome = paste_text_systemwide(
                                 &accessibility_trust_observed,
                                 insert_text.as_str(),
                                 keep_text_in_clipboard,
                                 insert_app_target.as_deref(),
                                 insert_app_bundle_id.as_deref(),
-                            )
+                            );
+                            (outcome, insert_text)
                         })
                         .await
                         {
-                            Ok(outcome) => outcome,
+                            Ok((outcome, text)) => {
+                                inserted_text = text;
+                                outcome
+                            }
                             Err(join_error) => {
                                 // A panic inside insertion must not be reported
                                 // as a successful insert; the transcript is
@@ -2522,7 +2530,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
                     .dictation_learn_from_external_corrections
                 && !is_self_activation_target(app_target.as_deref(), app_bundle_id.as_deref())
             {
-                let anchor_text = final_text.clone();
+                let anchor_text = inserted_text.clone();
                 post_insert_focus_anchor = tokio::task::spawn_blocking(move || {
                     dictation_correction_capture::capture_insertion_anchor(
                         &MacosFocusedFieldReader,
@@ -2741,7 +2749,7 @@ pub(crate) async fn stop_dictation_for_sidecar(
         let mut recent_delivery_slot = state.recent_dictation_delivery.lock().await;
         if pasted || copied {
             *recent_delivery_slot = Some(RecentDictationDelivery {
-                text: final_text.clone(),
+                text: inserted_text.clone(),
                 app_target: app_target.clone(),
                 app_bundle_id: app_bundle_id.clone(),
                 delivered_at: now,

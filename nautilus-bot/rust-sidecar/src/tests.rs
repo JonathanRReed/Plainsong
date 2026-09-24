@@ -7780,3 +7780,36 @@ fn a_failed_voice_edit_stops_instead_of_inserting_the_instruction() {
         "a Voice Edit error must end the session, not fall through to inserting the spoken instruction"
     );
 }
+
+#[test]
+fn a_voice_edit_that_returns_nothing_or_echoes_the_instruction_fails() {
+    use crate::dictation_text::{voice_edit_output_is_usable, VoiceEditKind};
+    // An empty completion must never fall back to pasting the input.
+    assert!(!voice_edit_output_is_usable(
+        VoiceEditKind::Draft,
+        "write a thank-you note",
+        "  "
+    ));
+    assert!(!voice_edit_output_is_usable(
+        VoiceEditKind::EditSelection,
+        "make it shorter",
+        ""
+    ));
+    // A draft that is just the spoken instruction is the fallback, not a draft.
+    assert!(!voice_edit_output_is_usable(
+        VoiceEditKind::Draft,
+        "write a thank-you note",
+        "write a thank-you note"
+    ));
+    assert!(voice_edit_output_is_usable(
+        VoiceEditKind::Draft,
+        "write a thank-you note",
+        "Thank you so much for your help this week."
+    ));
+    // Clean text can legitimately come back unchanged from "fix the typos".
+    assert!(voice_edit_output_is_usable(
+        VoiceEditKind::EditSelection,
+        "Already clean.",
+        "Already clean."
+    ));
+}
