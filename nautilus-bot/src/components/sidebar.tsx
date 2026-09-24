@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 import {
   Mic,
   AudioWaveform,
-  FileText,
+  House,
   FileOutput,
   Settings,
   Folder,
@@ -51,7 +51,7 @@ interface SidebarProps {
 }
 
 const primaryNavItems = [
-  { id: "dashboard" as const, label: "Home", icon: FileText },
+  { id: "dashboard" as const, label: "Home", icon: House },
   { id: "dictation" as const, label: "Dictation", icon: Mic },
   { id: "recordings" as const, label: "Meetings", icon: AudioWaveform },
 ].map((item) => ({ ...item, shortcut: formatNavShortcut(item.id) ?? "" }));
