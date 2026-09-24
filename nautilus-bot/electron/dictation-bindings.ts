@@ -336,6 +336,18 @@ export function isHelperOnlyTrigger(trigger: DictationBindingTrigger): boolean {
   return trigger.kind === "mouse" || isLoneModifierAccelerator(trigger.accelerator);
 }
 
+/**
+ * Whether a quick tap of this binding may lock hold-to-talk on (tap to lock).
+ * Not for a lone modifier: a quick Fn/Globe tap is macOS's own input-source
+ * switch or emoji picker, and the helper reports any press shorter than its
+ * 150 ms arm delay as `down` and `up` together, so a deliberate tap and a
+ * Globe tap are indistinguishable. Locking there left the microphone on for
+ * the length of a dictation after every language switch.
+ */
+export function dictationBindingAllowsTapToLock(binding?: DictationBinding): boolean {
+  return !(binding?.trigger.kind === "key" && isLoneModifierAccelerator(binding.trigger.accelerator));
+}
+
 export type DictationBindingIssueCode =
   | "empty_trigger"
   | "bare_key"

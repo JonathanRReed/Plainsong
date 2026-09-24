@@ -3,6 +3,7 @@ import {
   buildNativeHelperBindingTable,
   cycleDictationMode,
   describeDictationBindingTrigger,
+  dictationBindingAllowsTapToLock,
   dictationBindingTriggerKey,
   electronFallbackDictationBindings,
   findPrimaryDictationBinding,
@@ -293,6 +294,24 @@ describe("trigger helpers", () => {
     expect(electronFallbackDictationBindings(table)).toEqual([
       { binding: table[0], accelerator: "Control+Alt+Command+D" },
     ]);
+  });
+});
+
+describe("dictationBindingAllowsTapToLock", () => {
+  it("never lets a lone Fn/Globe tap lock the microphone on", () => {
+    // A quick Globe tap switches the input source; the helper reports taps
+    // under its 150 ms arm delay as down+up together, so it cannot be told
+    // apart from a deliberate tap-to-lock.
+    expect(dictationBindingAllowsTapToLock(keyBinding("primary", "Fn"))).toBe(false);
+    expect(dictationBindingAllowsTapToLock(keyBinding("primary", "Cmd+Shift+Space"))).toBe(true);
+    expect(
+      dictationBindingAllowsTapToLock({
+        id: "b2",
+        trigger: { kind: "mouse", button: 4 },
+        action: { kind: "dictation", modeId: null, behavior: "inherit" },
+      }),
+    ).toBe(true);
+    expect(dictationBindingAllowsTapToLock(undefined)).toBe(true);
   });
 });
 

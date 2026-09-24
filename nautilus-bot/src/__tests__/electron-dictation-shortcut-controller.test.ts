@@ -463,6 +463,40 @@ describe("createDictationShortcutSignalRuntime", () => {
       });
     });
 
+    it("does not send a second stop for the release of the unlocking press", async () => {
+      const harness = createHarness();
+      vi.setSystemTime(40_000);
+      const press = harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      harness.finishStart();
+      await press;
+      vi.setSystemTime(40_100);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+
+      vi.setSystemTime(44_000);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      // The sidecar's "stopping" event has not been observed yet, so the
+      // cached phase still says "recording" when the key comes back up.
+      harness.setPhase("recording");
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+      expect(harness.invocations.map((entry) => entry.command)).toEqual([
+        "start_dictation",
+        "stop_dictation",
+      ]);
+
+      // The next session's release is not swallowed.
+      harness.setPhase("done");
+      vi.setSystemTime(50_000);
+      const next = harness.runtime.handleSignal({ ...tapLock, signal: "pressed" });
+      harness.finishStart();
+      await next;
+      vi.setSystemTime(52_000);
+      await harness.runtime.handleSignal({ ...tapLock, signal: "released" });
+      expect(harness.invocations[harness.invocations.length - 1]).toMatchObject({
+        command: "stop_dictation",
+        args: { stopReason: "release" },
+      });
+    });
+
     it("still stops on release after a real hold", async () => {
       const harness = createHarness();
       vi.setSystemTime(20_000);

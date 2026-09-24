@@ -54,8 +54,8 @@ export const ALLOWED_EXTERNAL_HOSTS: readonly string[] = [
   // Mistral Voxtral → rust-sidecar/src/asr/mistral_voxtral.rs
   "console.mistral.ai",
   "docs.mistral.ai",
-  // xAI Grok speech-to-text → rust-sidecar/src/asr/xai_stt.rs
-  "console.x.ai",
+  // xAI Grok speech-to-text → rust-sidecar/src/asr/xai_stt.rs. Its key-setup
+  // host (console.x.ai) only appears in plain-text diagnostics, so it stays out.
   "docs.x.ai",
   // Gemini Transcribe → rust-sidecar/src/asr/gemini_transcribe.rs
   "ai.google.dev",

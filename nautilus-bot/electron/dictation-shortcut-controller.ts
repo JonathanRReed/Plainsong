@@ -309,6 +309,10 @@ export function createDictationShortcutSignalRuntime(deps: {
   // Tap to lock: when the current hold started, and whether a tap locked it.
   let holdPressEpochMs: number | null = null;
   let tapLocked = false;
+  // The press that unlocked a tap-locked session already stopped it; its
+  // release must not send a second stop (the sidecar answers "already
+  // stopping" and the HUD shows an error).
+  let swallowUnlockRelease = false;
   const invalidatedStartGenerations = new Set<number>();
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -366,6 +370,11 @@ export function createDictationShortcutSignalRuntime(deps: {
       }
     }
 
+    if (holdToTalkWithRelease && input.signal === "released" && swallowUnlockRelease) {
+      swallowUnlockRelease = false;
+      return;
+    }
+
     if (holdToTalkWithRelease && input.holdTapLocks) {
       if (
         input.signal === "released" &&
@@ -384,6 +393,7 @@ export function createDictationShortcutSignalRuntime(deps: {
       }
       if (input.signal === "pressed" && tapLocked) {
         tapLocked = false;
+        swallowUnlockRelease = true;
         if (activeStartGeneration !== null) {
           // The start is still in flight: stop as soon as it resolves.
           pendingHoldReleaseGeneration = activeStartGeneration;
@@ -445,6 +455,7 @@ export function createDictationShortcutSignalRuntime(deps: {
       if (holdToTalkWithRelease) {
         holdPressEpochMs = stopGestureEpochMs;
         tapLocked = false;
+        swallowUnlockRelease = false;
       }
       // Only clear a release that belongs to an older generation; a release
       // already recorded for THIS generation (possible if the signal races the
@@ -611,6 +622,7 @@ export function createDictationShortcutSignalRuntime(deps: {
       liveShortcutStartGeneration = null;
       holdPressEpochMs = null;
       tapLocked = false;
+      swallowUnlockRelease = false;
       pendingHoldReleaseGeneration = null;
       pendingHoldReleaseEpochMs = null;
       pendingHandsFreeStopGeneration = null;

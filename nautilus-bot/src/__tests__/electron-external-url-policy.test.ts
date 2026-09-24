@@ -51,6 +51,9 @@ describe("external URL policy", () => {
     expect(isAllowedExternalUrl("https://aistudio.google.com/apikey")).toBe(
       false,
     );
+    // Same for xAI: its key-setup host is named only in a diagnostics string.
+    expect(isAllowedExternalUrl("https://console.x.ai")).toBe(false);
+    expect(isAllowedExternalUrl("https://docs.x.ai")).toBe(true);
     // The documentation hosts those two providers *do* link, through
     // `sourceUrl`, are allowed.
     expect(

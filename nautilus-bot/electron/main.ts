@@ -22,7 +22,11 @@ import {
 } from "electron/main";
 import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
-import { dictationSoundForTransition, playDictationSound } from "./dictation-sounds";
+import {
+  dictationSoundForTransition,
+  playDictationSound,
+  type DictationSound,
+} from "./dictation-sounds";
 import { createMediaMuteController, runAppleScript } from "./media-mute";
 import { describeTrayStatus } from "./tray-status";
 import {
@@ -45,6 +49,7 @@ import { autoUpdater, type AppUpdater } from "electron-updater";
 import {
   buildNativeHelperBindingTable,
   cycleDictationMode,
+  dictationBindingAllowsTapToLock,
   dictationBindingConflictSources,
   electronFallbackDictationBindings,
   registrableDictationBindings,
@@ -168,10 +173,12 @@ import { isAllowedExternalUrl } from "./external-url-policy";
 import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   finalizeMeetingWithinBudget,
+  nextActiveMeetingPhase,
   nextActiveMeetingRecordingId,
   resolveMeetingStopId,
   type MeetingFinalizationOutcome,
   type MeetingLifecycleEvent,
+  type MeetingLifecyclePhase,
 } from "./meeting-lifecycle";
 import {
   DeepLinkRateLimiter,
@@ -378,6 +385,9 @@ let dictationSessionId: number | null = null;
 // against the right recording. Dictation already had this; meetings did not,
 // so a crash mid-meeting left the UI showing "recording" indefinitely.
 let activeMeetingRecordingId: string | null = null;
+// Its phase: the id stays set while the meeting is preparing, stopping and
+// processing too, and only "recording" means the microphone is capturing.
+let activeMeetingPhase: MeetingLifecyclePhase | null = null;
 let updaterConfigured = false;
 let updateReadyToInstall = false;
 let bootstrapComplete = false;
@@ -394,9 +404,32 @@ let muteMediaWhileDictatingEnabled = false;
 const mediaMute = createMediaMuteController({
   run: process.platform === "darwin" ? runAppleScript : async () => "true",
   log: (message, error) => console.warn(message, error),
+  marker: {
+    // A file, so a launch after a hard kill mid-dictation can unmute the Mac.
+    set: () => {
+      try {
+        writeFileSync(mediaMuteMarkerPath(), "");
+      } catch (error) {
+        console.warn("[media-mute] could not write the mute marker", error);
+      }
+    },
+    clear: () => {
+      try {
+        unlinkSync(mediaMuteMarkerPath());
+      } catch {
+        // Already gone.
+      }
+    },
+    isSet: () => existsSync(mediaMuteMarkerPath()),
+  },
 });
+
+function mediaMuteMarkerPath(): string {
+  return path.join(app.getPath("userData"), "media-muted-by-plainsong");
+}
+
 // For the menu-bar clock: when the current dictation went live, and when the
-// meeting being recorded was first seen.
+// meeting being recorded started capturing.
 let dictationLiveSince: number | null = null;
 let trayMeetingId: string | null = null;
 let trayMeetingStartedAt: number | null = null;
@@ -568,11 +601,16 @@ function isDictationLive(): boolean {
 function currentTrayStatus() {
   if (activeMeetingRecordingId !== trayMeetingId) {
     trayMeetingId = activeMeetingRecordingId;
-    trayMeetingStartedAt = activeMeetingRecordingId ? Date.now() : null;
+    trayMeetingStartedAt = null;
+  }
+  // The clock starts when capture does, not when the meeting began preparing.
+  if (activeMeetingRecordingId && activeMeetingPhase === "recording") {
+    trayMeetingStartedAt ??= Date.now();
   }
   return describeTrayStatus({
     dictationPhase,
     dictationStartedAt: dictationLiveSince,
+    meetingPhase: activeMeetingRecordingId ? activeMeetingPhase : null,
     meetingStartedAt: trayMeetingStartedAt,
     now: Date.now(),
   });
@@ -635,10 +673,12 @@ function buildTrayMenu(): Menu {
           },
         ]
       : []),
-    activeMeetingRecordingId
+    status.meetingControl !== "start"
       ? {
+          // Disabled while the meeting is starting or being finished: there
+          // is nothing recording to stop yet, or any more.
           label: "Stop Meeting Recording",
-          enabled: ready,
+          enabled: ready && status.meetingControl === "stop",
           click: () => {
             void ipcBridge
               ?.invokeSidecar("stop_recording", { recordingId: activeMeetingRecordingId })
@@ -705,13 +745,35 @@ function applyTrayTitle(status: ReturnType<typeof describeTrayStatus>): void {
   }
 }
 
+// Everything buildTrayMenu reads, so the menu is replaced only when it would
+// change. Replacing it closes it if it is open, and dictation-state-changed
+// arrives with every partial transcript.
+let trayMenuKey: string | null = null;
+
+function currentTrayMenuKey(status: ReturnType<typeof describeTrayStatus>): string {
+  return JSON.stringify([
+    status.statusLine,
+    status.meetingControl,
+    isDictationLive(),
+    bootstrapComplete,
+    ipcBridge !== null,
+    latestShortcutSettings.shortcuts?.toggleDictation ?? null,
+    recentDictationResults.map((result) => result.text),
+    dictationPermissionSummary,
+  ]);
+}
+
 function refreshTray(): void {
   if (!tray) {
     return;
   }
   const status = currentTrayStatus();
   applyTrayTitle(status);
-  tray.setContextMenu(buildTrayMenu());
+  const menuKey = currentTrayMenuKey(status);
+  if (menuKey !== trayMenuKey) {
+    trayMenuKey = menuKey;
+    tray.setContextMenu(buildTrayMenu());
+  }
   // Only the title ticks; the menu is rebuilt on state changes alone.
   if (status.ticking && trayClockTimer === null) {
     trayClockTimer = setInterval(() => applyTrayTitle(currentTrayStatus()), 1000);
@@ -1293,6 +1355,21 @@ let dictationPillDock: OverlayDock = "bottom";
 // against the side.
 let dictationOverlayPlacedDocked = false;
 let dictationDragSettleTimer: NodeJS.Timeout | null = null;
+// Overlays the user has started dragging since they were last placed. Set by
+// `will-move`, which Electron emits only for a move the user makes: setBounds
+// does not emit it, and neither does macOS re-homing a window after a display
+// is unplugged or rescaled. Only these moves are saved or can dock the pill,
+// so a display change never picks a side the user did not.
+const overlayUserDragging = new Set<OverlayKind>();
+let overlayDisplayListenersInstalled = false;
+
+function forgetOverlayDrags(): void {
+  overlayUserDragging.clear();
+  if (dictationDragSettleTimer) {
+    clearTimeout(dictationDragSettleTimer);
+    dictationDragSettleTimer = null;
+  }
+}
 
 function activeDictationDock(kind: OverlayKind): "left" | "right" | null {
   if (kind !== "dictation" || dictationPillDock === "bottom") {
@@ -1309,6 +1386,8 @@ function positionOverlayOnActiveDisplay(win: BrowserWindow): void {
     return;
   }
 
+  // A fresh placement: any earlier drag is over.
+  overlayUserDragging.delete(kind);
   try {
     const [width, height] = win.getSize();
     const dock = activeDictationDock(kind);
@@ -1452,7 +1531,9 @@ function persistDictationPillDock(dock: OverlayDock): void {
 // docks there; dropped anywhere else it goes back to the bottom placement at
 // the position it was dragged to (which the `moved` handler has already
 // saved). macOS reports `moved` all through a drag and nothing at the end, so
-// the drag counts as over once the window has been still for a moment.
+// the drag counts as over once the window has been still for a moment. Only
+// user drags get here (see `overlayUserDragging`); a drag that pauses and
+// carries on keeps its flag, so the drop settles again where it lands.
 function settleDictationOverlayDrag(overlay: BrowserWindow): void {
   if (overlay.isDestroyed()) {
     return;
@@ -1580,6 +1661,10 @@ function createOverlayWindow(kind: OverlayKind): BrowserWindow {
     overlay.setIgnoreMouseEvents(true, { forward: true });
   }
 
+  overlay.on("will-move", () => {
+    overlayUserDragging.add(kind);
+  });
+
   overlay.on("moved", () => {
     if (overlay.isDestroyed()) {
       return;
@@ -1587,6 +1672,9 @@ function createOverlayWindow(kind: OverlayKind): BrowserWindow {
     const bounds = overlay.getBounds();
     const programmatic = lastProgrammaticOverlayOrigin.get(kind);
     if (programmatic && programmatic.x === bounds.x && programmatic.y === bounds.y) {
+      return;
+    }
+    if (!overlayUserDragging.has(kind)) {
       return;
     }
     overlayPlacements.set(kind, {
@@ -1628,6 +1716,14 @@ function getOrCreateOverlayWindow(kind: OverlayKind): BrowserWindow {
 }
 
 function prepareOverlayWindows(): void {
+  if (!overlayDisplayListenersInstalled) {
+    overlayDisplayListenersInstalled = true;
+    // macOS moves windows off a display that goes away or changes size. Those
+    // moves are not drags, even if a drag flag is still set from earlier.
+    screen.on("display-added", forgetOverlayDrags);
+    screen.on("display-removed", forgetOverlayDrags);
+    screen.on("display-metrics-changed", forgetOverlayDrags);
+  }
   for (const kind of ["dictation", "recording"] as OverlayKind[]) {
     try {
       getOrCreateOverlayWindow(kind);
@@ -2138,6 +2234,9 @@ async function handleLocalCommand(
         throw new Error("Meeting capture did not return a recording ID");
       }
       activeMeetingRecordingId = result.recordingId;
+      // Its lifecycle events normally arrive first; if not, it is starting.
+      activeMeetingPhase ??= "preparing";
+      refreshTray();
       return { handled: true, result: result.recordingId };
     }
     case "end_meeting_capture": {
@@ -2320,7 +2419,9 @@ async function handleDictationShortcutSignal(
     capability,
     signal,
     startOptions,
-    holdTapLocks: settings.transcription?.dictationTapToLock !== false,
+    holdTapLocks:
+      settings.transcription?.dictationTapToLock !== false &&
+      dictationBindingAllowsTapToLock(binding),
   });
 }
 
@@ -2398,6 +2499,33 @@ async function handleDictationBindingTransition(
   }
 }
 
+/**
+ * Adopt a new dictation phase: the sidecar's, or one this process decides
+ * (a hotkey failure, the error reset, a sidecar crash). Every change goes
+ * through here so the output mute, the menu-bar clock and the tray always
+ * follow the phase; a crash that bypassed the mute left the Mac muted.
+ *
+ * `sound` is the one this transition plays. The start sound plays before the
+ * mute is scheduled, so it is heard; the done and error sounds wait until the
+ * mute is undone, for the same reason.
+ */
+function applyDictationPhase(nextPhase: string, sound: DictationSound | null = null): void {
+  if (nextPhase === "primed" || nextPhase === "recording") {
+    dictationLiveSince ??= Date.now();
+  } else {
+    dictationLiveSince = null;
+  }
+  if (sound === "start") {
+    playDictationSound(sound);
+  }
+  const restored = mediaMute.onPhase(nextPhase, muteMediaWhileDictatingEnabled);
+  if (sound && sound !== "start") {
+    void restored.then(() => playDictationSound(sound));
+  }
+  dictationPhase = nextPhase;
+  refreshTray();
+}
+
 function scheduleDictationErrorReset(): void {
   if (dictationShortcutFailureResetTimer) {
     clearTimeout(dictationShortcutFailureResetTimer);
@@ -2407,13 +2535,12 @@ function scheduleDictationErrorReset(): void {
     if (dictationPhase !== "error") {
       return;
     }
-    dictationPhase = "idle";
+    applyDictationPhase("idle");
     dictationShortcutSignalRuntime.onPhase("idle");
     broadcastRendererEvent("dictation-state-changed", { phase: "idle" });
     BrowserWindow.getAllWindows()
       .filter((window) => getOverlayKind(window) === "dictation")
       .forEach((window) => window.hide());
-    refreshTray();
   }, DICTATION_SHORTCUT_FAILURE_VISIBLE_MS);
 }
 
@@ -2423,9 +2550,8 @@ function surfaceDictationShortcutFailure(source: string, error: unknown): void {
     phase: "error",
     message: dictationShortcutFailureMessage(error),
   };
-  dictationPhase = "error";
+  applyDictationPhase("error");
   dictationShortcutSignalRuntime.onPhase("error");
-  refreshTray();
   if (showDictationOverlayEnabled) {
     showOverlayWindow(getOrCreateOverlayWindow("dictation"));
   }
@@ -3590,6 +3716,8 @@ async function bootstrap() {
 
   await app.whenReady();
   recordLaunchMilestone("app-ready");
+  // A run killed mid-dictation (force quit, crash) could not restore audio.
+  void mediaMute.recoverStaleMute();
 
   if (app.isPackaged) {
     // Pairs with `protocols:` in electron-builder.yml (CFBundleURLTypes).
@@ -3678,10 +3806,15 @@ async function bootstrap() {
     // if the cached phase never left "idle" (start acked, recording event
     // never observed before the crash).
     dictationShortcutSignalRuntime.onPhase("idle");
-    if (dictationPhase !== "idle") {
-      dictationPhase = "idle";
+    // The restarted sidecar starts with an empty recent-results list, so the
+    // menu must not offer to re-paste entries it no longer has.
+    recentDictationResults = [];
+    const wasIdle = dictationPhase === "idle";
+    // Unconditional: undoes any mute and refreshes the tray for the cleared
+    // list even when the phase already looked idle.
+    applyDictationPhase("idle");
+    if (!wasIdle) {
       broadcastRendererEvent("dictation-state-changed", { phase: "idle" });
-      refreshTray();
     }
 
     // A meeting dies with the process too. Reporting it as "error" rather than
@@ -3701,6 +3834,10 @@ async function bootstrap() {
         activeMeetingRecordingId,
         { phase: "recoverable", recordingId: interruptedRecordingId },
       );
+      activeMeetingPhase = nextActiveMeetingPhase(activeMeetingPhase, activeMeetingRecordingId, {
+        phase: "recoverable",
+        recordingId: interruptedRecordingId,
+      });
       refreshTray();
     }
   });
@@ -3735,16 +3872,21 @@ async function bootstrap() {
         recordingId?: unknown;
       };
       if (typeof lifecycle.phase === "string") {
+        const lifecycleEvent: MeetingLifecycleEvent = {
+          phase: lifecycle.phase as MeetingLifecycleEvent["phase"],
+          recordingId:
+            typeof lifecycle.recordingId === "string" ? lifecycle.recordingId : null,
+        };
         activeMeetingRecordingId = nextActiveMeetingRecordingId(
           activeMeetingRecordingId,
-          {
-            phase: lifecycle.phase as MeetingLifecycleEvent["phase"],
-            recordingId:
-              typeof lifecycle.recordingId === "string"
-                ? lifecycle.recordingId
-                : null,
-          },
-        );        refreshTray();
+          lifecycleEvent,
+        );
+        activeMeetingPhase = nextActiveMeetingPhase(
+          activeMeetingPhase,
+          activeMeetingRecordingId,
+          lifecycleEvent,
+        );
+        refreshTray();
       }
     }
 
@@ -3763,21 +3905,11 @@ async function bootstrap() {
             (payload as { outcome?: unknown }).outcome,
           )
         : null;
-      if (sound) {
-        playDictationSound(sound);
-      }
       if (dictationShortcutFailureResetTimer) {
         clearTimeout(dictationShortcutFailureResetTimer);
         dictationShortcutFailureResetTimer = null;
       }
-      if (nextPhase === "primed" || nextPhase === "recording") {
-        dictationLiveSince ??= Date.now();
-      } else {
-        dictationLiveSince = null;
-      }
-      mediaMute.onPhase(nextPhase, muteMediaWhileDictatingEnabled);
-      dictationPhase = nextPhase;
-      refreshTray();
+      applyDictationPhase(nextPhase, sound);
       // A helper table held back while this session was live can go in now.
       applyDeferredNativeShortcutConfig(`phase ${nextPhase}`);
       const sessionId = (payload as { sessionId?: unknown }).sessionId;
@@ -3791,6 +3923,12 @@ async function bootstrap() {
       if (dictationPhase === "error") {
         scheduleDictationErrorReset();
       }
+    }
+
+    if (eventName === "app-state-reset") {
+      // Reset all data cleared the sidecar's list this mirrors.
+      recentDictationResults = [];
+      refreshTray();
     }
 
     if (eventName === "dictation-text-ready") {
@@ -3886,6 +4024,7 @@ async function bootstrap() {
   prepareOverlayWindows();
   createTray();
   bootstrapComplete = true;
+  refreshTray();
   flushPendingDeepLinks();
 }
 

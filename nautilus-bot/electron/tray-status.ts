@@ -4,15 +4,23 @@
  * The item is how a live microphone stays visible when the HUD is hidden or
  * on another Space, so it names the state in the menu bar itself: a dot and
  * a running clock while dictating or recording a meeting, an ellipsis while
- * the words are being finished, and nothing when idle (a quiet menu bar is
- * the point). The menu's first line says the same thing in words.
+ * the words are being finished (or a meeting is starting or being finished),
+ * and nothing when idle (a quiet menu bar is the point). The menu's first
+ * line says the same thing in words.
  */
 
 export type TrayStatusInput = {
   dictationPhase: string;
   /** When the current dictation went live, or null. */
   dictationStartedAt: number | null;
-  /** When the current meeting recording started, or null if none. */
+  /**
+   * Phase of the meeting being tracked, or null if none. A meeting is only
+   * "recording" between its preparing and stopping phases; before and after
+   * it the microphone is not capturing, so there is no clock and nothing to
+   * stop.
+   */
+  meetingPhase: string | null;
+  /** When the current meeting started recording, or null. */
   meetingStartedAt: number | null;
   now: number;
 };
@@ -29,10 +37,21 @@ export type TrayStatus = {
   statusLine: string;
   /** Whether the title shows a running clock, so the caller ticks it. */
   ticking: boolean;
+  /**
+   * The menu's meeting item: "stop" while a meeting records, "busy" while one
+   * is starting or finishing (shown disabled), "start" otherwise.
+   */
+  meetingControl: "start" | "stop" | "busy";
 };
 
 const LIVE_PHASES = new Set(["primed", "recording"]);
 const FINISHING_PHASES = new Set(["stopping", "transcribing", "delivering"]);
+const MEETING_FINISHING_PHASES = new Set(["stopping", "processing", "transcribing"]);
+
+function meetingControlFor(meetingPhase: string | null): TrayStatus["meetingControl"] {
+  if (meetingPhase === "recording") return "stop";
+  return meetingPhase === null ? "start" : "busy";
+}
 
 export function formatTrayClock(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -43,7 +62,8 @@ export function formatTrayClock(ms: number): string {
 }
 
 export function describeTrayStatus(input: TrayStatusInput): TrayStatus {
-  const { dictationPhase, dictationStartedAt, meetingStartedAt, now } = input;
+  const { dictationPhase, dictationStartedAt, meetingPhase, meetingStartedAt, now } = input;
+  const meetingControl = meetingControlFor(meetingPhase);
   if (LIVE_PHASES.has(dictationPhase)) {
     const clock = formatTrayClock(now - (dictationStartedAt ?? now));
     return {
@@ -51,6 +71,7 @@ export function describeTrayStatus(input: TrayStatusInput): TrayStatus {
       tooltip: "Plainsong is listening",
       statusLine: "Listening",
       ticking: true,
+      meetingControl,
     };
   }
   if (FINISHING_PHASES.has(dictationPhase)) {
@@ -59,15 +80,29 @@ export function describeTrayStatus(input: TrayStatusInput): TrayStatus {
       tooltip: "Plainsong is finishing your dictation",
       statusLine: dictationPhase === "delivering" ? "Inserting…" : "Transcribing…",
       ticking: false,
+      meetingControl,
     };
   }
-  if (meetingStartedAt !== null) {
-    const clock = formatTrayClock(now - meetingStartedAt);
+  if (meetingPhase === "recording") {
+    const clock = formatTrayClock(now - (meetingStartedAt ?? now));
     return {
       title: `● ${clock}`,
       tooltip: "Plainsong is recording a meeting",
       statusLine: "Recording a meeting",
       ticking: true,
+      meetingControl,
+    };
+  }
+  if (meetingPhase !== null) {
+    const finishing = MEETING_FINISHING_PHASES.has(meetingPhase);
+    return {
+      title: "…",
+      tooltip: finishing
+        ? "Plainsong is finishing the meeting recording"
+        : "Plainsong is starting a meeting recording",
+      statusLine: finishing ? "Finishing the meeting…" : "Starting the meeting…",
+      ticking: false,
+      meetingControl,
     };
   }
   if (dictationPhase === "error") {
@@ -76,7 +111,14 @@ export function describeTrayStatus(input: TrayStatusInput): TrayStatus {
       tooltip: "Plainsong",
       statusLine: "The last dictation did not finish",
       ticking: false,
+      meetingControl,
     };
   }
-  return { title: "", tooltip: "Plainsong", statusLine: "Ready to dictate", ticking: false };
+  return {
+    title: "",
+    tooltip: "Plainsong",
+    statusLine: "Ready to dictate",
+    ticking: false,
+    meetingControl,
+  };
 }
