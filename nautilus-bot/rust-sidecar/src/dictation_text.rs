@@ -482,6 +482,51 @@ pub(crate) fn format_dictation_notes(text: &str) -> String {
 /// one bullet per sentence.
 pub(crate) fn bulletize_text(text: &str) -> String {
     const MAX_LIST_ITEM_WORDS: usize = 4;
+    // A comma part that opens like a clause ("I think", "maybe", "we should
+    // go") is speech with pauses, not a list item.
+    const CLAUSE_OPENERS: &[&str] = &[
+        "i",
+        "i'm",
+        "i'd",
+        "i'll",
+        "we",
+        "you",
+        "he",
+        "she",
+        "they",
+        "it",
+        "it's",
+        "that",
+        "this",
+        "there",
+        "maybe",
+        "perhaps",
+        "probably",
+        "so",
+        "well",
+        "actually",
+        "then",
+        "but",
+        "because",
+        "if",
+        "when",
+        "also",
+        "just",
+        "yes",
+        "no",
+        "ok",
+        "okay",
+        "like",
+        "honestly",
+        "basically",
+        "though",
+        "however",
+    ];
+    // Abbreviations whose full stop does not end a sentence.
+    const ABBREVIATIONS: &[&str] = &[
+        "dr", "mr", "mrs", "ms", "prof", "st", "jr", "sr", "vs", "e.g", "i.e", "approx", "fig",
+        "mt",
+    ];
     let mut items: Vec<String> = Vec::new();
     for segment in text
         .split([';', '\n'])
@@ -495,8 +540,15 @@ pub(crate) fn bulletize_text(text: &str) -> String {
             .collect();
         let is_short_item_list = comma_parts.len() >= 2
             && comma_parts.iter().all(|part| {
+                let first_word = part
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .replace('\u{2019}', "'")
+                    .to_lowercase();
                 part.split_whitespace().count() <= MAX_LIST_ITEM_WORDS
                     && !part.contains(['.', '!', '?'])
+                    && !CLAUSE_OPENERS.contains(&first_word.as_str())
             });
         if is_short_item_list {
             items.extend(comma_parts.iter().map(|part| format!("- {part}")));
@@ -508,7 +560,15 @@ pub(crate) fn bulletize_text(text: &str) -> String {
             let next_is_space = chars
                 .get(position + 1)
                 .is_some_and(|(_, next)| next.is_whitespace());
-            if matches!(ch, '.' | '!' | '?') && next_is_space {
+            let after_abbreviation = *ch == '.' && {
+                let word = segment[start..*at]
+                    .rsplit(char::is_whitespace)
+                    .next()
+                    .unwrap_or_default()
+                    .to_lowercase();
+                ABBREVIATIONS.contains(&word.as_str())
+            };
+            if matches!(ch, '.' | '!' | '?') && next_is_space && !after_abbreviation {
                 let sentence = segment[start..at + ch.len_utf8()].trim();
                 if !sentence.is_empty() {
                     items.push(format!("- {sentence}"));

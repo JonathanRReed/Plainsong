@@ -1602,11 +1602,18 @@ pub(crate) async fn stop_dictation_for_sidecar(
             .map(|(provider, _, _)| provider.is_remote())
             .unwrap_or(false);
         emit_dictation_polishing_stage(state, handle, session_id, ai_is_remote);
+        // Only a captured selection is something to edit. Clipboard or window
+        // context under a customized profile would otherwise be rewritten
+        // and pasted at the caret as if it had been selected.
+        let selection = (normalize_dictation_context_source(&dictation_options.context_source)
+            == "selected_text")
+            .then_some(dictation_options.captured_context_text.as_deref())
+            .flatten();
         match crate::dictation_text::run_voice_edit(
             state,
             &settings_snapshot,
             raw_transcribed_text.as_str(),
-            dictation_options.captured_context_text.as_deref(),
+            selection,
         )
         .await
         {
@@ -2761,10 +2768,12 @@ pub(crate) async fn stop_dictation_for_sidecar(
     }
 
     if let Some(anchor) = post_insert_focus_anchor {
+        // The fitted text, as the field holds it: diffing the unfitted
+        // "We ... go." would read the fit itself as the user's correction.
         schedule_post_insert_correction_readback(
             state,
             handle,
-            final_text.clone(),
+            inserted_text.clone(),
             app_target.clone(),
             anchor,
             now,

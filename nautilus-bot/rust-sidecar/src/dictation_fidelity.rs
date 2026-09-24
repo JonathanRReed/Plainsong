@@ -36,7 +36,30 @@ pub(crate) fn validate_cleanup(source: &str, candidate: &str) -> Result<(), Stri
     if content_tokens(&comparable(source)) != content_tokens(&comparable(candidate)) {
         return Err("AI cleanup changed, added, reordered, or omitted dictated words".to_string());
     }
+    // `comparable` cleans both sides, so it alone would accept an AI pass
+    // that adds "the the" or invents "Tuesday, no wait," before a real
+    // "Wednesday". Cleanup may only remove words, never add them.
+    // Checked against the source both as spoken and as cleaned, because
+    // number normalization can read differently once a filler is gone
+    // ("twenty uh five" vs "twenty five").
+    let kept = normalized_tokens(candidate);
+    if !is_subsequence(&kept, &normalized_tokens(source))
+        && !is_subsequence(&kept, &content_tokens(&comparable(source)))
+    {
+        return Err("AI cleanup changed, added, reordered, or omitted dictated words".to_string());
+    }
     Ok(())
+}
+
+fn normalized_tokens(text: &str) -> Vec<String> {
+    content_tokens(&crate::text::itn::inverse_text_normalize(text))
+}
+
+fn is_subsequence(needle: &[String], haystack: &[String]) -> bool {
+    let mut remaining = haystack.iter();
+    needle
+        .iter()
+        .all(|token| remaining.any(|candidate| candidate == token))
 }
 
 /// Both sides go through the same deterministic edits the local pipeline is
@@ -220,6 +243,21 @@ mod tests {
             assert_eq!(resolve_spoken_repairs(text), text);
         }
     }
+    #[test]
+    fn cleanup_may_remove_disfluencies_but_never_add_them() {
+        assert!(validate_cleanup("Bring the the slides.", "Bring the slides.").is_ok());
+        assert!(validate_cleanup("Meet Tuesday, no wait, Wednesday.", "Meet Wednesday.").is_ok());
+        for (source, candidate) in [
+            ("Bring the slides.", "Bring the the slides."),
+            ("Meet Wednesday.", "Meet Tuesday, no wait, Wednesday."),
+        ] {
+            assert!(
+                validate_cleanup(source, candidate).is_err(),
+                "{source} => {candidate}"
+            );
+        }
+    }
+
     #[test]
     fn cleanup_cannot_drop_add_or_move_negation() {
         for (source, candidate) in [

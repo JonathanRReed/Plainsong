@@ -3644,6 +3644,14 @@ fn bulletize_splits_sentences_not_every_comma_in_a_sentence() {
         bulletize_text("Version 3.5 ships today."),
         "- Version 3.5 ships today."
     );
+    assert_eq!(
+        bulletize_text("I think, maybe, we should go"),
+        "- I think, maybe, we should go"
+    );
+    assert_eq!(
+        bulletize_text("Call Dr. Smith tomorrow. Then email Mr. Jones."),
+        "- Call Dr. Smith tomorrow.\n- Then email Mr. Jones."
+    );
 }
 
 #[test]

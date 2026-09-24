@@ -55,17 +55,27 @@ pub struct XaiSttProvider {
 struct XaiSttResponse {
     /// Defaulted so silent audio reads as an empty transcript ("no speech")
     /// rather than a failed request.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     text: String,
     language: Option<String>,
     words: Option<Vec<XaiSttWord>>,
 }
 
+/// Every word field is optional: a word missing its timing (or its text)
+/// is dropped from the timestamps, never allowed to fail the transcript.
 #[derive(Deserialize)]
 struct XaiSttWord {
-    text: String,
-    start: f64,
-    end: f64,
+    text: Option<String>,
+    start: Option<f64>,
+    end: Option<f64>,
+}
+
+fn null_as_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 impl Default for XaiSttProvider {
@@ -137,11 +147,13 @@ impl XaiSttProvider {
             .words
             .unwrap_or_default()
             .into_iter()
-            .map(|word| TranscriptSegment {
-                start_time: word.start,
-                end_time: word.end,
-                text: word.text,
-                confidence: XAI_SEGMENT_CONFIDENCE,
+            .filter_map(|word| {
+                Some(TranscriptSegment {
+                    start_time: word.start?,
+                    end_time: word.end?,
+                    text: word.text?,
+                    confidence: XAI_SEGMENT_CONFIDENCE,
+                })
             })
             .collect();
 
@@ -297,6 +309,16 @@ mod tests {
     fn a_reply_without_text_is_an_empty_transcript_not_an_error() {
         let reply: XaiSttResponse = serde_json::from_str(r#"{"language":"en"}"#).expect("no text");
         assert!(reply.text.is_empty());
+    }
+
+    #[test]
+    fn null_text_or_untimed_words_do_not_fail_the_reply() {
+        let reply: XaiSttResponse = serde_json::from_str(
+            r#"{"text":null,"words":[{"text":"hi","start":0.0},{"text":null,"start":1,"end":2}]}"#,
+        )
+        .expect("lenient reply");
+        assert!(reply.text.is_empty());
+        assert_eq!(reply.words.map(|words| words.len()), Some(2));
     }
 
     #[test]

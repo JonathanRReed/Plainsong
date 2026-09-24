@@ -3324,6 +3324,10 @@ const DICTATION_LOUDNESS_FRAME_SECONDS: f32 = 0.02;
 const DICTATION_SPEECH_FRAME_RMS: f32 = 0.003;
 /// Samples above this are soft-limited rather than clipped.
 const DICTATION_LIMITER_KNEE: f32 = 0.9;
+/// A capture whose loudest frames stay under -40 dBFS and within 6 dB of its
+/// quietest is room tone, not words (speech rises and falls by far more).
+const DICTATION_NOISE_ONLY_MAX_RMS: f32 = 0.01;
+const DICTATION_NOISE_ONLY_MAX_CONTRAST: f32 = 2.0;
 
 /// Brings quiet dictation up to normal speech loudness (the "whisper mode"
 /// every dictation gets). Loudness is measured over speech frames only, so
@@ -3338,15 +3342,30 @@ fn normalize_dictation_loudness(samples: &mut [f32], sample_rate: u32) {
     let frame_len = ((sample_rate as f32 * DICTATION_LOUDNESS_FRAME_SECONDS) as usize).max(1);
     let mut speech_energy = 0.0_f64;
     let mut speech_samples = 0_usize;
+    let mut frame_levels = Vec::with_capacity(samples.len() / frame_len + 1);
     for frame in samples.chunks(frame_len) {
         let energy: f64 = frame.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
         let rms = (energy / frame.len() as f64).sqrt() as f32;
+        if !rms.is_finite() {
+            return;
+        }
+        frame_levels.push(rms);
         if rms >= DICTATION_SPEECH_FRAME_RMS {
             speech_energy += energy;
             speech_samples += frame.len();
         }
     }
     if speech_samples == 0 {
+        return;
+    }
+    // An accidental press with nobody speaking: lifting it would hand the
+    // recognizer amplified hiss, which Whisper-family models turn into
+    // invented words.
+    frame_levels.sort_by(f32::total_cmp);
+    let level_at =
+        |fraction: f32| frame_levels[((frame_levels.len() - 1) as f32 * fraction).round() as usize];
+    let (quiet, loud) = (level_at(0.1), level_at(0.95));
+    if loud < DICTATION_NOISE_ONLY_MAX_RMS && loud < quiet * DICTATION_NOISE_ONLY_MAX_CONTRAST {
         return;
     }
     let speech_rms = (speech_energy / speech_samples as f64).sqrt() as f32;
@@ -4572,6 +4591,30 @@ mod dictation_loudness_tests {
         // The old peak-based boost gave this utterance no gain at all.
         assert!(rms(&samples[800..]) > 0.08);
         assert!(samples.iter().all(|s| s.abs() <= 1.0));
+    }
+
+    #[test]
+    fn steady_room_noise_with_no_words_is_not_lifted() {
+        // Deterministic white noise at about -45 dBFS RMS.
+        let mut state = 0x2545_f491_u32;
+        let mut noise: Vec<f32> = (0..32_000)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+            })
+            .map(|sample| sample * 0.01)
+            .collect();
+        let before = noise.clone();
+        normalize_dictation_loudness(&mut noise, 16_000);
+        assert_eq!(noise, before);
+    }
+
+    #[test]
+    fn a_whisper_after_a_pause_is_still_lifted() {
+        let mut samples = vec![0.0005; 8_000];
+        samples.extend(tone(0.02, 1.0, 16_000));
+        normalize_dictation_loudness(&mut samples, 16_000);
+        assert!(rms(&samples[8_000..]) > 0.08);
     }
 
     #[test]

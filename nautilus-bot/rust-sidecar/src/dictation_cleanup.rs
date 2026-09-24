@@ -3,8 +3,10 @@
 //! Removes the three things people notice first in raw speech-to-text, and
 //! only in forms that cannot change what the speaker meant:
 //!
-//! 1. Hesitation sounds: um, umm, uh, uhh, uhm, erm. Never "ah" (a real
-//!    interjection), never ER (an acronym), never a quoted or all-caps word.
+//! 1. Hesitation sounds: um, umm, uh, uhh, uhm. Never "ah" (a real
+//!    interjection), never ER (an acronym), never a quoted or all-caps word,
+//!    and never er/err/erm, which are repair cues ("John, erm, Jim") that
+//!    `dictation_fidelity::resolve_spoken_repairs` handles.
 //! 2. Stutters: an immediately repeated function word with no punctuation
 //!    between ("the the", "I I"). Content words and real doubles ("had had",
 //!    "that that") and repeated answers ("Agreed. Agreed.") are kept.
@@ -21,13 +23,16 @@
 
 /// Hesitation sounds with no other reading. Matched case-sensitively in
 /// lowercase or sentence-case form so an all-caps "UM" is left alone.
-const HESITATIONS: &[&str] = &["um", "umm", "ummm", "uh", "uhh", "uhhh", "uhm", "erm"];
+const HESITATIONS: &[&str] = &["um", "umm", "ummm", "uh", "uhh", "uhhh", "uhm"];
 
 /// Function words whose immediate repetition is a stutter, never grammar.
-/// Deliberately excludes "that", "had", "is", "do" and every content word.
+/// Deliberately excludes "that", "had", "is", "do" and every content word,
+/// and words that double in real speech: "told you you were", "turn it on
+/// on Monday", "come in in ten", "look at at least", "so so sorry", "will"
+/// (also a name), "can" and "it".
 const STUTTER_WORDS: &[&str] = &[
-    "a", "an", "the", "to", "of", "for", "with", "and", "or", "but", "i", "we", "you", "they",
-    "he", "she", "it", "my", "our", "your", "in", "on", "at", "so", "if", "can", "will",
+    "a", "an", "the", "to", "of", "for", "with", "and", "or", "but", "i", "we", "they", "he",
+    "she", "my", "our", "your", "if",
 ];
 
 /// Repair cues, longest first. `weak` cues are ordinary words too, so they
@@ -364,6 +369,13 @@ fn resolve_typed_repairs(mut pieces: Vec<Piece>) -> Vec<Piece> {
             index += 1;
             continue;
         }
+        // "We invited ten, no one came": "no one" is a pronoun, not a
+        // repair. Only "ten, no, one" (a pause after the cue) corrects.
+        let cue = &pieces[repair_index - 1];
+        if cue_len == 1 && cue.lower() == "no" && cue.punct.is_empty() && repair.lower() == "one" {
+            index += 1;
+            continue;
+        }
         // After a full stop the cue might open an unrelated sentence ("It's
         // due Friday. I mean, Monday we start."), so the corrected value must
         // close its clause or lead straight into "at 3", "on the call", etc.
@@ -436,6 +448,7 @@ mod tests {
             "I, like, agree.",
             "The ER, yellow ward.",
             "Humble umbrella.",
+            "Send it to John, erm, Jim tomorrow.",
         ] {
             assert_eq!(clean(kept), kept);
         }
@@ -454,6 +467,14 @@ mod tests {
             "No no no.",
             "the, the thing",
             "very very good",
+            // Grammatical doubles.
+            "I told you you were right.",
+            "Turn it on on Monday.",
+            "Come in in ten minutes.",
+            "Look at at least three.",
+            "I'm so so sorry.",
+            "Will will send it.",
+            "Can can is a dance.",
         ] {
             assert_eq!(clean(kept), kept);
         }
@@ -493,6 +514,7 @@ mod tests {
             "Let's meet on Wednesday at 3."
         );
         assert_eq!(clean("Call at 3. Sorry, 4."), "Call at 4.");
+        assert_eq!(clean("We need ten, no, one."), "We need one.");
         for kept in [
             "Tuesday or Wednesday",
             "No problem on Tuesday.",
@@ -504,6 +526,8 @@ mod tests {
             "Tuesday, no wait, the meeting moved.",
             "It's due Friday. I mean, Monday we start.",
             "I work Monday. Actually, Tuesday too.",
+            "We invited ten, no one came.",
+            "At three, no one answered.",
         ] {
             assert_eq!(clean(kept), kept, "{kept}");
         }
