@@ -72,6 +72,9 @@ export function DictationCaptureHero({
   onUnavailableAction,
 }: DictationCaptureHeroProps) {
   const isUnavailable = !isAvailable && !isCaptureLive && !isBusy;
+  // Readiness still being checked is a normal loading state, not a
+  // problem: a spinner and a disabled "Checking…", never the rust warning.
+  const isChecking = isUnavailable && unavailableRole === "status";
   const ringToneClass = isCaptureLive
     ? "border-gold/20 bg-gold/5"
     : isUnavailable
@@ -128,6 +131,8 @@ export function DictationCaptureHero({
               </>
             ) : isBusy ? (
               <RefreshCw className="h-10 w-10 animate-spin text-foreground" />
+            ) : isChecking ? (
+              <RefreshCw className="h-10 w-10 animate-spin text-muted-foreground" />
             ) : isUnavailable ? (
               <TriangleAlert className="h-10 w-10 text-rust" />
             ) : phase === "done" ? (
@@ -206,6 +211,11 @@ export function DictationCaptureHero({
             <Button variant="outline" size="lg" disabled>
               <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
               {phase === "delivering" ? "Inserting…" : "Working…"}
+            </Button>
+          ) : isChecking ? (
+            <Button variant="outline" size="lg" disabled>
+              <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+              Checking…
             </Button>
           ) : isUnavailable ? (
             <Button
