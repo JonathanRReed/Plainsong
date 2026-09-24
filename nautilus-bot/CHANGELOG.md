@@ -24,6 +24,23 @@ Silicon. See `LAUNCH.md` for that boundary.
 - Fixed: mid-sentence fitting no longer lowercases names; undo removes the
   fitted text; a Voice Edit that gets nothing back from the model changes
   nothing instead of pasting the instruction.
+- Review fixes before merge:
+  - Filler removal keeps real doubles ("told you you were", "on on
+    Monday", "Will will") and "no one", and leaves "erm" repairs to the
+    repair pass. AI cleanup may now only remove words, never add them.
+  - Mid-sentence fitting keeps "Will" capitalized, adds no spaces in
+    Chinese or Japanese, looks past a space or comma after the caret, and
+    treats a closing quote or emoji as a sentence end.
+  - Notes bullets no longer split "I think, maybe, we should go" or
+    "Dr. Smith". Quiet room noise with no words is no longer boosted.
+  - A sidecar crash, a failed unmute or a force quit can no longer leave
+    the Mac muted; the start sound plays before the mute and the done
+    sound after it. The menu bar stops saying "Recording" once a meeting
+    is being finished, and its menu no longer closes while you dictate.
+  - Tap to lock is off for a lone Fn/Globe key, where a language-switch
+    tap looked the same; unlocking no longer flashes an error.
+  - Onboarding's Ready step can always finish, retries download the model
+    you chose, and the mic check measures the mic it names.
 - Every push to a work branch builds an unsigned test app on GitHub
   (Actions, Test build).
 - Dictation sounds (on by default): a tick when the mic goes live, a pop
