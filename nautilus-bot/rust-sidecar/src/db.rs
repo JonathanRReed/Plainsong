@@ -614,6 +614,10 @@ pub struct Database {
     dead_code,
     reason = "database module keeps migration and evidence-table helpers beyond current command usage"
 )]
+/// Recording id to (text preview, app target), for dictation history lists.
+pub type DictationListPreviews =
+    std::collections::HashMap<String, (Option<String>, Option<String>)>;
+
 impl Database {
     /// Create new database connection with optional encryption
     pub fn new_with_key(key: Option<&str>) -> Result<Self> {
@@ -2802,9 +2806,7 @@ impl Database {
     /// into, keyed by recording id, for history lists. One query for every
     /// dictation rather than one per row; the preview is capped at 240
     /// characters so a long dictation does not bloat the list payload.
-    pub fn get_dictation_list_previews(
-        &self,
-    ) -> Result<std::collections::HashMap<String, (Option<String>, Option<String>)>> {
+    pub fn get_dictation_list_previews(&self) -> Result<DictationListPreviews> {
         let mut stmt = self.conn.prepare(
             "SELECT r.id,
                     SUBSTR(TRIM(h.final_text), 1, 240),
