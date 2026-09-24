@@ -288,6 +288,8 @@ export interface TranscriptionSettings {
   dictationHandsFreeEnabled?: boolean;
   /** Hold-to-talk only: a quick tap locks the mic on. Absent means on. */
   dictationTapToLock?: boolean;
+  /** Fit spacing and casing to the text around the caret. Absent means on. */
+  dictationMatchSurroundingText?: boolean;
   dictationRoutePreference?: "local" | "cloud";
   dictationRouteOverrideEnabled?: boolean;
   dictationKeepWarm?: "off" | "on";

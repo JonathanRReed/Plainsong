@@ -2428,7 +2428,32 @@ pub(crate) async fn stop_dictation_for_sidecar(
                         let insert_text = final_text.clone();
                         let insert_app_target = app_target.clone();
                         let insert_app_bundle_id = app_bundle_id.clone();
+                        let match_surrounding_text = settings_snapshot
+                            .transcription
+                            .dictation_match_surrounding_text;
                         match tokio::task::spawn_blocking(move || {
+                            // Fit the words to the sentence around the caret
+                            // (spacing, casing, a stray full stop). macOS only;
+                            // the neighbors are read here and dropped.
+                            #[cfg(target_os = "macos")]
+                            let insert_text = match match_surrounding_text
+                                .then(|| {
+                                    crate::text_insert::read_cursor_neighbors(
+                                        insert_app_target.as_deref(),
+                                        insert_app_bundle_id.as_deref(),
+                                    )
+                                })
+                                .flatten()
+                            {
+                                Some((before, after)) => crate::text::cursor_fit::fit_to_cursor(
+                                    &insert_text,
+                                    &before,
+                                    &after,
+                                ),
+                                None => insert_text,
+                            };
+                            #[cfg(not(target_os = "macos"))]
+                            let _ = match_surrounding_text;
                             paste_text_systemwide(
                                 &accessibility_trust_observed,
                                 insert_text.as_str(),

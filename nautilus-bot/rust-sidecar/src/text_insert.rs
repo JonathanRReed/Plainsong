@@ -856,6 +856,45 @@ pub(crate) fn copy_focused_accessibility_element(
     Ok(focused_element)
 }
 
+/// The few characters right before and after an empty caret in the focused
+/// field, for `text::cursor_fit`. `None` when there is no readable text
+/// field, when text is selected (the dictation replaces it), or when the
+/// field is secure. Read in-process and never stored or logged.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_cursor_neighbors(
+    target_app: Option<&str>,
+    target_app_bundle_id: Option<&str>,
+) -> Option<(String, String)> {
+    let focused_element = copy_focused_accessibility_element(
+        target_app,
+        target_app_bundle_id,
+        "Accessibility could not create the system-wide element.".to_string(),
+    )
+    .ok()
+    .flatten()?;
+    let neighbors = (|| {
+        if classify_focused_element_security(focused_element).is_some() {
+            return None;
+        }
+        let value = ax_copy_string_attribute(focused_element, "AXValue")
+            .ok()
+            .flatten()?;
+        let range = ax_copy_cf_range_attribute(focused_element, "AXSelectedTextRange")
+            .ok()
+            .flatten()?;
+        if range.length != 0 || range.location < 0 {
+            return None;
+        }
+        let units: Vec<u16> = value.encode_utf16().collect();
+        let caret = usize::try_from(range.location).ok()?.min(units.len());
+        let before = String::from_utf16_lossy(&units[caret.saturating_sub(8)..caret]);
+        let after = String::from_utf16_lossy(&units[caret..(caret + 2).min(units.len())]);
+        Some((before, after))
+    })();
+    unsafe { CFRelease(focused_element) };
+    neighbors
+}
+
 /// Whether an error string produced by `ax_copy_attribute_value` corresponds
 /// to `kAXErrorCannotComplete` (`AXError -25204`). String-matched (rather
 /// than threaded through as a typed error) because `ax_copy_attribute_value`

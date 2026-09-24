@@ -364,6 +364,10 @@ pub struct TranscriptionSettings {
     /// Dictation, hold-to-talk only: a quick tap locks the mic on until the
     /// next press (read by the Electron shortcut controller).
     pub dictation_tap_to_lock: bool,
+    /// Dictation: fit spacing and casing to the text around the caret
+    /// (`text::cursor_fit`), from characters read at insert time and never
+    /// stored.
+    pub dictation_match_surrounding_text: bool,
     /// Dictation route preference: local or cloud.
     pub dictation_route_preference: String,
     /// Dictation: allow quick one-shot route override for the next manual capture.
@@ -611,6 +615,7 @@ impl Default for TranscriptionSettings {
             dictation_push_to_talk: false,
             dictation_hands_free_enabled: false,
             dictation_tap_to_lock: true,
+            dictation_match_surrounding_text: true,
             dictation_route_preference: "local".to_string(),
             dictation_route_override_enabled: true,
             dictation_keep_warm: "on".to_string(),
