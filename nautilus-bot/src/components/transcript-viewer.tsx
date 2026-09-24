@@ -444,6 +444,338 @@ function splitOnQuery(
   return parts;
 }
 
+/** A transcript's length as m:ss; the rows keep their own finer stamps. */
+function formatTranscriptLength(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds));
+  return `${Math.floor(whole / 60)}:${(whole % 60).toString().padStart(2, "0")}`;
+}
+
+/**
+ * Past this many turns the browser is allowed to skip laying out the ones off
+ * screen (`content-visibility: auto`). Below it the saving is not worth the
+ * scrollbar settling as turns are first measured.
+ */
+const DEFER_OFFSCREEN_TURNS = 300;
+
+/** What every turn but the one being edited is handed for "save". */
+const noopSaveEdit = async () => {};
+
+interface TranscriptTurnProps {
+  group: TranscriptSegment[];
+  groupIndex: number;
+  speakerId: string | null;
+  speakerName?: string;
+  isEditingSpeakers: boolean;
+  onRenameSpeaker?: (speakerId: string, newName: string, remember?: boolean) => Promise<void>;
+  voiceState?: SpeakerVoiceState;
+  rememberVoicesEnabled?: boolean;
+  isFirstSpeakerMention: boolean;
+  speakerNameOptions?: string[];
+  speakerNameSuggestions?: readonly string[];
+  onConfirmSpeakerVoice?: (speakerId: string, profileId: string) => Promise<void> | void;
+  onRejectSpeakerVoice?: (speakerId: string, profileId: string) => Promise<void> | void;
+  isActive: boolean;
+  /**
+   * The playhead, passed only to a turn it falls inside. Every other turn
+   * gets undefined, which does not change between ticks.
+   */
+  playheadTime?: number;
+  isLastRead: boolean;
+  /** Lowercased search term; empty when no search is running. */
+  highlightQuery: string;
+  /** Which of this turn's own hits is the current one, or -1. */
+  activeMatchInTurn: number;
+  activeMatchRef: React.RefObject<HTMLElement | null>;
+  activeGroupRef: React.RefObject<HTMLDivElement | null>;
+  deferOffscreen: boolean;
+  isClickable: boolean;
+  onSelect: (segment: TranscriptSegment) => void;
+  canEdit: boolean;
+  isEditingText: boolean;
+  /** Only the turn being edited receives the draft and the save state. */
+  editingText: string;
+  isSavingEdit: boolean;
+  onBeginEdit: (group: TranscriptSegment[]) => void;
+  onEditingTextChange: (text: string) => void;
+  onCancelEdit: () => void;
+  onSaveEdit: (group: TranscriptSegment[]) => Promise<void>;
+  onRequestDelete?: (group: TranscriptSegment[], speakerLabel: string) => void;
+}
+
+/**
+ * One speaker turn. Memoized, and handed only what it shows: the playhead
+ * reaches it as "is this the active turn" and "which segment is playing", so
+ * a `timeupdate` re-renders the turn that changed and not the other few
+ * hundred.
+ */
+const TranscriptTurn = memo(function TranscriptTurn({
+  group,
+  groupIndex,
+  speakerId,
+  speakerName,
+  isEditingSpeakers,
+  onRenameSpeaker,
+  voiceState,
+  rememberVoicesEnabled,
+  isFirstSpeakerMention,
+  speakerNameOptions,
+  speakerNameSuggestions,
+  onConfirmSpeakerVoice,
+  onRejectSpeakerVoice,
+  isActive,
+  playheadTime,
+  isLastRead,
+  highlightQuery,
+  activeMatchInTurn,
+  activeMatchRef,
+  activeGroupRef,
+  deferOffscreen,
+  isClickable,
+  onSelect,
+  canEdit,
+  isEditingText,
+  editingText,
+  isSavingEdit,
+  onBeginEdit,
+  onEditingTextChange,
+  onCancelEdit,
+  onSaveEdit,
+  onRequestDelete,
+}: TranscriptTurnProps) {
+  const firstSegment = group[0];
+  const speakerLabel = speakerName || defaultSpeakerLabel(speakerId);
+  const timestampLabel = formatTimeWithMs(firstSegment.startTime);
+  const editHintId = `transcript-edit-hint-${groupIndex}`;
+  const canRenameSpeaker = Boolean(speakerId && onRenameSpeaker);
+  const renameSpeakerForGroup =
+    speakerId && onRenameSpeaker
+      ? (name: string, remember: boolean) => onRenameSpeaker(speakerId, name, remember)
+      : undefined;
+  // Remembering a voice needs a signature for this cluster, and
+  // only clusters the sidecar has one for appear in `speakerVoices`.
+  // Without that check the switch showed up on a meeting diarized
+  // before the feature existed, defaulted to on, and the save
+  // failed at the RPC — so an ordinary rename became impossible.
+  const canRememberVoiceForGroup = Boolean(rememberVoicesEnabled && speakerId && voiceState);
+  // The very first group opens the leaf with a gilded versal.
+  const isLeafOpening = groupIndex === 0;
+
+  // Hits inside this turn, walked in the same order `matches` lists them.
+  let matchInTurn = 0;
+
+  return (
+    <div
+      ref={isActive ? activeGroupRef : undefined}
+      className={cn(
+        "group relative flex gap-3 rounded-lg p-3 transition-colors",
+        // Faint gold-ambient hairline separating speaker turns.
+        groupIndex > 0 && "border-t border-gold-ambient/15",
+        isActive ? "bg-gold/5" : "hover:bg-muted/50",
+        deferOffscreen && "transcript-turn-deferred",
+        isClickable && "cursor-pointer"
+      )}
+      onClick={() => onSelect(firstSegment)}
+    >
+      {/* Reading-position neume — the turn in focus, settling in */}
+      {isActive && (
+        <span
+          className="neume neume-lit settle-in absolute left-0 top-1/2 -translate-y-1/2"
+          aria-hidden="true"
+        />
+      )}
+      {/* Session ribbon bookmark — last-read position */}
+      {isLastRead && !isActive && (
+        <span
+          className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full bg-gold-ambient"
+          aria-hidden="true"
+        />
+      )}
+      {/* Timestamp & Speaker */}
+      <div className="flex flex-col gap-1 min-w-[100px]">
+        <span className="rubric-muted time-spec">
+          {timestampLabel}
+        </span>
+        <SpeakerBadge
+          speakerId={speakerId}
+          speakerName={speakerName}
+          isEditing={isEditingSpeakers && canRenameSpeaker}
+          isActive={isActive}
+          isFirstMention={isFirstSpeakerMention}
+          onRename={renameSpeakerForGroup}
+          canRememberVoice={canRememberVoiceForGroup}
+          isAutoNamed={voiceState?.matchState === "auto"}
+          nameOptions={speakerNameOptions}
+          nameSuggestions={speakerNameSuggestions}
+        />
+      </div>
+
+      {/* Text */}
+      <div className="flex-1">
+        {/* The voice offer sits once per speaker, on their first
+            turn, so a long meeting is not a wall of chips. */}
+        {isFirstSpeakerMention &&
+          speakerId &&
+          voiceState?.suggestion &&
+          onConfirmSpeakerVoice &&
+          onRejectSpeakerVoice && (
+            <SpeakerVoiceSuggestion
+              speakerId={speakerId}
+              suggestion={voiceState.suggestion}
+              isAuto={voiceState.matchState === "auto"}
+              onConfirm={onConfirmSpeakerVoice}
+              onReject={onRejectSpeakerVoice}
+            />
+          )}
+        {isEditingText ? (
+          <div className="flex flex-col gap-1">
+            <textarea
+              autoFocus
+              value={editingText}
+              onChange={(e) => onEditingTextChange(e.target.value)}
+              rows={3}
+              aria-label={`Edit transcript for ${speakerLabel} at ${timestampLabel}`}
+              aria-describedby={editHintId}
+              className="w-full text-sm bg-background border border-gold rounded-md px-2 py-1 resize-none focus:outline-none focus:ring-1 focus:ring-gold"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") { onCancelEdit(); }
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void onSaveEdit(group);
+                }
+              }}
+            />
+            <div className="flex items-center justify-between gap-2">
+              <p id={editHintId} className="text-xs text-muted-foreground">
+                Cmd/Ctrl+Enter to save
+              </p>
+              <div className="flex gap-1">
+                <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={isSavingEdit} onClick={onCancelEdit}>Cancel</Button>
+                <Button size="sm" className="h-6 text-xs" disabled={isSavingEdit || !editingText.trim()} onClick={() => { void onSaveEdit(group); }}><Check className="h-3 w-3 mr-1" />{isSavingEdit ? "Saving…" : "Save"}</Button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="group/text relative">
+            {/* A single click sets the reading ribbon and leaves the
+                words selectable and copyable. Editing is the hover
+                Edit button or a double-click — never a stray click,
+                which used to swallow the whole paragraph mid-quote. */}
+            <p
+              className="manuscript max-w-prose select-text text-[0.95rem] leading-[1.85]"
+              onDoubleClick={(e) => { if (canEdit) { e.stopPropagation(); onBeginEdit(group); } }}
+            >
+              {group.map((segment, i) => {
+                const isPlaying =
+                  playheadTime !== undefined &&
+                  playheadTime >= segment.startTime &&
+                  playheadTime <= segment.endTime;
+                const underline = isPlaying
+                  ? "underline decoration-dotted decoration-gold underline-offset-2"
+                  : "";
+                const trailingSpace = i < group.length - 1 ? " " : "";
+                // With no search running the words stay one text node,
+                // exactly as they were; only a live query splits them
+                // so hits can be marked without removing anything.
+                const body = highlightQuery
+                  ? splitOnQuery(segment.text, highlightQuery).map(
+                      (part, partIndex) => {
+                        if (!part.isMatch) {
+                          return <span key={partIndex}>{part.text}</span>;
+                        }
+                        const isActiveMatch = matchInTurn === activeMatchInTurn;
+                        matchInTurn += 1;
+                        return (
+                          <mark
+                            key={partIndex}
+                            ref={isActiveMatch ? activeMatchRef : undefined}
+                            className={cn(
+                              "rounded-sm text-foreground",
+                              isActiveMatch
+                                ? "bg-gold/25"
+                                : "bg-gold-ambient/20"
+                            )}
+                          >
+                            {part.text}
+                          </mark>
+                        );
+                      }
+                    )
+                  : segment.text;
+                // Open the whole leaf with a gilded versal. The entire
+                // first word stays a single text node — the real letter
+                // is never pulled out of the DOM (screen readers read
+                // the word whole) — and the gilded drop-cap is rendered
+                // by gilding the first letter via ::first-letter.
+                if (isLeafOpening && i === 0) {
+                  return (
+                    <span
+                      key={segment.id}
+                      className={cn(
+                        "transition-colors",
+                        // Gilded versal drop-cap on the rendered first
+                        // letter; the letter itself stays in the text
+                        // node so the word reads whole to AT.
+                        "[&::first-letter]:float-left [&::first-letter]:pr-[0.07em] [&::first-letter]:font-serif [&::first-letter]:text-[2.6em] [&::first-letter]:font-medium [&::first-letter]:leading-[0.82]",
+                        "[&::first-letter]:[background:var(--gold-leaf)] [&::first-letter]:[-webkit-background-clip:text] [&::first-letter]:[background-clip:text] [&::first-letter]:[-webkit-text-fill-color:transparent] [&::first-letter]:[text-shadow:0_1px_0_color-mix(in_oklab,var(--bole)_70%,transparent)]",
+                        underline
+                      )}
+                    >
+                      {body}{trailingSpace}
+                    </span>
+                  );
+                }
+                return (
+                  <span key={segment.id} className={cn("transition-colors", underline)}>
+                    {body}{trailingSpace}
+                  </span>
+                );
+              })}
+            </p>
+            {/* Both controls are 24×24 (WCAG 2.5.8) and sit a full
+                12px apart: they used to be ~16px targets 4px from
+                each other, and the copy above the transcript sends
+                people to this exact corner for Edit. */}
+            {canEdit && (
+              <div className="absolute top-0 right-0 flex items-center gap-3 opacity-0 group-hover/text:opacity-100 focus-within:opacity-100 transition-opacity">
+                <button
+                  type="button"
+                  aria-label="Edit segment"
+                  className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onBeginEdit(group);
+                  }}
+                >
+                  <Edit2 className="h-3.5 w-3.5 text-muted-foreground" />
+                </button>
+                {onRequestDelete && (
+                  <button
+                    type="button"
+                    aria-label="Delete this speaker turn"
+                    className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-destructive/10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRequestDelete(group, speakerLabel);
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                  </button>
+                )}
+              </div>
+            )}
+            {firstSegment.confidence < 0.8 && (
+              <p className="rubric-muted mt-1 inline-flex items-center gap-1.5">
+                <span className="neume neume-hollow" aria-hidden="true" />
+                Low confidence
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
 /**
  * Memoized: the meetings view around it re-renders for reasons that have
  * nothing to do with the transcript, and re-rendering hundreds of speaker
@@ -505,13 +837,6 @@ export const TranscriptViewer = memo(function TranscriptViewer({
       : cloudProvider
         ? `Cloud (${cloudProvider})`
         : "Provider unknown";
-  const provenanceShortLabel = isAppleOnDevice
-    ? "Apple on-device"
-    : isLocal
-      ? "Local"
-      : cloudProvider
-        ? `Cloud (${cloudProvider})`
-        : "Provider unknown";
   const provenanceTitle = isAppleOnDevice
     ? "Transcribed by Apple Speech on this device with server fallback disabled."
     : isLocal
@@ -520,18 +845,14 @@ export const TranscriptViewer = memo(function TranscriptViewer({
         ? `Transcribed by ${cloudProvider}, a named cloud provider.`
         : "This meeting did not record which transcription provider produced it.";
 
-  // Info-strip figures, all defensible from the actual transcript data.
+  // Toolbar figures, all defensible from the actual transcript data.
   const stats = useMemo(() => {
     const wordCount = countWords(segments);
-    const lastEnd = segments.length > 0 ? segments[segments.length - 1].endTime : 0;
-    const firstStart = segments.length > 0 ? segments[0].startTime : 0;
-    const spanSeconds = Math.max(0, lastEnd - firstStart);
-    const minutes = Math.max(spanSeconds > 0 ? 1 : 0, Math.round(spanSeconds / 60));
     const avgConfidence =
       segments.length > 0
         ? segments.reduce((sum, segment) => sum + segment.confidence, 0) / segments.length
         : 0;
-    return { wordCount, minutes, avgConfidence };
+    return { wordCount, avgConfidence };
   }, [segments]);
 
   useEffect(() => {
@@ -555,24 +876,26 @@ export const TranscriptViewer = memo(function TranscriptViewer({
     }
   }, [canRenameSpeakers]);
 
-  const handleRenameSpeaker = async (
-    speakerId: string,
-    newName: string,
-    remember?: boolean
-  ) => {
-    if (!onRenameSpeaker) {
-      return;
-    }
+  const handleRenameSpeaker = useCallback(
+    async (speakerId: string, newName: string, remember?: boolean) => {
+      if (!onRenameSpeaker) {
+        return;
+      }
 
-    await onRenameSpeaker(speakerId, newName, remember);
-    setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
-  };
+      await onRenameSpeaker(speakerId, newName, remember);
+      setSpeakerNames((prev) => ({ ...prev, [speakerId]: newName }));
+    },
+    [onRenameSpeaker]
+  );
 
-  const beginEditingGroup = (group: TranscriptSegment[]) => {
-    if (!onEditSegment) return;
-    setEditingSegmentId(group[0].id);
-    setEditingText(group.map((segment) => segment.text).join(" "));
-  };
+  const beginEditingGroup = useCallback(
+    (group: TranscriptSegment[]) => {
+      if (!onEditSegment) return;
+      setEditingSegmentId(group[0].id);
+      setEditingText(group.map((segment) => segment.text).join(" "));
+    },
+    [onEditSegment]
+  );
 
   // Await the save and only close the editor on success, so a failed write
   // never silently discards the user's correction.
@@ -791,29 +1114,68 @@ export const TranscriptViewer = memo(function TranscriptViewer({
     [groupedSegments, lastReadSegmentId, onSegmentClick]
   );
 
-  // Running index across groups so each rendered hit knows whether it is the
-  // active one. Reset per render pass, walked in the same order as `matches`.
-  let renderedMatchCount = 0;
+  // Where each turn's hits begin in `matches`, so a turn can tell whether the
+  // current hit is one of its own without walking every turn before it.
+  const matchStartByGroup = useMemo(() => {
+    if (matches.length === 0) {
+      return null;
+    }
+    const countBySegment = new Map<string, number>();
+    for (const match of matches) {
+      countBySegment.set(match.segmentId, (countBySegment.get(match.segmentId) ?? 0) + 1);
+    }
+    let running = 0;
+    return groupedSegments.map((group) => {
+      const first = running;
+      for (const segment of group) {
+        running += countBySegment.get(segment.id) ?? 0;
+      }
+      return first;
+    });
+  }, [groupedSegments, matches]);
+
+  // Stable handlers, so a memoized turn re-renders only when its own props do.
+  const selectTurn = useCallback(
+    (segment: TranscriptSegment) => {
+      setLastReadSegmentId(segment.id);
+      onSegmentClick?.(segment);
+    },
+    [onSegmentClick]
+  );
+  const cancelSegmentEdit = useCallback(() => setEditingSegmentId(null), []);
+  const requestDeleteTurn = useCallback(
+    (group: TranscriptSegment[], speakerLabel: string) =>
+      setPendingDelete({ segments: group, speakerLabel }),
+    []
+  );
+
+  const transcriptLength = segments.length > 0 ? segments[segments.length - 1].endTime : 0;
+  const deferOffscreen = groupedSegments.length > DEFER_OFFSCREEN_TURNS;
 
   return (
     <div className={cn("flex h-full min-h-0 flex-col overflow-hidden", className)}>
-      {/* Toolbar */}
-      <div className="shrink-0 border-b border-border bg-muted/30 px-4 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex flex-col gap-0.5">
-            {/* No heading here. The rail this viewer sits in already names the
-                pane "Transcript" with a count under it; repeating the pair read
-                as two stacked headers for one pane. This is the readout only. */}
-            <div className="flex items-baseline gap-2 font-mono text-xs text-muted-foreground tabular-nums">
-              <span className="text-foreground">{segments.length} segments</span>
-              {segments.length > 0 && (
-                <span>
-                  ({formatTimeWithMs(segments[segments.length - 1]?.endTime || 0)} total)
+      {/* Toolbar. One wrapping row: the figures on the left, provenance and
+          the rename toggle on the right, so a narrow rail wraps the row
+          instead of clipping the button. */}
+      <div className="shrink-0 border-b border-border bg-muted/30 px-4 py-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+          {/* No heading here. The rail this viewer sits in already names the
+              pane "Transcript" with a count under it; repeating the pair read
+              as two stacked headers for one pane. This is the readout only,
+              every figure defensible from the transcript itself. */}
+          <p className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono text-xs text-muted-foreground tabular-nums">
+            <span className="whitespace-nowrap text-foreground">{segments.length} segments</span>
+            {segments.length > 0 && (
+              <>
+                <span className="whitespace-nowrap">{formatTranscriptLength(transcriptLength)} total</span>
+                <span className="whitespace-nowrap">{stats.wordCount} words</span>
+                <span className="whitespace-nowrap">
+                  {Math.round(stats.avgConfidence * 100)}% avg conf
                 </span>
-              )}
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
+              </>
+            )}
+          </p>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {/* Trust badge — provenance, honestly named */}
             <span
               className={cn(
@@ -832,6 +1194,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
               <Button
                 variant="ghost"
                 size="sm"
+                className="shrink-0"
                 onClick={() => setIsEditingSpeakers(!isEditingSpeakers)}
               >
                 {isEditingSpeakers ? "Done" : "Rename Speakers"}
@@ -839,31 +1202,6 @@ export const TranscriptViewer = memo(function TranscriptViewer({
             )}
           </div>
         </div>
-
-        {/* Info strip — defensible figures, mono rubric, tabular */}
-        {segments.length > 0 && (
-          <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 rubric-muted">
-            <span className="inline-flex items-baseline gap-1">
-              <span className="time-spec text-foreground">{stats.wordCount}</span>
-              words
-            </span>
-            <span className="inline-flex items-baseline gap-1">
-              <span className="time-spec text-foreground">~{stats.minutes}</span>
-              min
-            </span>
-            <span className="inline-flex items-baseline gap-1">
-              avg conf
-              <span className="time-spec text-foreground">{Math.round(stats.avgConfidence * 100)}%</span>
-            </span>
-            <span className="inline-flex items-baseline gap-1">
-              <span
-                className={cn("neume", isLocal ? "neume-lit" : "neume-hollow")}
-                aria-hidden="true"
-              />
-              {provenanceShortLabel}
-            </span>
-          </div>
-        )}
       </div>
 
       {/* Transcript. The scrollbar is always drawn, never hover-revealed:
@@ -931,253 +1269,58 @@ export const TranscriptViewer = memo(function TranscriptViewer({
             groupedSegments.map((group, groupIndex) => {
               const firstSegment = group[0];
               const speakerId = normalizePersistedSpeakerId(firstSegment.speakerId);
-              const speakerName = speakerId ? speakerNames[speakerId] : undefined;
-              const speakerLabel = speakerName || defaultSpeakerLabel(speakerId);
-              const timestampLabel = formatTimeWithMs(firstSegment.startTime);
-              const editHintId = `transcript-edit-hint-${groupIndex}`;
-              const canRenameSpeaker = Boolean(speakerId && onRenameSpeaker);
-              const renameSpeakerForGroup =
-                speakerId && canRenameSpeaker
-                  ? (name: string, remember: boolean) =>
-                      handleRenameSpeaker(speakerId, name, remember)
+              const range = groupRanges[groupIndex];
+              const playheadInTurn =
+                currentTime !== undefined &&
+                currentTime >= range.start &&
+                currentTime <= range.end
+                  ? currentTime
                   : undefined;
-              const voiceState = speakerId ? speakerVoices?.[speakerId] : undefined;
-              // Remembering a voice needs a signature for this cluster, and
-              // only clusters the sidecar has one for appear in `speakerVoices`.
-              // Without that check the switch showed up on a meeting diarized
-              // before the feature existed, defaulted to on, and the save
-              // failed at the RPC — so an ordinary rename became impossible.
-              const canRememberVoiceForGroup = Boolean(
-                rememberVoicesEnabled && speakerId && voiceState
-              );
-              const isFirstSpeakerMention = firstSpeakerGroupIndices.has(groupIndex);
-
-              // Check if this group is currently playing
-              const isActive = groupIndex === activeGroupIndex;
-
-              // The very first group opens the leaf with a gilded versal.
-              const isLeafOpening = groupIndex === 0;
-              // Session ribbon: a thin gold left-edge on the last-read group.
-              const isLastRead = lastReadSegmentId === firstSegment.id;
+              const firstMatch = matchStartByGroup?.[groupIndex] ?? 0;
+              const endMatch = matchStartByGroup?.[groupIndex + 1] ?? matches.length;
+              const activeMatchInTurn =
+                activeMatchIndex >= firstMatch && activeMatchIndex < endMatch
+                  ? activeMatchIndex - firstMatch
+                  : -1;
+              const isEditingText = editingSegmentId === firstSegment.id;
 
               return (
                 <Fragment key={groupIndex}>
-                {renderPauseMarkers(groupIndex)}
-                <div
-                  ref={isActive ? activeGroupRef : undefined}
-                  className={cn(
-                    "group relative flex gap-3 rounded-lg p-3 transition-colors",
-                    // Faint gold-ambient hairline separating speaker turns.
-                    groupIndex > 0 && "border-t border-gold-ambient/15",
-                    isActive ? "bg-gold/5" : "hover:bg-muted/50",
-                    onSegmentClick && "cursor-pointer"
-                  )}
-                  onClick={() => {
-                    setLastReadSegmentId(firstSegment.id);
-                    onSegmentClick?.(firstSegment);
-                  }}
-                >
-                  {/* Reading-position neume — the turn in focus, settling in */}
-                  {isActive && (
-                    <span
-                      className="neume neume-lit settle-in absolute left-0 top-1/2 -translate-y-1/2"
-                      aria-hidden="true"
-                    />
-                  )}
-                  {/* Session ribbon bookmark — last-read position */}
-                  {isLastRead && !isActive && (
-                    <span
-                      className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full bg-gold-ambient"
-                      aria-hidden="true"
-                    />
-                  )}
-                  {/* Timestamp & Speaker */}
-                  <div className="flex flex-col gap-1 min-w-[100px]">
-                    <span className="rubric-muted time-spec">
-                      {timestampLabel}
-                    </span>
-                    <SpeakerBadge
-                      speakerId={speakerId}
-                      speakerName={speakerName}
-                      isEditing={isEditingSpeakers && canRenameSpeaker}
-                      isActive={isActive}
-                      isFirstMention={isFirstSpeakerMention}
-                      onRename={renameSpeakerForGroup}
-                      canRememberVoice={canRememberVoiceForGroup}
-                      isAutoNamed={voiceState?.matchState === "auto"}
-                      nameOptions={speakerNameOptions}
-                      nameSuggestions={speakerNameSuggestions}
-                    />
-                  </div>
-
-                  {/* Text */}
-                  <div className="flex-1">
-                    {/* The voice offer sits once per speaker, on their first
-                        turn, so a long meeting is not a wall of chips. */}
-                    {isFirstSpeakerMention &&
-                      speakerId &&
-                      voiceState?.suggestion &&
-                      onConfirmSpeakerVoice &&
-                      onRejectSpeakerVoice && (
-                        <SpeakerVoiceSuggestion
-                          speakerId={speakerId}
-                          suggestion={voiceState.suggestion}
-                          isAuto={voiceState.matchState === "auto"}
-                          onConfirm={onConfirmSpeakerVoice}
-                          onReject={onRejectSpeakerVoice}
-                        />
-                      )}
-                    {editingSegmentId === firstSegment.id ? (
-                      <div className="flex flex-col gap-1">
-                        <textarea
-                          autoFocus
-                          value={editingText}
-                          onChange={(e) => setEditingText(e.target.value)}
-                          rows={3}
-                          aria-label={`Edit transcript for ${speakerLabel} at ${timestampLabel}`}
-                          aria-describedby={editHintId}
-                          className="w-full text-sm bg-background border border-gold rounded-md px-2 py-1 resize-none focus:outline-none focus:ring-1 focus:ring-gold"
-                          onKeyDown={(e) => {
-                            if (e.key === "Escape") { setEditingSegmentId(null); }
-                            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                              e.preventDefault();
-                              void saveSegmentEdit(group);
-                            }
-                          }}
-                        />
-                        <div className="flex items-center justify-between gap-2">
-                          <p id={editHintId} className="text-xs text-muted-foreground">
-                            Cmd/Ctrl+Enter to save
-                          </p>
-                          <div className="flex gap-1">
-                            <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={isSavingSegmentEdit} onClick={() => setEditingSegmentId(null)}>Cancel</Button>
-                            <Button size="sm" className="h-6 text-xs" disabled={isSavingSegmentEdit || !editingText.trim()} onClick={() => { void saveSegmentEdit(group); }}><Check className="h-3 w-3 mr-1" />{isSavingSegmentEdit ? "Saving…" : "Save"}</Button>
-                          </div>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="group/text relative">
-                        {/* A single click sets the reading ribbon and leaves the
-                            words selectable and copyable. Editing is the hover
-                            Edit button or a double-click — never a stray click,
-                            which used to swallow the whole paragraph mid-quote. */}
-                        <p
-                          className="manuscript max-w-prose select-text text-[0.95rem] leading-[1.85]"
-                          onDoubleClick={(e) => { if (onEditSegment) { e.stopPropagation(); beginEditingGroup(group); } }}
-                        >
-                          {group.map((segment, i) => {
-                            const isPlaying =
-                              currentTime !== undefined &&
-                              currentTime >= segment.startTime &&
-                              currentTime <= segment.endTime;
-                            const underline = isPlaying
-                              ? "underline decoration-dotted decoration-gold underline-offset-2"
-                              : "";
-                            const trailingSpace = i < group.length - 1 ? " " : "";
-                            // With no search running the words stay one text node,
-                            // exactly as they were; only a live query splits them
-                            // so hits can be marked without removing anything.
-                            const body = normalizedHighlightQuery
-                              ? splitOnQuery(segment.text, normalizedHighlightQuery).map(
-                                  (part, partIndex) => {
-                                    if (!part.isMatch) {
-                                      return <span key={partIndex}>{part.text}</span>;
-                                    }
-                                    const isActiveMatch = renderedMatchCount === activeMatchIndex;
-                                    renderedMatchCount += 1;
-                                    return (
-                                      <mark
-                                        key={partIndex}
-                                        ref={isActiveMatch ? activeMatchRef : undefined}
-                                        className={cn(
-                                          "rounded-sm text-foreground",
-                                          isActiveMatch
-                                            ? "bg-gold/25"
-                                            : "bg-gold-ambient/20"
-                                        )}
-                                      >
-                                        {part.text}
-                                      </mark>
-                                    );
-                                  }
-                                )
-                              : segment.text;
-                            // Open the whole leaf with a gilded versal. The entire
-                            // first word stays a single text node — the real letter
-                            // is never pulled out of the DOM (screen readers read
-                            // the word whole) — and the gilded drop-cap is rendered
-                            // by gilding the first letter via ::first-letter.
-                            if (isLeafOpening && i === 0) {
-                              return (
-                                <span
-                                  key={segment.id}
-                                  className={cn(
-                                    "transition-colors",
-                                    // Gilded versal drop-cap on the rendered first
-                                    // letter; the letter itself stays in the text
-                                    // node so the word reads whole to AT.
-                                    "[&::first-letter]:float-left [&::first-letter]:pr-[0.07em] [&::first-letter]:font-serif [&::first-letter]:text-[2.6em] [&::first-letter]:font-medium [&::first-letter]:leading-[0.82]",
-                                    "[&::first-letter]:[background:var(--gold-leaf)] [&::first-letter]:[-webkit-background-clip:text] [&::first-letter]:[background-clip:text] [&::first-letter]:[-webkit-text-fill-color:transparent] [&::first-letter]:[text-shadow:0_1px_0_color-mix(in_oklab,var(--bole)_70%,transparent)]",
-                                    underline
-                                  )}
-                                >
-                                  {body}{trailingSpace}
-                                </span>
-                              );
-                            }
-                            return (
-                              <span key={segment.id} className={cn("transition-colors", underline)}>
-                                {body}{trailingSpace}
-                              </span>
-                            );
-                          })}
-                        </p>
-                        {/* Both controls are 24×24 (WCAG 2.5.8) and sit a full
-                            12px apart: they used to be ~16px targets 4px from
-                            each other, and the copy above the transcript sends
-                            people to this exact corner for Edit. */}
-                        {onEditSegment && (
-                          <div className="absolute top-0 right-0 flex items-center gap-3 opacity-0 group-hover/text:opacity-100 focus-within:opacity-100 transition-opacity">
-                            <button
-                              type="button"
-                              aria-label="Edit segment"
-                              className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                beginEditingGroup(group);
-                              }}
-                            >
-                              <Edit2 className="h-3.5 w-3.5 text-muted-foreground" />
-                            </button>
-                            {onDeleteSegments && (
-                              <button
-                                type="button"
-                                aria-label="Delete this speaker turn"
-                                className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-destructive/10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setPendingDelete({
-                                    segments: group,
-                                    speakerLabel:
-                                      speakerName || defaultSpeakerLabel(speakerId),
-                                  });
-                                }}
-                              >
-                                <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                              </button>
-                            )}
-                          </div>
-                        )}
-                        {firstSegment.confidence < 0.8 && (
-                          <p className="rubric-muted mt-1 inline-flex items-center gap-1.5">
-                            <span className="neume neume-hollow" aria-hidden="true" />
-                            Low confidence
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                  {renderPauseMarkers(groupIndex)}
+                  <TranscriptTurn
+                    group={group}
+                    groupIndex={groupIndex}
+                    speakerId={speakerId}
+                    speakerName={speakerId ? speakerNames[speakerId] : undefined}
+                    isEditingSpeakers={isEditingSpeakers}
+                    onRenameSpeaker={onRenameSpeaker ? handleRenameSpeaker : undefined}
+                    voiceState={speakerId ? speakerVoices?.[speakerId] : undefined}
+                    rememberVoicesEnabled={rememberVoicesEnabled}
+                    isFirstSpeakerMention={firstSpeakerGroupIndices.has(groupIndex)}
+                    speakerNameOptions={speakerNameOptions}
+                    speakerNameSuggestions={speakerNameSuggestions}
+                    onConfirmSpeakerVoice={onConfirmSpeakerVoice}
+                    onRejectSpeakerVoice={onRejectSpeakerVoice}
+                    isActive={groupIndex === activeGroupIndex}
+                    playheadTime={playheadInTurn}
+                    isLastRead={lastReadSegmentId === firstSegment.id}
+                    highlightQuery={normalizedHighlightQuery}
+                    activeMatchInTurn={activeMatchInTurn}
+                    activeMatchRef={activeMatchRef}
+                    activeGroupRef={activeGroupRef}
+                    deferOffscreen={deferOffscreen}
+                    isClickable={Boolean(onSegmentClick)}
+                    onSelect={selectTurn}
+                    canEdit={Boolean(onEditSegment)}
+                    isEditingText={isEditingText}
+                    editingText={isEditingText ? editingText : ""}
+                    isSavingEdit={isEditingText && isSavingSegmentEdit}
+                    onBeginEdit={beginEditingGroup}
+                    onEditingTextChange={setEditingText}
+                    onCancelEdit={cancelSegmentEdit}
+                    onSaveEdit={isEditingText ? saveSegmentEdit : noopSaveEdit}
+                    onRequestDelete={onDeleteSegments ? requestDeleteTurn : undefined}
+                  />
                 </Fragment>
               );
             })
@@ -1264,7 +1407,7 @@ export function TranscriptSearch({
   return (
     <div className={cn("flex items-center gap-2", className)}>
       <Input
-        placeholder="Find in transcript..."
+        placeholder="Find in transcript…"
         aria-label="Find in transcript"
         value={query}
         onChange={(e: React.ChangeEvent<HTMLInputElement>) => onQueryChange(e.target.value)}

@@ -640,3 +640,25 @@
     animation: none;
   }
 }
+
+/* ---- Meetings: list settle and long transcripts. ------------------------ */
+/* The meetings list stays invisible until the header's banners have landed
+   (see use-settled-reveal.ts), then fades in. Content at opacity 0 does not
+   count as a layout shift, so a late banner no longer shoves it down. */
+.meetings-list-settle {
+  transition: opacity 0.18s var(--ease-settle);
+}
+.meetings-list-settle[data-settled="false"] {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .meetings-list-settle {
+    transition: none;
+  }
+}
+/* Past a few hundred turns, let the browser skip laying out the ones off
+   screen. A turn's size is remembered once it has been seen. */
+.transcript-turn-deferred {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
