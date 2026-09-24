@@ -57,7 +57,7 @@ function Stat({
     <div className="min-w-0 space-y-1">
       <p className="rubric-muted">{label}</p>
       <p
-        className="font-serif text-3xl leading-none tabular-nums text-foreground"
+        className="whitespace-nowrap font-serif text-3xl leading-none tabular-nums text-foreground"
         aria-label={value === null ? `${label}: not enough audio yet` : `${label}: ${format(value)}`}
       >
         {value === null ? "–" : format(counted)}
@@ -71,7 +71,7 @@ function Stat({
 export function DictationStats({ insights }: { insights: DictationInsights }) {
   const stats = dictationHeadlineStats(insights);
   return (
-    <div className="grid grid-cols-2 gap-x-6 gap-y-5 rounded-xl border border-border/60 bg-card/60 px-5 py-4 sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-x-6 gap-y-5 rounded-xl border border-border/60 bg-card/60 px-5 py-4 lg:grid-cols-4">
       <Stat
         label="Words"
         value={stats.words}

@@ -48,7 +48,9 @@ import {
   TriangleAlert,
   Users,
 } from "lucide-react";
-import { formatDate, formatNumber, formatTime } from "@/lib/format-locale";
+import { formatDate, formatNumber, formatShortTime } from "@/lib/format-locale";
+import { getDictationInsights, type DictationInsights } from "@/lib/backend/dictation";
+import { DictationStats } from "@/components/views/dictation/dictation-stats";
 
 /** How many recordings Recent shows; the Dictation and Meetings views hold the rest. */
 const RECENT_LIMIT = 12;
@@ -183,6 +185,21 @@ export function DashboardView() {
       })
       .catch(() => {
         // The default shortcut stays on screen; it is right for most people.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const [dictationInsights, setDictationInsights] = useState<DictationInsights | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    getDictationInsights()
+      .then((insights) => {
+        if (!cancelled) setDictationInsights(insights);
+      })
+      .catch(() => {
+        // No stats strip; the rest of Home does not depend on it.
       });
     return () => {
       cancelled = true;
@@ -471,6 +488,10 @@ export function DashboardView() {
             )}
           </section>
 
+          {dictationInsights && dictationInsights.totalDictations > 0 ? (
+            <DictationStats insights={dictationInsights} />
+          ) : null}
+
           <Tabs defaultValue="recent" className="space-y-4">
             <TabsList>
               <TabsTrigger value="recent">Recent</TabsTrigger>
@@ -506,7 +527,7 @@ export function DashboardView() {
                               <div className="min-w-0 flex-1">
                                 <p className="truncate font-medium">{recording.title}</p>
                                 <p className="text-xs text-muted-foreground">
-                                  {isDictation ? "Dictation" : "Meeting"} · {formatTime(recording.createdAt)}
+                                  {isDictation ? "Dictation" : "Meeting"} · {formatShortTime(recording.createdAt)}
                                 </p>
                               </div>
                               <Badge variant="secondary" className="time-spec shrink-0">
