@@ -22,18 +22,19 @@ import { compareStrings } from "@/lib/format-locale";
 describe("ASR capability mappings", () => {
   it("recognises only the engines this build can still run", () => {
     // 12 engines that shipped before September 2026, plus Deepgram, Gemini
-    // Transcribe, Mistral Voxtral and the offline Cohere Transcribe route,
-    // plus `transcribe_cpp`, which only a sidecar built with
+    // Transcribe, Mistral Voxtral, xAI Grok and the offline Cohere Transcribe
+    // route, plus `transcribe_cpp`, which only a sidecar built with
     // `--features asr-transcribe-cpp` ever reports. The renderer keeps a name
     // for that one so a developer build's route renders instead of silently
     // vanishing from the picker; nothing in a release build sends it.
-    expect(ASR_PROVIDER_TYPES).toHaveLength(17);
+    expect(ASR_PROVIDER_TYPES).toHaveLength(18);
     expect(isKnownAsrProvider("whisper")).toBe(true);
     expect(isKnownAsrProvider("parakeet")).toBe(true);
     expect(isKnownAsrProvider("macos_apple_speech")).toBe(true);
     expect(isKnownAsrProvider("deepgram")).toBe(true);
     expect(isKnownAsrProvider("gemini_transcribe")).toBe(true);
     expect(isKnownAsrProvider("mistral_voxtral")).toBe(true);
+    expect(isKnownAsrProvider("xai_stt")).toBe(true);
     expect(isKnownAsrProvider("transcribe_cpp")).toBe(true);
     expect(isKnownAsrProvider("cohere_local")).toBe(true);
   });

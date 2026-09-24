@@ -69,6 +69,7 @@ mod dictation_fidelity;
 mod dictation_live_preview;
 pub mod dictation_parity;
 pub mod dictation_pipeline;
+mod dictation_progress;
 mod dictation_reprocess;
 pub mod dictation_secure_field;
 mod dictation_session;
@@ -137,6 +138,14 @@ use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 #[cfg(target_os = "macos")]
 use core_foundation_sys::base::{Boolean, CFGetTypeID, CFRange, CFTypeRef};
+/// Same layout as CoreFoundation's `CFRange`, so the pure UTF-16 range
+/// helpers and their tests build on non-macOS hosts.
+#[cfg(all(test, not(target_os = "macos")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CFRange {
+    pub location: isize,
+    pub length: isize,
+}
 #[cfg(target_os = "macos")]
 use core_foundation_sys::dictionary::CFDictionaryRef;
 #[cfg(target_os = "macos")]
@@ -688,7 +697,7 @@ const VAULT_UNLOCK_CHECK_PLAINTEXT: &[u8] = b"nautilus-vault-check";
 /// Canonical registry for every provider credential accepted by the sidecar.
 /// Reset and provider-name validation share it so adding a credential cannot
 /// leave a second cleanup list stale.
-const PROVIDER_SECRET_NAMES: [&str; 10] = [
+const PROVIDER_SECRET_NAMES: [&str; 11] = [
     "openai",
     "elevenlabs",
     "deepgram",
@@ -699,6 +708,7 @@ const PROVIDER_SECRET_NAMES: [&str; 10] = [
     "ollama-cloud",
     "mistral",
     "cohere",
+    "xai",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1157,7 +1167,6 @@ struct RecordingOverlayState {
     pause_started_at_ms: Option<i64>,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 struct PendingDictationTarget {
     app_name: Option<String>,
@@ -2373,6 +2382,7 @@ fn workspace_frontmost_application() -> Option<WorkspaceFrontmostApplication> {
     workspace_frontmost_application_via_osascript()
 }
 
+#[cfg(target_os = "macos")]
 fn workspace_frontmost_application_via_osascript() -> Option<WorkspaceFrontmostApplication> {
     let script = r#"
 ObjC.import("AppKit");

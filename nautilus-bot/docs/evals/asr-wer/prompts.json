@@ -1,0 +1,30 @@
+{
+  "schema": "plainsong-asr-wer-set-v1",
+  "description": "Dictation-style English prompts for comparing ASR routes. Each reference is exactly what the speaker says aloud; score raw recognizer output against it, before any cleanup pass.",
+  "utterances": [
+    { "id": "msg-01", "reference": "hey can you push the release notes to the shared drive before the standup tomorrow" },
+    { "id": "msg-02", "reference": "running about ten minutes late grab a table near the window if you get there first" },
+    { "id": "msg-03", "reference": "thanks Priya the numbers look right but the Q3 forecast still needs the Denver office" },
+    { "id": "email-01", "reference": "hi Marcus following up on our call last Tuesday I have attached the revised statement of work with the updated milestones" },
+    { "id": "email-02", "reference": "we can move the kickoff to the fourteenth of October if that works better for your legal team" },
+    { "id": "email-03", "reference": "please confirm the invoice total of four thousand two hundred and fifty dollars before Friday" },
+    { "id": "tech-01", "reference": "the Kubernetes pod keeps restarting because the readiness probe times out after thirty seconds" },
+    { "id": "tech-02", "reference": "migrate the users table in PostgreSQL and add an index on the email column" },
+    { "id": "tech-03", "reference": "the OAuth callback returns a four oh one when the refresh token has expired" },
+    { "id": "tech-04", "reference": "open a pull request against main and tag Nguyen for the TypeScript review" },
+    { "id": "tech-05", "reference": "set the environment variable to false and restart the Redis cache on staging" },
+    { "id": "names-01", "reference": "Siobhan and Joaquin will present the roadmap and Tomasz will cover hiring" },
+    { "id": "names-02", "reference": "book a flight from San Francisco to Reykjavik on the morning of March third" },
+    { "id": "numbers-01", "reference": "the meeting is at three thirty in room two fourteen on the fifth floor" },
+    { "id": "numbers-02", "reference": "our churn dropped from eight point two percent to six point five percent this quarter" },
+    { "id": "numbers-03", "reference": "call me back at five five five one two three four and ask for extension nine" },
+    { "id": "notes-01", "reference": "first point the onboarding flow is too long second point nobody reads the permissions screen" },
+    { "id": "notes-02", "reference": "idea for the blog post compare local transcription with cloud transcription on privacy and cost" },
+    { "id": "repair-01", "reference": "let's meet on Wednesday actually no make that Thursday at noon" },
+    { "id": "repair-02", "reference": "the budget is twelve thousand sorry fifteen thousand for the whole quarter" },
+    { "id": "long-01", "reference": "I think the biggest risk for the launch is that we have not tested the updater on a clean machine so before we announce anything I want one person to install the beta from scratch sign in and let it update overnight" },
+    { "id": "long-02", "reference": "when you write the summary keep it short lead with the decision then list the three open questions and who owns each one so the team can act on it without reading the whole transcript" },
+    { "id": "quiet-01", "reference": "remind me to water the plants and call the dentist on Monday" },
+    { "id": "fast-01", "reference": "okay so the plan is ship the fix today write the postmortem tomorrow and review it together on Friday" }
+  ]
+}

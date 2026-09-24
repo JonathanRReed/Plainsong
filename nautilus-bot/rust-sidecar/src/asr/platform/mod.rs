@@ -128,6 +128,7 @@ impl AsrProviderType {
                 | AsrProviderType::Deepgram
                 | AsrProviderType::GeminiTranscribe
                 | AsrProviderType::MistralVoxtral
+                | AsrProviderType::XaiStt
         )
     }
 

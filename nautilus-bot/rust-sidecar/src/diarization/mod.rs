@@ -22,6 +22,18 @@ pub mod voiceprints;
 #[cfg(feature = "diarization-speakrs")]
 mod speakrs_backend;
 
+/// EXPERIMENTAL Nemotron 3 Diarization backend, eval harness only. Off by default.
+#[cfg(feature = "diarization-nemotron")]
+mod nemotron_backend;
+
+/// Turn normalization shared by the end-to-end backends above.
+#[cfg(any(
+    test,
+    feature = "diarization-speakrs",
+    feature = "diarization-nemotron"
+))]
+mod turns;
+
 /// Per-model ONNX session policy and input-length guard for the embedders.
 /// See `artifacts/qa/campplus-divergence-2026-09-02.md`.
 #[cfg(feature = "diarization")]
@@ -1923,5 +1935,21 @@ mod eval_tests {
             .await
             .expect("speakrs diarization");
         report("speakrs-community1", &audio, started.elapsed(), &result);
+    }
+
+    /// Nemotron has no pinned download yet: point
+    /// `PLAINSONG_NEMOTRON_DIAR_ONNX` at `nemotron3_diar_v3.onnx`.
+    #[cfg(feature = "diarization-nemotron")]
+    #[tokio::test]
+    #[ignore = "evaluation harness: needs the model file and runs real inference"]
+    async fn eval_nemotron_backend() {
+        let audio = eval_audio_path();
+        let duration = get_audio_duration(&audio).await.expect("fixture duration");
+
+        let started = std::time::Instant::now();
+        let result = nemotron_backend::run(&audio, duration, nemotron_backend::model_path())
+            .await
+            .expect("Nemotron diarization");
+        report("nemotron3-diarization", &audio, started.elapsed(), &result);
     }
 }

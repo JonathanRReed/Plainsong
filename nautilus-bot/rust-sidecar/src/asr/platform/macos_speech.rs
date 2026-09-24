@@ -650,6 +650,7 @@ struct HelperProbePayload {
     operating_system_version: Option<String>,
 }
 
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 impl HelperProbePayload {
     /// Whether SpeechAnalyzer can run for the probed locale right now.
     fn speech_analyzer_usable(&self) -> bool {
@@ -922,7 +923,6 @@ fn serialize_helper_error(payload: &HelperErrorPayload) -> String {
     })
 }
 
-#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 fn parse_helper_error_line(line: &str) -> Option<HelperErrorPayload> {
     let payload = serde_json::from_str::<HelperErrorPayload>(line).ok()?;
     if payload.protocol_version == HELPER_PROTOCOL_VERSION && payload.kind == "error" {

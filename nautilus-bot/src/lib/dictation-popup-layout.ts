@@ -62,7 +62,7 @@ const CAPTURE_PREVIEW_LINE = 24; // text-sm leading-6, line-clamp-4
 // lines at the narrower compact width.
 const CAPTURE_STATUS_LINES = { full: 2, compact: 3 } as const;
 
-const PROCESSING_HEAD = 42; // settled waveform + mb-1.5 + text-sm title
+const PROCESSING_HEAD = 58; // settled waveform + mb-1.5 + text-sm title + my-1.5 finish bar
 const PROCESSING_DETAIL_LINE = 16; // text-xs detail paragraph, line-clamp-6
 const PROCESSING_ACTIVATION = 36; // mt-1 + the line-clamp-2 activation detail
 const PROCESSING_PREVIEW_CHROME = 48; // mt-2 + border x2 + py-2 x2 + label + mt-1

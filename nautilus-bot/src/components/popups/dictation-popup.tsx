@@ -57,6 +57,11 @@ import {
 import { cn } from "@/lib/utils";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
 import { WaveformVisualizer } from "@/components/waveform-visualizer";
+import { DictationFinishBar } from "@/components/popups/dictation-finish-bar";
+import type {
+  DictationProcessingStage,
+  DictationProgressPlan,
+} from "@/lib/dictation-progress";
 import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = DictationPopupDisplayMode;
@@ -139,6 +144,7 @@ const CLOUD_PROVIDER_LABELS: Record<string, string> = {
   deepgram: "Deepgram",
   mistral_voxtral: "Mistral Voxtral",
   gemini_transcribe: "Gemini",
+  xai_stt: "xAI Grok",
 };
 
 function formatRouteLabel(
@@ -427,6 +433,13 @@ export function DictationPopup() {
     volatile: string;
   } | null>(null);
   const [outcome, setOutcome] = useState<string | null>(null);
+  const [processingStage, setProcessingStage] = useState<
+    "transcribing" | "polishing"
+  >("transcribing");
+  const [progressPlan, setProgressPlan] = useState<DictationProgressPlan>({
+    expectedTranscribeMs: 600,
+    expectedPolishMs: null,
+  });
   const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
   const [_handsFreeEnabled, _setHandsFreeEnabled] = useState(false);
   const [handsFreeSilenceTimeoutSeconds, setHandsFreeSilenceTimeoutSeconds] =
@@ -597,6 +610,20 @@ export function DictationPopup() {
 
     setPhase(payload.phase);
     setMessage(sanitizedMessage);
+    setProcessingStage(
+      payload.processingStage === "polishing" ? "polishing" : "transcribing",
+    );
+    if (typeof payload.expectedTranscribeMs === "number") {
+      const expectedTranscribeMs = payload.expectedTranscribeMs;
+      const expectedPolishMs =
+        typeof payload.expectedPolishMs === "number" ? payload.expectedPolishMs : null;
+      setProgressPlan((previous) =>
+        previous.expectedTranscribeMs === expectedTranscribeMs &&
+        previous.expectedPolishMs === expectedPolishMs
+          ? previous
+          : { expectedTranscribeMs, expectedPolishMs },
+      );
+    }
     setPreview(payload.partialText ?? payload.preview ?? null);
     setPreviewParts(
       payload.partialStableText != null || payload.partialVolatileText != null
@@ -1035,6 +1062,14 @@ export function DictationPopup() {
 
   const { selectedModeLabel, contextMeta, insertionMeta, routeLabel, targetDetail, autoActivationDetail, isCapturePhase } = computedMeta;
   const hudState = resolveHudState(phase);
+  const finishStage: DictationProcessingStage =
+    phase === "stopping" ? "stopping" : processingStage;
+  const finishStageLabel =
+    finishStage === "stopping"
+      ? "Finishing"
+      : finishStage === "polishing"
+        ? "Polishing"
+        : "Transcribing";
   const captureControlHint = formatCaptureControlHint(
     hudState,
     dictationShortcut,
@@ -1223,7 +1258,7 @@ export function DictationPopup() {
         : hudState === "recording"
           ? "Listening"
           : hudState === "processing"
-            ? "Thinking"
+            ? finishStageLabel
             : hudState === "done"
               ? "Ready"
               : hudState === "error"
@@ -1249,13 +1284,22 @@ export function DictationPopup() {
             aria-hidden="true"
             className={cn(HUD_STATE_NEUME[hudState], "shrink-0")}
           />
-          <AudioWaveform
-            levels={displayAudioLevel}
-            active={phase === "recording"}
-            size="sm"
-            barCount={11}
-            barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
-          />
+          {hudState === "processing" || (hudState === "done" && outcome !== "error") ? (
+            <DictationFinishBar
+              stage={finishStage}
+              plan={progressPlan}
+              complete={hudState === "done"}
+              className="w-16"
+            />
+          ) : (
+            <AudioWaveform
+              levels={displayAudioLevel}
+              active={phase === "recording"}
+              size="sm"
+              barCount={11}
+              barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
+            />
+          )}
           <span
             className="whitespace-nowrap text-xs font-medium tracking-[0.08em] text-foreground"
             data-testid="dictation-hud-status"
@@ -1295,7 +1339,7 @@ export function DictationPopup() {
       : phase === "recording"
         ? "Listening"
         : phase === "transcribing"
-          ? "Transcribing"
+          ? finishStageLabel
           : phase === "delivering"
             ? "Inserting"
             : phase === "done"
@@ -1462,20 +1506,21 @@ export function DictationPopup() {
         )}
 
         {phase === "stopping" && (
-          <div className="flex items-center gap-3 text-foreground">
-            <Loader2 className="h-5 w-5 animate-spin text-foreground" />
-            <div>
-              <p className="text-sm font-semibold">Stopping</p>
-              <p className="text-xs text-muted-foreground">
-                Finalizing audio and preserving context…
-              </p>
-            </div>
+          <div className="text-foreground">
+            <p className="text-sm font-semibold">Finishing</p>
+            <p className="text-xs text-muted-foreground">
+              Finalizing audio and preserving context…
+            </p>
+            <DictationFinishBar
+              stage="stopping"
+              plan={progressPlan}
+              className="mt-2"
+            />
           </div>
         )}
 
         {phase === "transcribing" && (
           <div className="flex items-center gap-3 text-foreground">
-            <Loader2 className="h-5 w-5 animate-spin text-foreground" />
             <div className="min-w-0 flex-1">
               <div className="mb-1.5">
                 <WaveformVisualizer
@@ -1485,7 +1530,12 @@ export function DictationPopup() {
                   height={16}
                 />
               </div>
-              <p className="text-sm font-semibold">Transcribing</p>
+              <p className="text-sm font-semibold">{finishStageLabel}</p>
+              <DictationFinishBar
+                stage={finishStage}
+                plan={progressPlan}
+                className="my-1.5"
+              />
               {/* Clamped so `getPopupSize` can bound the window it sizes to
                   this card; an unclamped paragraph would grow past it. */}
               <p className="text-xs text-muted-foreground line-clamp-6">

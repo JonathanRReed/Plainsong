@@ -1445,6 +1445,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "deepgram" => "deepgram".to_string(),
         "gemini_transcribe" => "gemini_transcribe".to_string(),
         "mistral_voxtral" => "mistral_voxtral".to_string(),
+        "xai_stt" => "xai_stt".to_string(),
         // Only when the spike is compiled in. A default build has no engine
         // that answers to this name, so it must land on `whisper` through the
         // fallback below rather than become a ghost route in the settings file.
@@ -1529,6 +1530,8 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             // sanitize_mistral_model_id).
             crate::asr::mistral_voxtral::sanitize_mistral_model_id(model_id).to_string()
         }
+        // One route: the endpoint picks the model.
+        "xai_stt" => crate::asr::xai_stt::XAI_STT_MODEL_ID.to_string(),
         // `route_spec_for`, not `spec_for`: the latter also resolves the
         // Nemotron streaming GGUF that the benchmark loads to prove the runtime
         // path and that `model_options()` deliberately never offers. Normalizing

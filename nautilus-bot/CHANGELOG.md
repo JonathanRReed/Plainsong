@@ -10,6 +10,23 @@ hardening pass. The source version and numeric macOS build version are now
 signed candidate being notarized, stapled, installed, and exercised on Apple
 Silicon. See `LAUNCH.md` for that boundary.
 
+### Dictation finishing and accuracy
+- After you stop speaking, the dictation HUD now shows Finishing, Transcribing
+  and (when an AI pass runs) Polishing, with a bar that fills toward an
+  estimate learned from this Mac's recent dictations. It slows near the end
+  and only fills when the text lands, so it can run late but never claims the
+  text is ready early. Reduced motion steps it instead of animating it.
+- `bun run eval:asr-wer` scores ASR routes by word error rate against
+  human-read references (`docs/evals/asr-wer/prompts.json`). Earlier WER
+  figures in this repo were measured against another model's output.
+- New bring-your-own-key dictation route: xAI Grok speech-to-text, with your
+  dictionary sent as key terms. Not offered for meetings until xAI's request
+  limits are confirmed.
+- Experimental, off by default: a Nemotron 3 Diarization backend behind the
+  `diarization-nemotron` Cargo feature, for scoring against the current
+  speaker separation. See `docs/typeless-parity-and-model-refresh-2026-09.md`.
+- The Rust sidecar builds and runs its tests on Linux again.
+
 ### Dictation fidelity
 - Keep resumed numbered lists intact in Notes mode and reject AI cleanup that
   renumbers, drops, adds, or reorders dictated words. Negation and intentional

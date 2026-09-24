@@ -161,7 +161,8 @@ Speech recognition runs locally by default: Parakeet TDT 0.6B v3 is the
 recommended default dictation model, with Whisper (via whisper.cpp),
 Distil-Whisper, Moonshine, and other native engines available as
 alternatives. Optional bring-your-own-key cloud providers (OpenAI,
-ElevenLabs, Groq, Cohere) are supported. Keys are stored in the OS
+ElevenLabs, Groq, Cohere, Deepgram, Google Gemini, Mistral, xAI) are
+supported. Keys are stored in the OS
 keychain and requests go directly to the provider, never through a Plainsong
 server.
 

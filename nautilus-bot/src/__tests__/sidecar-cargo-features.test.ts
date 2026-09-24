@@ -39,6 +39,7 @@ describe("sidecar cargo feature set", () => {
       "ort-coreml",
       "asr-transcribe-cpp",
       "diarization-speakrs",
+      "diarization-nemotron",
     ]) {
       expect(cargoToml).toMatch(new RegExp(`^${feature} = \\[`, "m"));
       expect(defaultLine).not.toContain(feature);

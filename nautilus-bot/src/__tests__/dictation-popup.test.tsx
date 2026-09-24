@@ -581,6 +581,45 @@ describe("DictationPopup", () => {
     expect(screen.queryByText("Listening")).toBeNull();
   });
 
+  it("moves the finishing bar from Transcribing to Polishing and fills it only on done", async () => {
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "transcribing",
+          sessionId: 41,
+          processingStage: "transcribing",
+          expectedTranscribeMs: 400,
+          expectedPolishMs: 700,
+        },
+      });
+    });
+    const transcribingBar = await screen.findByTestId("dictation-finish-bar");
+    expect(transcribingBar).toHaveAttribute("data-stage", "transcribing");
+    expect(transcribingBar).toHaveAttribute("aria-valuetext", "Transcribing");
+
+    await act(async () => {
+      handler?.({
+        payload: {
+          phase: "transcribing",
+          sessionId: 41,
+          message: "Polishing…",
+          processingStage: "polishing",
+          expectedPolishMs: 700,
+        },
+      });
+    });
+    expect(await screen.findAllByText("Polishing")).not.toHaveLength(0);
+    const polishingBar = screen.getByTestId("dictation-finish-bar");
+    expect(polishingBar).toHaveAttribute("data-stage", "polishing");
+    const fill = polishingBar.firstElementChild as HTMLElement;
+    expect(fill.style.transform).not.toBe("scaleX(1)");
+  });
+
   it("tells the user how to stop and cancel while capture is live", async () => {
     // Escape-cancel has always worked (the native shortcut helper handles it)
     // and no surface in the app said so.

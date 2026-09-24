@@ -21,6 +21,7 @@ pub mod transcribe_cpp;
 pub mod whisper;
 #[cfg(not(feature = "asr-whisper"))]
 pub mod whisper_stub;
+pub mod xai_stt;
 #[cfg(not(feature = "asr-whisper"))]
 pub use whisper_stub as whisper;
 pub mod whisper_candle;
@@ -1448,6 +1449,9 @@ pub enum AsrProviderType {
     /// returns speaker labels, and the vendor of the best open-weights model
     /// on the Artificial Analysis board: see `asr/mistral_voxtral.rs`.
     MistralVoxtral,
+    /// xAI's Grok speech-to-text over the batch `/v1/stt` endpoint. Dictation
+    /// only until the meeting limits are confirmed: see `asr/xai_stt.rs`.
+    XaiStt,
     /// The transcribe.cpp spike route (feature `asr-transcribe-cpp`, OFF by
     /// default). It exists in the enum only when the spike is compiled in, so
     /// a default build cannot name it, offer it, or persist it.
@@ -1474,6 +1478,7 @@ impl AsrProviderType {
             AsrProviderType::Deepgram,
             AsrProviderType::GeminiTranscribe,
             AsrProviderType::MistralVoxtral,
+            AsrProviderType::XaiStt,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp,
         ]
@@ -1497,6 +1502,7 @@ impl AsrProviderType {
             AsrProviderType::Deepgram => "Deepgram Nova",
             AsrProviderType::GeminiTranscribe => "Google Gemini Transcribe",
             AsrProviderType::MistralVoxtral => "Mistral Voxtral",
+            AsrProviderType::XaiStt => "xAI Grok",
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => "transcribe.cpp (experimental)",
         }
@@ -1542,6 +1548,8 @@ impl AsrProviderType {
             // Mistral's `voxtral-mini-latest` alias; the realtime model is a
             // websocket route this batch provider cannot serve.
             AsrProviderType::MistralVoxtral => mistral_voxtral::VOXTRAL_MINI_TRANSCRIBE_MODEL_ID,
+            // The endpoint takes no model parameter; see xai_stt.rs.
+            AsrProviderType::XaiStt => xai_stt::XAI_STT_MODEL_ID,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
         }
@@ -1557,6 +1565,7 @@ impl AsrProviderType {
             AsrProviderType::Deepgram => Some("deepgram"),
             AsrProviderType::GeminiTranscribe => Some("gemini"),
             AsrProviderType::MistralVoxtral => Some("mistral"),
+            AsrProviderType::XaiStt => Some("xai"),
             AsrProviderType::Whisper
             | AsrProviderType::Parakeet
             | AsrProviderType::WhisperCandle
@@ -1735,6 +1744,10 @@ impl AsrProviderType {
                 label: "Voxtral Mini Transcribe 2 ($0.003/min, speaker labels included)"
                     .to_string(),
             }],
+            AsrProviderType::XaiStt => vec![ModelOption {
+                id: xai_stt::XAI_STT_MODEL_ID.to_string(),
+                label: "Grok speech-to-text (xAI's current model)".to_string(),
+            }],
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::route_model_options(),
         }
@@ -1795,6 +1808,7 @@ impl AsrProviderFactory {
             AsrProviderType::MistralVoxtral => Box::new(
                 mistral_voxtral::MistralVoxtralProvider::new(selected_model_id),
             ),
+            AsrProviderType::XaiStt => Box::new(xai_stt::XaiSttProvider::new(selected_model_id)),
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => Box::new(transcribe_cpp::TranscribeCppProvider::new(
                 selected_model_id,

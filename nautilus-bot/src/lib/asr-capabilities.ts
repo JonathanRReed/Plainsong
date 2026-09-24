@@ -37,6 +37,7 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   deepgram: true,
   gemini_transcribe: true,
   mistral_voxtral: true,
+  xai_stt: true,
   transcribe_cpp: true,
 } satisfies Record<AsrProviderType, true>;
 
@@ -113,6 +114,8 @@ const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
   "windows_sdk_dictation",
   "moonshine",
   "whisper_candle",
+  // Until xAI's per-request size and duration limits are confirmed.
+  "xai_stt",
 ]);
 
 /**
@@ -155,6 +158,7 @@ const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
   "deepgram",
   "gemini_transcribe",
   "mistral_voxtral",
+  "xai_stt",
 ]);
 
 export function isDownloadableProvider(providerType: AsrProviderType) {

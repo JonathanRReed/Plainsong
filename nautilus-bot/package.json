@@ -33,6 +33,8 @@
     "release:win": "node scripts/assert-host-platform.mjs win32 && bun run sidecar:build:release && bun run shortcut-helper:build && bun run calendar-helper:build && bun run language-model-helper:build && bun run build:renderer && bun run build:electron && electron-builder --win nsis --publish never",
     "test:rust": "node scripts/cargo-sidecar.mjs test --locked --lib --bins",
     "benchmark:latency": "node scripts/cargo-sidecar.mjs run --release --locked --bin benchmark-latency --",
+    "eval:asr-wer": "node scripts/eval-asr-wer.mjs",
+    "pin:hf-artifact": "node scripts/pin-hf-artifact.mjs",
     "gate:dictation-latency": "node scripts/verify-dictation-latency.mjs --input artifacts/qa/dictation-latency.json",
     "gate:dictation-latency:e2e": "node scripts/verify-dictation-latency.mjs --input artifacts/qa/dictation-latency-e2e.json",
     "licenses:generate": "node scripts/generate-third-party-notices.mjs",

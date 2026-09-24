@@ -52,6 +52,15 @@ export interface DictationStateChangedEvent {
   partialVolatileText?: string | null;
   /** Which engine drew this preview: "streaming" or "redecode". */
   partialEngine?: "streaming" | "redecode" | null;
+  /**
+   * Sub-stage of the `transcribing` phase: speech-to-text, then the optional
+   * AI pass. Drives the finishing bar's label and position.
+   */
+  processingStage?: "transcribing" | "polishing" | null;
+  /** Estimated speech-to-text time, learned from recent dictations. */
+  expectedTranscribeMs?: number | null;
+  /** Estimated AI pass time; null when no AI pass is expected. */
+  expectedPolishMs?: number | null;
   sessionId?: number | null;
   stopReason?: string | null;
   outcome?: string | null;
@@ -201,6 +210,9 @@ const VOLATILE_SESSION_FIELDS = [
   "partialStableText",
   "partialVolatileText",
   "partialEngine",
+  "processingStage",
+  "expectedTranscribeMs",
+  "expectedPolishMs",
   "outcome",
   "stopReason",
   "fallbackReason",
