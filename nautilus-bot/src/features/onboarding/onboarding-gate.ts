@@ -185,6 +185,15 @@ export function resolveOnboardingGate(
             "This install has no setup record, and setup state could not be checked.",
           );
     }
+    // Someone who finished setup gets their workspace at once. Readiness keeps
+    // loading behind it, and if it finds something broken the wizard opens
+    // over the workspace then, as it would have after the splash.
+    if (completed) {
+      return decision(
+        "skip",
+        "Setup was completed, so the workspace opens while readiness is still being checked.",
+      );
+    }
     return decision("wait", "Waiting for permissions, models and settings to report.");
   }
 

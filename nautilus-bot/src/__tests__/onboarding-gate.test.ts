@@ -44,6 +44,20 @@ describe("resolveOnboardingGate", () => {
     expect(decision.action).toBe("wait");
   });
 
+  it("opens the workspace for a completed install while readiness is still being read", () => {
+    const decision = resolveOnboardingGate({
+      ...READY,
+      evidenceLoaded: false,
+      microphonePermissionReady: null,
+      cursorInsertionReady: null,
+      dictationRouteReady: null,
+      record: COMPLETED_IN_JUNE,
+      legacyFlagComplete: false,
+    });
+    expect(decision.action).toBe("skip");
+    expect(decision.unmet).toEqual([]);
+  });
+
   it("holds the splash while readiness is still being read", () => {
     const decision = resolveOnboardingGate({
       ...READY,

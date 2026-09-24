@@ -441,6 +441,68 @@ describe("App shell", () => {
     expect(screen.queryByText("Mock dictation workspace")).not.toBeInTheDocument();
   });
 
+  it("opens a completed install to its workspace without waiting for readiness", async () => {
+    setReadiness({ settings: null, providers: [], permissions: null, loading: true });
+    electronMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_settings") {
+        return { ...settings, onboarding: { completedAt: "2026-06-19T10:04:00Z" } };
+      }
+      return null;
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("Mock dictation workspace")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("status", { name: "Checking first-run setup" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("caches the theme from settings so the next launch paints in it", async () => {
+    setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+    electronMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_settings") {
+        return { ...settings, theme: "light" };
+      }
+      return null;
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(localStorage.getItem("plainsong.theme")).toBe("light");
+      expect(document.documentElement).not.toHaveClass("dark");
+    });
+  });
+
+  it("remembers a collapsed sidebar across launches", async () => {
+    setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+
+    const { unmount } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Collapse sidebar" }));
+    expect(localStorage.getItem("plainsong.sidebarCollapsed")).toBe("true");
+    unmount();
+
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "Expand sidebar" })).toBeInTheDocument();
+  });
+
+  it("collapses the sidebar in a narrow window without overwriting the saved choice", async () => {
+    setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 999px)",
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Expand sidebar" }));
+
+    expect(await screen.findByRole("button", { name: "Collapse sidebar" })).toBeInTheDocument();
+    expect(localStorage.getItem("plainsong.sidebarCollapsed")).toBeNull();
+  });
+
   it("surfaces runtime provider warnings as toasts", async () => {
     setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
 

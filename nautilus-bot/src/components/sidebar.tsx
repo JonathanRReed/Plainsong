@@ -86,9 +86,9 @@ interface ShortcutHelpItem {
   keys: string[];
 }
 
-/** Split a "⌘+H" style label into individual keycaps. */
+/** Split a "⌘ ⇧ Space" or "Ctrl + Shift + Space" label into individual keycaps. */
 function shortcutKeys(shortcut: string): string[] {
-  return shortcut.split("+").map((part) => part.trim()).filter(Boolean);
+  return shortcut.split(/\s*\+\s*|\s+/).filter(Boolean);
 }
 
 interface LocalModeStatus {
@@ -103,6 +103,14 @@ const UNKNOWN_LOCAL_MODE_STATUS: LocalModeStatus = {
   active: false,
   label: "Status unavailable",
   detail: "Couldn't read privacy settings, so the processing mode is unknown.",
+};
+
+// The workspace now opens before readiness has answered, so the chip has a
+// quiet state for "not read yet" that is distinct from "could not read".
+const CHECKING_LOCAL_MODE_STATUS: LocalModeStatus = {
+  active: false,
+  label: "Checking",
+  detail: "Reading privacy settings.",
 };
 
 // Two lanes now choose an analysis provider — dictation cleanup and meeting
@@ -168,7 +176,7 @@ export function Sidebar({
   isCollapsed = false,
   onToggleCollapse,
 }: SidebarProps) {
-  const { productReadiness, settings } = useProductReadinessStatus();
+  const { productReadiness, settings, loading } = useProductReadinessStatus();
   const sidebarReadiness = selectReadinessForSurface(
     productReadiness,
     "sidebar",
@@ -180,7 +188,9 @@ export function Sidebar({
         settings.privacy.meetingsAi?.provider,
         settings.privacy.remoteProcessingEnabled,
       )
-    : UNKNOWN_LOCAL_MODE_STATUS;
+    : loading
+      ? CHECKING_LOCAL_MODE_STATUS
+      : UNKNOWN_LOCAL_MODE_STATUS;
   const shortcut = settings?.shortcuts?.toggleDictation || defaultDictationShortcut();
   const dictationMode: DictationShortcutMode = settings?.transcription?.dictationHandsFreeEnabled
     ? "hands_free"
@@ -201,7 +211,7 @@ export function Sidebar({
     (item) => ({ label: item.label, keys: navShortcutKeys(item.id) ?? [] })
   );
   const shortcutGroups: ShortcutHelpItem[] = [
-    { label: "Start dictation", keys: shortcutKeys(dictationHotkey.label.replace(/ \+ /g, "+")) },
+    { label: "Start dictation", keys: shortcutKeys(dictationHotkey.label) },
     ...navShortcuts,
   ];
 
@@ -213,9 +223,12 @@ export function Sidebar({
 
   return (
     <TooltipProvider>
+      {/* The width snaps rather than animating: a width transition relays out
+          the whole workspace on every frame. The labels fade in instead. */}
       <div
         className={cn(
-          "flex h-full shrink-0 flex-col overflow-hidden border-r border-border/70 bg-card/80 shadow-[1px_0_0_hsl(var(--foreground)/0.03)_inset] backdrop-blur-xl transition-[width] duration-200",
+          "flex h-full shrink-0 flex-col overflow-hidden border-r border-border/70 bg-card/80 shadow-[1px_0_0_hsl(var(--foreground)/0.03)_inset] backdrop-blur-xl",
+          !isCollapsed && "sidebar-labels-enter",
           isCollapsed ? "w-[72px]" : "w-72"
         )}
       >
@@ -466,8 +479,10 @@ export function Sidebar({
           </div>
 
           <div className={cn("flex flex-col gap-2", isCollapsed && "items-center gap-2")}>
+            {/* Still checking is not a setup problem, so it raises no badge. */}
             {sidebarReadiness.state !== "ready" &&
-            sidebarReadiness.cause ? (
+            sidebarReadiness.cause &&
+            sidebarReadiness.cause.id !== "loading" ? (
               <Tooltip delayDuration={0}>
                 <TooltipTrigger asChild>
                   <button
