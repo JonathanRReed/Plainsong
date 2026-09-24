@@ -2,6 +2,9 @@
 
 Last reviewed: 2026-08-27
 
+For the current comparison with Typeless and Wispr Flow, see
+[typeless-wispr-comparison-2026-09.md](typeless-wispr-comparison-2026-09.md).
+
 The [September 4 beta 4 final pass](beta4-final-pass.md) supersedes this
 document's release status and current competitor claims. In particular,
 Granola now describes limited free history without the specific 25-note

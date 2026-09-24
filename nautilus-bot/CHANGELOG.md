@@ -10,6 +10,21 @@ hardening pass. The source version and numeric macOS build version are now
 signed candidate being notarized, stapled, installed, and exercised on Apple
 Silicon. See `LAUNCH.md` for that boundary.
 
+### Feel: matching Typeless and Wispr Flow
+- Dictation sounds (on by default): a tick when the mic goes live, a pop
+  when the words land, a low tone on failure.
+- Hold to talk, tap to lock: a quick tap on the hold key keeps listening
+  until the next press.
+- Dictating into the middle of a sentence adds the space, keeps lowercase
+  and drops a stray full stop (Match surrounding text, on by default).
+- Words, speaking pace, time saved and a day streak on Home and above
+  dictation history; history rows show what you said and where it went.
+- The dictation pill says "Still working" when a stage runs long.
+- No theme flash or setup splash at launch, views fade in instead of
+  blanking and keep their scroll, a compact Settings bar, an onboarding
+  wizard whose buttons never scroll away, and less re-rendering while
+  recording. See `docs/typeless-wispr-comparison-2026-09.md`.
+
 ### Voice Edit, quiet speech and Plainsong Plus
 - New style, Voice Edit: select text, dictate an instruction ("make this
   friendlier", "turn this into bullets") and the selection is rewritten in
