@@ -225,6 +225,11 @@ export function resolveDictationShortcutDecision(input: {
 // (helper killed mid-hold, tap outage, ...): stop recording after this long.
 export const DICTATION_HOLD_WATCHDOG_MS = 5 * 60 * 1000;
 
+// Tap to lock: a hold-to-talk press released sooner than this is a tap, and
+// a tap locks the microphone on until the next press, the way Wispr Flow's
+// double-tap and Typeless's press-to-toggle do. Anything longer is a hold.
+export const HOLD_TAP_LOCK_MS = 300;
+
 /**
  * What a start issued by this controller tells the sidecar beyond "start":
  * today only the per-session mode a binding named (roadmap item B4). Mirrors
@@ -241,6 +246,11 @@ type DictationShortcutSignalInput = {
   signal: DictationShortcutSignal;
   /** Applied to the `start_dictation` this signal may issue; ignored otherwise. */
   startOptions?: DictationShortcutStartOptions;
+  /**
+   * Hold-to-talk only: a quick tap locks the session on instead of stopping
+   * it (see HOLD_TAP_LOCK_MS). Off unless the caller asks for it.
+   */
+  holdTapLocks?: boolean;
 };
 
 export type DictationShortcutSignalRuntime = {
@@ -296,6 +306,9 @@ export function createDictationShortcutSignalRuntime(deps: {
   let pendingHandsFreeStopGeneration: number | null = null;
   let pendingHandsFreeStopGestureEpochMs: number | null = null;
   let liveShortcutStartGeneration: number | null = null;
+  // Tap to lock: when the current hold started, and whether a tap locked it.
+  let holdPressEpochMs: number | null = null;
+  let tapLocked = false;
   const invalidatedStartGenerations = new Set<number>();
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -353,6 +366,45 @@ export function createDictationShortcutSignalRuntime(deps: {
       }
     }
 
+    if (holdToTalkWithRelease && input.holdTapLocks) {
+      if (
+        input.signal === "released" &&
+        !tapLocked &&
+        holdPressEpochMs !== null &&
+        stopGestureEpochMs - holdPressEpochMs < HOLD_TAP_LOCK_MS
+      ) {
+        // A tap, not a hold: keep listening until the next press. The release
+        // was seen, so the lost-release watchdog has nothing left to guard;
+        // the sidecar's own maximum dictation length still applies.
+        tapLocked = true;
+        holdPressEpochMs = null;
+        clearWatchdog();
+        deps.log?.("dictation shortcut tap locked", { phase });
+        return;
+      }
+      if (input.signal === "pressed" && tapLocked) {
+        tapLocked = false;
+        if (activeStartGeneration !== null) {
+          // The start is still in flight: stop as soon as it resolves.
+          pendingHoldReleaseGeneration = activeStartGeneration;
+          pendingHoldReleaseEpochMs = stopGestureEpochMs;
+          return;
+        }
+        clearWatchdog();
+        deps.log?.("dictation shortcut stop_dictation", {
+          phase,
+          behavior: input.behavior,
+          capability: input.capability,
+          stopReason: "tap_lock_toggle",
+        });
+        await deps.invoke("stop_dictation", { stopReason: "tap_lock_toggle", stopGestureEpochMs });
+        return;
+      }
+      if (input.signal === "released") {
+        holdPressEpochMs = null;
+      }
+    }
+
     if (decision.action === "ignore") {
       if (input.signal === "released" && holdToTalkWithRelease) {
         if (activeStartGeneration !== null) {
@@ -390,6 +442,10 @@ export function createDictationShortcutSignalRuntime(deps: {
       });
       const generation = ++startGeneration;
       activeStartGeneration = generation;
+      if (holdToTalkWithRelease) {
+        holdPressEpochMs = stopGestureEpochMs;
+        tapLocked = false;
+      }
       // Only clear a release that belongs to an older generation; a release
       // already recorded for THIS generation (possible if the signal races the
       // invoke) must survive.
@@ -463,7 +519,7 @@ export function createDictationShortcutSignalRuntime(deps: {
         });
         return;
       }
-      if (holdToTalkWithRelease) {
+      if (holdToTalkWithRelease && !tapLocked) {
         armWatchdog(input);
       }
       return;
@@ -519,6 +575,8 @@ export function createDictationShortcutSignalRuntime(deps: {
     }
     if (phase !== "preparing" && phase !== "primed" && phase !== "recording") {
       liveShortcutStartGeneration = null;
+      holdPressEpochMs = null;
+      tapLocked = false;
       if (activeStartGeneration !== null) {
         invalidatedStartGenerations.add(activeStartGeneration);
         if (pendingHoldReleaseGeneration === activeStartGeneration) {
@@ -551,6 +609,8 @@ export function createDictationShortcutSignalRuntime(deps: {
         activeStartGeneration = null;
       }
       liveShortcutStartGeneration = null;
+      holdPressEpochMs = null;
+      tapLocked = false;
       pendingHoldReleaseGeneration = null;
       pendingHoldReleaseEpochMs = null;
       pendingHandsFreeStopGeneration = null;

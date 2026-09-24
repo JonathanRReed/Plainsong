@@ -2669,6 +2669,23 @@ export function SettingsView() {
                 Start on its own when you speak
               </option>
             </select>
+            {dictationShortcutBehavior === "hold_to_talk" && (
+              <SettingsSwitch
+                className="pt-2 pb-0"
+                label="Tap to lock"
+                description="A quick tap keeps listening without holding the key; tap again to finish. Holding still works as before."
+                checked={settings.transcription.dictationTapToLock !== false}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationTapToLock: checked,
+                    },
+                  })
+                }
+              />
+            )}
           </div>
         )}
 

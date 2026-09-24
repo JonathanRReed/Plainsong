@@ -478,6 +478,7 @@ type AppSettings = {
   transcription?: {
     dictationPushToTalk?: boolean;
     dictationHandsFreeEnabled?: boolean;
+    dictationTapToLock?: boolean;
     dictationModePreset?: string;
     dictationSelectedCustomModeId?: string | null;
     dictationCustomModes?: Array<{ id: string; name: string }>;
@@ -2082,6 +2083,7 @@ async function handleDictationShortcutSignal(
     capability,
     signal,
     startOptions,
+    holdTapLocks: settings.transcription?.dictationTapToLock !== false,
   });
 }
 

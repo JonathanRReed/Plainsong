@@ -286,6 +286,8 @@ export interface TranscriptionSettings {
   dictationAutoRequestPermissions?: boolean;
   dictationPushToTalk: boolean;
   dictationHandsFreeEnabled?: boolean;
+  /** Hold-to-talk only: a quick tap locks the mic on. Absent means on. */
+  dictationTapToLock?: boolean;
   dictationRoutePreference?: "local" | "cloud";
   dictationRouteOverrideEnabled?: boolean;
   dictationKeepWarm?: "off" | "on";
