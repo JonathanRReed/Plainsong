@@ -5,7 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { DictationPopup } from "@/components/popups/dictation-popup";
 
 function deferred<T>() {
@@ -22,7 +22,11 @@ const popupMocks = vi.hoisted(() => {
   const listeners = new Map<string, (event: { payload: any }) => void>();
   return {
     listeners,
-    invoke: vi.fn(async (command: string) => {
+    invoke: vi.fn(async (command: string): Promise<unknown> => {
+      // These tests exercise the full card; the pill default has its own test.
+      if (command === "__overlay_placement__") {
+        return { displayMode: "full" };
+      }
       if (command === "get_dictation_overlay_state") {
         return {
           phase: "recording",
@@ -395,7 +399,7 @@ describe("DictationPopup", () => {
     expect(
       await screen.findByText("Turning speech into send-ready text."),
     ).toBeInTheDocument();
-    expect(screen.getByText("Live preview")).toBeInTheDocument();
+    expect(screen.getByText("Heard so far")).toBeInTheDocument();
     expect(
       screen.getByText("Draft the follow-up with clear owners."),
     ).toBeInTheDocument();
@@ -517,7 +521,7 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(await screen.findByText("Model ready")).toBeInTheDocument();
+    expect(await screen.findByText("Speak now")).toBeInTheDocument();
     expect(screen.getByText("00:00")).toBeInTheDocument();
   });
 
@@ -534,7 +538,7 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(await screen.findByText("Loading model")).toBeInTheDocument();
+    expect(await screen.findByText("Starting")).toBeInTheDocument();
     expect(screen.getByText("00:00")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => {
@@ -563,7 +567,7 @@ describe("DictationPopup", () => {
       render(<DictationPopup />);
     });
 
-    expect(await screen.findByText("Model ready")).toBeInTheDocument();
+    expect(await screen.findByText("Speak now")).toBeInTheDocument();
 
     const handler = popupMocks.listeners.get("dictation-state-changed");
     expect(handler).toBeDefined();
@@ -572,13 +576,54 @@ describe("DictationPopup", () => {
       handler?.({ payload: { phase: "recording", sessionId: 40 } });
     });
     expect(await screen.findByText("Listening")).toBeInTheDocument();
-    expect(screen.queryByText("Model ready")).toBeNull();
+    expect(screen.queryByText("Speak now")).toBeNull();
 
     await act(async () => {
       handler?.({ payload: { phase: "transcribing", sessionId: 40 } });
     });
     expect(await screen.findAllByText("Transcribing")).not.toHaveLength(0);
     expect(screen.queryByText("Listening")).toBeNull();
+  });
+
+  it("opens as the compact pill when no display mode has been chosen", async () => {
+    const original = popupMocks.invoke.getMockImplementation();
+    onTestFinished(() => {
+      if (original) popupMocks.invoke.mockImplementation(original);
+    });
+    popupMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_dictation_overlay_state") {
+        return { phase: "recording", startedAtMs: Date.now(), sessionId: 12 };
+      }
+      return null;
+    });
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+    const status = await screen.findByTestId("dictation-hud-status");
+    expect(status).toHaveTextContent("Listening");
+    expect(status).toHaveAttribute("role", "status");
+  });
+
+  it("never shows the pill's success bar for a refused delivery", async () => {
+    const original = popupMocks.invoke.getMockImplementation();
+    onTestFinished(() => {
+      if (original) popupMocks.invoke.mockImplementation(original);
+    });
+    popupMocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "get_dictation_overlay_state") {
+        return { phase: "recording", startedAtMs: Date.now(), sessionId: 13 };
+      }
+      return null;
+    });
+    await act(async () => {
+      render(<DictationPopup />);
+    });
+    const handler = popupMocks.listeners.get("dictation-state-changed");
+    await act(async () => {
+      handler?.({ payload: { phase: "done", sessionId: 13, outcome: "secure_field" } });
+    });
+    expect(await screen.findByTestId("dictation-hud-status")).toHaveTextContent("Not inserted");
+    expect(screen.queryByTestId("dictation-finish-bar")).toBeNull();
   });
 
   it("moves the finishing bar from Transcribing to Polishing and fills it only on done", async () => {

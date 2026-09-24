@@ -308,8 +308,14 @@ fn typed_class(piece: &Piece) -> Option<TypedClass> {
     None
 }
 
-/// Returns (cue length) when a repair cue starts at `index`.
-fn cue_at(pieces: &[Piece], index: usize, reparandum: &Piece) -> Option<usize> {
+/// Words that may follow a corrected value inside the same clause ("Wednesday
+/// at 3"), used only when speech-to-text put a full stop before the cue.
+const CONTINUATIONS: &[&str] = &[
+    "at", "on", "in", "by", "from", "around", "after", "before", "and", "then", "please",
+];
+
+/// Returns (cue length, weak) when a repair cue starts at `index`.
+fn cue_at(pieces: &[Piece], index: usize, reparandum: &Piece) -> Option<(usize, bool)> {
     REPAIR_CUES.iter().find_map(|(words, weak)| {
         let slice = pieces.get(index..index + words.len())?;
         let matches = slice
@@ -321,7 +327,7 @@ fn cue_at(pieces: &[Piece], index: usize, reparandum: &Piece) -> Option<usize> {
             .iter()
             .all(|piece| piece.punct.is_empty() || piece.punct == ",");
         let paused = reparandum.punct == ",";
-        (matches && inner_clean && (!weak || paused)).then_some(words.len())
+        (matches && inner_clean && (!weak || paused)).then_some((words.len(), *weak))
     })
 }
 
@@ -332,14 +338,22 @@ fn resolve_typed_repairs(mut pieces: Vec<Piece>) -> Vec<Piece> {
             index += 1;
             continue;
         };
-        if !matches!(pieces[index].punct.as_str(), "" | ",") {
+        // Speech-to-text often ends the sentence at the hesitation:
+        // "Tuesday. No wait, Wednesday." A full stop counts as a pause, but
+        // only before a strong cue (checked below).
+        if !matches!(pieces[index].punct.as_str(), "" | "," | ".") {
             index += 1;
             continue;
         }
-        let Some(cue_len) = cue_at(&pieces, index + 1, &pieces[index]) else {
+        let Some((cue_len, weak_cue)) = cue_at(&pieces, index + 1, &pieces[index]) else {
             index += 1;
             continue;
         };
+        let stopped_before_cue = pieces[index].punct == ".";
+        if stopped_before_cue && weak_cue {
+            index += 1;
+            continue;
+        }
         let repair_index = index + 1 + cue_len;
         let cue_last_punct_ok = matches!(pieces[repair_index - 1].punct.as_str(), "" | ",");
         let Some(repair) = pieces.get(repair_index) else {
@@ -347,6 +361,18 @@ fn resolve_typed_repairs(mut pieces: Vec<Piece>) -> Vec<Piece> {
             continue;
         };
         if !cue_last_punct_ok || !repair.lead.is_empty() || typed_class(repair) != Some(class) {
+            index += 1;
+            continue;
+        }
+        // After a full stop the cue might open an unrelated sentence ("It's
+        // due Friday. I mean, Monday we start."), so the corrected value must
+        // close its clause or lead straight into "at 3", "on the call", etc.
+        if stopped_before_cue
+            && repair.punct.is_empty()
+            && !pieces
+                .get(repair_index + 1)
+                .is_some_and(|next| CONTINUATIONS.contains(&next.lower().as_str()))
+        {
             index += 1;
             continue;
         }
@@ -457,6 +483,16 @@ mod tests {
         );
         assert_eq!(clean("at three no wait four"), "at four");
         assert_eq!(clean("Tuesday no wait Wednesday"), "Wednesday");
+        // Speech-to-text usually ends the sentence at the hesitation.
+        assert_eq!(
+            clean("Um, let's meet on Tuesday. No wait, Wednesday."),
+            "Let's meet on Wednesday."
+        );
+        assert_eq!(
+            clean("Let's meet on Tuesday. No, wait, Wednesday at 3."),
+            "Let's meet on Wednesday at 3."
+        );
+        assert_eq!(clean("Call at 3. Sorry, 4."), "Call at 4.");
         for kept in [
             "Tuesday or Wednesday",
             "No problem on Tuesday.",
@@ -466,6 +502,8 @@ mod tests {
             "Monday, actually.",
             "We may, actually, June works",
             "Tuesday, no wait, the meeting moved.",
+            "It's due Friday. I mean, Monday we start.",
+            "I work Monday. Actually, Tuesday too.",
         ] {
             assert_eq!(clean(kept), kept, "{kept}");
         }

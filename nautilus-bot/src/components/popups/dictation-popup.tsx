@@ -56,12 +56,12 @@ import {
 } from "@/lib/dictation-ui-message";
 import { cn } from "@/lib/utils";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
-import { WaveformVisualizer } from "@/components/waveform-visualizer";
 import { DictationFinishBar } from "@/components/popups/dictation-finish-bar";
 import type {
   DictationProcessingStage,
   DictationProgressPlan,
 } from "@/lib/dictation-progress";
+import { describePillStatus } from "@/lib/dictation-hud-status";
 import type { DictationCustomMode } from "@/types/settings";
 
 type DisplayMode = DictationPopupDisplayMode;
@@ -312,6 +312,17 @@ const HUD_STATE_NEUME: Record<HudState, string> = {
   error: "neume neume-rust",
 };
 
+const LEVEL_HISTORY_LENGTH = 20;
+
+/** True when the message only restates the title ("Inserted at cursor."). */
+function repeatsTitle(title: string | null | undefined, message: string | null | undefined): boolean {
+  const normalize = (value: string | null | undefined) =>
+    (value ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const normalizedTitle = normalize(title);
+  const normalizedMessage = normalize(message);
+  return normalizedTitle.length > 0 && normalizedMessage === normalizedTitle;
+}
+
 // How long the "next profile" announcement stays on screen. Long enough to
 // read one short name, short enough that a second press reads as a second
 // step rather than the same notice lingering.
@@ -440,11 +451,19 @@ export function DictationPopup() {
     expectedTranscribeMs: 600,
     expectedPolishMs: null,
   });
-  const [displayMode, setDisplayMode] = useState<DisplayMode>("full");
+  // The pill is the default, like every polished dictation HUD: it says what
+  // is happening in one word and stays out of the way. The full card is one
+  // double-click away and remembered once chosen.
+  const [displayMode, setDisplayMode] = useState<DisplayMode>("minimal");
   const [_handsFreeEnabled, _setHandsFreeEnabled] = useState(false);
   const [handsFreeSilenceTimeoutSeconds, setHandsFreeSilenceTimeoutSeconds] =
     useState(0);
   const [displayAudioLevel, setDisplayAudioLevel] = useState(0);
+  // The last few smoothed levels, newest on the right, so the pill draws a
+  // moving trace of the voice instead of one level copied to every bar.
+  const [levelHistory, setLevelHistory] = useState<number[]>(() =>
+    new Array(LEVEL_HISTORY_LENGTH).fill(0),
+  );
   const [modePreset, setModePreset] = useState<DictationModePreset>("voice");
   const [contextSource, setContextSource] =
     useState<DictationContextSource>("none");
@@ -748,7 +767,7 @@ export function DictationPopup() {
         }
       })
       .catch(() => {
-        // A missing placement just means the default full HUD.
+        // A missing placement just means the default pill.
       });
 
     return () => {
@@ -947,6 +966,16 @@ export function DictationPopup() {
   }, [phase, startedAtMs]);
 
   useEffect(() => {
+    setLevelHistory((history) =>
+      phase === "recording"
+        ? [...history.slice(1), displayAudioLevel]
+        : history.every((level) => level === 0)
+          ? history
+          : new Array(LEVEL_HISTORY_LENGTH).fill(0),
+    );
+  }, [displayAudioLevel, phase]);
+
+  useEffect(() => {
     if (phase !== "recording") {
       setDisplayAudioLevel(0);
       return;
@@ -1070,6 +1099,14 @@ export function DictationPopup() {
       : finishStage === "polishing"
         ? "Polishing"
         : "Transcribing";
+  const stageKey = `${lastSessionIdRef.current ?? ""}:${
+    phase === "stopping" || phase === "transcribing" ? finishStage : phase
+  }`;
+  const stageStartRef = useRef({ key: "", at: 0 });
+  if (stageStartRef.current.key !== stageKey) {
+    stageStartRef.current = { key: stageKey, at: performance.now() };
+  }
+  const stageStartedAt = stageStartRef.current.at;
   const captureControlHint = formatCaptureControlHint(
     hudState,
     dictationShortcut,
@@ -1240,7 +1277,7 @@ export function DictationPopup() {
       <div className="h-screen w-screen bg-transparent p-3">
         <div
           data-hud-card
-          className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover/95 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_hsl(34_26%_4%/0.5)]"
+          className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover px-4 py-3.5 shadow-[0_6px_18px_hsl(34_26%_4%/0.35)]"
         >
           {cycledModeNotice}
         </div>
@@ -1249,62 +1286,70 @@ export function DictationPopup() {
   }
 
   // ── Minimal pill mode ────────────────────────────────────────────────────
+  // Fixed width with fixed slots (glyph, trace, label, action), so the pill
+  // never jitters as its label changes between states.
   if (displayMode === "minimal") {
-    const statusLabel =
-      hudState === "priming"
-        ? phase === "preparing"
-          ? "Loading model"
-          : "Model ready"
-        : hudState === "recording"
-          ? "Listening"
-          : hudState === "processing"
-            ? finishStageLabel
-            : hudState === "done"
-              ? "Ready"
-              : hudState === "error"
-                ? "Problem"
-                : "Working";
+    const pill = describePillStatus({ phase, stage: finishStage, outcome, message });
+    const pillNeume =
+      pill.tone === "live"
+        ? "neume neume-lit neume-live"
+        : pill.tone === "success"
+          ? "neume neume-lit"
+          : pill.tone === "alert"
+            ? "neume neume-rust"
+            : pill.tone === "quiet"
+              ? "neume neume-hollow"
+              : "neume";
 
     return (
-      <div className="h-screen w-screen bg-transparent flex items-center justify-center">
+      <div className="flex h-screen w-screen items-center justify-center bg-transparent">
         <div
           data-hud-card
           data-drag-region
+          data-tone={pill.tone}
           onDoubleClick={() => void cycleDisplayMode()}
-          title="Double-click to expand"
-          className="flex items-center gap-2 rounded-full border border-foreground/10 bg-popover/95 px-3 py-2 shadow-[0_10px_30px_hsl(34_26%_4%/0.4)] backdrop-blur-xl"
+          title={pill.detail ?? "Double-click for details"}
+          className={cn(
+            "flex h-10 w-[252px] items-center gap-2.5 rounded-full border bg-popover pl-3.5 pr-1.5 shadow-[0_4px_14px_hsl(34_26%_4%/0.3)] transition-smooth",
+            pill.tone === "alert" ? "border-rust/35" : "border-foreground/10",
+          )}
         >
-          <div className={cn(
-            "inline-flex h-6 w-6 items-center justify-center rounded-full transition-smooth",
-            phase === "recording" ? "bg-gold/12 text-gold-text" : "bg-foreground/6 text-foreground"
-          )}>
-            <Mic className="h-3 w-3" />
+          <span aria-hidden="true" className={cn(pillNeume, "shrink-0")} />
+          {pill.tone !== "alert" && (
+          <div className="flex h-4 w-16 shrink-0 items-center justify-center">
+            {pill.showBar ? (
+              <DictationFinishBar
+                stage={finishStage}
+                plan={progressPlan}
+                complete={pill.barComplete}
+                stageStartedAt={stageStartedAt}
+              />
+            ) : (
+              <AudioWaveform
+                levels={levelHistory}
+                active={phase === "recording"}
+                envelope={false}
+                size="sm"
+                barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
+              />
+            )}
           </div>
-          <span
-            aria-hidden="true"
-            className={cn(HUD_STATE_NEUME[hudState], "shrink-0")}
-          />
-          {hudState === "processing" || (hudState === "done" && outcome !== "error") ? (
-            <DictationFinishBar
-              stage={finishStage}
-              plan={progressPlan}
-              complete={hudState === "done"}
-              className="w-16"
-            />
-          ) : (
-            <AudioWaveform
-              levels={displayAudioLevel}
-              active={phase === "recording"}
-              size="sm"
-              barCount={11}
-              barColor={phase === "recording" ? "var(--brand-warm)" : "var(--muted-foreground)"}
-            />
           )}
           <span
-            className="whitespace-nowrap text-xs font-medium tracking-[0.08em] text-foreground"
+            role="status"
+            aria-live="polite"
+            aria-label={pill.detail ? `${pill.label}. ${pill.detail}` : undefined}
+            className={cn(
+              "min-w-0 flex-1 truncate text-sm font-medium",
+              pill.tone === "alert"
+                ? "text-rust"
+                : pill.tone === "live" || pill.tone === "success"
+                  ? "text-foreground"
+                  : "text-muted-foreground",
+            )}
             data-testid="dictation-hud-status"
           >
-            {sourceNotice ?? statusLabel}
+            {sourceNotice ?? pill.label}
           </span>
           {/* The pill has no room for a separate Stop, so while capture is
               live this button stops the session instead of only hiding the
@@ -1312,7 +1357,7 @@ export function DictationPopup() {
               indicator anywhere on screen. */}
           <button
             type="button"
-            className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/8 hover:text-foreground"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-smooth hover:bg-foreground/8 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={() =>
               void (isCapturePhase ? handleStopFromPopup() : hidePopup())
@@ -1322,7 +1367,7 @@ export function DictationPopup() {
             {isCapturePhase ? (
               <Square className="h-2.5 w-2.5 fill-current" />
             ) : (
-              <X className="h-3 w-3" />
+              <X className="h-3.5 w-3.5" />
             )}
           </button>
         </div>
@@ -1331,21 +1376,22 @@ export function DictationPopup() {
   }
 
   const compact = displayMode === "compact";
+  // The header carries the phase; the body below never repeats it.
   const phaseLabel =
     phase === "preparing"
-      ? "Loading model"
+      ? "Starting"
       : phase === "primed"
-        ? "Model ready"
+        ? "Speak now"
       : phase === "recording"
         ? "Listening"
-        : phase === "transcribing"
+        : phase === "stopping" || phase === "transcribing"
           ? finishStageLabel
           : phase === "delivering"
             ? "Inserting"
             : phase === "done"
-              ? "Ready"
+              ? describePillStatus({ phase, stage: finishStage, outcome, message }).label
               : phase === "error"
-                ? "Problem"
+                ? describePillStatus({ phase, stage: finishStage, outcome, message }).label
                 : "Working";
 
   const spokenEditHints = [
@@ -1363,7 +1409,7 @@ export function DictationPopup() {
     <div className="h-screen w-screen bg-transparent p-3">
       <div
         data-hud-card
-        className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover/95 px-4 py-3.5 backdrop-blur-xl shadow-[0_20px_60px_hsl(34_26%_4%/0.5)]"
+        className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover px-4 py-3.5 shadow-[0_6px_18px_hsl(34_26%_4%/0.35)]"
       >
         {cycledModeNotice && <div className="mb-3">{cycledModeNotice}</div>}
         {/* Header - Minimal. Also the drag handle: the HUD is a floating pill
@@ -1507,40 +1553,35 @@ export function DictationPopup() {
 
         {phase === "stopping" && (
           <div className="text-foreground">
-            <p className="text-sm font-semibold">Finishing</p>
-            <p className="text-xs text-muted-foreground">
-              Finalizing audio and preserving context…
-            </p>
             <DictationFinishBar
               stage="stopping"
               plan={progressPlan}
-              className="mt-2"
+              stageStartedAt={stageStartedAt}
+              className="my-1.5"
             />
+            <p className="text-sm text-muted-foreground">
+              Finishing the recording…
+            </p>
           </div>
         )}
 
         {phase === "transcribing" && (
           <div className="flex items-center gap-3 text-foreground">
             <div className="min-w-0 flex-1">
-              <div className="mb-1.5">
-                <WaveformVisualizer
-                  data={[]}
-                  settled
-                  settledNeumeCount={6}
-                  height={16}
-                />
-              </div>
-              <p className="text-sm font-semibold">{finishStageLabel}</p>
               <DictationFinishBar
                 stage={finishStage}
                 plan={progressPlan}
+                stageStartedAt={stageStartedAt}
                 className="my-1.5"
               />
               {/* Clamped so `getPopupSize` can bound the window it sizes to
                   this card; an unclamped paragraph would grow past it. */}
-              <p className="text-xs text-muted-foreground line-clamp-6">
-                {message ??
-                  `${selectedModeLabel} is shaping the result for ${insertionMeta.label.toLowerCase()}${targetDetail}.`}
+              <p className="text-sm text-muted-foreground line-clamp-6">
+                {message && !/^(Transcribing|Polishing)…?$/.test(message)
+                  ? message
+                  : finishStage === "polishing"
+                    ? `Tidying punctuation and wording for ${insertionMeta.label.toLowerCase()}${targetDetail}.`
+                    : `Turning your speech into text for ${insertionMeta.label.toLowerCase()}${targetDetail}.`}
               </p>
               {autoActivationDetail && (
                 <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
@@ -1550,7 +1591,7 @@ export function DictationPopup() {
               {!compact && preview && (
                 <div className="mt-2 max-w-[330px] rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    Live preview
+                    Heard so far
                   </p>
                   <p
                     key={preview}
@@ -1596,7 +1637,7 @@ export function DictationPopup() {
             )}
             <div className="min-w-0 flex-1">
               <p className="manuscript text-base font-serif text-foreground">{doneTitle}</p>
-              {!compact && (
+              {!compact && doneMessage && !repeatsTitle(doneTitle, doneMessage) && (
                 <p className="max-w-[330px] text-sm leading-relaxed text-muted-foreground line-clamp-6">
                   {doneMessage}
                 </p>
@@ -1715,21 +1756,21 @@ export function DictationPopup() {
         )}
 
         {phase === "error" && (
-          <div className="flex items-center gap-3 text-foreground">
-            <TriangleAlert className="h-5 w-5 text-foreground" />
+          <div className="flex items-start gap-3 text-foreground">
+            <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-rust" />
             <div>
-              <p className="text-sm font-semibold">Problem</p>
-              {!compact && message && (
-                <p className="max-w-[330px] text-sm leading-relaxed text-muted-foreground line-clamp-6">
-                  {message}
-                </p>
-              )}
-              {!compact && (
-                <p className="text-sm text-muted-foreground">
-                  Check microphone access, {routeLabel.toLowerCase()}, and
-                  shortcut permissions.
-                </p>
-              )}
+              {/* The header already names the problem; this says why and
+                  what to do. Compact keeps the reason too: "Problem" on its
+                  own told the user nothing. */}
+              <p
+                className={cn(
+                  "max-w-[330px] text-sm leading-relaxed text-foreground",
+                  compact ? "line-clamp-3" : "line-clamp-6",
+                )}
+              >
+                {message ??
+                  "Dictation stopped before it finished. Check microphone and Accessibility access in System Settings, then try again."}
+              </p>
               {!compact && (
                 <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
                   <button

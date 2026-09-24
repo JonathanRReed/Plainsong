@@ -30,11 +30,18 @@ export function DictationFinishBar({
   stage,
   plan,
   complete = false,
+  stageStartedAt,
   className,
 }: {
   stage: DictationProcessingStage;
   plan: DictationProgressPlan;
   complete?: boolean;
+  /**
+   * `performance.now()` when this stage began. Owned by the caller so a
+   * remount (display-mode switch, reduced-motion change) resumes the stage
+   * instead of restarting it from zero.
+   */
+  stageStartedAt?: number;
   className?: string;
 }) {
   const [fraction, setFraction] = useState(() =>
@@ -48,7 +55,7 @@ export function DictationFinishBar({
       setFraction(1);
       return;
     }
-    const startedAt = performance.now();
+    const startedAt = stageStartedAt ?? performance.now();
     const currentPlan = { expectedTranscribeMs, expectedPolishMs };
     const tick = () =>
       setFraction(
@@ -64,7 +71,7 @@ export function DictationFinishBar({
       frame = requestAnimationFrame(loop);
     });
     return () => cancelAnimationFrame(frame);
-  }, [stage, expectedTranscribeMs, expectedPolishMs, complete, reducedMotion]);
+  }, [stage, expectedTranscribeMs, expectedPolishMs, complete, reducedMotion, stageStartedAt]);
 
   return (
     <div

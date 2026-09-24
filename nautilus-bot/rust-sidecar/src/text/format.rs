@@ -734,6 +734,10 @@ fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<Dict
     let bundle_id = bundle_id.to_ascii_lowercase();
 
     let messaging_bundle_ids = [
+        "com.tinyspeck.slackmacgap",         // Slack
+        "com.hnc.discord",                   // Discord
+        "com.apple.mobilesms",               // Messages
+        "com.microsoft.teams2",              // Microsoft Teams
         "com.tdesktop.telegram",             // Telegram
         "net.whatsapp.whatsapp",             // WhatsApp
         "org.whispersystems.signal-desktop", // Signal
@@ -743,6 +747,31 @@ fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<Dict
         .any(|candidate| bundle_id == *candidate || bundle_id.contains(candidate))
     {
         return Some(DictationAppCategory::Messaging);
+    }
+
+    let email_bundle_ids = [
+        "com.apple.mail",          // Mail
+        "com.microsoft.outlook",   // Outlook
+        "com.superhuman.electron", // Superhuman
+    ];
+    if email_bundle_ids
+        .iter()
+        .any(|candidate| bundle_id == *candidate || bundle_id.contains(candidate))
+    {
+        return Some(DictationAppCategory::Email);
+    }
+
+    let notes_bundle_ids = [
+        "com.apple.notes",    // Notes
+        "notion.id",          // Notion
+        "com.microsoft.word", // Word
+        "md.obsidian",        // Obsidian
+    ];
+    if notes_bundle_ids
+        .iter()
+        .any(|candidate| bundle_id == *candidate || bundle_id.contains(candidate))
+    {
+        return Some(DictationAppCategory::Notes);
     }
 
     let ai_chat_bundle_ids = [
@@ -784,40 +813,63 @@ fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<Dict
     None
 }
 
+/// Whole-word match of `candidate` (one or more words) inside an app name or
+/// browser domain hint. Substring matching sent 1Password to Notes ("word")
+/// and Mailchimp to Email ("mail"). A trailing version number still matches,
+/// so "iTerm2" is "iterm".
+fn name_has_word(app_name: &str, candidate: &str) -> bool {
+    let words: Vec<&str> = app_name
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let wanted: Vec<&str> = candidate.split_whitespace().collect();
+    if wanted.is_empty() || wanted.len() > words.len() {
+        return false;
+    }
+    words.windows(wanted.len()).any(|window| {
+        window.iter().zip(&wanted).all(|(word, want)| {
+            word == want
+                || word.strip_prefix(want).is_some_and(|rest| {
+                    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
+                })
+        })
+    })
+}
+
 fn resolve_dictation_app_category_from_name(app_name: &str) -> DictationAppCategory {
     if [
         "slack", "messages", "imessage", "discord", "teams", "telegram", "whatsapp", "signal",
     ]
     .iter()
-    .any(|candidate| app_name.contains(candidate))
+    .any(|candidate| name_has_word(app_name, candidate))
     {
         return DictationAppCategory::Messaging;
     }
 
     if ["gmail", "outlook", "mail", "superhuman"]
         .iter()
-        .any(|candidate| app_name.contains(candidate))
+        .any(|candidate| name_has_word(app_name, candidate))
     {
         return DictationAppCategory::Email;
     }
 
     if ["google docs", "docs", "notion", "word", "notes", "obsidian"]
         .iter()
-        .any(|candidate| app_name.contains(candidate))
+        .any(|candidate| name_has_word(app_name, candidate))
     {
         return DictationAppCategory::Notes;
     }
 
     if ["linear", "hubspot", "salesforce", "jira"]
         .iter()
-        .any(|candidate| app_name.contains(candidate))
+        .any(|candidate| name_has_word(app_name, candidate))
     {
         return DictationAppCategory::Worklog;
     }
 
     if ["chatgpt", "claude", "perplexity", "gemini", "lm studio"]
         .iter()
-        .any(|candidate| app_name.contains(candidate))
+        .any(|candidate| name_has_word(app_name, candidate))
     {
         return DictationAppCategory::AiChat;
     }
@@ -838,7 +890,7 @@ fn resolve_dictation_app_category_from_name(app_name: &str) -> DictationAppCateg
         "antigravity",
     ]
     .iter()
-    .any(|candidate| app_name.contains(candidate))
+    .any(|candidate| name_has_word(app_name, candidate))
     {
         return DictationAppCategory::CodeEditor;
     }
@@ -1440,6 +1492,41 @@ mod tests {
             ),
             smart_format_dictation_text_for_app(input, "voice", Some("Slack"))
         );
+    }
+
+    #[test]
+    fn app_names_match_whole_words_not_substrings() {
+        use DictationAppCategory::*;
+        for (name, expected) in [
+            ("1Password", Other),
+            ("Mailchimp", Other),
+            ("Codecademy", Other),
+            ("Microsoft Word", Notes),
+            ("mail.google.com", Email),
+            ("docs.google.com", Notes),
+            ("iTerm2", CodeEditor),
+            ("Visual Studio Code", CodeEditor),
+            ("Slack", Messaging),
+        ] {
+            assert_eq!(
+                resolve_dictation_app_category(Some(name), None),
+                expected,
+                "{name}"
+            );
+        }
+        for (bundle, expected) in [
+            ("com.tinyspeck.slackmacgap", Messaging),
+            ("com.apple.mail", Email),
+            ("com.microsoft.Outlook", Email),
+            ("notion.id", Notes),
+            ("com.apple.Notes", Notes),
+        ] {
+            assert_eq!(
+                resolve_dictation_app_category(None, Some(bundle)),
+                expected,
+                "{bundle}"
+            );
+        }
     }
 
     #[test]

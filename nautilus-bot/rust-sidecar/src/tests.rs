@@ -3626,6 +3626,22 @@ fn bulletize_keeps_conjunctions_inside_a_single_bullet() {
 }
 
 #[test]
+fn bulletize_splits_sentences_not_every_comma_in_a_sentence() {
+    assert_eq!(
+        bulletize_text("I think, maybe, we should go. Then we ship it."),
+        "- I think, maybe, we should go.\n- Then we ship it."
+    );
+    assert_eq!(
+        bulletize_text("eggs, milk, bread, two bags of flour"),
+        "- eggs\n- milk\n- bread\n- two bags of flour"
+    );
+    assert_eq!(
+        bulletize_text("Version 3.5 ships today."),
+        "- Version 3.5 ships today."
+    );
+}
+
+#[test]
 fn pre_insert_llm_pass_is_gated_on_smart_format_or_power_rewrite() {
     let mut settings = settings::Settings::default();
     let mut options = models::DictationStartOptions::default();

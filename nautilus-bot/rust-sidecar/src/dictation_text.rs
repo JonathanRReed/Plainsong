@@ -476,14 +476,51 @@ pub(crate) fn format_dictation_notes(text: &str) -> String {
 ///
 /// Splits only on separators the speaker actually voiced as list breaks. It
 /// used to also split on every " and ", which tore ordinary phrases ("bread
-/// and butter", "Jill and I agreed") into two bullets.
+/// and butter", "Jill and I agreed") into two bullets, and on every comma,
+/// which turned "I think, maybe, we should go" into three. Commas now split
+/// only a run of short items ("eggs, milk, bread"); anything else becomes
+/// one bullet per sentence.
 pub(crate) fn bulletize_text(text: &str) -> String {
-    let mut items: Vec<String> = text
-        .split([',', ';', '\n'])
+    const MAX_LIST_ITEM_WORDS: usize = 4;
+    let mut items: Vec<String> = Vec::new();
+    for segment in text
+        .split([';', '\n'])
         .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(|part| format!("- {}", part))
-        .collect();
+        .filter(|s| !s.is_empty())
+    {
+        let comma_parts: Vec<&str> = segment
+            .split(',')
+            .map(|part| part.trim().trim_end_matches('.').trim())
+            .filter(|part| !part.is_empty())
+            .collect();
+        let is_short_item_list = comma_parts.len() >= 2
+            && comma_parts.iter().all(|part| {
+                part.split_whitespace().count() <= MAX_LIST_ITEM_WORDS
+                    && !part.contains(['.', '!', '?'])
+            });
+        if is_short_item_list {
+            items.extend(comma_parts.iter().map(|part| format!("- {part}")));
+            continue;
+        }
+        let mut start = 0;
+        let chars: Vec<(usize, char)> = segment.char_indices().collect();
+        for (position, (at, ch)) in chars.iter().enumerate() {
+            let next_is_space = chars
+                .get(position + 1)
+                .is_some_and(|(_, next)| next.is_whitespace());
+            if matches!(ch, '.' | '!' | '?') && next_is_space {
+                let sentence = segment[start..at + ch.len_utf8()].trim();
+                if !sentence.is_empty() {
+                    items.push(format!("- {sentence}"));
+                }
+                start = at + ch.len_utf8();
+            }
+        }
+        let rest = segment[start..].trim();
+        if !rest.is_empty() {
+            items.push(format!("- {rest}"));
+        }
+    }
 
     if items.is_empty() {
         items.push(format!("- {}", text.trim()));

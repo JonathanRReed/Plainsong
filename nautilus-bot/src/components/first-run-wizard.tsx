@@ -1709,9 +1709,9 @@ function TryDictationStep({
   return (
     <div className="space-y-5">
       <p className="max-w-xl text-sm text-muted-foreground">
-        Get a real transcript before setting up system-wide insertion. This test
-        uses Plainsong&apos;s normal local capture and history path, but keeps
-        the result inside Plainsong.
+        Try one sentence here before Plainsong types into other apps. It runs
+        exactly like real dictation, on this Mac, and the result stays inside
+        Plainsong.
       </p>
 
       <div className="divide-y divide-border rounded-xl border border-border">
@@ -1755,10 +1755,11 @@ function TryDictationStep({
               <Download className="h-4 w-4" />
             </span>
             <div>
-              <p className="text-sm font-medium">Recommended local model</p>
+              <p className="text-sm font-medium">Speech model</p>
               <p className="text-sm text-muted-foreground">
-                Parakeet TDT 0.6B v3 is a 640 MB download. A smaller 142 MB option is
-                available later, with less accuracy on unfamiliar words.
+                The recommended model is a 640 MB download and runs on this Mac.
+                A smaller 142 MB one is available later, with less accuracy on
+                unfamiliar words.
               </p>
             </div>
           </div>
@@ -1812,7 +1813,9 @@ function TryDictationStep({
           <p className="mt-1 max-w-md text-sm text-muted-foreground">
             {scratchState === "listening"
               ? "Speak naturally, then finish when you are done."
-              : "This result is saved locally. It will not touch the clipboard or another app."}
+              : scratchState === "complete" || scratchState === "transcribing"
+                ? "This result is saved locally. It will not touch the clipboard or another app."
+                : "Try: “Um, let’s meet on Tuesday, no wait, Wednesday.” Plainsong drops the um and keeps the day you meant."}
           </p>
 
           <div className="mt-4">
