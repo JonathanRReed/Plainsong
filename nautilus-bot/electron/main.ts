@@ -23,6 +23,8 @@ import {
 import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
 import { dictationSoundForTransition, playDictationSound } from "./dictation-sounds";
+import { createMediaMuteController, runAppleScript } from "./media-mute";
+import { describeTrayStatus } from "./tray-status";
 import {
   createReadStream,
   appendFileSync,
@@ -383,6 +385,19 @@ let minimizeToTrayEnabled = false;
 let alwaysOnTopEnabled = false;
 let showDictationOverlayEnabled = true;
 let dictationSoundsEnabled = true;
+let muteMediaWhileDictatingEnabled = false;
+// Only macOS has the output mute this drives; elsewhere the query answers
+// "already muted", so the controller never acts.
+const mediaMute = createMediaMuteController({
+  run: process.platform === "darwin" ? runAppleScript : async () => "true",
+  log: (message, error) => console.warn(message, error),
+});
+// For the menu-bar clock: when the current dictation went live, and when the
+// meeting being recorded was first seen.
+let dictationLiveSince: number | null = null;
+let trayMeetingId: string | null = null;
+let trayMeetingStartedAt: number | null = null;
+let trayClockTimer: ReturnType<typeof setInterval> | null = null;
 let showRecordingOverlayEnabled = true;
 // Mirror of `automation.localToolsEnabled`. Gates every `plainsong://` deep
 // link; the CLI/MCP read the same switch from settings.json themselves.
@@ -547,27 +562,53 @@ function isDictationLive(): boolean {
   return dictationPhase === "primed" || dictationPhase === "recording";
 }
 
+function currentTrayStatus() {
+  if (activeMeetingRecordingId !== trayMeetingId) {
+    trayMeetingId = activeMeetingRecordingId;
+    trayMeetingStartedAt = activeMeetingRecordingId ? Date.now() : null;
+  }
+  return describeTrayStatus({
+    dictationPhase,
+    dictationStartedAt: dictationLiveSince,
+    meetingStartedAt: trayMeetingStartedAt,
+    now: Date.now(),
+  });
+}
+
+function invokeFromTray(command: string, args: Record<string, unknown> = {}): void {
+  void ipcBridge?.invoke(command, args).catch((error) => {
+    console.error(`[tray] ${command} failed`, error);
+  });
+}
+
 function buildTrayMenu(): Menu {
   const dictationAccelerator = convertShortcutToAccelerator(
     latestShortcutSettings.shortcuts?.toggleDictation,
   );
   const live = isDictationLive();
+  const ready = bootstrapComplete && ipcBridge !== null;
+  const status = currentTrayStatus();
 
   const recentItems: Parameters<typeof Menu.buildFromTemplate>[0] =
     recentDictationResults.length === 0
-      ? [{ label: "No dictation results yet", enabled: false }]
+      ? [{ label: "Nothing dictated yet", enabled: false }]
       : recentDictationResults.map((result, index) => ({
-          label: `Paste "${summarizeTranscriptForMenu(result.text)}"`,
-          click: () => {
-            void ipcBridge
-              ?.invoke("repaste_dictation_result", { index })
-              .catch((error) => {
-                console.error("[tray] failed to re-paste dictation result", error);
-              });
-          },
+          label: summarizeTranscriptForMenu(result.text),
+          submenu: [
+            {
+              label: "Paste again",
+              click: () => invokeFromTray("repaste_dictation_result", { index }),
+            },
+            {
+              label: "Copy",
+              click: () => invokeFromTray("recopy_dictation_result", { index }),
+            },
+          ],
         }));
 
   return Menu.buildFromTemplate([
+    { label: status.statusLine, enabled: false },
+    { type: "separator" },
     {
       // The accelerator is display-only here: the real binding is registered
       // through globalShortcut/the native helper, and letting the menu
@@ -575,17 +616,44 @@ function buildTrayMenu(): Menu {
       label: live ? "Stop Dictation" : "Start Dictation",
       accelerator: dictationAccelerator ?? undefined,
       registerAccelerator: false,
-      enabled: bootstrapComplete && ipcBridge !== null,
-      click: () => {
-        void ipcBridge
-          ?.invoke(live ? "stop_dictation" : "start_dictation", {})
-          .catch((error) => {
-            console.error("[tray] failed to toggle dictation", error);
-          });
-      },
+      enabled: ready,
+      click: () => invokeFromTray(live ? "stop_dictation" : "start_dictation"),
     },
+    ...(live
+      ? [
+          {
+            label: "Cancel Dictation",
+            enabled: ready,
+            click: () =>
+              invokeFromTray(
+                "force_stop_dictation",
+                typeof dictationSessionId === "number" ? { sessionId: dictationSessionId } : {},
+              ),
+          },
+        ]
+      : []),
+    activeMeetingRecordingId
+      ? {
+          label: "Stop Meeting Recording",
+          enabled: ready,
+          click: () => {
+            void ipcBridge
+              ?.invokeSidecar("stop_recording", { recordingId: activeMeetingRecordingId })
+              .catch((error) => console.error("[tray] failed to stop the meeting", error));
+          },
+        }
+      : {
+          // Opens the consent sheet, exactly like the New meeting button.
+          label: "Record a Meeting\u2026",
+          enabled: bootstrapComplete,
+          click: () => {
+            showAndFocusMainWindow();
+            broadcastRendererEvent("main-view-requested", { view: "recordings" });
+            broadcastRendererEvent("meeting-start-requested", {});
+          },
+        },
     { type: "separator" },
-    { label: "Recent results", enabled: false },
+    { label: "Recent dictations", enabled: false },
     ...recentItems,
     { type: "separator" },
     {
@@ -598,6 +666,14 @@ function buildTrayMenu(): Menu {
         if (bootstrapComplete) {
           showAndFocusMainWindow();
         }
+      },
+    },
+    {
+      label: "Settings\u2026",
+      enabled: bootstrapComplete,
+      click: () => {
+        showAndFocusMainWindow();
+        broadcastRendererEvent("main-view-requested", { view: "settings" });
       },
     },
     { type: "separator" },
@@ -613,18 +689,33 @@ function buildTrayMenu(): Menu {
 
 // A live microphone must be visible somewhere on screen even when the HUD is
 // hidden or the user is on another Space. The tray icon itself is a template
-// image the system recolors, so it cannot carry the gold "setting down" moment
-// — the neume beside it does, in the same notation vocabulary the HUD uses.
+// image the system recolors, so the state rides beside it as text: a dot and
+// a running clock while dictating or recording a meeting, an ellipsis while
+// finishing, nothing when idle.
+function applyTrayTitle(status: ReturnType<typeof describeTrayStatus>): void {
+  if (!tray) {
+    return;
+  }
+  tray.setToolTip(status.tooltip);
+  if (process.platform === "darwin") {
+    tray.setTitle(status.title, { fontType: "monospacedDigit" });
+  }
+}
+
 function refreshTray(): void {
   if (!tray) {
     return;
   }
-  const live = isDictationLive();
-  tray.setToolTip(live ? "Plainsong — dictation is live" : "Plainsong");
-  if (process.platform === "darwin") {
-    tray.setTitle(live ? "\u25C6" : "");
-  }
+  const status = currentTrayStatus();
+  applyTrayTitle(status);
   tray.setContextMenu(buildTrayMenu());
+  // Only the title ticks; the menu is rebuilt on state changes alone.
+  if (status.ticking && trayClockTimer === null) {
+    trayClockTimer = setInterval(() => applyTrayTitle(currentTrayStatus()), 1000);
+  } else if (!status.ticking && trayClockTimer !== null) {
+    clearInterval(trayClockTimer);
+    trayClockTimer = null;
+  }
 }
 
 async function refreshDictationPermissionSummary(): Promise<void> {
@@ -1254,6 +1345,7 @@ function applyUiSettings(settings: AppSettings | null | undefined): void {
   showDictationOverlayEnabled = resolved.showDictationOverlay;
   showRecordingOverlayEnabled = resolved.showRecordingOverlay;
   dictationSoundsEnabled = resolved.dictationSounds;
+  muteMediaWhileDictatingEnabled = settings?.ui?.muteMediaWhileDictating === true;
   notificationSettings = resolveNotificationSettings(settings);
   localToolsEnabled = settings?.automation?.localToolsEnabled === true;
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -3053,6 +3145,8 @@ async function finalizeActiveMeetingBeforeQuit(): Promise<MeetingFinalizationOut
 }
 
 app.on("before-quit", (event) => {
+  // Never leave the Mac muted because Plainsong quit mid-dictation.
+  void mediaMute.restore();
   // Take one pass to finalize the meeting, then re-issue the quit. The guard is
   // `isQuitting`, which is already set below, so the second pass falls straight
   // through instead of looping.
@@ -3508,7 +3602,7 @@ async function bootstrap() {
                 ? lifecycle.recordingId
                 : null,
           },
-        );
+        );        refreshTray();
       }
     }
 
@@ -3534,6 +3628,12 @@ async function bootstrap() {
         clearTimeout(dictationShortcutFailureResetTimer);
         dictationShortcutFailureResetTimer = null;
       }
+      if (nextPhase === "primed" || nextPhase === "recording") {
+        dictationLiveSince ??= Date.now();
+      } else {
+        dictationLiveSince = null;
+      }
+      mediaMute.onPhase(nextPhase, muteMediaWhileDictatingEnabled);
       dictationPhase = nextPhase;
       refreshTray();
       // A helper table held back while this session was live can go in now.
