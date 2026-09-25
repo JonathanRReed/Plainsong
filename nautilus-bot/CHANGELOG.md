@@ -28,6 +28,15 @@ All notable changes to Plainsong are documented in this file.
   it needs the model first, the shortcut cards line up, and the header says
   Setup.
 
+### Fixes from hands-on testing
+- Starting a dictation from inside Plainsong (the practice dictation in
+  setup, Start on the Dictation page) no longer sends focus to the app
+  behind it (Finder, after a DMG install).
+- Setup no longer starts over at step 1 when you click back to Plainsong:
+  once open, it stays open until you finish or skip it.
+- A dictation that heard nothing says "Nothing heard" instead of a check
+  mark over "Transcription ready".
+
 ### Install and permissions
 - Opening Plainsong straight from its disk image now offers to move it to
   Applications, where it keeps its permissions after the disk image is

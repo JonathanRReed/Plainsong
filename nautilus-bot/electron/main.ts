@@ -1639,7 +1639,15 @@ function presentNotification(notification: PlainsongNotification): void {
 function showOverlayWindow(win: BrowserWindow): void {
   positionOverlayOnActiveDisplay(win);
   if (process.platform === "darwin") {
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    // To float over full-screen apps Electron flips the whole app to a UI
+    // element and back, which briefly hides Plainsong's windows and hands
+    // focus to the app behind (Finder, after a DMG install). When a Plainsong
+    // window is focused (a dictation started from the app itself) there is no
+    // full-screen app to cover, so skip the flip and keep the focus.
+    win.setVisibleOnAllWorkspaces(true, {
+      visibleOnFullScreen: true,
+      skipTransformProcessType: BrowserWindow.getFocusedWindow() !== null,
+    });
   }
   win.setAlwaysOnTop(true, "screen-saver");
   win.showInactive();
