@@ -2,13 +2,12 @@
 
 All notable changes to Plainsong are documented in this file.
 
-## [Unreleased] - 0.9.0-beta.4 (candidate work in progress)
+## [0.9.0-beta.5] - 2026-09-24
 
-Beta 4 combines the audited beta 3 source work with the final private-beta
-hardening pass. The source version and numeric macOS build version are now
-`0.9.0-beta.4` and `900304`. Release qualification still depends on the exact
-signed candidate being notarized, stapled, installed, and exercised on Apple
-Silicon. See `LAUNCH.md` for that boundary.
+Dictation that feels like Typeless and Wispr Flow, Voice Edit, a new
+onboarding, and the fixes from a full review before merge. Version
+`0.9.0-beta.5`, macOS build `900305`, signed, notarized and stapled for Apple
+Silicon.
 
 ### Feel: matching Typeless and Wispr Flow
 - The dictation pill has four sizes and can dock upright to the left or
@@ -112,6 +111,21 @@ Silicon. See `LAUNCH.md` for that boundary.
   and meaningful interjections in the local fallback.
 - Recognition errors and uncaptured audio are not repaired by these text-stage
   checks. See [dictation fidelity](docs/dictation-fidelity.md) for scope and QA.
+
+### Security and release builds
+- External links, deep links and the renderer protocol reject credentials and
+  non-standard ports and accept a single trailing dot on a hostname (#152,
+  #161, #170).
+- Release builds strip the sidecar with Apple's `strip`: rustc's own stripper
+  wrote binaries that macOS 27's dyld refuses to load.
+
+## [0.9.0-beta.4] - 2026-09-05
+
+Beta 4 combines the audited beta 3 source work with the final private-beta
+hardening pass. The source version and numeric macOS build version are
+`0.9.0-beta.4` and `900304`. Release qualification still depends on the exact
+signed candidate being notarized, stapled, installed, and exercised on Apple
+Silicon. See `LAUNCH.md` for that boundary.
 
 ### Documented
 - Plainsong's own speaker separation could not report a turn shorter than five

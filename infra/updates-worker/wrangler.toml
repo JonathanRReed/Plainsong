@@ -12,4 +12,4 @@ routes = [{ pattern = "updates.plainsong.jonathanrreed.com", custom_domain = tru
 [vars]
 GITHUB_REPO = "JonathanRReed/Plainsong"
 # used only if the GitHub API cannot be reached and nothing is cached
-FALLBACK_BETA_TAG = "v0.9.0-beta.4"
+FALLBACK_BETA_TAG = "v0.9.0-beta.5"
