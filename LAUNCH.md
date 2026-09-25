@@ -1,6 +1,6 @@
 # Plainsong limited beta launch checklist
 
-Release target: `0.9.0-beta.4`
+Release target: `0.9.0-beta.5`
 
 Last reconciled: September 4, 2026
 

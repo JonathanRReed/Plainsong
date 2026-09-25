@@ -10,18 +10,18 @@ The app is free and MIT-licensed, with no trial, paid tiers, or required account
 
 ## Install the beta
 
-`0.9.0-beta.4` requires macOS 13+ on Apple Silicon. Windows and Linux are planned, not supported release targets.
+`0.9.0-beta.5` requires macOS 13+ on Apple Silicon. Windows and Linux are planned, not supported release targets.
 
-Download [Plainsong-0.9.0-beta.4-arm64.dmg](https://github.com/JonathanRReed/Plainsong/releases/download/v0.9.0-beta.4/Plainsong-0.9.0-beta.4-arm64.dmg), then verify it:
+Download [Plainsong-0.9.0-beta.5-arm64.dmg](https://github.com/JonathanRReed/Plainsong/releases/download/v0.9.0-beta.5/Plainsong-0.9.0-beta.5-arm64.dmg), then verify it:
 
 ```bash
-shasum -a 256 Plainsong-0.9.0-beta.4-arm64.dmg
+shasum -a 256 Plainsong-0.9.0-beta.5-arm64.dmg
 ```
 
 Expected SHA-256:
 
 ```text
-28f1b1a42306095afe36b24c126a42ec060f7e5a1a22b37e1d0b2bceee759cb4
+07631038787b5fc013b226b5d759f0648825b013741c13dc55e0e2b181039fd0
 ```
 
 The file is 136,566,773 bytes, Developer ID signed, notarized, and stapled. Drag `Plainsong.app` into `/Applications` and open it there. No macOS security bypass is required.
