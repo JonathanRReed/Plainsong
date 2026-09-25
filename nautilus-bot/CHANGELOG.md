@@ -17,6 +17,30 @@ All notable changes to Plainsong are documented in this file.
 - Uses the MIT-licensed `voice-glow` and `thinking-orbs` packages from
   libraries.dev.
 
+### Onboarding
+- Meeting setup reads as three plain rows (the speech model, your voice,
+  the other people on the call) instead of raw diagnostics; the details are
+  one click away for support. A model that is not downloaded yet is a normal
+  state, not a warning.
+- "Skip meetings" goes on to the Ready summary instead of closing setup, and
+  Ready says honestly what is and is not set up.
+- Download sizes read in MB and GB, the practice dictation says plainly when
+  it needs the model first, the shortcut cards line up, and the header says
+  Setup.
+
+### Install and permissions
+- Opening Plainsong straight from its disk image now offers to move it to
+  Applications, where it keeps its permissions after the disk image is
+  ejected.
+- Repair insert permissions first tells macOS which copy of Plainsong is the
+  real one. With an old copy still registered (a download, a mounted disk
+  image), the Accessibility switch could bind to that copy and turn itself
+  off again.
+- Fixed: Plainsong could not tell which app copy it was running from, so the
+  "running from the disk image" note never appeared.
+- Setup (Show setup again, Fix dictation setup, Set up meetings) moved from
+  Settings, Storage to Settings, General.
+
 ## [0.9.0-beta.5] - 2026-09-24
 
 Dictation that feels like Typeless and Wispr Flow, Voice Edit, a new

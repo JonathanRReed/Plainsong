@@ -375,8 +375,12 @@ describe("FirstRunWizard", () => {
     expect(
       screen.getByRole("button", { name: /download and continue/i })
     ).toBeInTheDocument();
-    expect(screen.getByText(/downloads on demand/i)).toBeInTheDocument();
-    expect(screen.getByText("2.8 GiB")).toBeInTheDocument();
+    expect(screen.getByText(/one-time download/i)).toBeInTheDocument();
+    // Sizes are converted to the decimal MB/GB Finder uses, not relabelled:
+    // the capability table's 2888 MiB is 3.03 GB and 639 MiB is 670 MB.
+    expect(screen.getByText("3.0 GB")).toBeInTheDocument();
+    expect(screen.getByText("670 MB")).toBeInTheDocument();
+    expect(screen.queryByText(/MiB|GiB/)).not.toBeInTheDocument();
     expect(screen.queryByText(/already ships with/i)).not.toBeInTheDocument();
   });
 
@@ -462,10 +466,10 @@ describe("FirstRunWizard", () => {
     render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
 
     await waitFor(() => {
-      expect(screen.getByLabelText("Meeting audio storage")).toHaveValue(
+      expect(screen.getByLabelText("Meeting audio")).toHaveValue(
         "transcript_only",
       );
-      expect(screen.getByLabelText("Meeting retention")).toHaveValue("1m");
+      expect(screen.getByLabelText("Delete old meetings")).toHaveValue("1m");
     });
   });
 
@@ -621,14 +625,16 @@ describe("FirstRunWizard", () => {
     expect(
       await screen.findByRole("heading", { name: /meeting setup/i }),
     ).toBeInTheDocument();
-    await clickPrimary(/download meeting model/i);
+    // The fixture's meeting model is already on this Mac, so the primary
+    // action only chooses it -- it does not promise a download.
+    await clickPrimary(/^continue$/i);
     await passMeetingNotesStep();
 
     expect(
       await screen.findByText(/the model download was skipped/i)
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /download local model/i })
+      screen.getByRole("button", { name: /download speech model/i })
     ).toBeInTheDocument();
 
     await clickPrimary(/start using plainsong/i);
@@ -649,7 +655,7 @@ describe("FirstRunWizard", () => {
     expect(
       await screen.findByRole("heading", { name: /meeting setup/i }),
     ).toBeInTheDocument();
-    await clickPrimary(/download meeting model/i);
+    await clickPrimary(/^continue$/i);
     await passMeetingNotesStep();
     expect(
       await screen.findByRole("heading", { name: /^ready$/i }),
@@ -669,7 +675,7 @@ describe("FirstRunWizard", () => {
     await reachReadyAfterSkippingModel();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /download local model/i }));
+      fireEvent.click(screen.getByRole("button", { name: /download speech model/i }));
     });
     expect(downloadAsrModels).toHaveBeenCalledWith("whisper", "base.en");
     expect(await screen.findByText(/still downloading/i)).toBeInTheDocument();
@@ -704,13 +710,13 @@ describe("FirstRunWizard", () => {
     await reachReadyAfterSkippingModel();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /download local model/i }));
+      fireEvent.click(screen.getByRole("button", { name: /download speech model/i }));
     });
     expect(
       await screen.findByText(/model download failed: network unavailable\. try again/i),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /retry local model download/i }),
+      screen.getByRole("button", { name: /retry speech model download/i }),
     ).toBeInTheDocument();
 
     await clickPrimary(/start using plainsong/i);
@@ -968,7 +974,7 @@ describe("FirstRunWizard", () => {
     expect(
       await screen.findByRole("heading", { name: /meeting setup/i }),
     ).toBeInTheDocument();
-    await clickPrimary(/download meeting model/i);
+    await clickPrimary(/^continue$/i);
     await passMeetingNotesStep();
     expect(
       await screen.findByRole("heading", { name: /^ready$/i }),
@@ -1307,7 +1313,8 @@ describe("FirstRunWizard", () => {
     await passMicrophoneStep();
     await clickPrimary(/^continue$/i);
     await clickPrimary(/^continue$/i);
-    await clickPrimary(/download meeting model/i);
+    await screen.findByRole("heading", { name: /meeting setup/i });
+    await clickPrimary(/^continue$/i);
     await passMeetingNotesStep();
 
     expect(
@@ -1354,6 +1361,150 @@ describe("FirstRunWizard", () => {
     expect(currentSettings.shortcuts.toggleDictation).toBe("Cmd+Shift+J");
   });
 
+  it("gives a first run a plain meeting summary and keeps the diagnostics under Details", async () => {
+    const asrBackend = await import("@/lib/backend/asr");
+    const settingsBackend = await import("@/lib/backend/settings");
+    const recordingsBackend = await import("@/lib/backend/recordings");
+    // A fresh install: the recommended meeting model is not downloaded yet.
+    vi.mocked(asrBackend.getAsrProviders).mockImplementation(async () => [
+      providers[0],
+      {
+        ...providers[1],
+        providerType: "parakeet",
+        name: "NVIDIA Parakeet",
+        selectedModelId: "parakeet-tdt-0.6b-v3",
+        modelOptions: [{ id: "parakeet-tdt-0.6b-v3", label: "Parakeet TDT 0.6B v3" }],
+        downloadStatus: "NotDownloaded",
+        runtimeStatus: "missing_model",
+      },
+    ]);
+    currentSettings.transcription.meetingProvider = "parakeet";
+    currentSettings.transcription.meetingModelId = "parakeet-tdt-0.6b-v3";
+    // What the sidecar actually says on a first run.
+    vi.mocked(settingsBackend.verifyMeetingSetup).mockResolvedValue({
+      ok: false,
+      title: "Meeting verification",
+      summary: "No meeting-grade route is currently ready.",
+      details: [
+        "Microphone: ready",
+        "System audio backend: Core Audio process tap",
+        "System audio native format: 48000 Hz / 2 ch",
+        "A native route is available, but permission and non-silent callbacks have not been verified.",
+      ],
+    });
+    vi.mocked(recordingsBackend.getSystemAudioCapability).mockResolvedValue({
+      backend: "core_audio_process_tap",
+      nativeOsSupported: true,
+      nativeOsEnabled: true,
+      routeDevice: "MacBook Pro Speakers",
+      routeId: "coreaudio:BuiltInSpeakerDevice",
+      nativeSampleRate: 48000,
+      nativeChannels: 2,
+      readiness: "unverified",
+      ready: false,
+      reason: null,
+      actionableReason:
+        "A native route is available, but permission and non-silent callbacks have not been verified.",
+    });
+
+    try {
+    render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
+
+    const modelSentence = await screen.findByText(/^not downloaded yet\./i);
+    // A model nobody has downloaded yet is the normal first-run state: the
+    // size is stated, and the row is not marked as a fault.
+    expect(modelSentence).toHaveTextContent("one-time 670 MB download");
+    expect(modelSentence.closest("li")?.querySelector(".neume-rust")).toBeNull();
+    expect(
+      await screen.findByRole("button", { name: "Download meeting model (670 MB)" }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Microphone access is on.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/not tested yet\. the test plays a short, quiet tone/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /test system audio/i })).toBeInTheDocument();
+
+    // Every sidecar line is still there for support -- once, and only inside
+    // the collapsed Details disclosure.
+    const details = screen.getByText("Details").closest("details");
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");
+    for (const line of [
+      "No meeting-grade route is currently ready.",
+      "System audio backend: Core Audio process tap",
+      "System audio native format: 48000 Hz / 2 ch",
+    ]) {
+      const node = screen.getByText(line);
+      expect(details).toContainElement(node);
+    }
+    expect(
+      screen.getAllByText(/permission and non-silent callbacks have not been verified/i),
+    ).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /use recommended route/i })).not.toBeInTheDocument();
+    } finally {
+      // clearAllMocks keeps implementations; put the shared fixtures back.
+      vi.mocked(asrBackend.getAsrProviders).mockImplementation(async () => providers);
+      vi.mocked(settingsBackend.verifyMeetingSetup).mockImplementation(
+        async () => getMeetingVerificationResult(),
+      );
+      vi.mocked(recordingsBackend.getSystemAudioCapability).mockImplementation(
+        async () => ({
+          backend: "core_audio_process_tap",
+          nativeOsSupported: true,
+          nativeOsEnabled: true,
+          routeDevice: "MacBook Pro Speakers",
+          routeId: "coreaudio:BuiltInSpeakerDevice",
+          nativeSampleRate: 48000,
+          nativeChannels: 2,
+          readiness: "ready",
+          ready: true,
+          reason: null,
+          actionableReason: null,
+        }),
+      );
+    }
+  });
+
+  it("skips meetings to the Ready summary instead of closing setup", async () => {
+    const onComplete = vi.fn();
+    const settingsBackend = await import("@/lib/backend/settings");
+
+    render(<FirstRunWizard onComplete={onComplete} />);
+
+    await clickPrimary(/skip model download/i);
+    await passMicrophoneStep();
+    await clickPrimary(/^continue$/i);
+    await clickPrimary(/^continue$/i);
+    await screen.findByRole("heading", { name: /meeting setup/i });
+    await clickPrimary(/^skip meetings$/i);
+
+    // Straight past the meeting-notes step, which is only about meetings.
+    expect(
+      await screen.findByRole("heading", { name: /^ready$/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/^step 7 of 7$/i)).toBeInTheDocument();
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Cmd + Shift + Space")).toBeInTheDocument();
+    expect(
+      screen.getByText(/not set up, as you chose\. set them up any time from more > setup/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Meeting notes")).not.toBeInTheDocument();
+    // The model was skipped too, so the shortcut card does not pretend it
+    // works yet.
+    expect(
+      screen.getByText(/once the speech model is downloaded, put the cursor/i),
+    ).toBeInTheDocument();
+
+    await clickPrimary(/start using plainsong/i);
+    expect(onComplete).toHaveBeenCalledWith({
+      markOnboardingComplete: true,
+      meetingsCompleted: false,
+      deferred: false,
+    });
+    // Skipping is not finishing meeting setup: nothing is stamped.
+    expect(settingsBackend.recordOnboardingState).not.toHaveBeenCalled();
+  });
+
   it("keeps system audio unverified until the non-silent tone test passes", async () => {
     const recordingsBackend = await import("@/lib/backend/recordings");
     const getSystemAudioCapability = vi.mocked(
@@ -1379,7 +1530,7 @@ describe("FirstRunWizard", () => {
     render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
 
     expect(
-      await screen.findByText(/permission and non-silent audio are not verified yet/i),
+      await screen.findByText(/not tested yet\. the test plays a short, quiet tone/i),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /open system-audio privacy settings/i }),
@@ -1390,7 +1541,7 @@ describe("FirstRunWizard", () => {
       expect(testSystemAudioCapture).toHaveBeenCalledTimes(1);
     });
     expect(
-      await screen.findByText(/verified 997 hz system audio/i),
+      await screen.findByText(/heard the test tone through macbook pro speakers/i),
     ).toBeInTheDocument();
   });
 
@@ -1423,7 +1574,7 @@ describe("FirstRunWizard", () => {
     fireEvent.click(await screen.findByRole("button", { name: /test system audio/i }));
 
     expect(
-      await screen.findByText(/verified non-silent system audio via Stereo Mix/i),
+      await screen.findByText(/heard sound through stereo mix/i),
     ).toBeInTheDocument();
   });
 
@@ -1432,17 +1583,21 @@ describe("FirstRunWizard", () => {
 
     render(<FirstRunWizard mode="meetings" onComplete={onComplete} />);
 
-    await screen.findByText(/^meeting transcription$/i);
+    await screen.findByText(/^speech model for meetings$/i);
     expect(
-      screen.getByText(/meetings need a meeting-grade asr route/i)
+      await screen.findByText(/the recommended model is already on this mac/i)
     ).toBeInTheDocument();
+    // The sidecar's own verdict stays available for support, under Details.
+    expect(
+      screen.getByText(/meetings need a meeting-grade asr route/i).closest("details"),
+    ).not.toBeNull();
 
-    await clickPrimary(/use recommended route/i);
+    // Continue chooses the model that is already here; nothing downloads.
+    await clickPrimary(/^continue$/i);
     await waitFor(() => {
       expect(currentSettings.transcription.meetingProvider).toBe("distil_whisper");
     });
-
-    await clickPrimary(/^continue$/i);
+    await screen.findByRole("heading", { name: /meeting notes/i });
     await clickPrimary(/finish meeting setup/i);
 
     await waitFor(() => {
@@ -1528,16 +1683,16 @@ describe("FirstRunWizard", () => {
     const finishButton = await screen.findByRole("button", {
       name: /^continue$/i,
     });
-    fireEvent.change(screen.getByLabelText("Meeting audio storage"), {
+    fireEvent.change(screen.getByLabelText("Meeting audio"), {
       target: { value: "transcript_only" },
     });
-    fireEvent.change(screen.getByLabelText("Meeting retention"), {
+    fireEvent.change(screen.getByLabelText("Delete old meetings"), {
       target: { value: "custom" },
     });
-    fireEvent.change(screen.getByLabelText("Custom retention months"), {
+    fireEvent.change(screen.getByLabelText("Months to keep"), {
       target: { value: "6" },
     });
-    fireEvent.change(screen.getByLabelText("Retention delete mode"), {
+    fireEvent.change(screen.getByLabelText("What gets deleted"), {
       target: { value: "audio_and_transcript" },
     });
 
@@ -1556,10 +1711,10 @@ describe("FirstRunWizard", () => {
     );
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(onComplete).not.toHaveBeenCalled();
-    expect(screen.getByLabelText("Meeting audio storage")).toHaveValue("transcript_only");
-    expect(screen.getByLabelText("Meeting retention")).toHaveValue("custom");
-    expect(screen.getByLabelText("Custom retention months")).toHaveValue(6);
-    expect(screen.getByLabelText("Retention delete mode")).toHaveValue(
+    expect(screen.getByLabelText("Meeting audio")).toHaveValue("transcript_only");
+    expect(screen.getByLabelText("Delete old meetings")).toHaveValue("custom");
+    expect(screen.getByLabelText("Months to keep")).toHaveValue(6);
+    expect(screen.getByLabelText("What gets deleted")).toHaveValue(
       "audio_and_transcript"
     );
 
@@ -1569,8 +1724,8 @@ describe("FirstRunWizard", () => {
       expect(saveSettings).toHaveBeenCalledTimes(2);
       expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     });
-    expect(screen.getByLabelText("Meeting audio storage")).toHaveValue("transcript_only");
-    expect(screen.getByLabelText("Meeting retention")).toHaveValue("custom");
+    expect(screen.getByLabelText("Meeting audio")).toHaveValue("transcript_only");
+    expect(screen.getByLabelText("Delete old meetings")).toHaveValue("custom");
 
     await act(async () => {
       retrySave.resolve();
@@ -1809,7 +1964,7 @@ describe("FirstRunWizard", () => {
       currentSettings.transcription.meetingModelId = "distil-large-v3";
 
       render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
-      await screen.findByText(/^meeting transcription$/i);
+      await screen.findByText(/^speech model for meetings$/i);
       await clickPrimary(/^continue$/i);
       return screen.findByRole("heading", { name: /meeting notes/i });
     }

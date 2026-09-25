@@ -170,6 +170,7 @@ import {
 } from "./capture-admission";
 import { rendererPermissionAllowed } from "./renderer-permission-policy";
 import { isAllowedExternalUrl } from "./external-url-policy";
+import { offerMoveToApplications } from "./move-to-applications";
 import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   finalizeMeetingWithinBudget,
@@ -3686,6 +3687,12 @@ function flushPendingDeepLinks(): void {
   }
 }
 
+/** The running .app bundle (…/Plainsong.app), from the main executable. */
+function runningAppBundlePath(): string | null {
+  const match = /^(.*?\.app)\/Contents\/MacOS\//.exec(process.execPath);
+  return match ? match[1] : null;
+}
+
 async function bootstrap() {
   // Mirror this process's own logging into the in-memory tail the support
   // bundle reads. Nothing is written to disk and nothing leaves the Mac;
@@ -3716,6 +3723,22 @@ async function bootstrap() {
 
   await app.whenReady();
   recordLaunchMilestone("app-ready");
+  // Opened straight from the DMG: offer the move before anything else
+  // starts, since the move relaunches from /Applications.
+  if (
+    await offerMoveToApplications({
+      isPackaged: app.isPackaged && process.env.PLAINSONG_QA_MODE !== "1",
+      platform: process.platform,
+      bundlePath: runningAppBundlePath(),
+      isInApplicationsFolder: () => app.isInApplicationsFolder(),
+      ask: async (options) =>
+        (await dialog.showMessageBox({ type: "question", ...options })).response,
+      move: () => app.moveToApplicationsFolder(),
+      log: (message, error) => console.warn(message, error),
+    })
+  ) {
+    return;
+  }
   // A run killed mid-dictation (force quit, crash) could not restore audio.
   void mediaMute.recoverStaleMute();
 
