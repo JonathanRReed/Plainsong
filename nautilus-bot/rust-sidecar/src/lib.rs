@@ -1740,7 +1740,7 @@ async fn resolve_ready_meeting_selection(
             }
 
             Err(format!(
-                "No meeting-capable ASR route is ready. {} Open Settings -> Storage -> Guided setup -> Set up meetings, or download a meeting model in Settings -> ASR / Providers.",
+                "No meeting model is ready yet. {} Download one from Settings > General > Setup > Set up meetings, or in Settings > Models.",
                 requested_error
             ))
         }

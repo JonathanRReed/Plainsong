@@ -856,6 +856,29 @@ describe("DictationPopup", () => {
     ).toBeInTheDocument();
   });
 
+  it("says nothing was heard instead of Transcription ready with a check", async () => {
+    let container!: HTMLElement;
+    await act(async () => {
+      ({ container } = render(<DictationPopup />));
+    });
+    const stateHandler = popupMocks.listeners.get("dictation-state-changed");
+    await act(async () => {
+      stateHandler?.({
+        payload: {
+          phase: "done",
+          sessionId: 21,
+          outcome: "empty",
+          message: "No speech detected.",
+        },
+      });
+    });
+
+    expect(await screen.findByText("Nothing heard")).toBeInTheDocument();
+    expect(screen.queryByText("Transcription ready")).not.toBeInTheDocument();
+    expect(container.querySelector(".lucide-circle-check-big")).toBeNull();
+    expect(container.querySelector(".lucide-mic-off")).toBeInTheDocument();
+  });
+
   it("does not dress a failed delivery up as a success", async () => {
     // Insertion failing outright still reaches phase "done" — the transcript
     // exists and is saved — so the done surface itself has to carry the bad

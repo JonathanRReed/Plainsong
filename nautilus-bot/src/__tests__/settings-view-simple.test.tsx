@@ -1514,8 +1514,9 @@ describe("SettingsView performance behavior", () => {
     );
 
     await screen.findByText("How Plainsong listens, writes, and what it keeps.");
-    fireEvent.click(screen.getByText("Storage"));
-    await screen.findByText("Setup");
+    // Setup lives in General, where someone looking for it would start.
+    fireEvent.click(screen.getByText("General"));
+    await screen.findByRole("button", { name: /show setup again/i });
 
     fireEvent.click(screen.getByRole("button", { name: /show setup again/i }));
     fireEvent.click(screen.getByRole("button", { name: /fix dictation setup/i }));

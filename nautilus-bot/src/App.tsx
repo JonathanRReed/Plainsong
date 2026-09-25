@@ -315,6 +315,20 @@ function AppShell() {
     (onboardingGate.action === "show" && !setupClosedThisSession
       ? onboardingGate.mode
       : null);
+  // Once the gate opens setup, it stays open until the reader closes it.
+  // Readiness refreshes whenever the window regains focus, and a practice
+  // dictation, a finished download or a permission granted mid-setup can
+  // flip the gate's live answer; following it unmounted the wizard and
+  // brought it back at step 1.
+  useEffect(() => {
+    if (
+      onboardingGate.action === "show" &&
+      !setupClosedThisSession &&
+      requestedWizardMode === null
+    ) {
+      setRequestedWizardMode(onboardingGate.mode);
+    }
+  }, [onboardingGate.action, onboardingGate.mode, requestedWizardMode, setupClosedThisSession]);
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof performance === "undefined") return;
