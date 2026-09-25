@@ -2,6 +2,21 @@
 
 All notable changes to Plainsong are documented in this file.
 
+## [Unreleased]
+
+### Feel
+- The Dictation screen's microphone stage glows in gold with your voice
+  while you dictate and sweeps once while the words are set down; the
+  onboarding microphone check glows with the same live signal. Both follow
+  the light/dark setting, stay still under Reduce Motion, and are off in
+  high-contrast mode.
+- AI waits of several seconds show a small dotted indicator beside what is
+  happening instead of a spinner: "Ask your meetings" (your question now
+  appears at once with "Reading your meetings…" under it), meeting analysis,
+  and regenerating a summary, action items or notes ("Writing…").
+- Uses the MIT-licensed `voice-glow` and `thinking-orbs` packages from
+  libraries.dev.
+
 ## [0.9.0-beta.5] - 2026-09-24
 
 Dictation that feels like Typeless and Wispr Flow, Voice Edit, a new

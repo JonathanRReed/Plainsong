@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { OptionSelect } from "@/components/settings/option-select";
 import { CheckCircle2, Loader2, MicOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { GoldVoiceGlow } from "@/components/ui/voice-glow";
 import { MicLevelMeter } from "@/components/onboarding/mic-level-meter";
 import {
   micErrorMessage,
@@ -69,7 +70,7 @@ export function MicrophoneStep({
 }) {
   const pickerId = useId();
   const mic = useMicLevel();
-  const { start, state, level, heard, error, usingSystemDefault } = mic;
+  const { start, state, level, heard, error, usingSystemDefault, getStream } = mic;
   const [devices, setDevices] = useState<AudioInputDeviceInfo[]>([]);
   const [selected, setSelected] = useState<DevicePreference>(null);
   const [loaded, setLoaded] = useState(false);
@@ -169,14 +170,19 @@ export function MicrophoneStep({
         while you talk. Nothing is recorded on this step.
       </p>
 
+      {/* The glow listens to the same stream as the meter: it answers the
+          voice, the bars still say how loud. */}
+      <GoldVoiceGlow active={state === "live"} stream={state === "live" ? getStream() : null}>
       <div
         className={`rounded-xl border p-6 transition-colors motion-reduce:transition-none ${
           heard ? "border-gold/40 bg-gold/5" : "border-border bg-muted/20"
         }`}
       >
-        <MicLevelMeter level={level} active={state === "live"} />
+        <div className="relative z-[5]">
+          <MicLevelMeter level={level} active={state === "live"} />
+        </div>
 
-        <div className="mt-4 flex min-h-12 flex-col items-center text-center" role="status" aria-live="polite">
+        <div className="relative z-[5] mt-4 flex min-h-12 flex-col items-center text-center" role="status" aria-live="polite">
           {state === "error" && error ? (
             <>
               <p className="flex items-center gap-2 font-serif text-lg font-semibold text-rust">
@@ -225,7 +231,7 @@ export function MicrophoneStep({
         </div>
 
         {state === "error" ? (
-          <div className="mt-4 flex flex-wrap justify-center gap-2">
+          <div className="relative z-[5] mt-4 flex flex-wrap justify-center gap-2">
             <Button size="sm" onClick={retry}>
               Try again
             </Button>
@@ -237,6 +243,7 @@ export function MicrophoneStep({
           </div>
         ) : null}
       </div>
+      </GoldVoiceGlow>
 
       <div className="space-y-2">
         <label htmlFor={pickerId} className="text-sm font-medium">

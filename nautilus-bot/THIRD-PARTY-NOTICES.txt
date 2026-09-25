@@ -6,7 +6,7 @@ Regenerate from nautilus-bot/ with:
 
 Application package: plainsong@0.9.0-beta.5
 Rust dependency packages: 525
-npm production dependency packages: 79
+npm production dependency packages: 81
 Downloadable model artifacts: 23
 
 The dependency indexes retain declared license identifiers and repository URLs
@@ -22641,7 +22641,7 @@ NPM PRODUCTION DEPENDENCY INDEX
 argparse 2.0.1
   License: Python-2.0
   Repository: nodeca/argparse
-  License material: NPM-LICENSE-026
+  License material: NPM-LICENSE-027
 
 aria-hidden 1.2.6
   License: MIT
@@ -22651,7 +22651,7 @@ aria-hidden 1.2.6
 builder-util-runtime 9.7.0
   License: MIT
   Repository: https://github.com/electron-userland/electron-builder
-  License material: NPM-LICENSE-023
+  License material: NPM-LICENSE-024
 
 class-variance-authority 0.7.1
   License: Apache-2.0
@@ -22661,12 +22661,12 @@ class-variance-authority 0.7.1
 clsx 2.1.1
   License: MIT
   Repository: lukeed/clsx
-  License material: NPM-LICENSE-017
+  License material: NPM-LICENSE-018
 
 cmdk 1.1.1
   License: MIT
   Repository: https://github.com/pacocoursey/cmdk
-  License material: NPM-LICENSE-022
+  License material: NPM-LICENSE-023
 
 debug 4.4.3
   License: MIT
@@ -22681,7 +22681,7 @@ detect-node-es 1.1.0
 electron-updater 6.8.9
   License: MIT
   Repository: https://github.com/electron-userland/electron-builder
-  License material: NPM-LICENSE-023
+  License material: NPM-LICENSE-024
 
 fs-extra 10.1.0
   License: MIT
@@ -22691,22 +22691,22 @@ fs-extra 10.1.0
 get-nonce 1.0.1
   License: MIT
   Repository: git@github.com:theKashey/get-nonce
-  License material: NPM-LICENSE-020
+  License material: NPM-LICENSE-021
 
 graceful-fs 4.2.11
   License: ISC
   Repository: https://github.com/isaacs/node-graceful-fs
-  License material: NPM-LICENSE-029
+  License material: NPM-LICENSE-030
 
 js-yaml 4.3.1
   License: MIT
   Repository: nodeca/js-yaml
-  License material: NPM-LICENSE-018
+  License material: NPM-LICENSE-019
 
 jsonfile 6.2.1
   License: MIT
   Repository: git@github.com:jprichardson/node-jsonfile
-  License material: NPM-LICENSE-019
+  License material: NPM-LICENSE-020
 
 lazy-val 1.0.5
   License: MIT
@@ -22716,17 +22716,17 @@ lazy-val 1.0.5
 lodash.escaperegexp 4.1.2
   License: MIT
   Repository: lodash/lodash
-  License material: NPM-LICENSE-030
+  License material: NPM-LICENSE-031
 
 lodash.isequal 4.5.0
   License: MIT
   Repository: lodash/lodash
-  License material: NPM-LICENSE-027
+  License material: NPM-LICENSE-028
 
 lucide-react 1.38.0
   License: ISC
   Repository: https://github.com/lucide-icons/lucide
-  License material: NPM-LICENSE-021
+  License material: NPM-LICENSE-022
 
 ms 2.1.3
   License: MIT
@@ -22736,12 +22736,12 @@ ms 2.1.3
 react 19.2.8
   License: MIT
   Repository: https://github.com/react/react
-  License material: NPM-LICENSE-025
+  License material: NPM-LICENSE-026
 
 react-dom 19.2.8
   License: MIT
   Repository: https://github.com/react/react
-  License material: NPM-LICENSE-025
+  License material: NPM-LICENSE-026
 
 react-remove-scroll 2.7.2
   License: MIT
@@ -22761,7 +22761,7 @@ react-style-singleton 2.2.3
 reselect 5.2.0
   License: MIT
   Repository: https://github.com/reduxjs/reselect
-  License material: NPM-LICENSE-028
+  License material: NPM-LICENSE-029
 
 sax 1.6.1
   License: BlueOak-1.0.0
@@ -22771,7 +22771,7 @@ sax 1.6.1
 scheduler 0.27.0
   License: MIT
   Repository: https://github.com/facebook/react
-  License material: NPM-LICENSE-025
+  License material: NPM-LICENSE-026
 
 semver 7.7.4
   License: ISC
@@ -22781,7 +22781,12 @@ semver 7.7.4
 tailwind-merge 3.6.0
   License: MIT
   Repository: https://github.com/dcastil/tailwind-merge
-  License material: NPM-LICENSE-024
+  License material: NPM-LICENSE-025
+
+thinking-orbs 0.3.2
+  License: MIT
+  Repository: https://github.com/Jakubantalik/Libraries.dev
+  License material: NPM-LICENSE-017
 
 tiny-typed-emitter 2.1.0
   License: MIT
@@ -22816,7 +22821,12 @@ use-sidecar 1.1.3
 use-sync-external-store 1.6.0
   License: MIT
   Repository: https://github.com/facebook/react
-  License material: NPM-LICENSE-025
+  License material: NPM-LICENSE-026
+
+voice-glow 0.2.1
+  License: MIT
+  Repository: https://github.com/Jakubantalik/Libraries.dev
+  License material: NPM-LICENSE-017
 
 ================================================================================
 NPM LICENSE DOCUMENTS
@@ -23451,6 +23461,34 @@ software or this license, under any kind of legal claim.***
 
 --------------------------------------------------------------------------------
 NPM-LICENSE-017
+File name(s): LICENSE
+Applies to: thinking-orbs@0.3.2, voice-glow@0.2.1
+SHA-256: 915a283980628a0ca9e7b423ebafc6f3a0fa1e630ff17d34e59034808d92011c
+--------------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2026 Jakub Antalik
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+NPM-LICENSE-018
 File name(s): license
 Applies to: clsx@2.1.1
 SHA-256: 9a9edad7baae52622bddf3c15b2ef8a33d2c89f2d25408ad13e8a7481c6b0c97
@@ -23466,7 +23504,7 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-018
+NPM-LICENSE-019
 File name(s): LICENSE
 Applies to: js-yaml@4.3.1
 SHA-256: a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550
@@ -23494,7 +23532,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-019
+NPM-LICENSE-020
 File name(s): LICENSE
 Applies to: jsonfile@6.2.1
 SHA-256: a9801fb52ba22ef808682a094da8a7a480584b7ed0dfd0d888ab543616335031
@@ -23516,7 +23554,7 @@ OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHE
  ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-020
+NPM-LICENSE-021
 File name(s): LICENSE
 Applies to: get-nonce@1.0.1
 SHA-256: acf3b087b348d2f2e731b9d4131af185aad694c1204ce14a46909483fd42da05
@@ -23544,7 +23582,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-021
+NPM-LICENSE-022
 File name(s): LICENSE
 Applies to: lucide-react@1.38.0
 SHA-256: b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57
@@ -23594,7 +23632,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-022
+NPM-LICENSE-023
 File name(s): LICENSE.md
 Applies to: cmdk@1.1.1
 SHA-256: b5acfd21b3b61508365224c40ec1b03ec71091248baaf989d4be916551e7d532
@@ -23622,7 +23660,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-023
+NPM-LICENSE-024
 File name(s): LICENSE
 Applies to: builder-util-runtime@9.7.0, electron-updater@6.8.9
 SHA-256: bed8d0ab3e6031817f775a641ff37313b0f5591bc8ba0ed79b978dafbd4231ce
@@ -23651,7 +23689,7 @@ SOFTWARE.
 
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-024
+NPM-LICENSE-025
 File name(s): LICENSE.md
 Applies to: tailwind-merge@3.6.0
 SHA-256: d4c70c7ce38cea8778f0aed3fc0bef0a9dbd27f13bd8b6773cbd6d37941971e5
@@ -23679,7 +23717,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-025
+NPM-LICENSE-026
 File name(s): LICENSE
 Applies to: react-dom@19.2.8, react@19.2.8, scheduler@0.27.0, use-sync-external-store@1.6.0
 SHA-256: da6d3703ed11cbe42bd212c725957c98da23cbff1998c05fa4b3d976d1a58e93
@@ -23707,7 +23745,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-026
+NPM-LICENSE-027
 File name(s): LICENSE
 Applies to: argparse@2.0.1
 SHA-256: de4d1f2d2ad5ad0cfd1657a106476b31cb5db5ef9d1ff842b237c0c81f0c8a23
@@ -23968,7 +24006,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
 OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-027
+NPM-LICENSE-028
 File name(s): LICENSE
 Applies to: lodash.isequal@4.5.0
 SHA-256: e159c6d48c989185448658f276375bfb2300362ec6d4ae5525a2d49c4bcb947d
@@ -24022,7 +24060,7 @@ licenses; we recommend you read them, as their terms may differ from the
 terms above.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-028
+NPM-LICENSE-029
 File name(s): LICENSE
 Applies to: reselect@5.2.0
 SHA-256: e98047a5dee068b33f82e8c4b7a63037b5108c93393198efd4097753004af5dd
@@ -24050,7 +24088,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-029
+NPM-LICENSE-030
 File name(s): LICENSE
 Applies to: graceful-fs@4.2.11
 SHA-256: f65c5d9f22a317b2a10803bd1868461ce6499c2ed7217bc80c0cc772a748789c
@@ -24072,7 +24110,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
 IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 --------------------------------------------------------------------------------
-NPM-LICENSE-030
+NPM-LICENSE-031
 File name(s): LICENSE
 Applies to: lodash.escaperegexp@4.1.2
 SHA-256: ffd8b33b354585f4ce119f19c53728281e48a97b074491eb6bf6d5c5ff305272
