@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { AiWaitOrb } from "@/components/ui/ai-wait-orb";
 import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
@@ -4909,11 +4910,11 @@ export function RecordingsView() {
                                     disabled={!selectedRecording || isRefreshingSummary}
                                   >
                                     {isRefreshingSummary ? (
-                                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                      <AiWaitOrb state="composing" theme="light" className="mr-2" />
                                     ) : (
                                       <RefreshCw className="mr-2 h-4 w-4" />
                                     )}
-                                    Regenerate
+                                    {isRefreshingSummary ? "Writing…" : "Regenerate"}
                                   </Button>
                                   <DropdownMenu>
                                     <DropdownMenuTrigger asChild>
@@ -5021,11 +5022,11 @@ export function RecordingsView() {
                                       disabled={!selectedRecording || isRefreshingActionItems}
                                     >
                                       {isRefreshingActionItems ? (
-                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                        <AiWaitOrb state="composing" className="mr-2" />
                                       ) : (
                                         <RefreshCw className="mr-2 h-4 w-4" />
                                       )}
-                                      Regenerate
+                                      {isRefreshingActionItems ? "Writing…" : "Regenerate"}
                                     </Button>
                                     <Button
                                       type="button"
@@ -5406,11 +5407,15 @@ export function RecordingsView() {
                                   disabled={!selectedRecording || isEnhancingMeetingNotes}
                                 >
                                   {isEnhancingMeetingNotes ? (
-                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                    <AiWaitOrb state="composing" className="mr-2" />
                                   ) : (
                                     <RefreshCw className="mr-2 h-4 w-4" />
                                   )}
-                                  {enhancedMeetingNotesDraft ? "Build it again" : "Build a draft"}
+                                  {isEnhancingMeetingNotes
+                                    ? "Writing…"
+                                    : enhancedMeetingNotesDraft
+                                      ? "Build it again"
+                                      : "Build a draft"}
                                 </Button>
                                 <Button
                                   type="button"

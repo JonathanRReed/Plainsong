@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { AiWaitOrb } from "@/components/ui/ai-wait-orb";
 import { useSavedPromptChat } from "@/components/prompts/use-saved-prompt-chat";
 import { ActionItemChip } from "@/components/views/meetings/action-item-list";
 import {
@@ -32,7 +33,6 @@ import {
   Lightbulb,
   Calendar,
   Send,
-  Loader2,
   AlertCircle
 } from "lucide-react";
 import { formatTime } from "@/lib/format-locale";
@@ -577,11 +577,7 @@ export function AiAnalysisPanel({
             onClick={handleCustomQuery}
             disabled={isAnalyzing || !customQuery.trim() || savedPromptChat.pickerOpen}
           >
-            {isAnalyzing ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
+            <Send className="h-4 w-4" />
           </Button>
         </div>
         {savedPromptChat.picker}
@@ -657,7 +653,7 @@ export function AiAnalysisPanel({
           className="rounded-lg border border-border bg-muted/30 p-3 text-sm text-muted-foreground"
         >
           <div className="flex items-center gap-2">
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <AiWaitOrb state="composing" />
             <span>{analysisProgress.message}</span>
           </div>
           {analysisProgress.strategy === "chunked" && analysisProgress.total > 0 ? (
@@ -693,7 +689,9 @@ export function AiAnalysisPanel({
       {/* Results */}
       {isAnalyzing && !lastResult && !actionItems && (
         <div className="flex flex-col items-center justify-center gap-3 py-10 text-center">
-          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          {/* One orb at a time: the progress card above carries it once a
+              long transcript is analysed in parts. */}
+          {analysisProgress ? null : <AiWaitOrb state="composing" />}
           <p className="font-serif text-sm text-muted-foreground">{emptyStateLabel}</p>
         </div>
       )}

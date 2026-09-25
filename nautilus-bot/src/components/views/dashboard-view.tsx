@@ -51,6 +51,7 @@ import {
 import { formatDate, formatNumber, formatShortTime } from "@/lib/format-locale";
 import { getDictationInsights, type DictationInsights } from "@/lib/backend/dictation";
 import { DictationStats } from "@/components/views/dictation/dictation-stats";
+import { AiWaitOrb } from "@/components/ui/ai-wait-orb";
 
 /** How many recordings Recent shows; the Dictation and Meetings views hold the rest. */
 const RECENT_LIMIT = 12;
@@ -117,6 +118,9 @@ export function DashboardView() {
   const [memoryQuery, setMemoryQuery] = useState("");
   const [memoryMessages, setMemoryMessages] = useState<MeetingChatMessage[]>([]);
   const [memoryLoading, setMemoryLoading] = useState(false);
+  // The question being answered, shown in the thread at once with a pending
+  // reply under it: an answer across every transcript can take half a minute.
+  const [pendingMemoryQuery, setPendingMemoryQuery] = useState<string | null>(null);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const currentRequestIdRef = useRef<number>(0);
   const [relationshipMemory, setRelationshipMemory] = useState<RelationshipMemory | null>(null);
@@ -276,6 +280,7 @@ export function DashboardView() {
     currentRequestIdRef.current = requestId;
     
     setMemoryLoading(true);
+    setPendingMemoryQuery(query);
     setMemoryError(null);
     try {
       const result = await askMemory(buildThreadedMemoryQuery(query));
@@ -315,6 +320,7 @@ export function DashboardView() {
       // Only update loading state if this is still the current request
       if (currentRequestIdRef.current === requestId) {
         setMemoryLoading(false);
+        setPendingMemoryQuery(null);
       }
     }
   };
@@ -627,7 +633,7 @@ export function DashboardView() {
                     onClick={() => void runMemoryQuery()}
                     disabled={memoryLoading || !memoryQuery.trim() || savedPromptChat.pickerOpen}
                   >
-                    {memoryLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    <Send className="h-4 w-4" />
                   </Button>
                 </div>
                 {savedPromptChat.picker}
@@ -640,7 +646,7 @@ export function DashboardView() {
                   {memoryError}
                 </div>
               )}
-              {memoryMessages.length > 0 && (
+              {(memoryMessages.length > 0 || pendingMemoryQuery) && (
                 <div className="space-y-3 max-h-96 overflow-y-auto">
                   {memoryMessages.map((message) => (
                     <div
@@ -673,6 +679,20 @@ export function DashboardView() {
                       )}
                     </div>
                   ))}
+                  {pendingMemoryQuery ? (
+                    <>
+                      <div className="p-3 rounded-lg bg-muted/40 ml-8">
+                        <p className="text-sm">{pendingMemoryQuery}</p>
+                      </div>
+                      <div
+                        role="status"
+                        className="flex items-center gap-2 p-3 rounded-lg bg-muted/20 mr-8 text-sm text-muted-foreground"
+                      >
+                        <AiWaitOrb state="searching" />
+                        Reading your meetings…
+                      </div>
+                    </>
+                  ) : null}
                 </div>
               )}
             </CardContent>

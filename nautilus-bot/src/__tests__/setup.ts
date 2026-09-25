@@ -28,9 +28,23 @@ if (!window.matchMedia) {
   })) as unknown as typeof window.matchMedia;
 }
 
+// Paths and gradients cover the thinking-orbs and voice-glow canvases.
 const canvas2DContextStub = {
+  arc: vi.fn(),
   beginPath: vi.fn(),
   clearRect: vi.fn(),
+  closePath: vi.fn(),
+  createLinearGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+  createRadialGradient: vi.fn(() => ({ addColorStop: vi.fn() })),
+  ellipse: vi.fn(),
+  lineTo: vi.fn(),
+  moveTo: vi.fn(),
+  stroke: vi.fn(),
+  translate: vi.fn(),
+  lineWidth: 1,
+  strokeStyle: "",
+  filter: "none",
+  globalCompositeOperation: "source-over",
   drawImage: vi.fn(),
   fill: vi.fn(),
   fillRect: vi.fn(),

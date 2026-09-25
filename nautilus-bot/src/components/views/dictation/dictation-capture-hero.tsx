@@ -11,6 +11,8 @@ import {
   Volume2,
 } from "lucide-react";
 import type { DictationPhase } from "@/features/dictation/runtime";
+import { GoldVoiceGlow } from "@/components/ui/voice-glow";
+import { useDictationLevel } from "@/hooks/use-dictation-level";
 
 export type DictationPhaseTone = "idle" | "active" | "success" | "error";
 
@@ -73,6 +75,9 @@ export function DictationCaptureHero({
   onUnavailableAction,
 }: DictationCaptureHeroProps) {
   const isUnavailable = !isAvailable && !isCaptureLive && !isBusy;
+  // The ring and status sit on a stage that glows with the voice while the
+  // mic is live, then sweeps once while the words are set down.
+  const voiceLevel = useDictationLevel(isCaptureLive && phase === "recording");
   // Readiness still being checked is a normal loading state, not a
   // problem: a spinner and a disabled "Checking…", never the rust warning.
   const isChecking = isUnavailable && unavailableRole === "status";
@@ -80,13 +85,13 @@ export function DictationCaptureHero({
     ? "border-gold/20 bg-gold/5"
     : isUnavailable
       ? "border-rust/30 bg-rust/10"
-    : phase === "done"
-      ? "border-gold/20 bg-gold/5"
-      : phase === "error"
-        ? "border-rust/30 bg-rust/10"
-        : hotkeyPressed
-          ? "border-gold/30 bg-gold/5"
-          : "border-border bg-muted/20";
+      : phase === "done"
+        ? "border-gold/20 bg-gold/5"
+        : phase === "error"
+          ? "border-rust/30 bg-rust/10"
+          : hotkeyPressed
+            ? "border-gold/30 bg-gold/5"
+            : "border-border bg-muted/20";
 
   return (
     <Card
@@ -110,98 +115,103 @@ export function DictationCaptureHero({
         </div>
 
         <div className="flex flex-col items-center gap-5 py-2">
-          <div
-            className={cn(
-              "relative flex h-24 w-24 items-center justify-center rounded-full border transition-transform duration-150",
-              ringToneClass,
-              isCaptureLive && "gilt-halo",
-              hotkeyPressed && !isCaptureLive && "scale-[1.03]",
-            )}
+          <GoldVoiceGlow
+            className="w-full"
+            active={isCaptureLive || isBusy}
+            level={voiceLevel}
+            processing={isBusy}
           >
-            {isCaptureLive ? (
-              <>
-                <span
-                  aria-hidden="true"
-                  className="absolute inset-0 rounded-full border border-gold/20 animate-ping opacity-40"
-                />
-                <span
-                  aria-hidden="true"
-                  className="absolute inset-[10px] rounded-full border border-gold/20 opacity-60"
-                />
-                <Mic className="relative h-10 w-10 text-gold" />
-              </>
-            ) : isBusy ? (
-              <RefreshCw className="h-10 w-10 animate-spin text-foreground" />
-            ) : isChecking ? (
-              <RefreshCw className="h-10 w-10 animate-spin text-muted-foreground" />
-            ) : isUnavailable ? (
-              <TriangleAlert className="h-10 w-10 text-rust" />
-            ) : phase === "done" ? (
-              <CheckCircle2 className="h-10 w-10 text-gold-text" />
-            ) : phase === "error" ? (
-              <TriangleAlert className="h-10 w-10 text-rust" />
-            ) : (
-              <>
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    "absolute inset-0 rounded-full border transition-all duration-150",
-                    hotkeyPressed
-                      ? "border-gold/30 opacity-100"
-                      : "border-border/60 opacity-70",
-                  )}
-                />
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    "absolute inset-[10px] rounded-full border transition-all duration-150",
-                    hotkeyPressed
-                      ? "border-gold/25 opacity-100"
-                      : "border-border/50 opacity-70",
-                  )}
-                />
-                <Mic
-                  className={cn(
-                    "relative h-10 w-10 transition-colors",
-                    hotkeyPressed ? "text-gold" : "text-muted-foreground",
-                  )}
-                />
-              </>
-            )}
-          </div>
-
-          <div className="text-center">
-            <p className="text-lg font-medium">
-              <span
-                aria-hidden="true"
+            <div className="flex w-full flex-col items-center gap-5 rounded-xl pt-2 pb-8">
+              <div
                 className={cn(
-                  "mr-2 align-middle neume",
-                  isUnavailable || phaseTone === "error"
-                    ? "neume-rust"
-                    : phaseTone === "idle"
-                      ? "neume-hollow"
-                      : "neume-lit",
-                  isCaptureLive && "neume-live",
+                  "relative z-[5] flex h-24 w-24 items-center justify-center rounded-full border transition-transform duration-150",
+                  ringToneClass,
+                  isCaptureLive && "gilt-halo",
+                  hotkeyPressed && !isCaptureLive && "scale-[1.03]",
                 )}
-              />
-              {isUnavailable ? unavailableTitle : phaseTitle}
-            </p>
-            {isCaptureLive ? (
-              phase === "recording" ? (
-                <p className="time-spec mt-2 font-mono text-3xl font-semibold text-foreground">
-                  {formattedDuration}
+              >
+                {isCaptureLive ? (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className="absolute inset-[10px] rounded-full border border-gold/20 opacity-60"
+                    />
+                    <Mic className="relative h-10 w-10 text-gold" />
+                  </>
+                ) : isBusy ? (
+                  <RefreshCw className="h-10 w-10 animate-spin text-foreground" />
+                ) : isChecking ? (
+                  <RefreshCw className="h-10 w-10 animate-spin text-muted-foreground" />
+                ) : isUnavailable ? (
+                  <TriangleAlert className="h-10 w-10 text-rust" />
+                ) : phase === "done" ? (
+                  <CheckCircle2 className="h-10 w-10 text-gold-text" />
+                ) : phase === "error" ? (
+                  <TriangleAlert className="h-10 w-10 text-rust" />
+                ) : (
+                  <>
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "absolute inset-0 rounded-full border transition-all duration-150",
+                        hotkeyPressed
+                          ? "border-gold/30 opacity-100"
+                          : "border-border/60 opacity-70",
+                      )}
+                    />
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "absolute inset-[10px] rounded-full border transition-all duration-150",
+                        hotkeyPressed
+                          ? "border-gold/25 opacity-100"
+                          : "border-border/50 opacity-70",
+                      )}
+                    />
+                    <Mic
+                      className={cn(
+                        "relative h-10 w-10 transition-colors",
+                        hotkeyPressed ? "text-gold" : "text-muted-foreground",
+                      )}
+                    />
+                  </>
+                )}
+              </div>
+
+              <div className="relative z-[5] text-center">
+                <p className="text-lg font-medium">
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "mr-2 align-middle neume",
+                      isUnavailable || phaseTone === "error"
+                        ? "neume-rust"
+                        : phaseTone === "idle"
+                          ? "neume-hollow"
+                          : "neume-lit",
+                      isCaptureLive && "neume-live",
+                    )}
+                  />
+                  {isUnavailable ? unavailableTitle : phaseTitle}
                 </p>
-              ) : (
-                <p className="mt-2 text-sm text-muted-foreground">
-                  {phaseDetail}
-                </p>
-              )
-            ) : (
-              <p className="mt-1 text-sm text-muted-foreground">
-                {isUnavailable ? unavailableDetail : phaseDetail}
-              </p>
-            )}
-          </div>
+                {isCaptureLive ? (
+                  phase === "recording" ? (
+                    <p className="time-spec mt-2 font-mono text-3xl font-semibold text-foreground">
+                      {formattedDuration}
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      {phaseDetail}
+                    </p>
+                  )
+                ) : (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {isUnavailable ? unavailableDetail : phaseDetail}
+                  </p>
+                )}
+              </div>
+            </div>
+          </GoldVoiceGlow>
 
           {isCaptureLive || phase === "preparing" ? (
             <Button variant="outline" size="lg" onClick={onStop}>
