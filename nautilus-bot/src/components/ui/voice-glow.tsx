@@ -1,13 +1,19 @@
 import type { ReactNode } from "react";
 import { VoiceBeam, type VoiceBeamLevel } from "voice-glow";
 import { useDocumentTheme } from "@/hooks/use-document-theme";
+import { DecorativeBoundary } from "@/components/ui/decorative-boundary";
 
 // House gold, centre first then outward: --brand-warm on dark, the brand gold
 // the waveform glows with, then --brand-warm-strong's deeper bronze. The
 // library parses hex/rgb only, so these mirror the OKLCH tokens.
 const HOUSE_GOLDS = ["#dcb366", "#c89543", "#b5823a", "#96692e"];
 // The band's defaults carry teal and rose fringes; keep the ridge in gold too.
-const HOUSE_BAND = { core: "#f1dcaa", above: "#dcb366", mid: "#c89543", below: "#96692e" };
+const HOUSE_BAND = {
+  core: "#f1dcaa",
+  above: "#dcb366",
+  mid: "#c89543",
+  below: "#96692e",
+};
 
 function forcedColorsActive(): boolean {
   return (
@@ -48,19 +54,21 @@ export function GoldVoiceGlow({
 }: GoldVoiceGlowProps) {
   const theme = useDocumentTheme();
   return (
-    <VoiceBeam
-      className={className}
-      active={active && !forcedColorsActive()}
-      level={level}
-      stream={stream}
-      processing={processing}
-      theme={theme}
-      colorVariant="gold"
-      colors={HOUSE_GOLDS}
-      bandColors={HOUSE_BAND}
-      staticColors
-    >
-      {children}
-    </VoiceBeam>
+    <DecorativeBoundary fallback={<div className={className}>{children}</div>}>
+      <VoiceBeam
+        className={className}
+        active={active && !forcedColorsActive()}
+        level={level}
+        stream={stream}
+        processing={processing}
+        theme={theme}
+        colorVariant="gold"
+        colors={HOUSE_GOLDS}
+        bandColors={HOUSE_BAND}
+        staticColors
+      >
+        {children}
+      </VoiceBeam>
+    </DecorativeBoundary>
   );
 }

@@ -66,6 +66,18 @@ HTMLCanvasElement.prototype.getContext = vi.fn(
   () => canvas2DContextStub as unknown as CanvasRenderingContext2D
 ) as unknown as typeof HTMLCanvasElement.prototype.getContext;
 
+// voice-glow drives SVG filters and Web Audio that jsdom does not implement;
+// its visuals are checked in a real renderer, so tests get a plain wrapper.
+vi.mock("voice-glow", async () => {
+  const { createElement, forwardRef } = await import("react");
+  const VoiceBeam = forwardRef<HTMLDivElement, { children?: import("react").ReactNode; className?: string }>(
+    function VoiceBeam({ children, className }, ref) {
+      return createElement("div", { ref, className, "data-voice-glow": "" }, children);
+    },
+  );
+  return { VoiceBeam, default: VoiceBeam };
+});
+
 // Mock Electron IPC adapter
 vi.mock("@/lib/electron", () => ({
   invoke: vi.fn(),

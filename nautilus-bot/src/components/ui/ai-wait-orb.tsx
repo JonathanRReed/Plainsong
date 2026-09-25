@@ -1,10 +1,14 @@
 import { ThinkingOrb, type OrbState } from "thinking-orbs";
 import { cn } from "@/lib/utils";
+import { DecorativeBoundary } from "@/components/ui/decorative-boundary";
 
 interface AiWaitOrbProps {
   /** What the model is doing: "composing" writes, "searching" reads across
    * meetings, "breathing" thinks before an answer. */
-  state: Extract<OrbState, "composing" | "searching" | "breathing" | "listening">;
+  state: Extract<
+    OrbState,
+    "composing" | "searching" | "breathing" | "listening"
+  >;
   /** Pin the ink for a surface the app theme does not describe, such as
    * dark dots on the gold primary button. Defaults to the app's theme. */
   theme?: "dark" | "light";
@@ -21,12 +25,14 @@ interface AiWaitOrbProps {
  */
 export function AiWaitOrb({ state, theme, className }: AiWaitOrbProps) {
   return (
-    <ThinkingOrb
-      state={state}
-      size={20}
-      theme={theme ?? "auto"}
-      aria-hidden="true"
-      className={cn("inline-block shrink-0 align-middle", className)}
-    />
+    <DecorativeBoundary fallback={null}>
+      <ThinkingOrb
+        state={state}
+        size={20}
+        theme={theme ?? "auto"}
+        aria-hidden="true"
+        className={cn("inline-block shrink-0 align-middle", className)}
+      />
+    </DecorativeBoundary>
   );
 }
