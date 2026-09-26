@@ -19,11 +19,16 @@ export function parseCloudLocationRequest(args: unknown): CloudLocationRequest {
   }
 
   const folder = typeof payload.folder === "string" ? payload.folder.trim() : "";
+  // Security validation: ensure the path is a safe relative folder name.
+  // Must not contain null bytes, start with root slashes or Windows drive specifiers,
+  // or contain directory traversal components ('.' or '..').
   if (
     !folder ||
     folder.length > 160 ||
+    folder.includes("\0") ||
     folder.startsWith("/") ||
     folder.startsWith("\\") ||
+    /^[A-Za-z]:/.test(folder) ||
     folder.split(/[\\/]/).some((part) => part === ".." || part === ".")
   ) {
     throw new Error("Cloud folder must be a safe relative path");
