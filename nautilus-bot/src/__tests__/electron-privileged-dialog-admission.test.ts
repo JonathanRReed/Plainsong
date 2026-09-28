@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { CaptureAdmissionController } from "../../electron/capture-admission";
+import { parseCloudLocationRequest } from "../../electron/privileged-storage-locations";
 
 function localCommandHandler(): string {
   const source = readFileSync(path.resolve(process.cwd(), "electron/main.ts"), "utf8");
@@ -235,5 +236,29 @@ describe("privileged native dialog admission", () => {
       .map(({ command }) => command);
 
     expect(openExternalCases).toEqual(["open_calendar_privacy_settings"]);
+  });
+
+  it("rejects null bytes and Windows drive specifiers in cloud location requests", () => {
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "i_cloud",
+        folder: "backups\0/../sensitive",
+      }),
+    ).toThrow("Cloud folder must be a safe relative path");
+
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "i_cloud",
+        folder: "C:backups",
+      }),
+    ).toThrow("Cloud folder must be a safe relative path");
+
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "google_drive",
+        remoteName: "gdrive",
+        folder: "D:\\system32",
+      }),
+    ).toThrow("Cloud folder must be a safe relative path");
   });
 });
