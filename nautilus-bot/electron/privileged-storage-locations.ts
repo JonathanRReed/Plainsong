@@ -19,9 +19,13 @@ export function parseCloudLocationRequest(args: unknown): CloudLocationRequest {
   }
 
   const folder = typeof payload.folder === "string" ? payload.folder.trim() : "";
+  // Prevent null byte truncation, Windows drive specifiers (e.g. C:), absolute
+  // paths, and directory traversal segments.
   if (
     !folder ||
     folder.length > 160 ||
+    folder.includes("\0") ||
+    /^[A-Za-z]:/.test(folder) ||
     folder.startsWith("/") ||
     folder.startsWith("\\") ||
     folder.split(/[\\/]/).some((part) => part === ".." || part === ".")

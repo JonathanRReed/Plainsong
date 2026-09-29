@@ -48,6 +48,20 @@ describe("privileged storage command admission", () => {
         folder: "../outside",
       }),
     ).toThrow("safe relative path");
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "google_drive",
+        remoteName: "gdrive",
+        folder: "C:\\Windows",
+      }),
+    ).toThrow("safe relative path");
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "google_drive",
+        remoteName: "gdrive",
+        folder: "folder\0sub",
+      }),
+    ).toThrow("safe relative path");
     expect(
       parseCloudLocationRequest({
         provider: "google_drive",
