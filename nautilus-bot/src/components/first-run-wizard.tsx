@@ -719,7 +719,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   }, []);
 
   const permissionStepVisible =
-    step === "permissions" || step === "try-dictation" || step === "use-everywhere";
+    step === "permissions" ||
+    step === "try-dictation" ||
+    step === "use-everywhere" ||
+    step === "meeting-setup" ||
+    step === "ready";
 
   useEffect(() => {
     if (permissionStepVisible) {
