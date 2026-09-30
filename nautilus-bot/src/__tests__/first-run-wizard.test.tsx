@@ -1513,7 +1513,7 @@ describe("FirstRunWizard", () => {
     const testSystemAudioCapture = vi.mocked(
       recordingsBackend.testSystemAudioCapture,
     );
-    getSystemAudioCapability.mockResolvedValueOnce({
+    const unverifiedCapability = {
       backend: "core_audio_process_tap",
       nativeOsSupported: true,
       nativeOsEnabled: true,
@@ -1525,7 +1525,10 @@ describe("FirstRunWizard", () => {
       ready: false,
       reason: null,
       actionableReason: "Run Test system audio.",
-    });
+    } as const;
+    getSystemAudioCapability
+      .mockResolvedValueOnce(unverifiedCapability)
+      .mockResolvedValueOnce(unverifiedCapability);
 
     render(<FirstRunWizard mode="meetings" onComplete={vi.fn()} />);
 
