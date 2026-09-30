@@ -8,6 +8,7 @@ import {
   Loader2,
   Mail,
   Mic,
+  MicOff,
   Minimize2,
   PanelsTopLeft,
   RotateCcw,
@@ -1286,13 +1287,20 @@ export function DictationPopup() {
 
   // Computed above every early return below: hooks must run in the same order
   // on every render, and the minimal pill returns before this point.
+  // The pill already reads "No speech" from the message; the card must not
+  // say "Transcription ready" with a check mark over the same result.
+  const heardNothing =
+    phase === "done" &&
+    describePillStatus({ phase, stage: finishStage, outcome, message }).label === "No speech";
   const { doneTitle, doneMessage, commandLabel, deliveryRefusal } = useMemo(() => ({
     deliveryRefusal: describeDictationDeliveryRefusal(outcome),
-    doneTitle: formatDoneTitle(
-      outcome,
-      finalCommandApplied,
-      runtimeAppTarget,
-    ),
+    doneTitle: heardNothing
+      ? "Nothing heard"
+      : formatDoneTitle(
+          outcome,
+          finalCommandApplied,
+          runtimeAppTarget,
+        ),
     doneMessage:
       message ??
       formatDoneMessage(
@@ -1304,6 +1312,7 @@ export function DictationPopup() {
       ),
     commandLabel: formatAppliedDictationCommandLabel(finalCommandApplied),
   }), [
+    heardNothing,
     outcome,
     finalCommandApplied,
     runtimeAppTarget,
@@ -1723,6 +1732,8 @@ export function DictationPopup() {
           <div className="flex items-start gap-3 text-foreground">
             {outcome === "error" || deliveryRefusal ? (
               <TriangleAlert className="mt-1 h-5 w-5 shrink-0 text-rust" />
+            ) : heardNothing ? (
+              <MicOff className="mt-1 h-5 w-5 shrink-0 text-muted-foreground" />
             ) : (
               <CheckCircle2 className="mt-1 h-5 w-5 shrink-0 text-foreground" />
             )}

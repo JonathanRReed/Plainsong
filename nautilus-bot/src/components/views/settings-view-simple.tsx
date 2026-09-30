@@ -339,7 +339,7 @@ const SETTINGS_TABS = [
   {
     id: "general" as TabId,
     label: "General",
-    summary: "Theme, windows, notifications, calendar, meeting behaviour, and shortcuts",
+    summary: "Theme, windows, notifications, calendar, meeting behaviour, shortcuts, and setup",
     icon: Monitor,
   },
   {
@@ -4896,6 +4896,45 @@ export function SettingsView() {
 
                       {renderShortcutsSection()}
                     </div>
+
+                    <div className="border-t pt-4 space-y-3">
+                      <div className="space-y-1">
+                        <p className="section-heading">Setup</p>
+                        <p className="text-sm text-muted-foreground">
+                          Walk through permissions, models, and meeting
+                          capture again. Plainsong also opens this on its own
+                          when dictation cannot run — a revoked permission, a
+                          deleted model — whether or not you have been through
+                          it before.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          variant="secondary"
+                          onClick={() => requestMainView("setup")}
+                        >
+                          Open Setup
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => requestOnboarding("full")}
+                        >
+                          Show setup again
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => requestOnboarding("dictation")}
+                        >
+                          Fix dictation setup
+                        </Button>
+                        <Button
+                          variant="outline"
+                          onClick={() => requestOnboarding("meetings")}
+                        >
+                          Set up meetings
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                 )}
 
@@ -5331,45 +5370,6 @@ export function SettingsView() {
                         The audio and the transcript
                       </option>
                     </SettingsOptionSelect>
-
-                    <div className="border-t pt-4 space-y-3">
-                      <div className="space-y-1">
-                        <p className="section-heading">Setup</p>
-                        <p className="text-sm text-muted-foreground">
-                          Walk through permissions, models, and meeting
-                          capture again. Plainsong also opens this on its own
-                          when dictation cannot run — a revoked permission, a
-                          deleted model — whether or not you have been through
-                          it before.
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="secondary"
-                          onClick={() => requestMainView("setup")}
-                        >
-                          Open Setup
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() => requestOnboarding("full")}
-                        >
-                          Show setup again
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() => requestOnboarding("dictation")}
-                        >
-                          Fix dictation setup
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() => requestOnboarding("meetings")}
-                        >
-                          Set up meetings
-                        </Button>
-                      </div>
-                    </div>
 
                     <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
                       <div className="space-y-1">

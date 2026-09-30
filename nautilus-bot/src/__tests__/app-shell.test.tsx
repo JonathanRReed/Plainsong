@@ -385,6 +385,24 @@ describe("App shell", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps setup open while readiness changes underneath it", async () => {
+    const { rerender } = render(<App />);
+    const wizard = await screen.findByRole("dialog", { name: "First-run wizard" });
+
+    // Mid-setup the Mac becomes ready (a download finishes, a permission is
+    // granted), then briefly not (the model is busy with a practice
+    // dictation). Following the gate unmounted the wizard and brought it back
+    // at step 1 when the reader clicked back to Plainsong.
+    setReadiness(readyMac(undefined));
+    rerender(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "First-run wizard" })).toBe(wizard);
+    });
+    setReadiness({ dictationRoute: { ready: false } } as never);
+    rerender(<App />);
+    expect(screen.getByRole("dialog", { name: "First-run wizard" })).toBe(wizard);
+  });
+
   it("reopens setup on demand after it has been closed", async () => {
     render(<App />);
 

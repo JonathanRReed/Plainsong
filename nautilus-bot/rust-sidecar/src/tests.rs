@@ -7821,3 +7821,20 @@ fn a_voice_edit_that_returns_nothing_or_echoes_the_instruction_fails() {
         "Already clean."
     ));
 }
+
+#[test]
+fn app_bundle_is_found_from_the_sidecar_inside_resources() {
+    let root = std::env::temp_dir().join(format!("plainsong-bundle-{}", std::process::id()));
+    let sidecar_dir = root.join("Plainsong.app/Contents/Resources/sidecar");
+    std::fs::create_dir_all(&sidecar_dir).expect("bundle layout");
+    let sidecar = sidecar_dir.join("plainsong-sidecar");
+    assert_eq!(
+        crate::text_insert::app_bundle_containing(&sidecar),
+        Some(root.join("Plainsong.app"))
+    );
+    assert_eq!(
+        crate::text_insert::app_bundle_containing(&root.join("target/release/plainsong-sidecar")),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

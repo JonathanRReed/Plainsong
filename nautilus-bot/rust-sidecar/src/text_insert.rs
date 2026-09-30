@@ -258,22 +258,54 @@ pub(crate) fn can_dispatch_hotkeys() -> bool {
     check_accessibility_permission() || check_post_event_access()
 }
 
+/// The Plainsong.app this process runs from. The sidecar lives in
+/// `Contents/Resources/sidecar/`, not `Contents/MacOS/`, so this walks up to
+/// the enclosing `.app` rather than assuming the main executable's layout
+/// (which made it None in every packaged build, and with it the disk-image
+/// warning and the app-copy diagnostics).
 #[cfg(target_os = "macos")]
 pub(crate) fn current_app_bundle_path() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
-    let macos_dir = executable.parent()?;
-    if macos_dir.file_name()?.to_str()? != "MacOS" {
-        return None;
+    app_bundle_containing(&executable)
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn app_bundle_containing(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|ancestor| {
+            ancestor.extension().and_then(|ext| ext.to_str()) == Some("app")
+                && ancestor.join("Contents").is_dir()
+        })
+        .map(Path::to_path_buf)
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreServices", kind = "framework")]
+extern "C" {
+    fn LSRegisterURL(in_url: core_foundation::url::CFURLRef, in_update: Boolean) -> i32;
+}
+
+/// Tells Launch Services that this copy is Plainsong. macOS resolves the
+/// Accessibility switch through the bundle identifier; with a stale copy
+/// registered (an old download, a mounted disk image, a deleted build) the
+/// switch the user turns on can resolve to that copy, fail its code check and
+/// vanish again.
+#[cfg(target_os = "macos")]
+pub(crate) fn register_running_app_bundle() -> Result<PathBuf, String> {
+    let bundle = current_app_bundle_path()
+        .ok_or_else(|| "Plainsong is not running from an app bundle.".to_string())?;
+    let url = core_foundation::url::CFURL::from_path(&bundle, true)
+        .ok_or_else(|| format!("Could not form a URL for {}", bundle.display()))?;
+    let status = unsafe { LSRegisterURL(url.as_concrete_TypeRef(), 1) };
+    if status == 0 {
+        Ok(bundle)
+    } else {
+        Err(format!(
+            "Launch Services returned {status} for {}",
+            bundle.display()
+        ))
     }
-    let contents_dir = macos_dir.parent()?;
-    if contents_dir.file_name()?.to_str()? != "Contents" {
-        return None;
-    }
-    let bundle_dir = contents_dir.parent()?;
-    if bundle_dir.extension()?.to_str()? != "app" {
-        return None;
-    }
-    Some(bundle_dir.to_path_buf())
 }
 
 #[cfg(target_os = "macos")]

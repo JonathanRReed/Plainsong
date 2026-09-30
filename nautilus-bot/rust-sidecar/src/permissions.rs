@@ -207,6 +207,12 @@ pub(crate) async fn repair_cursor_insert_permissions_impl(
             .accessibility_trust_observed
             .store(false, Ordering::Relaxed);
 
+        // First make sure macOS resolves "Plainsong" to this copy, or the
+        // switch turned on below can bind to a stale one and switch itself off.
+        if let Err(error) = crate::text_insert::register_running_app_bundle() {
+            tracing::warn!("Could not re-register the running app with Launch Services: {error}");
+        }
+
         match reset_tcc_service("Accessibility", APP_BUNDLE_IDENTIFIER) {
             Ok(()) => notes.push(
                 "Reset the macOS Accessibility privacy decision for Plainsong. Re-enable Plainsong in Privacy & Security > Accessibility if macOS shows it turned off."
