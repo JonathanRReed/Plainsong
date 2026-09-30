@@ -22,8 +22,10 @@ export function parseCloudLocationRequest(args: unknown): CloudLocationRequest {
   if (
     !folder ||
     folder.length > 160 ||
+    folder.includes("\0") ||
     folder.startsWith("/") ||
     folder.startsWith("\\") ||
+    /^[A-Za-z]:/.test(folder) ||
     folder.split(/[\\/]/).some((part) => part === ".." || part === ".")
   ) {
     throw new Error("Cloud folder must be a safe relative path");
