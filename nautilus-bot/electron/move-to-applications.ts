@@ -1,6 +1,6 @@
 /**
- * Offering to install Plainsong when it was opened straight from its disk
- * image.
+ * Offering to install Plainsong when it was opened from its disk image,
+ * including a first launch relocated by macOS App Translocation.
  *
  * A copy running from /Volumes is the one macOS attaches Microphone and
  * Accessibility grants to, and it disappears when the disk image is ejected,
@@ -13,7 +13,7 @@
 export interface MoveToApplicationsDeps {
   isPackaged: boolean;
   platform: NodeJS.Platform;
-  /** The running .app bundle, e.g. /Volumes/Plainsong/Plainsong.app. */
+  /** The running .app bundle, possibly in /Volumes or AppTranslocation. */
   bundlePath: string | null;
   isInApplicationsFolder: () => boolean;
   /** Resolves with the index of the button the reader chose. */
@@ -36,7 +36,8 @@ export function runningFromDiskImage(deps: Pick<MoveToApplicationsDeps, "isPacka
     deps.isPackaged &&
     deps.platform === "darwin" &&
     typeof deps.bundlePath === "string" &&
-    deps.bundlePath.startsWith("/Volumes/")
+    (deps.bundlePath.startsWith("/Volumes/") ||
+      deps.bundlePath.includes("/AppTranslocation/"))
   );
 }
 
