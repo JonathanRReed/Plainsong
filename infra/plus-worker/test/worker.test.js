@@ -168,6 +168,23 @@ test("fair use: an exhausted allowance answers 429 without calling the provider"
   assert.equal(calls.length, 0);
 });
 
+test("concurrent transcriptions atomically reserve the remaining allowance", async () => {
+  upstream["api.x.ai/v1/stt"] = () => ({ status: 200, body: { text: "hello", duration: 2, words: [] } });
+  const e = env();
+  await e.__store.addUsage("cus_1", usagePeriod(), { dictationSeconds: MONTHLY_CAPS.dictationSeconds - 2 });
+  const token = await signToken({ sub: "cus_1" }, SECRET);
+  const responses = await Promise.all([
+    call(e, "POST", "/v1/audio/transcriptions", { token, body: audioForm(2) }),
+    call(e, "POST", "/v1/audio/transcriptions", { token, body: audioForm(2) }),
+  ]);
+  assert.deepEqual(
+    responses.map((response) => response.status).sort(),
+    [200, 429],
+  );
+  assert.equal(calls.filter((entry) => entry.key === "api.x.ai/v1/stt").length, 1);
+  assert.equal((await e.__store.getUsage("cus_1", usagePeriod())).dictationSeconds, MONTHLY_CAPS.dictationSeconds);
+});
+
 test("a clip longer than one dictation request allows is refused", async () => {
   const token = await signToken({ sub: "cus_1" }, SECRET);
   const response = await call(env(), "POST", "/v1/audio/transcriptions", { token, body: audioForm(11 * 60) });
@@ -311,6 +328,27 @@ test("a chat request whose worst case exceeds the remaining allowance answers 42
   assert.equal(calls.length, 0);
   const small = { ...big, max_tokens: 512 };
   assert.equal((await call(e, "POST", "/v1/chat/completions", { token, body: small })).status, 200);
+});
+
+test("concurrent chats atomically reserve the remaining allowance", async () => {
+  upstream["api.groq.com/openai/v1/chat/completions"] = () => ({
+    status: 200,
+    body: { choices: [{ message: { content: "Done." } }], usage: { prompt_tokens: 1, completion_tokens: 1 } },
+  });
+  const e = env();
+  await e.__store.addUsage("cus_1", usagePeriod(), { llmTokens: MONTHLY_CAPS.llmTokens - 2 });
+  const token = await signToken({ sub: "cus_1" }, SECRET);
+  const request = { model: "plainsong-fast", messages: [{ role: "user", content: "x" }], max_tokens: 1 };
+  const responses = await Promise.all([
+    call(e, "POST", "/v1/chat/completions", { token, body: request }),
+    call(e, "POST", "/v1/chat/completions", { token, body: request }),
+  ]);
+  assert.deepEqual(
+    responses.map((response) => response.status).sort(),
+    [200, 429],
+  );
+  assert.equal(calls.filter((entry) => entry.key === "api.groq.com/openai/v1/chat/completions").length, 1);
+  assert.equal((await e.__store.getUsage("cus_1", usagePeriod())).llmTokens, MONTHLY_CAPS.llmTokens);
 });
 
 test("only a paid subscription grants access; no subscription row grants nothing", async () => {
