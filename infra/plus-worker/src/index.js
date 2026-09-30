@@ -200,19 +200,36 @@ async function handleTranscription(request, env, customerId) {
 
   const store = storeFor(env);
   const period = usagePeriod();
-  const remaining = remainingAllowance(await store.getUsage(customerId, period));
-  const allowance = purpose === "meeting" ? remaining.meetingSeconds : remaining.dictationSeconds;
-  if (allowance <= 0 || estimate > allowance) {
+  const reservedSeconds = Math.round(estimate);
+  const reservation = purpose === "meeting" ? { meetingSeconds: reservedSeconds } : { dictationSeconds: reservedSeconds };
+  if (!(await store.reserveUsage(customerId, period, reservation, MONTHLY_CAPS))) {
     return error(429, "fair_use_reached", "This month's Plainsong Plus allowance is used up. Local models take over.");
   }
 
-  const result = await transcribe(env, new Blob([bytes], { type: file.type || "audio/wav" }), {
-    language: typeof form.get("language") === "string" ? form.get("language") : null,
-    keyterms: form.getAll("keyterm"),
-  });
+  let result;
+  try {
+    result = await transcribe(env, new Blob([bytes], { type: file.type || "audio/wav" }), {
+      language: typeof form.get("language") === "string" ? form.get("language") : null,
+      keyterms: form.getAll("keyterm"),
+    });
+  } catch (cause) {
+    await store.addUsage(
+      customerId,
+      period,
+      purpose === "meeting" ? { meetingSeconds: -reservedSeconds } : { dictationSeconds: -reservedSeconds },
+    );
+    throw cause;
+  }
   // Never bill less than the header says: a provider may report no duration.
   const seconds = Math.max(result.duration ?? 0, estimate);
-  await store.addUsage(customerId, period, purpose === "meeting" ? { meetingSeconds: seconds } : { dictationSeconds: seconds });
+  const adjustment = seconds - reservedSeconds;
+  if (adjustment) {
+    await store.addUsage(
+      customerId,
+      period,
+      purpose === "meeting" ? { meetingSeconds: adjustment } : { dictationSeconds: adjustment },
+    );
+  }
   return json({ text: result.text, language: result.language, duration: seconds, words: result.words });
 }
 
@@ -227,20 +244,26 @@ async function handleChat(request, env, customerId) {
 
   const store = storeFor(env);
   const period = usagePeriod();
-  const remaining = remainingAllowance(await store.getUsage(customerId, period));
   const maxTokens = Math.max(1, Math.min(Math.floor(Number(body.max_tokens)) || 2048, 8192));
   // Rough worst case (about 4 characters a token), so one large request
   // cannot run far past the cap on the last few tokens of allowance.
-  if (Math.ceil(inputChars / 4) + maxTokens > remaining.llmTokens) {
+  const reservedTokens = Math.ceil(inputChars / 4) + maxTokens;
+  if (!(await store.reserveUsage(customerId, period, { llmTokens: reservedTokens }, MONTHLY_CAPS))) {
     return error(429, "fair_use_reached", "This month's Plainsong Plus allowance is used up. Local models take over.");
   }
-  const response = await chat(env, {
-    model: body.model,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
-    max_tokens: maxTokens,
-    temperature: typeof body.temperature === "number" ? body.temperature : 0.2,
-  });
-  await store.addUsage(customerId, period, { llmTokens: response.usage.total_tokens });
+  let response;
+  try {
+    response = await chat(env, {
+      model: body.model,
+      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      max_tokens: maxTokens,
+      temperature: typeof body.temperature === "number" ? body.temperature : 0.2,
+    });
+  } catch (cause) {
+    await store.addUsage(customerId, period, { llmTokens: -reservedTokens });
+    throw cause;
+  }
+  await store.addUsage(customerId, period, { llmTokens: response.usage.total_tokens - reservedTokens });
   return json(response);
 }
 

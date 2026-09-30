@@ -47,6 +47,47 @@ export function d1Store(db) {
         )
         .run();
     },
+    async reserveUsage(customerId, period, delta, caps) {
+      const reserved = {
+        dictationSeconds: Math.round(delta.dictationSeconds ?? 0),
+        meetingSeconds: Math.round(delta.meetingSeconds ?? 0),
+        llmTokens: Math.round(delta.llmTokens ?? 0),
+      };
+      if (
+        reserved.dictationSeconds < 0 ||
+        reserved.meetingSeconds < 0 ||
+        reserved.llmTokens < 0 ||
+        reserved.dictationSeconds > caps.dictationSeconds ||
+        reserved.meetingSeconds > caps.meetingSeconds ||
+        reserved.llmTokens > caps.llmTokens
+      ) {
+        return false;
+      }
+      const result = await db
+        .prepare(
+          `INSERT INTO usage (customer_id, period, dictation_seconds, meeting_seconds, llm_tokens)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT (customer_id, period) DO UPDATE SET
+             dictation_seconds = dictation_seconds + excluded.dictation_seconds,
+             meeting_seconds = meeting_seconds + excluded.meeting_seconds,
+             llm_tokens = llm_tokens + excluded.llm_tokens
+           WHERE dictation_seconds + excluded.dictation_seconds <= ?
+             AND meeting_seconds + excluded.meeting_seconds <= ?
+             AND llm_tokens + excluded.llm_tokens <= ?`,
+        )
+        .bind(
+          customerId,
+          period,
+          reserved.dictationSeconds,
+          reserved.meetingSeconds,
+          reserved.llmTokens,
+          caps.dictationSeconds,
+          caps.meetingSeconds,
+          caps.llmTokens,
+        )
+        .run();
+      return (result.meta?.changes ?? 0) === 1;
+    },
     async getSubscriptionStatus(customerId) {
       const row = await db
         .prepare("SELECT status FROM subscriptions WHERE customer_id = ?")
@@ -111,6 +152,29 @@ export function memoryStore() {
         meetingSeconds: current.meetingSeconds + (delta.meetingSeconds ?? 0),
         llmTokens: current.llmTokens + (delta.llmTokens ?? 0),
       });
+    },
+    async reserveUsage(customerId, period, delta, caps) {
+      const current = {
+        dictationSeconds: 0,
+        meetingSeconds: 0,
+        llmTokens: 0,
+        ...usage.get(`${customerId}:${period}`),
+      };
+      if ((delta.dictationSeconds ?? 0) < 0 || (delta.meetingSeconds ?? 0) < 0 || (delta.llmTokens ?? 0) < 0) return false;
+      const next = {
+        dictationSeconds: current.dictationSeconds + Math.round(delta.dictationSeconds ?? 0),
+        meetingSeconds: current.meetingSeconds + Math.round(delta.meetingSeconds ?? 0),
+        llmTokens: current.llmTokens + Math.round(delta.llmTokens ?? 0),
+      };
+      if (
+        next.dictationSeconds > caps.dictationSeconds ||
+        next.meetingSeconds > caps.meetingSeconds ||
+        next.llmTokens > caps.llmTokens
+      ) {
+        return false;
+      }
+      usage.set(`${customerId}:${period}`, next);
+      return true;
     },
     async getSubscriptionStatus(customerId) {
       return subscriptions.get(customerId)?.status ?? null;
