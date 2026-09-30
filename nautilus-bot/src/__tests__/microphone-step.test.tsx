@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MicrophoneStep } from "@/components/onboarding/microphone-step";
 
@@ -96,6 +96,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Unmount while the animation-frame shim still exists so the hook can cancel it.
+  cleanup();
   vi.unstubAllGlobals();
 });
 
