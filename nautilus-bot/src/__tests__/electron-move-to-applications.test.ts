@@ -20,10 +20,18 @@ function deps(overrides: Partial<MoveToApplicationsDeps> = {}): MoveToApplicatio
 describe("move to Applications", () => {
   it("only applies to a packaged Mac app on a mounted disk image", () => {
     expect(runningFromDiskImage(deps())).toBe(true);
+    expect(runningFromDiskImage(deps({ bundlePath: "/private/var/folders/aa/bb/AppTranslocation/1234/d/Plainsong.app" }))).toBe(true);
     expect(runningFromDiskImage(deps({ bundlePath: "/Applications/Plainsong.app" }))).toBe(false);
     expect(runningFromDiskImage(deps({ isPackaged: false }))).toBe(false);
     expect(runningFromDiskImage(deps({ platform: "win32" }))).toBe(false);
     expect(runningFromDiskImage(deps({ bundlePath: null }))).toBe(false);
+  });
+
+  it("offers the move from a translocated first launch", async () => {
+    const d = deps({ bundlePath: "/private/var/folders/aa/bb/AppTranslocation/1234/d/Plainsong.app" });
+    await expect(offerMoveToApplications(d)).resolves.toBe(true);
+    expect(d.ask).toHaveBeenCalledTimes(1);
+    expect(d.move).toHaveBeenCalledTimes(1);
   });
 
   it("moves when the reader accepts, and says the app is relaunching", async () => {
