@@ -4384,6 +4384,15 @@ fn rclone_resolution_keeps_windows_path_lookup_platform_gated() {
 }
 
 #[test]
+fn windows_open_path_never_uses_cmd_exe() {
+    let source = include_str!("export_paths.rs");
+    assert!(
+        !source.contains("Command::new(\"cmd\")"),
+        "open_path_in_default_app must not pass paths through cmd.exe on Windows"
+    );
+}
+
+#[test]
 fn dictation_result_is_durable_before_delivery_begins() {
     // A paste can cross process and accessibility boundaries. The only
     // recoverable transcript must therefore be committed before the first
