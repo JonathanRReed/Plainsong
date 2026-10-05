@@ -288,8 +288,13 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;
 
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Process -FilePath $args[0]",
+        ])
         .arg(path)
         .status()
         .map_err(|e| {
