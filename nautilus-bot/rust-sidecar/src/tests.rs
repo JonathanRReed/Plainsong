@@ -4384,6 +4384,19 @@ fn rclone_resolution_keeps_windows_path_lookup_platform_gated() {
 }
 
 #[test]
+fn windows_opener_uses_powershell_start_process_literal_path_not_cmd() {
+    let source = include_str!("export_paths.rs");
+    assert!(
+        !source.contains("Command::new(\"cmd\")"),
+        "open_path_in_default_app must not use cmd.exe due to shell metacharacter injection risks"
+    );
+    assert!(
+        source.contains("Start-Process -LiteralPath"),
+        "open_path_in_default_app must use PowerShell Start-Process with -LiteralPath on Windows"
+    );
+}
+
+#[test]
 fn dictation_result_is_durable_before_delivery_begins() {
     // A paste can cross process and accessibility boundaries. The only
     // recoverable transcript must therefore be committed before the first
