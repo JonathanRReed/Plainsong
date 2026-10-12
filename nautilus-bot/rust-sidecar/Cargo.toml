@@ -98,7 +98,7 @@ tokenizers = { version = "0.23", optional = true }
 # targets and documents `metal` as a no-op elsewhere, so naming it here does not
 # make this dependency macOS-only. A CPU measurement needs no rebuild either
 # way: PLAINSONG_TRANSCRIBE_CPP_BACKEND=cpu pins the device at runtime.
-transcribe-cpp = { version = "0.2.3", default-features = false, features = ["metal"], optional = true }
+transcribe-cpp = { version = "0.3.1", default-features = false, features = ["metal"], optional = true }
 
 # Audio preprocessing. Not optional: the mixed ("Me + Them") capture path
 # resamples whichever of the mic/loopback devices is running at the lower rate
@@ -134,7 +134,7 @@ keyring = { version = "3.6", features = ["apple-native", "windows-native"] }
 regex = "1.11"
 urlencoding = "2.1"
 hostname = "0.4"
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 walkdir = "2.5"
 
 # Speaker diarization via pyannote community-1 (spike, OFF by default).
@@ -150,7 +150,7 @@ speakrs = { version = "0.5.0", optional = true, default-features = false, featur
 # `ort 2.0.0-rc.13` and `ndarray 0.17` as this crate, so no second ONNX
 # Runtime is linked. `default-features = false` drops parakeet-rs's own `ort`
 # defaults so ours decide how ONNX Runtime is fetched and linked.
-parakeet-rs = { version = "0.3.8", optional = true, default-features = false, features = ["sortformer"] }
+parakeet-rs = { version = "0.4.0", optional = true, default-features = false, features = ["sortformer"] }
 
 # Optional progress bars
 indicatif = { version = "0.18", optional = true }
