@@ -288,17 +288,22 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;
 
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
-        .status()
-        .map_err(|e| {
-            format!(
-                "Failed to launch Windows opener for '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
+    let status = {
+        // Single-quote escape path for PowerShell -LiteralPath to prevent shell command injection
+        // via path metacharacters (which would occur if passed directly to cmd.exe /C start).
+        let escaped_path = path.to_string_lossy().replace('\'', "''");
+        let script = format!("Start-Process -LiteralPath '{escaped_path}'");
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .map_err(|e| {
+                format!(
+                    "Failed to launch Windows opener for '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?
+    };
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let status = std::process::Command::new("xdg-open")
