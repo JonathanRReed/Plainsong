@@ -256,5 +256,28 @@ describe("privileged native dialog admission", () => {
         folder: "C:Backups",
       }),
     ).toThrow("safe relative path");
+
+    // Space-padded traversal segments check
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "i_cloud",
+        folder: "Backups/.. ",
+      }),
+    ).toThrow("safe relative path");
+
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "i_cloud",
+        folder: "Backups/. ",
+      }),
+    ).toThrow("safe relative path");
+
+    // Trailing slashes on valid paths should be accepted
+    expect(
+      parseCloudLocationRequest({
+        provider: "i_cloud",
+        folder: "Backups/subfolder/",
+      }).folder,
+    ).toBe("Backups/subfolder/");
   });
 });

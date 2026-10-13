@@ -26,7 +26,11 @@ export function parseCloudLocationRequest(args: unknown): CloudLocationRequest {
     folder.startsWith("/") ||
     folder.startsWith("\\") ||
     /^[A-Za-z]:/.test(folder) ||
-    folder.split(/[\\/]/).some((part) => part === ".." || part === ".")
+    // Filter out empty segments (e.g. from trailing slashes) and trim parts to catch space-padded traversal (".. ")
+    folder.split(/[\\/]/).filter(Boolean).some((part) => {
+      const trimmed = part.trim();
+      return trimmed === ".." || trimmed === ".";
+    })
   ) {
     throw new Error("Cloud folder must be a safe relative path");
   }
