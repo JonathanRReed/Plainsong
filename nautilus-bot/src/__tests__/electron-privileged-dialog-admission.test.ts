@@ -256,5 +256,22 @@ describe("privileged native dialog admission", () => {
         folder: "C:Backups",
       }),
     ).toThrow("safe relative path");
+
+    // Whitespace-padded path traversal checks
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "one_drive",
+        remoteName: "onedrive",
+        folder: "Backups/ .. /secret",
+      }),
+    ).toThrow("safe relative path");
+
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "one_drive",
+        remoteName: "onedrive",
+        folder: "Backups/ . /secret",
+      }),
+    ).toThrow("safe relative path");
   });
 });
