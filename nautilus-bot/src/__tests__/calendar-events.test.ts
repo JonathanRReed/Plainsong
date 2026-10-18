@@ -286,6 +286,7 @@ describe("calendarPermissionView", () => {
 describe("detectVideoService", () => {
   it("recognizes the common conferencing hosts", () => {
     expect(detectVideoService(["https://acme.zoom.us/j/123"])).toBe("zoom");
+    expect(detectVideoService(["https://acme.zoom.us../j/123"])).toBe("zoom");
     expect(detectVideoService(["https://meet.google.com/abc-defg-hij"])).toBe("google_meet");
     expect(detectVideoService(["https://teams.microsoft.com/l/meetup-join/x"])).toBe(
       "microsoft_teams",
