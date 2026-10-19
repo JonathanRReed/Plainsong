@@ -256,5 +256,22 @@ describe("privileged native dialog admission", () => {
         folder: "C:Backups",
       }),
     ).toThrow("safe relative path");
+
+    // Whitespace-padded path traversal segments (e.g. " .. " or " . ")
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "google_drive",
+        remoteName: "gdrive",
+        folder: "Backups/.. /secret",
+      }),
+    ).toThrow("safe relative path");
+
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "proton_drive",
+        remoteName: "proton",
+        folder: "Backups/ . /secret",
+      }),
+    ).toThrow("safe relative path");
   });
 });
