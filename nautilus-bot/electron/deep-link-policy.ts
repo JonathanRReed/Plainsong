@@ -136,7 +136,7 @@ export function parseDeepLink(raw: string): DeepLinkParse {
   if (url.username || url.password || url.port) {
     return { ok: false, reason: "unexpected_authority" };
   }
-  const rawHost = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
+  const rawHost = url.hostname.replace(/\.+$/, "");
   const host = rawHost.toLowerCase();
   if (host === RENDERER_HOST) {
     return { ok: false, reason: "renderer_origin" };

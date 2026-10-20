@@ -160,7 +160,7 @@ export function detectVideoService(urls: readonly unknown[]): CalendarVideoServi
     try {
       const url = new URL(candidate);
       if (url.protocol !== "http:" && url.protocol !== "https:") continue;
-      hostname = url.hostname.toLowerCase();
+      hostname = url.hostname.toLowerCase().replace(/\.+$/, "");
     } catch {
       continue;
     }
