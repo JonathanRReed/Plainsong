@@ -238,7 +238,7 @@ describe("privileged native dialog admission", () => {
     expect(openExternalCases).toEqual(["open_calendar_privacy_settings"]);
   });
 
-  it("parseCloudLocationRequest rejects null bytes and Windows drive specifiers as unsafe paths", () => {
+  it("parseCloudLocationRequest rejects null bytes, Windows drive specifiers, and space-padded traversal segments as unsafe paths", () => {
     // Null byte injection check
     expect(() =>
       parseCloudLocationRequest({
@@ -254,6 +254,23 @@ describe("privileged native dialog admission", () => {
         provider: "one_drive",
         remoteName: "onedrive",
         folder: "C:Backups",
+      }),
+    ).toThrow("safe relative path");
+
+    // Space-padded path traversal check (e.g. Backups/..  or Backups/ . )
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "one_drive",
+        remoteName: "onedrive",
+        folder: "Backups/.. ",
+      }),
+    ).toThrow("safe relative path");
+
+    expect(() =>
+      parseCloudLocationRequest({
+        provider: "i_cloud",
+        remoteName: null,
+        folder: "Backups/ . ",
       }),
     ).toThrow("safe relative path");
   });
