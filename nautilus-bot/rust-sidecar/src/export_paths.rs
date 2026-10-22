@@ -280,6 +280,13 @@ pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<
     ))
 }
 
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn build_windows_open_script(path: &Path) -> String {
+    let path_str = path.to_string_lossy();
+    let escaped_path = escape_powershell_single_quoted(&path_str);
+    format!("Start-Process -LiteralPath '{}'", escaped_path)
+}
+
 pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("/usr/bin/open")
@@ -288,17 +295,19 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;
 
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
-        .status()
-        .map_err(|e| {
-            format!(
-                "Failed to launch Windows opener for '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
+    let status = {
+        let script = build_windows_open_script(path);
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .status()
+            .map_err(|e| {
+                format!(
+                    "Failed to launch Windows opener for '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?
+    };
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let status = std::process::Command::new("xdg-open")
@@ -320,4 +329,19 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_open_script_escapes_single_quotes_and_uses_literal_path() {
+        let path = Path::new(r"C:\Users\test\My Document's & File.txt");
+        let script = build_windows_open_script(path);
+        assert_eq!(
+            script,
+            r"Start-Process -LiteralPath 'C:\Users\test\My Document''s & File.txt'"
+        );
+    }
 }
