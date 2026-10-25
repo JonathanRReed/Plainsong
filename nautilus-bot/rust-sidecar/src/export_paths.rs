@@ -287,10 +287,19 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
         .status()
         .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;
 
+    // Use PowerShell with Start-Process -LiteralPath and single-quote escaping instead of
+    // `cmd.exe /C start ""` to prevent shell metacharacter expansion and command injection.
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "Start-Process -LiteralPath '{}'",
+                crate::text_insert::escape_powershell_single_quoted(&path.to_string_lossy())
+            ),
+        ])
         .status()
         .map_err(|e| {
             format!(
