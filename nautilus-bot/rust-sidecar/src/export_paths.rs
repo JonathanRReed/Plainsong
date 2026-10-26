@@ -291,7 +291,8 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     let status = {
         // Use PowerShell Start-Process -LiteralPath with single-quote escaping to safely handle
         // paths containing spaces, ampersands, or shell metacharacters without cmd.exe parsing risks.
-        let escaped_path = crate::text_insert::escape_powershell_single_quoted(&path.to_string_lossy());
+        let escaped_path =
+            crate::text_insert::escape_powershell_single_quoted(&path.to_string_lossy());
         let script = format!("Start-Process -LiteralPath '{}'", escaped_path);
         std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
