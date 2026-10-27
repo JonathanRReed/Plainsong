@@ -4981,6 +4981,19 @@ fn windows_set_clipboard_script_reads_utf8_payload_file() {
     assert!(script.contains("Set-Clipboard -Value $text"));
 }
 
+#[test]
+fn windows_open_command_escapes_special_characters_and_metacharacters() {
+    let (prog, args) = build_windows_open_command("C:\\Users\\Bob's Files\\report & notes.pdf");
+    assert_eq!(prog, "powershell");
+    assert_eq!(args[0], "-NoProfile");
+    assert_eq!(args[1], "-NonInteractive");
+    assert_eq!(args[2], "-Command");
+    assert_eq!(
+        args[3],
+        "Start-Process -LiteralPath 'C:\\Users\\Bob''s Files\\report & notes.pdf'"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn pending_hotkey_target_freshness_accepts_recent_capture() {

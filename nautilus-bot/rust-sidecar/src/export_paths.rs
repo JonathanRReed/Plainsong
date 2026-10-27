@@ -280,6 +280,21 @@ pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<
     ))
 }
 
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn build_windows_open_command(path_str: &str) -> (String, Vec<String>) {
+    let escaped = text_insert::escape_powershell_single_quoted(path_str);
+    let script = format!("Start-Process -LiteralPath '{}'", escaped);
+    (
+        "powershell".to_string(),
+        vec![
+            "-NoProfile".to_string(),
+            "-NonInteractive".to_string(),
+            "-Command".to_string(),
+            script,
+        ],
+    )
+}
+
 pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("/usr/bin/open")
@@ -288,17 +303,19 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;
 
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
-        .status()
-        .map_err(|e| {
-            format!(
-                "Failed to launch Windows opener for '{}': {}",
-                path.display(),
-                e
-            )
-        })?;
+    let status = {
+        let (program, args) = build_windows_open_command(&path.to_string_lossy());
+        std::process::Command::new(program)
+            .args(args)
+            .status()
+            .map_err(|e| {
+                format!(
+                    "Failed to launch Windows opener for '{}': {}",
+                    path.display(),
+                    e
+                )
+            })?
+    };
 
     #[cfg(all(unix, not(target_os = "macos")))]
     let status = std::process::Command::new("xdg-open")
