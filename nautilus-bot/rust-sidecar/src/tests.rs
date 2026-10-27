@@ -4988,7 +4988,10 @@ fn windows_open_command_escapes_special_characters_and_metacharacters() {
     assert_eq!(args[0], "-NoProfile");
     assert_eq!(args[1], "-NonInteractive");
     assert_eq!(args[2], "-Command");
-    assert_eq!(args[3], "Start-Process -LiteralPath 'C:\\Users\\Bob''s Files\\report & notes.pdf'");
+    assert_eq!(
+        args[3],
+        "Start-Process -LiteralPath 'C:\\Users\\Bob''s Files\\report & notes.pdf'"
+    );
 }
 
 #[cfg(target_os = "macos")]
