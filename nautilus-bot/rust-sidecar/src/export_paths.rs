@@ -280,6 +280,7 @@ pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<
     ))
 }
 
+#[cfg(any(test, target_os = "windows"))]
 pub(crate) fn build_windows_open_command(path_str: &str) -> (String, Vec<String>) {
     let escaped = text_insert::escape_powershell_single_quoted(path_str);
     let script = format!("Start-Process -LiteralPath '{}'", escaped);
