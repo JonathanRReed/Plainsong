@@ -280,6 +280,12 @@ pub(crate) fn ensure_path_in_approved_roots(path: &Path, label: &str) -> Result<
     ))
 }
 
+#[cfg(any(test, target_os = "windows"))]
+pub(crate) fn build_windows_open_command(path: &Path) -> String {
+    let escaped = text_insert::escape_powershell_single_quoted(&path.to_string_lossy());
+    format!("Start-Process -LiteralPath '{escaped}'")
+}
+
 pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let status = std::process::Command::new("/usr/bin/open")
@@ -288,9 +294,13 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to launch 'open' for '{}': {}", path.display(), e))?;
 
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &build_windows_open_command(path),
+        ])
         .status()
         .map_err(|e| {
             format!(
@@ -320,4 +330,24 @@ pub(crate) fn open_path_in_default_app(path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_windows_open_command() {
+        let plain = Path::new("C:\\Users\\test\\Documents\\file.txt");
+        assert_eq!(
+            build_windows_open_command(plain),
+            "Start-Process -LiteralPath 'C:\\Users\\test\\Documents\\file.txt'"
+        );
+
+        let with_single_quotes_and_spaces = Path::new("C:\\Users\\test\\My 'File' & More.txt");
+        assert_eq!(
+            build_windows_open_command(with_single_quotes_and_spaces),
+            "Start-Process -LiteralPath 'C:\\Users\\test\\My ''File'' & More.txt'"
+        );
+    }
 }
