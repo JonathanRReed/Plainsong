@@ -299,6 +299,11 @@ describe("detectVideoService", () => {
     expect(detectVideoService(["https://zoom.us.example.com/j/1"])).toBeNull();
   });
 
+  it("normalizes DNS root-relative hostnames with trailing dots", () => {
+    expect(detectVideoService(["https://zoom.us./j/123"])).toBe("zoom");
+    expect(detectVideoService(["https://meet.google.com./abc-defg-hij"])).toBe("google_meet");
+  });
+
   it("claims nothing for a link it does not recognize", () => {
     // A doc link is not a video call, and guessing would be a claim this code
     // cannot support.
