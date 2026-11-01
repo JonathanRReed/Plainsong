@@ -58,7 +58,7 @@ describe("resolveOnboardingGate", () => {
     expect(decision.unmet).toEqual([]);
   });
 
-  it("holds the splash while readiness is still being read", () => {
+  it("opens fresh setup before readiness probes finish without claiming grants", () => {
     const decision = resolveOnboardingGate({
       ...READY,
       evidenceLoaded: false,
@@ -68,7 +68,16 @@ describe("resolveOnboardingGate", () => {
       record: NEVER_SET_UP,
       legacyFlagComplete: false,
     });
-    expect(decision.action).toBe("wait");
+    expect(decision.action).toBe("show");
+    expect(decision.unmet).toEqual([]);
+    expect(decision.adoptRecord).toBe(false);
+  });
+
+  it.each([
+    { record: { deferredAt: "2026-06-19T10:04:00Z" }, legacyFlagComplete: false },
+    { record: NEVER_SET_UP, legacyFlagComplete: true },
+  ])("waits for readiness before interpreting an existing deferral or legacy flag", (record) => {
+    expect(resolveOnboardingGate({ ...READY, ...record, evidenceLoaded: false }).action).toBe("wait");
   });
 
   it("shows the wizard on an install that has recorded nothing", () => {
@@ -113,14 +122,27 @@ describe("resolveOnboardingGate", () => {
     expect(decision.adoptRecord).toBe(true);
   });
 
-  it("records a working install that carries neither a record nor a flag, rather than staging a wizard over it", () => {
+  it("requires explicit completion on a ready fresh install, including a later launch after interruption", () => {
     const decision = resolveOnboardingGate({
       ...READY,
       record: NEVER_SET_UP,
       legacyFlagComplete: false,
     });
+    expect(decision.action).toBe("show");
+    expect(decision.adoptRecord).toBe(false);
+    const relaunched = resolveOnboardingGate({ ...READY, record: {}, legacyFlagComplete: false });
+    expect(relaunched.action).toBe("show");
+    expect(relaunched.adoptRecord).toBe(false);
+  });
+
+  it("respects a ready deferred install without promoting it to completion", () => {
+    const decision = resolveOnboardingGate({
+      ...READY,
+      record: { deferredAt: "2026-09-01T09:00:00Z", deferredUnmet: ["dictation_model"] },
+      legacyFlagComplete: true,
+    });
     expect(decision.action).toBe("skip");
-    expect(decision.adoptRecord).toBe(true);
+    expect(decision.adoptRecord).toBe(false);
   });
 
   it("stays out of the way when setup was completed and dictation still works", () => {

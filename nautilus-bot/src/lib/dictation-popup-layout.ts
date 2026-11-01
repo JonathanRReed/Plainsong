@@ -5,7 +5,7 @@ export type DictationPopupDisplayMode = "full" | "compact" | "minimal";
 type DictationPillSize = "small" | "default" | "large" | "xlarge";
 export type DictationPillDock = "bottom" | "left" | "right";
 
-/** Settings > General > Pill size. Absent or unrecognized reads as "default". */
+/** Settings > Dictation > Pill size. Absent or unrecognized reads as "default". */
 const DICTATION_PILL_SCALE: Record<DictationPillSize, number> = {
   small: 0.85,
   default: 1,
@@ -20,7 +20,7 @@ export function resolveDictationPillScale(value: unknown): number {
     : 1;
 }
 
-/** Settings > General > Pill position. Absent or unrecognized reads as "bottom". */
+/** Settings > Dictation > Pill position. Absent or unrecognized reads as "bottom". */
 export function resolveDictationPillDock(value: unknown): DictationPillDock {
   return value === "left" || value === "right" ? value : "bottom";
 }
@@ -240,13 +240,11 @@ export function getPopupSize(
   }
 
   if (phase === "done") {
-    // Title, one chip row, a result box clamped to four lines and one row of
-    // actions: measured at 284-323px in a real render, plus the window's
-    // padding. The old 248px allowance clipped the actions off entirely.
-    // The card is bottom-anchored, so spare height sits above it, unseen.
-    // A flat 420 covers the tallest measured card plus three message lines
-    // and keeps the overlay cap's 48px of headroom.
-    return { width: 432, height: 420 };
+    // The full result is scrollable instead of line-clamped. Recovery states
+    // can also carry a six-line explanation and several metadata rows, so use
+    // the host's 480px cap. The card itself scrolls within that viewport when
+    // all of those elements appear together.
+    return { width: 432, height: 480 };
   }
 
   return {

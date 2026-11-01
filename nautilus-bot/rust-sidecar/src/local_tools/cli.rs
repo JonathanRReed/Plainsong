@@ -16,7 +16,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "plainsong - read your Plainsong meetings and dictations from the terminal
 
 USAGE
-    plainsong <command> [options]
+    plainsong [--allow-credential-access] <command> [options]
 
 COMMANDS
     list        [--limit N] [--offset N] [--since DATE|7d|24h] [--project NAME] [--json]
@@ -41,7 +41,10 @@ COMMANDS
 NOTES
     Every command is read-only. The database is opened with SQLite's read-only
     flag; there is no command that writes.
-    Requires \"Local tools\" to be turned on in Plainsong > Settings > General.
+    Requires \"Allow the plainsong command and MCP server\" to be turned on in Plainsong > Settings > Advanced.
+    On macOS, credential access is non-interactive by default. In a
+    human-operated terminal, --allow-credential-access may prompt for access.
+    --allow-credential-access is unavailable for mcp.
 
 EXIT CODES
     0 ok   1 error   2 usage   3 local tools are off   4 not found
@@ -92,6 +95,12 @@ pub enum Command {
     Mcp,
     Help,
     Version,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    pub command: Command,
+    pub allow_credential_access: bool,
 }
 
 impl Command {
@@ -301,6 +310,34 @@ pub fn parse_args(args: &[String]) -> Result<Command, UsageError> {
         }
         other => Err(UsageError(format!("unknown command {other}"))),
     }
+}
+
+/// Parse global options and the command after the program name.
+pub fn parse_invocation(args: &[String]) -> Result<Invocation, UsageError> {
+    const CREDENTIAL_FLAG: &str = "--allow-credential-access";
+
+    let (allow_credential_access, command_args) = match args.first() {
+        Some(arg) if arg == CREDENTIAL_FLAG => (true, &args[1..]),
+        _ => (false, args),
+    };
+
+    if command_args.iter().any(|arg| arg == CREDENTIAL_FLAG) {
+        return Err(UsageError(format!(
+            "{CREDENTIAL_FLAG} must be the first argument"
+        )));
+    }
+
+    let command = parse_args(command_args)?;
+    if allow_credential_access && command == Command::Mcp {
+        return Err(UsageError(format!(
+            "{CREDENTIAL_FLAG} is unavailable for mcp"
+        )));
+    }
+
+    Ok(Invocation {
+        command,
+        allow_credential_access,
+    })
 }
 
 fn json_line<T: serde::Serialize>(value: &T) -> anyhow::Result<String> {
@@ -543,6 +580,71 @@ mod tests {
             Command::Help
         );
         assert_eq!(parse_args(&args(&["-V"])).unwrap(), Command::Version);
+    }
+
+    #[test]
+    fn parses_invocation_credential_access() {
+        assert_eq!(
+            parse_invocation(&args(&["list"])).unwrap(),
+            Invocation {
+                command: Command::List {
+                    limit: DEFAULT_PAGE_SIZE,
+                    offset: 0,
+                    since: None,
+                    project: None,
+                    json: false,
+                },
+                allow_credential_access: false,
+            }
+        );
+        assert_eq!(
+            parse_invocation(&args(&["--allow-credential-access", "stats", "--json"])).unwrap(),
+            Invocation {
+                command: Command::Stats { json: true },
+                allow_credential_access: true,
+            }
+        );
+    }
+
+    #[test]
+    fn credential_access_flag_preserves_informational_commands() {
+        assert_eq!(
+            parse_invocation(&args(&["--allow-credential-access", "help"])).unwrap(),
+            Invocation {
+                command: Command::Help,
+                allow_credential_access: true,
+            }
+        );
+        assert_eq!(
+            parse_invocation(&args(&["--allow-credential-access", "--version"])).unwrap(),
+            Invocation {
+                command: Command::Version,
+                allow_credential_access: true,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_credential_access_for_mcp_or_outside_first_position() {
+        let mcp_error = parse_invocation(&args(&["--allow-credential-access", "mcp"])).unwrap_err();
+        assert!(mcp_error.0.contains("unavailable for mcp"));
+
+        for input in [
+            &["stats", "--allow-credential-access"][..],
+            &[
+                "--allow-credential-access",
+                "--allow-credential-access",
+                "stats",
+            ][..],
+            &["stats", "--allow-credential-access", "--help"][..],
+        ] {
+            let error = parse_invocation(&args(input)).unwrap_err();
+            assert!(
+                error.0.contains("must be the first argument"),
+                "{input:?}: {:?}",
+                error.0
+            );
+        }
     }
 
     #[test]

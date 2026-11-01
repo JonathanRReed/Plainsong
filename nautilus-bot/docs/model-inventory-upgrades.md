@@ -17,8 +17,8 @@ All 742 tests pass.
 Added `candle-metal` Cargo feature. `select_best_device()` tries Metal
 first with CPU fallback. Not in `default` or `asr-all`; since 2026-09-01
 the macOS release build enables it through
-`scripts/sidecar-cargo-features.mjs`, the one list shared by
-`build-rust-sidecar.mjs`, `lint:rust` / `test:rust` / `benchmark:latency`,
+`scripts/sidecar-cargo-features.ts`, the one list shared by
+`build-rust-sidecar.ts`, `lint:rust` / `test:rust` / `benchmark:latency`,
 CI, and the third-party notices generator. Measured on an M4 Pro with
 distil-large-v3.5: 0.96 s p50 on Metal vs 32.8 s on CPU F32 for a 5.3 s
 utterance, 2.6 s vs 55.5 s for 44 s of audio. Receipt:
@@ -33,7 +33,7 @@ a regression: ~24 s of CoreML model compilation on first load (4.5 s on
 later launches vs 0.7 s CPU), the encoder split into 75 CoreML partitions,
 the merged decoder rejected by CoreML entirely (a single `If` node), and a
 slower steady state than plain CPU (1.7 s p50 CPU vs 2.1 s p50 / 5.6 s p95
-CoreML on the 44 s fixture). `scripts/sidecar-cargo-features.mjs` leaves it
+CoreML on the 44 s fixture). `scripts/sidecar-cargo-features.ts` leaves it
 out of the release build; details and the Silero VAD numbers are in the
 receipt above.
 
@@ -104,9 +104,9 @@ the model is used; `LICENSE` and `NOTICE` are downloaded alongside the
 weights so the retention obligation is met on disk. Four pinned files
 (GGUF, `tokenizer.json`, `LICENSE`, `NOTICE`), 473 MiB total, each with a
 SHA-256 in `llm/bundled_local.rs` and an immutable commit revision in the
-URL. Readiness is "every file carries a trusted MAC'd integrity receipt",
-not "the files exist": `artifacts_trusted` gates the load, and the
-startup migration re-verifies them with the ASR weights.
+URL. Readiness is "every pinned file is present and this run has not found
+it wrong"; the load hashes each file against its pin through the descriptor
+it then reads, and a mismatch makes the model read as not installed.
 
 **Runtime.** Candle, not llama.cpp.
 `candle_transformers::models::quantized_qwen3::ModelWeights` reads the

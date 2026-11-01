@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchSpokenFixture } from "../../scripts/lib/spoken-fixture-match.mjs";
+import { matchSpokenFixture } from "../../scripts/lib/spoken-fixture-match.ts";
 
 describe("meeting soak spoken-fixture matching", () => {
   const fixture =

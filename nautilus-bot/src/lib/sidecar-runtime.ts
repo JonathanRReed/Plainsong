@@ -14,13 +14,15 @@ export type SidecarExitReason =
   | "crash"
   | "killed"
   | "spawn_failed"
-  | "unresponsive";
+  | "unresponsive"
+  | "credential_required";
 
 const REASONS: readonly SidecarExitReason[] = [
   "crash",
   "killed",
   "spawn_failed",
   "unresponsive",
+  "credential_required",
 ];
 
 export interface SidecarRuntimeEvent {
@@ -74,9 +76,16 @@ export interface SidecarLossNotice {
   message: string;
   /** True while Plainsong is bringing it back on its own. */
   recovering: boolean;
+  action?: "unlock_credentials";
 }
 
 const LOSS_COPY: Record<SidecarExitReason, SidecarLossNotice> = {
+  credential_required: {
+    title: "Secure storage needs your approval",
+    message: "Plainsong paused startup. Choose Unlock and retry when you can respond to the macOS credential prompt.",
+    recovering: false,
+    action: "unlock_credentials",
+  },
   crash: {
     title: "The local transcription engine stopped",
     message:

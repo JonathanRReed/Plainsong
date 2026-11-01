@@ -2,20 +2,1012 @@
 
 All notable changes to Plainsong are documented in this file.
 
-## [Unreleased]
+## Unreleased
 
-### Feel
-- The Dictation screen's microphone stage glows in gold with your voice
-  while you dictate and sweeps once while the words are set down; the
-  onboarding microphone check glows with the same live signal. Both follow
-  the light/dark setting, stay still under Reduce Motion, and are off in
-  high-contrast mode.
-- AI waits of several seconds show a small dotted indicator beside what is
-  happening instead of a spinner: "Ask your meetings" (your question now
-  appears at once with "Reading your meetings…" under it), meeting analysis,
-  and regenerating a summary, action items or notes ("Writing…").
-- Uses the MIT-licensed `voice-glow` and `thinking-orbs` packages from
-  libraries.dev.
+## [0.9.0-beta.7] - 2026-11-01
+
+- The dictation HUD releases its waveform canvas when idle in minimal mode.
+
+- Meeting recaps now quote what was said instead of rewording it. Each line
+  is a whole sentence from the transcript with the speaker and time, grouped
+  under Decisions, Action items, Unclear action items, Questions raised and
+  Key points. Only fillers, repeated words and spoken headings are removed, so
+  names, numbers, negations and conditions stay as spoken. A correction or
+  retraction appears right after the sentence it changes. The local model only
+  chooses which sentences to show; decisions and commitments Plainsong
+  recognizes are always included. Your written notes can appear as quotes too.
+
+- Action items are the meeting's own words too. Each one quotes the sentence
+  that made the commitment, with who said it and when, followed by any later
+  sentence that corrects or confirms it, so "by the 20th, or rather the 24th"
+  or "Not the 21st, the 28th." is shown as said. The owner and due date appear
+  beside the item only when the final sentence states them. When someone
+  hands a task to someone else ("so Ravi should book it" / "Fine, I'll book
+  it"), the item is listed as the new owner's and quotes the whole exchange.
+  Two commitments in one sentence are two items. A commitment whose owner or
+  restated value is in doubt is still listed, quoted and marked "Unclear in
+  the meeting", with its owner left out when the meeting disputes it.
+  Commitments whose condition, scope or latest version is unclear are quoted
+  under Unclear action items in the recap instead of being listed.
+
+- Recap and action-item corrections are read more closely: "I mean" between
+  two dates, "make it the 19th" from another speaker, "Thursday no Friday",
+  "by the thirty" and a split "But only if …" now attach to the right
+  sentence, and a correction of a nearby number ("we need 3 coaches.
+  Actually, make that 4") no longer makes an earlier decision unclear.
+
+- Fixed missing updater configuration in macOS releases. Packaging now checks
+  the app, DMG and ZIP before accepting a release.
+
+- On 8 GB Macs, meeting search indexing can run while you are away under the
+  same idle, power and pressure checks as notes. It releases idle speech and
+  notes caches first and stops its search helper when you return. Keyword
+  search stays available before meaning search finishes.
+
+- The minimal meeting pill now has an expand button that restores the full
+  notes card. Before, the smallest view could not be made larger again.
+
+- Finalized meetings now store mic and call audio as compact 16 kHz, 16-bit
+  FLAC by default, with no stored mix. Playback rebuilds the mix locally and
+  masks mic asides before measuring levels or mixing. Existing finalized
+  meetings convert through the resumable idle journal. Pending, failed and
+  incomplete meetings keep full-rate audio. Saved transcripts never change.
+  Re-transcribing or relabeling speakers in an older meeting uses its compact
+  16 kHz audio, so results can differ slightly from the original. Settings
+  reports completed space savings. Capture and first-pass ASR are unchanged.
+
+- Dictate during a recorded meeting. Aside text stays outside meeting
+  transcripts, notes, search, Ask and searchable dictation history. Show or
+  delete asides in meeting review. Dictation audio has private 24-hour capture
+  recovery, including during a meeting pause or with another microphone, even
+  with History off. Mic-only WAV and FLAC exports silence aside spans.
+
+- macOS releases the main window after two minutes hidden when its workspace
+  can safely close, then restores its view when reopened. Editors, setup and
+  unsaved changes keep the window alive. Dictation and meeting HUDs retain
+  separate renderers. Reopening shows a lightweight workspace placeholder.
+  Removed experimental memory flags after they increased hidden idle memory.
+- Fixed lossless storage conversion for 44.1 and 48 kHz PCM16 recordings and
+  stereo tracks. Existing meeting WAVs retry through the same background
+  journal. Native-rate conversion and playback decoding preserve the saved
+  track's rate, channels and samples. Finalized meetings use compact storage
+  as described above. Capture rates are unchanged.
+
+- Idle notes, cleanup, search and cached speech models release sooner under
+  memory pressure. Warning releases idle models on 8 GB Macs; critical releases
+  them on every tier. Active requests finish before idle release, and later
+  requests reload models on demand.
+
+- Search power checks now use native macOS counters instead of starting
+  `pmset` while indexing.
+
+- Call detection now checks running apps through native macOS APIs instead
+  of starting AppleScript for every poll.
+
+- Before a vault database schema upgrade, Plainsong keeps an encrypted snapshot
+  with the same vault key and retains the two newest copies. Snapshot failure
+  blocks the migration; a failed migration rolls back its transaction.
+- macOS release tooling submits only the signed DMG, retries interrupted uploads,
+  and builds updater ZIPs from the stapled app. Releases include a `SHA256SUMS`
+  file for checking downloads. The next candidate still needs live Apple checks.
+
+- Added separate, off-by-default Calendar and Contacts spelling switches in one
+  section. Calendar hints use attendee and organizer names from the past week
+  and next two days. Local meetings prioritize the current or next event;
+  dictation favors today's, frequent and recent attendees. Spelling lists stay
+  in memory, with no new saved attendee lists or cloud prompts.
+  In the frozen 104-clip evaluation, name flags fell from 37 to 35; the
+  untouched split stayed at 15. This misses the 50% name-recovery target.
+  No names were introduced across 6,184 absent dictionary-term checks and
+  16,810 optional-name checks. Added vocabulary-stage p90 was 30.5 ms over
+  40 paired observations, including list construction.
+
+- Automatic keeps CPU speech ready for 30 minutes on 8 GB Macs instead of
+  two. Memory pressure and other local model work release idle speech sooner,
+  including on Always. Explicit timers and Automatic on other speech routes
+  retain their durations.
+  Headless tests on a 24 GB M4 Pro, with the 8 GB tier simulated, measured
+  17 to 21 MiB of idle helper physical footprint for Parakeet v3. Its resident
+  set reached 1.22 GiB, including reclaimable model pages. For 10 seconds of
+  audio, the first helper request after 5 minutes idle fell from 2,870 to
+  205 ms; after 10 minutes, from 2,292 to 209 ms. The helper reloads when the
+  30 minute timer expires.
+
+- On 8 GB Macs, automatic meeting notes can use a smaller memory reserve
+  after three minutes without keyboard or pointer activity, on AC or with
+  at least 50% battery and Low Power Mode off. Notes pause when you return
+  or memory pressure rises, and resume from finished chunks. Speech keeps
+  priority.
+
+- Voice now defaults to digits for money, percentages, clock times, dates,
+  phone numbers, measurements, explicit versions and counts of ten or more.
+  Zero to nine stay words in ordinary prose, such as "two people" and
+  "one of the reasons". Existing explicit words preferences remain words;
+  users who kept the old default inherit digits. Selecting words also spells
+  out digits from the recognizer.
+
+- Recap verification prefers complete passages over redundant word-row fragments.
+  Unique partial evidence remains available.
+
+- Summary retries omit detected capture-label prefixes from the writer's input.
+  Verification keeps the original transcript and citations.
+
+- Recaps reject invented agreement uncertainty, conditions moved between tasks
+  and unsupported responsibility claims. Capture labels and source commentary
+  cannot stand in for meeting facts.
+
+- Recaps keep later task conditions even when the model cites an earlier
+  statement. First-person prose must identify the speaker.
+
+- Summary retries preserve accepted sentences and their citations. Only new
+  sentences need another verification pass.
+
+- Older meeting playbook IDs keep summary verification enabled. Short default
+  recaps get one verified retry before source excerpts. Notes reject leaked
+  response fields and record fallback reasons without logging transcript text.
+
+- Added regression checks for verified prose, legacy playbooks and leaked
+  response fields in meeting notes.
+
+- Added the synthetic b21 packaged meeting capture to the notes fidelity eval,
+  including its overlapping word rows and partial phrases.
+
+- Kept dictation tracks convert to native-rate FLAC during idle time on macOS.
+  Conversion verifies every decoded sample, preserves WAVs on failure, and
+  resumes interrupted work. Vault audio remains encrypted.
+- Privacy settings show meeting audio storage and compression savings, add a
+  one-week retention option, and offer a confirmed audio-only cleanup. New
+  settings propose three months of audio with transcripts and notes kept.
+  Automatic deletion waits for confirmation and protects pending, failed and
+  incomplete transcription recovery.
+
+- Light-tier Macs prepare trusted CPU speech models on first use instead of
+  switching to an installed GGUF while preparation is pending. CPU preparation
+  can run at warning pressure when native memory admission allows it. GGUF
+  fallback still requires its own admission and reports the engine used.
+
+- Dictation keeps audio privately for 24 hours after a memory-headroom refusal
+  and offers Recover last dictation, even with History off. Background notes,
+  search batches and new live meeting chunks yield to the final dictation.
+
+- Open the workspace without waiting for the startup scan of old dictation scratch files. Cleanup still starts at launch.
+
+- Default local meeting summaries retain verified sentences and remove unsupported ones.
+  Pruned summaries stay in review. Source excerpts remain a fallback when fewer
+  than two supported sentences survive. Checks reject unsupported group
+  attribution, conclusions and causal claims, and accept article and number-word
+  differences without changing the retained text.
+
+- Dictionary name rescoring now checks every pronunciation form and considers
+  pronunciation and CTC spelling when choosing candidates. User terms need a
+  positive acoustic margin over the exact words being replaced.
+
+- Text-only dictionary matching uses pronunciation forms instead of interpreting
+  foreign name spellings as English. This prevents Zimina from becoming Szymon.
+
+- Dictation keeps preferred spellings such as McKenzie, LangChain and PyTorch
+  when the recognizer splits them at a capital letter. This uses the session
+  vocabulary and preserves the recognized letters and punctuation. Vocabulary
+  rescoring also rejects a candidate when another term has at least as close
+  a spelling and a better acoustic score.
+
+- Phonetic dictionary matching keeps acronyms such as SQL instead of replacing
+  them with similar terms such as SQLite.
+
+- Local meeting notes now recover explicit commitments with their owners and
+  dates. Summaries that still fail grounding use cited source excerpts.
+
+- Added a headless synthetic meeting-notes fidelity eval for local models.
+
+- Meeting notes now read interleaved microphone and system speech as phrases
+  within each track, avoiding citation loops caused by fragmented word rows.
+  The original transcript stays unchanged.
+
+- Fixed updates stalling when macOS reports an app or staging folder through
+  a filesystem alias or symlink. Updates still verify the app, payload and version.
+
+- Dictation now gives stalled live text more time before transcribing the full
+  recording. If that handoff or the following transcription fails, each recording
+  stays private for 24 hours with a recovery action, even when History is off.
+
+- First-run setup opens before background readiness checks finish. Startup
+  also avoids loading the hidden Dictation view and delays warming its popup
+  until the main window is interactive.
+
+- Fixed resident meeting speech being refused at warning memory pressure.
+  Memory sampling now retries failures, and admission errors identify pressure,
+  unreadable counters, or the measured memory shortage.
+
+- Short, formatted dictation answers now skip optional AI cleanup and keep the local formatter's exact text.
+
+- Dictation now prepares the target app during audio finalization and avoids an unnecessary activation delay.
+
+- Fixed the compact meeting popup hiding its title and controls, clipping warnings, and showing text from other windows.
+
+- Speech diagnostics now keep the engine that actually ran, including
+  Core ML on the CPU and the Neural Engine, instead of showing provider default.
+
+- Meetings now wait and retry when there is not enough memory to transcribe.
+  If memory stays low, transcription remains pending with a retry action.
+  The recording and any partial transcript are kept.
+
+- Fixed first-time Parakeet preparation failing when model metadata changes
+  during loading. Changed files are checked against their pinned checksum,
+  and a temporary file-identity failure retries once after one second.
+
+- On Macs with less than 12 GB of memory (8 GB Macs), Parakeet speech now
+  decodes on the CPU instead of the Neural Engine, in the same small helper
+  process with the same model. Word error is unchanged: in a 2026-10-25
+  measurement on a 24 GB M4 Pro, the CPU route scored 7.25% on the 98-clip
+  dictation corpus, with identical transcripts on 95 of 98 clips, and decoded
+  a 10-second clip in about 94 ms against 51 ms on the Neural Engine (about
+  0.02x real time either way). The first model load takes about 4 seconds,
+  with no compiler spike. The change is the memory: while the Neural Engine
+  runs the model, macOS wires 600–900 MiB for it outside the app, which put
+  dictation at 1,173–1,406 MiB against the 1 GiB budget these Macs plan for;
+  on the CPU the model's mapped weights stay reclaimable by the system and
+  dictation measured 529–546 MiB in three packaged runs on 2026-10-27. Macs
+  with 12 GB or more of memory keep the Neural Engine.
+- Fixed voice commands on macOS can select a unique phrase, replace or capitalise
+  the selection, delete the last verified insertion or its last sentence, move
+  to the field's start or end, and insert line or paragraph breaks without a
+  text model. Each edit has guarded undo. Changed or secure fields and ambiguous
+  phrases are refused. See [voice editing](docs/voice-edit.md) for limits.
+- Added **Save notes to a folder** in Settings > Meetings, off by default.
+  New finished meetings and later note or action-item edits can save as Markdown
+  in a folder chosen through the native picker, with an optional transcript.
+  Saves use a durable retry queue and keep externally changed files. Meeting
+  review shows save status and Retry. Deleting a meeting keeps its published
+  file unless you select **Delete the published file too**.
+- Added an opt-in "Spell names from nearby text" setting for macOS dictation.
+  A bounded Accessibility read extracts a session-only vocabulary from the
+  target window. Local spelling correction uses close matches and, in code editors, exact spoken
+  identifier components. Short names, ordinary words and ambiguous matches stay
+  unchanged. Changes use the existing review and undo controls. See
+  [nearby spelling](docs/nearby-spelling.md) for limits and verification status.
+- Startup no longer hashes local models, and Plainsong no longer keeps any
+  record of checked models on disk. Each run of the app hashes a model file
+  against its pinned checksum the first time it loads it. A low-priority
+  background check covers the current dictation and meeting speech models
+  shortly after launch. A file that fails its check shows as not installed and
+  offers the download again. In a 2026-10-24 sidecar test on a profile with 32
+  installed models (about 2.9 GB), launch took about 37 ms instead of about
+  840 ms, with 0.02 s of CPU instead of 1.5 s. The background check then
+  hashed the 705 MB dictation model in about 0.32 s.
+- On Apple Silicon with macOS 14 or later, choosing Download for Parakeet
+  fetches only its Core ML build (632 MB, or 464 MB when the
+  transcription language is English) and, when dictation can be English, a
+  103 MB vocabulary model: about 735 MB, or 567 MB for English. The 739 MB
+  file other Macs use downloads only if the Core ML build can't run on
+  this Mac, in the background with progress in Settings > Models; dictation
+  with Parakeet says it is waiting for that download and, like any dictation
+  that couldn't be transcribed, keeps the recording for a retry when your
+  History settings keep audio. The first dictation after the download prepares the model for
+  the Mac — about 10 seconds once on most Macs, about 4 seconds on 8 GB
+  Macs, where the model needs no Neural Engine compile — and the dictation
+  window says "Preparing model" meanwhile. Nothing downloads before that click. If Parakeet is
+  already on your Mac, the missing files download in the background, with
+  progress in Settings > Models, and nothing already downloaded is removed.
+- Plainsong uses much less memory on 8 GB Macs. On Apple Silicon, Parakeet
+  speech runs in a small helper process: on the Neural Engine on Macs with
+  12 GB or more of memory, and on the CPU below that. The speech model loads
+  when you start dictating or recording. On Automatic it stays ready for
+  30 minutes on Macs with less than 12 GB of memory (5 minutes below 20 GB,
+  otherwise 10), and memory pressure or other local model work releases it
+  sooner. In three 2026-10-27 runs of the whole packaged app on a 24 GB M4
+  Pro simulating 8 GB, the app's processes peaked at 208–231 MiB idle,
+  529–546 MiB dictating, 690–703 MiB recording a meeting and 1,202–1,322 MiB
+  writing notes and indexing search afterwards, against budgets of 300 MiB,
+  1 GiB, 1.5 GiB and 2.5 GiB. Below 12 GB the speech model runs on the CPU,
+  so macOS holds no extra Neural Engine memory for it; on larger Macs the
+  system's wired memory rose by 481–718 MiB while the model loaded in an
+  earlier test. Simulation sets Plainsong's own choices, not a real 8 GB
+  Mac's memory bandwidth or what other apps use.
+- Meeting notes and search indexing wait until a call ends and run one at a
+  time. On Macs with less than 20 GB of memory, starting a dictation or a
+  meeting stops notes generation at once; the notes are finished when speech
+  ends. A new meeting always starts, even while the last one is still being
+  processed.
+- On Macs with less than 12 GB of memory, dictation and live meeting
+  transcripts no longer wait for 2 GB of free memory on top of the speech
+  model while macOS reports normal memory pressure. Beside a call app, a
+  browser and chat, such a Mac often has only 1–3 GB free, and loading the
+  speech model was refused. Speech now keeps 512 MB free at normal pressure.
+  A dictation on a speech model that is already loaded asks only for its
+  own working memory. At raised pressure the earlier, larger margins still
+  apply, and at critical pressure speech is still refused. Notes, search and speaker
+  labels keep the full reserve.
+- Built-in notes finish on the small Light model. Generation that starts
+  repeating is stopped, what was finished is kept, and only the missing part
+  is asked again. On four test meetings at simulated 8 and 16 GB, all 48
+  Light and Balanced runs wrote notes. A 30-minute meeting took 73 s on Light
+  and 169 s on Balanced; their notes kept 36 and 37 of 42 checked facts.
+  Light is still weak at action items with both an owner and a date.
+- When a summary can't be written, the meeting keeps the decisions, tasks,
+  figures and names quoted from the transcript under "Summary couldn't be
+  written", records why, and offers Retry.
+- Text appears sooner after dictation. Plainsong asked about 16 times which
+  app was in front before inserting, starting a process each time (257 ms in
+  total); it now reads this from the system in under a millisecond. In our
+  2026-10-24 benchmark harness (36 clips played through the speaker into the
+  built-in microphone), the median end-to-end time fell from 1.50 s to
+  1.07 s. About 65 ms of that came from a cheaper test trigger.
+- Dictation checks the audio for names and terms from your personal
+  dictionary, from Contacts when **Spell names from Contacts** is on (off by
+  default; names only, read on this Mac), and from a built-in list. A word
+  changes only when the audio matches the name closely. Your own names are
+  also matched by how they sound in English, including accented and
+  multi-word names. On synthetic held-out clips that the thresholds were
+  tuned on, correct names and terms went from 63 to 69 of 94 with no new
+  errors and no change to control clips. On a fresh set, the last matching
+  step added one name (80 to 81 of 154) and changed nothing else. The
+  built-in list alone made no measured difference to unseen names. The check
+  adds about 7 ms and 8 MB.
+- Sound-alike spelling leaves English pet forms of known names alone, so
+  "Lindy" is no longer changed into a similar dictionary name.
+- With numbers as digits, including the default Voice style, spoken money
+  is written the way it is typed: "three point two million
+  dollars" becomes "$3.2 million", "twelve hundred and fifty dollars"
+  becomes "$1,250" and "ten to fifteen thousand dollars" becomes "$10,000 to
+  $15,000". An ambiguous range stays in words.
+- Times after a weekday ("Friday at 4.45") or in a paired time zone
+  ("9.30am Pacific, which is 12.30 Eastern") are written with a colon.
+  Labelled numbers such as "room 1230" stay as written.
+- A list counted aloud ("number one, budget review, number two, …") becomes
+  a numbered list in multi-line fields of apps Plainsong has no category for.
+  kitty, Alacritty, WezTerm, Hyper, Tabby and Rio are treated as terminals.
+- Spoken phrase swaps ("change Smith to Smyth") no longer carry the
+  trailing full stop into the replacement. Voice Edit prepares its model at
+  the start of a dictation again.
+- Dictionary rules no longer match inside accented, combining-mark or
+  right-to-left words, and a replacement keeps a literal `$1`. Cleanup that
+  would change a percentage, operator, emoji, accent, email address or URL
+  is refused.
+- Links opened from the app are limited to fixed destinations, support
+  bundles remove shorter credential formats and credential headers, and model
+  downloads require HTTPS, including redirects.
+- The meeting chooser shows 50 meetings at first and loads more on request,
+  and its search matches equivalent Unicode spellings.
+- Reset Everything also forgets the notes folder and its save queue. Files
+  already saved there stay.
+
+The measurements below describe their dated test runs, not every recording or
+Mac. See [beta.7 evidence](docs/evals/beta7-evidence.md) for datasets, counts,
+conditions, source receipts and limits.
+
+### Accessibility and permissions
+
+- Setup keeps keyboard focus inside the dialog. Model choices, saved prompts,
+  downloads, and meeting answers now report their names and status to screen readers.
+- Error and follow-up notifications stay visible until dismissed.
+  Confirmations pause while hovered or focused. Failed audio and calendar
+  checks offer a retry.
+- A missing or unverified speech model says so in plain words and points to
+  Settings > Models.
+- Accessibility status reflects the current macOS grant, including revocation
+  after a successful insertion. Past insertion success stays in diagnostics.
+
+### Privacy
+
+- Opening Models or Search & AI no longer fetches every configured cloud
+  provider's model list. Choose a provider, save its key, or use Refresh models
+  to load that provider's catalog.
+- The privacy document now explains model and executable downloads, provider
+  catalogs, ChatGPT sign-in and account storage, Gemini audio cleanup, Apple
+  speech assets, and calendar access and meeting metadata.
+- Selected-text actions from the command palette now run only after a click or
+  key press in the focused Plainsong window, and each request is admitted
+  once.
+- Reading the selection for a selected-text action puts back every type on the
+  clipboard, including items a password manager marked private, and leaves a
+  newer copy you made in the meantime alone.
+- Support bundles keep only approved settings. Custom prompts, other free text
+  and every absolute path, file URL and volume name are removed.
+- The audit log no longer records export file names, recording paths,
+  imported file names or auto-generated meeting titles. It keeps the format
+  and a size or length instead, and removes those fields from older entries
+  at launch.
+- Turning off "Suggest meetings from your calendar" now stops Plainsong
+  checking and reading the calendar until you turn it back on. Before, it
+  only hid the meeting cues. The choice is saved in settings.
+
+### Dictation
+
+- New installs on Apple Silicon use the newer Parakeet build for dictation.
+  On 630 real-speech clips tested on October 21, pooled word error rate was
+  6.32%, against 7.59% for the older build. Peak memory was about 1.7 GB
+  against 2.4 GB in that busy-host run. The older build stays inside the app as a fallback
+  and is no longer listed as a second "Compatible" model. Existing installs
+  on it switch at launch once the newer build is downloaded, with a one-time
+  notice. Until then Settings > Models offers a download and switch action
+  (about 735 MB on macOS 14 or later, 739 MB on earlier versions). Nothing downloads without that click. Any other model you chose stays.
+- The microphone starts opening when you press the shortcut, while the
+  speech model loads. The menu bar says "Opening microphone…" until
+  recording starts, then "Listening". Audio spoken before the microphone
+  opens can still be missed.
+- With Keep the model warm enabled, Plainsong attempts to load the speech
+  model at launch when memory permits. Pressing the shortcut also starts
+  loading it. A cold load can still delay transcription.
+- The hidden dictation pill no longer redraws in the background. An October
+  22 packaged beta.7 candidate averaged 0.33% total CPU over 20 idle samples
+  taken one second apart after a 30-second warm-up. This is one candidate's
+  result.
+- At warning-level memory pressure, a dictation you are waiting on can
+  still run if measured free memory covers it plus a reserve for other
+  apps. Critical pressure or an unknown memory state still refuses it.
+  Background warm-ups and other optional work wait.
+- On Apple Silicon at normal memory pressure, built-in AI cleanup now
+  reserves one eighth of physical memory for other apps, between 2 and
+  6 GiB, instead of a fixed 6 GiB. Raised or unknown pressure keeps the
+  6 GiB reserve. This is an admission rule, not measured memory use. When
+  cleanup is refused, Plainsong inserts the local text unchanged.
+- Hands-free reuses the running microphone and its buffered trigger audio.
+  This reduces the risk of losing the start of a dictation.
+- Dictionary rules can replace phonetic matches, such as "Superbase" with
+  Supabase. When field context is enabled and available, names in the
+  focused field can also guide local correction. Recognition and matching
+  can still miss a name.
+- Spoken corrections resolve without AI: "v2, no wait, v3" keeps v3.
+  "config underscore v3 dot yaml" becomes `config_v3.yaml` in code editors.
+  "Invite Carlos, I mean Carla" keeps Carla, and "to 4:30, no wait, to five
+  o'clock" keeps five o'clock. An apology ("I told Dana, sorry, Sam") is
+  left as you said it.
+- Spoken clock times read as times: "from 445 to 315" becomes 4:45 to 3:15
+  when the sentence is about scheduling. A recognizer's "6.30pm", "4.45 EST"
+  or "the meeting from 3.15 to 4.30" is written with a colon; any other
+  decimal, such as a price, version, lab value or quote, stays as it is.
+- German, Spanish, French, Italian and Portuguese dictation no longer get
+  the English cleanup rules: German "um" and Portuguese "um" are kept, and
+  Italian "i" is not capitalized. Your language setting, when it is not
+  automatic, decides this.
+- Ordinals and "oh" numbers are only written as digits when the reading is
+  certain: "the 563rd night" and "21st century", but "three hundred and
+  twenty second graders" stays in words. "it's eleven oh five" becomes
+  11:05 and "flight fifteen oh eight" becomes flight 1508.
+- "Pounds" becomes "£" only when the sentence is about money, so "The
+  patient weighs one hundred and five pounds" stays a weight. A number is
+  written as digits only when the whole phrase can be ("two thirds of a
+  cup" and "one twenty over eighty" stay in words). A short German or
+  Portuguese dictation keeps its "um", and a filler you are talking about
+  ("Please write um exactly") is kept by local and AI cleanup alike. A
+  short email ("Hi Sam, approved. Best, Jordan.") gets its sign-off on its
+  own lines.
+- An email sign-off joined by a comma ("..., best, Jordan") is laid out on
+  its own lines, and TextEdit and Pages count as documents for lists and
+  paragraphs.
+- Cleanup checks for changes to filenames, flags, casing, questions, prices
+  and applied dictionary spellings. A rejected rewrite keeps the source
+  text. These checks do not catch every possible change. Turning Remove
+  filler words off now applies to AI cleanup too.
+- Statements are no longer turned into questions.
+- In email, notes and task apps, a spoken list ("three things: first...,
+  second..., and third...") becomes a numbered list, "new paragraph"
+  said after a sentence starts one, and long dictation breaks into
+  paragraphs. Emails get the greeting and sign-off on their own lines.
+  Chat apps get a numbered list only when you announce it ("three things:
+  first..."), and nothing else. AI prompts, code editors, terminals,
+  single-line fields and fields Plainsong cannot identify get no added line
+  breaks. Format for destination app turns this off.
+- Local cleanup no longer adds a comma before "so far" or "for you"; a
+  comma before "and", "but", "or" or "so" now needs a full clause on both
+  sides, and none is added inside an "if" or "unless" condition.
+- The experimental Parakeet GGUF route now loads when there's as much free
+  memory as the standard Parakeet route needs, and it no longer marks
+  non-English dictation as English.
+
+### Inserting text
+
+- The success sound and filled pill now mean a verified insert. Clipboard
+  and preview results use a neutral sound; refused or failed inserts use
+  the failure sound, including when a newer clipboard was preserved.
+- Slow dictation says it is still processing, without promising the words
+  are safe if the app quits.
+- Plainsong notices when an app didn't take a paste, says it couldn't
+  confirm the text, and leaves it ready to paste.
+- When an automatic insert falls back to the clipboard, the popup says
+  "Copied, press ⌘V" rather than reporting success.
+- Optional per shortcut: press Return after the text is confirmed in the
+  same field, for chat and AI prompt boxes. Off by default.
+- Dictated text is marked so clipboard managers skip it.
+- Paste works on Dvorak, AZERTY and other keyboard layouts.
+- Escape cancels while the model is loading and while a shortcut chord is
+  still held; the popup has a Cancel (discard) button.
+- Paste last result always pastes your newest finished dictation.
+- A microphone that disconnects mid-dictation is reported.
+- Quit waits for a dictation that is still being processed, for as long as
+  it takes, and asks what to do: wait, copy the words and quit, or discard
+  the dictation. Before, a quit went ahead after 30 seconds and could drop
+  the words of a long dictation.
+- When you stop a dictation, its audio is kept in one private file until
+  the result is recorded. If Plainsong closes before then, the next launch
+  offers "Recover last dictation": it transcribes the audio again and shows
+  the words with Copy and Discard. Nothing is pasted for you. A dictation
+  that was still recording when Plainsong closed is not covered.
+- If an insert fails after you copied something else, your copy is kept and
+  the pill says "Clipboard kept". Before, the dictation could replace it.
+- When Plainsong couldn't identify the field you dictated into, the words
+  now go to the clipboard like any other failed insert.
+- An app you quit while your words were being processed is no longer
+  reopened to receive them; the words go to the clipboard instead.
+- "Listening" and the start sound wait for the first audio from the
+  microphone. With AirPods the sound plays about 0.3 seconds later, and
+  about 1.2 seconds later with other Bluetooth headsets, so the headset
+  doesn't swallow it.
+
+### Learning and setup
+
+- After you fix a word in another app, Plainsong offers to learn it with one
+  click and shows what the rule will change. Nothing is learned without your
+  approval, and Undo is available.
+- Setup leads with the recommended model, finishes with "Start dictating",
+  and recovers from a memory refusal by offering a smaller model.
+- The speech step lists every other model this Mac can run right under the
+  recommended one, one line each with what sets it apart and its size, so
+  there is no "Choose another model" click. Experimental models stay in
+  Settings. Settings > Models lists the same models in each task, with the
+  recommended one first, and keeps only experimental models and cloud
+  services behind "Show more".
+- The Balanced preset is gone: on every Mac it would have been the same
+  Parakeet v3 as Recommended.
+- Setup offers to mute other audio while you dictate.
+
+### Meetings
+
+- A meeting that crashed in its first seconds now keeps its audio. At the next
+  launch, or when you re-check a meeting's audio, Plainsong repairs the
+  recording's header from what is on disk, including audio written after the
+  last save point.
+- In a Me + Them meeting, if one track stops saving, the other tracks keep
+  recording and Stop saves the meeting instead of leaving it in an error.
+  The meeting says which source failed and what was kept.
+- Renaming a speaker you had confirmed as a remembered voice, choosing a
+  different voice for them, or saying "Not them" now removes the sample that
+  confirmation added and recalculates that voice.
+- Call notifications have a Record action that opens meeting consent with
+  the detected call filled in. Clicking the body opens Recordings.
+- Quitting while a meeting is still being transcribed asks first: wait for
+  the transcript, or quit and transcribe it later. The audio is already
+  saved, and the next launch offers Retry transcription. Before, the quit
+  ended the transcription without a word.
+- You can type in Live notes in the meeting window: click the notes box, or
+  choose Type Live Notes from the menu bar. The window lets go of the
+  keyboard when you leave the notes, and starting a dictation never moves
+  focus to it.
+- Me + Them now records the other people on a call when you wear
+  headphones, AirPods or a headset. On macOS 14.7 or later Plainsong records
+  your microphone and all audio playing on the Mac, including other apps
+  and notification sounds, as two separate tracks. Switching between
+  speakers, headphones and AirPods no longer needs a new check. If the
+  meeting audio stops arriving or changes format mid-meeting, Plainsong
+  reopens it. Before, it listened only to the default output and refused
+  most headsets, so with headphones on only your side was recorded. No audio driver or extra app is needed; BlackHole
+  still works as an advanced option on older macOS.
+- macOS asks for "Screen & System Audio Recording" only when you choose
+  Allow meeting audio, in setup or when starting a meeting. The check is
+  silent: Plainsong no longer plays a test tone through your speakers. If
+  macOS has blocked it, Plainsong says so and offers Open System Settings.
+- Choosing Me + Them now says plainly that it records every sound the Mac
+  plays during the meeting, music, videos and notifications included, in
+  the meeting start dialog, Settings and setup.
+- The live meeting window shows two levels, "You" and "Meeting audio", so
+  you can see that both sides are coming through. If no sound at all has
+  arrived from the Mac after ten seconds, the meeting audio level says
+  "Unverified: no sound yet" instead of looking like a quiet call.
+- If the meeting audio stops arriving mid-meeting (the Mac sends pure
+  digital silence, which a quiet call does not), the meeting window says
+  "Meeting audio stopped arriving" after 30 seconds. Plainsong checks the
+  permission again first: if macOS withdrew it, the warning says so and
+  points to Privacy & Security.
+- In long meetings the microphone and meeting audio tracks stay in step:
+  Plainsong corrects the small clock difference between the two devices,
+  so the two sides no longer drift apart as a call goes on.
+- Without headphones, the far side heard through your microphone no longer
+  shows up a second time as your own words. A microphone line is set aside
+  only when its words are exactly the other side's words, at an echo's
+  timing, and the recording shows the microphone following the speaker; a
+  changed word, number, amount, name, condition or "not" keeps it, and so
+  does repeating someone on purpose. Set-aside lines are left out of the
+  transcript text, search and summaries but not deleted: the meeting view
+  lists them under the transcript with a Show button.
+- New installs on Apple Silicon use the same Parakeet download for
+  dictation and meetings. In five AMI meetings, about 131 minutes, tested on
+  October 21, the newer build had 23.0% word error rate on headset audio
+  against 30.4% for the older build, and 28.0% against 37.6% on room audio.
+  Peak memory was 1.0-1.1 GiB against 2.0-2.2 GiB. These were recorded-audio
+  harness tests. A meeting slot on the older Parakeet v3 build moves with
+  dictation once the newer build is downloaded; any other meeting model
+  stays. Choosing another meeting-capable model during setup records
+  meetings with that model instead, and until the newer build is downloaded,
+  meetings use the older build when it is on the Mac.
+- A meeting recorded while the Mac is short of memory waits for memory to
+  free up, up to ten minutes per meeting, and says it is waiting. If memory
+  is still short after that, the transcript is marked incomplete, the audio
+  is kept, and Retry transcription can finish it later.
+- The older Parakeet build now provides word timestamps. On the AMI test
+  recordings the median timestamp error was 70 ms, with a 180-200 ms 90th
+  percentile. Timestamps help align speaker labels but do not ensure the
+  label is correct.
+- ECAPA speaker labelling folds very small clusters into larger ones. On
+  five AMI meetings with four speakers each, it found 3-5 speakers on headset
+  audio instead of 60-183. A separate synthetic guest test kept a ten-second
+  guest. Similar voices can still merge. Relabelling attempts to preserve
+  the names you gave the voices.
+- Fewer words are left without a speaker. A word where two people's turns
+  overlap goes to the turn it sits deeper inside, and a word just outside a
+  turn goes to the one speaker beside it. Across 16 AMI headset recordings
+  tested on October 21, unlabelled aligned words fell from 6.5% to 0.6%.
+  Correct labels rose from 88.6% to 92.6%; wrong labels rose from 4.9% to
+  6.8%. Filling gaps can assign a word to the wrong person.
+- Speaker labelling is no longer skipped silently. It waits out a memory
+  shortage like transcription does, and if it still cannot run, Plainsong
+  says why when the meeting finishes and how to try again.
+- New local speaker model: pyannote community-1, with no fixed speaker
+  count. On October 21 AMI tests, correct labels on aligned headset words
+  were 93.2% against ECAPA's 92.7% on five meetings and 92.5% against 92.6%
+  on eleven held-out meetings. On the first five room recordings, correct
+  labels were 91.5% against 90.0%, and wrong labels 8.0% against 9.0%.
+  It kept a guest who spoke for ten seconds; on one meeting it merged two
+  similar voices. New installs on Apple Silicon, and Reset everything on this device, start on it;
+  existing installs keep their speaker model and can choose it under
+  Settings > Meetings > Speaker model (a 33 MB download).
+  Remembered voices work with it through its own voice signatures; voices
+  remembered with another model are kept, and Settings says which ones the
+  model that will actually run cannot match. Model by pyannote, CC BY 4.0.
+- Meetings never download a speaker model on their own. The meeting step of
+  first-run setup names the speaker model and its size beside the meeting
+  speech model, and one Download click fetches whichever of the two is
+  missing; skipping meetings downloads neither. If the selected speaker model is missing, a meeting
+  uses another one already on the Mac (pyannote community-1, then
+  ECAPA-TDNN, then any other) and says which. With none, the meeting is
+  saved without speaker labels, says so, and offers a Download button for
+  the model, after which Label the speakers works on that meeting.
+- Two downloads of the same model file, such as one from Settings and one
+  from a meeting, no longer write over each other: the second waits for the
+  first and uses its file.
+- A long meeting's speaker labelling no longer makes a dictation you finish
+  meanwhile fail: it hands the speech runtime to the dictation between
+  steps and carries on afterwards.
+- Relabelling a meeting's speakers, or transcribing the meeting again,
+  clears every voice signature the earlier run left, whichever model ran,
+  and keeps only the new run's. Earlier signatures no longer stay under
+  speaker numbers that may now belong to someone else, or outrank the new
+  ones when Plainsong suggests a name.
+- Summary checks flag some unsupported names and statements for review.
+  These checks can miss errors. Review the transcript before relying on
+  a summary.
+- Record a Meeting… in the menu bar (and plainsong://meeting/start) opens
+  the consent sheet from any view, not only when Meetings is showing.
+- The menu bar shows a paused meeting as paused, with a clock that leaves
+  paused time out, and follows a new meeting started while the last one
+  is still being transcribed instead of showing "Finishing" with Stop
+  disabled.
+- A mic-only meeting whose microphone is unplugged or drops out is stopped
+  and saved, with a notification, instead of recording nothing until you
+  press Stop. A meeting stopped before any audio was recorded is removed
+  and the app says nothing was recorded, instead of leaving an error row.
+- A meeting that will not start says why: a meeting-audio problem or a
+  full disk is no longer reported as a disconnected microphone, a locked
+  vault no longer asks for the consent notice, and a backup or dictation
+  in progress no longer reads as "a meeting is already being recorded".
+  The fix (Open Microphone settings, Unlock vault, Review models) is
+  offered inside the consent dialog.
+- Editing a long speaker turn keeps the turn's full time span, so playback
+  highlighting, jump-to-time and subtitles stay right.
+- Markdown, plain-text and Word exports use the speaker names you set (and
+  Me / Them), and unnamed speakers keep their own number. Export files
+  are never hidden by a title that starts with a dot.
+- Re-transcribing a meeting no longer puts the old names on whoever the new
+  run numbers the same; Me and Them keep theirs.
+- Deleting a meeting also forgets the voice samples it taught remembered
+  voices.
+- Speaker suggestions appear as soon as a meeting's speakers are labelled,
+  and a finished meeting with no speech says so instead of promising a
+  transcript.
+- Meeting errors, notes failures, speaker-labelling failures and
+  speaker-model download failures are said in plain words with a next
+  step, without model or audio-system internals. Ask's setup help points
+  to Search & AI instead of a terminal command.
+- Screen readers hear the meeting chip's phase changes, focus returns to
+  the meeting list after a delete, and old notes failures no longer fire
+  an alert per row.
+- Ask questions are no longer written to the audit log.
+
+### Searching past recordings
+
+- Ask can find a passage that says the same thing in other words, with a
+  search model built into Plainsong. No Ollama or account is needed, and
+  your transcripts, questions and the index stay on your Mac. Choose it in
+  Settings > Search & AI; new installs start with it selected, and the model
+  (EmbeddingGemma 2, Apache-2.0, about 346 MB) downloads when you click
+  Download. Until then, Ask matches words. Existing installs keep word
+  matching. Google asks that EmbeddingGemma 2 be used in line with the Gemma
+  Prohibited Use Policy, which Settings links beside the model.
+- In an October 21 retrieval test using 98 hours of English AMI reference
+  transcripts with candidate sources filtered by project, the default model
+  returned a relevant passage in the top five for 75.0% of 124 hand-written
+  questions, against 53.2% for word matching over the same passages. This
+  measured meaning search alone, not Ask's combined ranking or its answers.
+- Two other built-in models are offered: Qwen3 Embedding 0.6B (Apache-2.0)
+  and EmbeddingGemma 300M (77.4% in the same test). EmbeddingGemma 300M comes
+  under the Gemma Terms of Use, so Plainsong downloads and runs it only after
+  you accept those terms and the Gemma Prohibited Use Policy in the app; it
+  records the acceptance with its date. Ollama stays available for your own
+  model, with three suggested models and a custom name.
+- Search now indexes passages of about a hundred words. Meeting transcripts
+  store one row per word, so meaning search used to compare single words
+  and Ask received single words as its sources.
+- New and edited recordings are indexed in the background, four passages
+  at a time. Each batch waits until dictation, recording, meeting
+  transcription, speaker labelling and summaries, and Ask or cleanup have
+  been quiet for 3 seconds, and indexing stops in Low Power Mode or on
+  battery below 20%. In the October 21 standalone indexing test, the default
+  model processed 11,123 passages at 18.5 passages per second, or 6.1 seconds
+  of processing per hour of reference transcript. This excludes background
+  scheduling and does not predict completion time while you use the Mac.
+- Ask combines meaning and word matches, so exact names and numbers (an
+  order number, a surname) still surface, and recordings not yet indexed are
+  searched by words.
+- With word matching, Ask now reads the passage around each matching word
+  instead of the word alone.
+- Search-model downloads can be cancelled, any downloaded search model can
+  be removed in Settings, and Rebuild re-indexes in the background.
+
+### Dictation review and recovery
+
+- Compare cleaned-up dictation with the original, restore individual passages,
+  undo revisions, preview styles and save edits. Words that cleanup removed
+  show struck through in the review, so "Tuesday. No wait, Wednesday" reads
+  as a correction instead of an empty slot.
+- Cleanup checks now cover more changes to negation, conditions, uncertainty,
+  counted items and financial values. Rejected rewrites keep the source text.
+- Recover unfinished edits and retry failed delivery from the retained text.
+- Hide standalone empty-audio markers from live dictation previews.
+- Stop live previews before final dictation processing. A stalled preview
+  offers retry without starting a conflicting decode.
+- Review correction suggestions before adding dictionary rules. Capturing
+  corrections in other apps is optional and requires your permission.
+- Choose Right Command or Right Option for hold or toggle dictation. Enable
+  double-tap locking separately from the existing single-tap option.
+
+### Meeting capture and review
+
+- Recover failed final-note saves without replacing newer notes. AI drafts
+  remain separate from your original notes.
+- Open cited transcript evidence from meeting notes, browse occupied
+  five-minute sections, filter speakers and jump to timestamps.
+- Keep capture-loss warnings visible in meeting review and document exports.
+  Subtitle exports explain that they contain saved timed cues only.
+- Search older meeting transcripts. Concurrent transcript saves check for
+  newer manual edits before writing.
+
+### Models and privacy
+
+- Two optional English alternatives in Settings > Models for dictation and
+  meetings. Fluid Speech Mini by FluidVoice produced fewer stray words with
+  nearby talkers in synthetic audio tests, but left more real-speech clips empty
+  and made more critical errors in dictation tests than Parakeet v3, and can
+  miss very short replies.
+  Underdog Bark 3.0 Pro by Conway Research did better on short distant-microphone
+  meeting clips in our tests; whole-meeting differences were within test
+  variation, and dictation may lose capitals and punctuation. Neither is a
+  default. Other transcription languages use Parakeet instead. The optional
+  models download from Plainsong's GitHub release.
+- Parakeet v3, Whisper base.en and Cactus Whistle use adaptive memory admission
+  on Apple Silicon, with a reserve for other applications and verified memory
+  pressure. Moonshine's short-dictation path also uses measured memory
+  allowances. Other runtimes retain the conservative reserve.
+- Built-in notes, Ask and S1 cleanup now use a separate local text helper.
+  Notes offer Light, Balanced and Best, preselected from memory capacity.
+  A saved choice takes priority. Light defaults to rules-only dictation cleanup;
+  S1 is optional and loads on demand.
+- In 18 admitted fixture runs on a shared 24 GB M4 Pro, with simulated 8 and
+  16 GB capacities, helper-plus-sidecar peak bounds ranged from 0.473 to
+  1.352 GiB. Light's maximum was 0.586 GiB. These exclude Electron and
+  retained capture memory; the whole-app figures under Unreleased cover
+  them. [Notes helper evidence](docs/evals/notes-helper-2026-10-23.md)
+  records the cases, times, source manifests and limits.
+- Long notes preserve speaker turns and source identities while summarizing
+  in parts. Missing material source details remain as timestamped quotes.
+  Unsupported details get review flags. Generated notes can still misstate
+  a supported fact or miss a correction, so the quoted source stays available.
+- Memory-waiting notes retry with backoff and survive restart. Canceling a wait
+  stops future attempts and an active retry, and writes nothing afterwards. Apple on-device notes are available as an option
+  when supported, but live generation was not admitted on the shared test host.
+- Moonshine uploads native attention data in bounded slices. This avoids a
+  full-size duplicate buffer; it does not fix omissions in longer recordings.
+- Model choices warn about observed long-recording failures in experimental
+  Moonshine and Qwen routes. Parakeet remains the recommended choice.
+- Whisper checks recording-buffer memory before decoding audio.
+- Search and filter model choices by task, hosting and readiness. Installed
+  files and a working model are shown separately.
+- Microphone and calendar permission descriptions explain optional cloud
+  processing. Ollama setup distinguishes local models from cloud models.
+- Removed the unreleased groundwork for a paid tier. Plainsong has no paid
+  tier.
+- The ERes2NetV2 speaker model is turned off while its license is
+  unresolved. Plainsong no longer offers, downloads or runs it. Meetings set
+  to use it run pyannote community-1 or another downloaded speaker model and
+  say so; with none downloaded they are saved without speaker labels, as
+  before. An earlier download stays on your Mac until you remove it in
+  Settings > Meetings.
+
+### Dependency security
+
+- Update JavaScript and Rust dependencies to address reported advisories.
+
+### Interface
+
+- The microphone meter follows your voice and respects reduced motion and
+  high-contrast settings.
+- Longer AI tasks show what is running. Questions stay visible while Plainsong
+  searches your meetings.
+
+### Onboarding
+- First-run choices include Parakeet v3, Whisper base.en, experimental Cactus
+  Whistle and Moonshine Streaming Medium, and Whisper Large Turbo. Cactus
+  requires Apple Silicon and supports up to 30 seconds per dictation. Existing
+  ready configurations are preserved.
+- Practice unlocks its controls when capture stops, fails or is cancelled from
+  another window. Late results cannot overwrite a retry.
+- Download completion is shown separately from verified practice. Memory
+  refusals explain how to retry.
+- Setup describes local meeting-model installation and History retention
+  without assuming either is already configured.
+- Microphone checks request macOS access before opening capture. A stalled
+  check offers retry after 30 seconds and releases late microphone streams.
+- Setup shows a successful system-audio test even while a model or microphone
+  still needs attention.
+- Shortcut and meeting-note choices support arrow-key navigation. Step changes
+  no longer move focus away after you start using a control, and closing setup
+  returns focus to the control that opened it.
+- Meeting setup reads as three plain rows (the speech model, your voice,
+  the other people on the call) instead of raw diagnostics; the details are
+  one click away for support. A model that is not downloaded yet is a normal
+  state, not a warning.
+- "Skip meetings" goes on to the Ready summary instead of closing setup, and
+  Ready says honestly what is and is not set up.
+- The meeting notes step offers Plainsong's built-in text model on any Mac
+  that can run it, with its name, download size and the memory it needs, and
+  downloads it only when you click Download text model. "Transcripts only, no
+  automatic notes" is its own choice. The meeting step shows the total
+  download size, including the notes model when it is chosen, before anything
+  downloads.
+- Download sizes read in MB and GB, the practice dictation says plainly when
+  it needs the model first, the shortcut cards line up, and the header says
+  Setup.
+
+### Fixes from hands-on testing
+- Quit can finish after a renderer process exits. A live editor still gets a
+  chance to save before shutdown.
+- Starting a dictation from inside Plainsong (the practice dictation in
+  setup, Start on the Dictation page) no longer sends focus to the app
+  behind it (Finder, after a DMG install).
+- Setup no longer starts over at step 1 when you click back to Plainsong:
+  once open, it stays open until you finish or skip it.
+- A dictation that heard nothing says "Nothing heard" instead of a check
+  mark over "Transcription ready".
+- Clicking Stop on the dictation pill no longer brings Plainsong forward, so
+  the text goes into the field you were dictating into. If Plainsong itself
+  ended up in front (its menu bar item or main window), the field you
+  started in is brought back before inserting. If you switched to another
+  app, Plainsong does not pull you back.
+- When text can't be inserted (you switched apps, the field changed, the
+  app refused), it is put on the clipboard and the pill says "Copied, press
+  ⌘V". Before, it stayed only inside the popup. A password field still gets
+  nothing, and a clipboard you changed during insertion is left alone.
+- With dictation history turned off, a failed insert no longer says the text
+  was saved to history.
+- A dictation that reaches the 10-minute limit is stopped and inserted right
+  away. Before, the pill kept saying "Listening" while nothing more was
+  recorded.
+- Quitting during a dictation finishes it first (insert or copy) instead
+  of dropping the words.
+- Starting a dictation while a meeting records says "Meeting recording" in
+  the pill instead of "Didn't finish".
+- Connect calendar now shows the macOS permission prompt. In beta.6 the
+  click did nothing: the app's signature lacked the calendar entitlement, so
+  macOS refused without asking. The card now also says what happened after
+  each click: connected, refused (with a link to System Settings), or that
+  macOS showed no prompt.
+- Model downloads no longer fail partway on a slower connection. The
+  built-in text model and the live preview model were cut off after one
+  minute, and speech models after 15 minutes, while the file was still
+  arriving. A download that genuinely stalls still stops on its own.
+- A failed model download says what happened in plain words (no internet
+  connection, not enough disk space and how much is needed, a damaged copy,
+  a busy download server) instead of showing the download address, file
+  paths and internal error text.
+- Setup has a Back button. Before, the only way to change an earlier
+  answer (the speech model, the shortcut) was to finish or skip setup and
+  reopen it.
+- Reopening setup with the speech model already downloaded says "Parakeet
+  v3 is on this Mac and ready." instead of "Download complete." next to a
+  warning that dictation won't work until a model is downloaded.
+- If a quit was held for a dictation and then cancelled (an unsaved meeting
+  draft, say), the next quit still finishes a live dictation first. Before,
+  only the first quit in a session waited.
+- "Record a Meeting…" in the menu bar opens the consent sheet from any
+  screen. Before, it only worked if Meetings was already on screen;
+  otherwise Plainsong came forward on Meetings and nothing happened.
+- The menu bar menu has Open at Login, so the dictation shortcut works
+  after a restart without opening Plainsong first. It shows what macOS
+  reports, including when System Settings still has to allow it.
+- While a dictation is finishing, the menu bar says "Finishing Dictation…"
+  instead of offering a Start that would be refused. Recent dictations
+  says "None since Plainsong opened" instead of "Nothing dictated yet" when
+  History has entries from before.
+- Updates: an offline check says Plainsong couldn't reach the update server
+  instead of showing a network error code; an install that failed offers
+  "Try installing again" for the same version; Check for updates waits
+  while an update downloads or installs; and the card no longer shows an
+  "Unknown" badge before the first check.
+- Deleting a dictation (by hand or by auto-delete) also removes it from the
+  menu bar's Recent dictations and from Paste last result. Before, the
+  menu kept offering words History said were gone.
+- Ask finds passages for the question you just asked. A follow-up question
+  used to be searched together with the whole conversation before it (and
+  a question about a meeting with that meeting's summary), so the new
+  question was often cut off and the passages were about earlier turns.
+- Ask on Home: an answer your recordings don't clearly support says so;
+  pressing Enter while an answer is on its way no longer starts a second
+  one; Clear thread waits for the pending answer; errors no longer start
+  with "Error invoking remote method"; and "no match" says "Nothing in your
+  recordings matched that question" instead of telling you to record
+  meetings.
+- Speech model status lines read "Ready on this Mac" and "isn't downloaded
+  yet" instead of naming file formats and engines ("transcribe.cpp GGUF
+  inference ready"). Process again names auto-delete settings the way the
+  menu does ("After 24 hours", not "24h") and points to Capture and insert.
+- Dictations removed by auto-delete leave History right away instead of
+  staying listed (and failing to open) until something else changed. The
+  custom auto-delete hours on the Dictation page can be cleared and
+  retyped, and are saved when you leave the field.
+- After you delete the dictation shown in the latest-result card, the card
+  no longer says "Saved in history" or offers Save and "Use for Paste last
+  result" for the deleted entry. The text stays there to copy.
+- Plainer wording where internal terms showed: "Needs setup" and
+  "Couldn't start" on speech models instead of "Runtime setup required" and
+  "Runtime error", "Not enough free memory right now" instead of "memory
+  headroom", "Mode in use" on the Dictation page, and search indexing says
+  it is paused, waiting for free memory, or will try again, instead of
+  showing the loader's or database's own error text.
+- Search model settings: picking a different model shows it at once
+  instead of snapping back to the old one (and its Download button) for a
+  few seconds; a download already running when you open Settings or Ask
+  shows its progress and Cancel instead of a greyed-out button; the hint
+  under Ask disappears when the download finishes and says why one failed.
+  The setting is now called "How Ask finds passages", since the search
+  boxes always match words.
+- Downloading a speech model from Settings > Models shows its progress on
+  the button ("Downloading 37%") instead of "Working…", and the other
+  model rows wait for it rather than letting a second download take over
+  the first row's busy state.
+- Settings > Models lists each downloaded speech model under Disk with its
+  size and a Remove button (with a confirm). A model dictation or meetings
+  uses says so and has to be swapped out first. Before, there was no way to
+  free the space a model you stopped using took.
+
+### Install and permissions
+- Updating from beta.5: finish or cancel any dictation before you click
+  Install. Beta.5's own quit path does not wait for a dictation in progress,
+  so its words can be lost during the update. Beta.7 holds quit until every
+  dictation is resolved.
+- Opening Plainsong straight from its disk image now offers to move it to
+  Applications, where it keeps its permissions after the disk image is
+  ejected.
+- Permission repair identifies and registers the running app before resetting
+  its Accessibility permission. It stops if the app identity or registration
+  cannot be verified.
+- Fixed: Plainsong could not tell which app copy it was running from, so the
+  "running from the disk image" note never appeared.
+- Setup moved out of Settings, Storage: Run setup again is under Settings >
+  General, Fix dictation setup under Settings > Dictation, and Set up
+  meetings under Settings > Meetings.
+
+### Internal
+
+- Added a launch-only loopback update feed for signed packaged QA, with
+  isolated profiles and download interruption and corruption checks.
 
 ## [0.9.0-beta.5] - 2026-09-24
 
@@ -71,7 +1063,7 @@ Silicon.
   wizard whose buttons never scroll away, and less re-rendering while
   recording. See `docs/typeless-wispr-comparison-2026-09.md`.
 
-### Voice Edit, quiet speech and Plainsong Plus
+### Voice Edit and quiet speech
 - New style, Voice Edit: select text, dictate an instruction ("make this
   friendlier", "turn this into bullets") and the selection is rewritten in
   place. With nothing selected it drafts what you ask for ("Help me write").
@@ -80,9 +1072,6 @@ Silicon.
 - Dictation no longer runs a noise gate that clipped quiet consonants;
   quiet recordings are instead brought to a steady level before
   transcription, with a soft limiter so loud ones do not clip.
-- Not launched and not in any build users get: groundwork for Plainsong
-  Plus, an optional $10/month tier with hosted models. See
-  `docs/plainsong-plus.md`.
 
 ### Dictation cleanup and HUD
 - New, on by default: "Remove filler words" drops um/uh, stuttered words
@@ -246,11 +1235,10 @@ Silicon. See `LAUNCH.md` for that boundary.
   `artifacts/qa/speechanalyzer-receipt-2026-09-02.md`.
 - Two cloud speech-to-text providers that return speaker labels, both
   bring-your-own-key and opt-in like the rest. **Deepgram Nova-3**
-  ($0.0043/min, the fastest route Plainsong offers) sends your personal
+  sends your personal
   dictionary as keyterms, returns word timestamps and turn-level speakers, and
   opts every request out of Deepgram's model improvement programme.
-  **Google Gemini 3.5 Transcribe** ($0.005/min, the lowest published word
-  error rate here) returns speakers and word timestamps for meetings and takes
+  **Google Gemini 3.5 Transcribe** returns speakers and word timestamps for meetings and takes
   your dictionary for dictation — its API refuses both on one request, so the
   picker and the audit log say which one a request actually carried. Gemini
   uploads audio to Google's Files API and Plainsong deletes it again after
@@ -385,7 +1373,7 @@ Silicon. See `LAUNCH.md` for that boundary.
   says why ("Meeting stopped: Zoom closed").
 - Pause and resume a meeting from the recording mini window, the Meetings
   header, or the live meeting card (⌘⇧P). The microphone and system audio
-  stay open, so resume is instant, but nothing captured while paused reaches
+  stay open while paused, but nothing captured while paused reaches
   the file, the live preview, or the silence watchdogs; the clock stands
   still, the saved audio skips the gap, and the transcript timeline marks it
   as "[Paused 2 min 10 s]". Pauses are recorded on the meeting and in the

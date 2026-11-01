@@ -59,7 +59,8 @@
 //! live in the route's tradeoff copy (src/lib/asr-capabilities.ts).
 
 use super::{
-    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment, TranscriptionResult,
+    AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, TranscriptSegment,
+    TranscriptionOptions, TranscriptionResult, VocabularyHint,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -206,6 +207,18 @@ impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
     }
+}
+
+/// Remove only digital silence at the outer edges. Qwen's decoder can
+/// terminate early with long zero padding; every nonzero sample and internal
+/// pause remains. This is not an energy threshold or speech detector.
+#[cfg(feature = "asr-parakeet")]
+fn trim_exact_zero_edges(samples: &[f32]) -> &[f32] {
+    let Some(start) = samples.iter().position(|sample| *sample != 0.0) else {
+        return &samples[..0];
+    };
+    let end = samples.iter().rposition(|sample| *sample != 0.0).unwrap() + 1;
+    &samples[start..end]
 }
 
 /// Split audio into pieces of at most `QWEN3_ASR_CHUNK_SECONDS`, each cut in
@@ -373,14 +386,14 @@ fn qwen3_asr_repo_files() -> [(
     ]
 }
 
-/// Whether all seven pinned files in `model_dir` pass `is_model_artifact_trusted`
-/// (the receipt the download path or the startup migration wrote after
-/// hashing them). Shared with the manager's diagnostics so both say the same.
-pub(crate) fn artifacts_trusted(model_dir: &Path) -> bool {
+/// Whether all seven pinned files in `model_dir` are present and none has
+/// failed its integrity check in this session. Loading hashes them. Shared
+/// with the manager's diagnostics so both say the same.
+pub(crate) fn artifacts_installed(model_dir: &Path) -> bool {
     qwen3_asr_repo_files()
         .iter()
         .all(|(_, _, _, local_name, sha256)| {
-            crate::download::is_model_artifact_trusted(&model_dir.join(local_name), Some(sha256))
+            crate::download::is_model_artifact_installed(&model_dir.join(local_name), Some(sha256))
         })
 }
 
@@ -534,17 +547,45 @@ fn default_asr_text_token_id() -> i64 {
 #[cfg(feature = "asr-parakeet")]
 impl Qwen3AsrConfig {
     fn load(model_dir: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(model_dir.join(QWEN3_ASR_LOCAL_CONFIG))
+        let bytes = verified_file_bytes(model_dir, QWEN3_ASR_LOCAL_CONFIG)
             .context("Failed to read Qwen3-ASR config.json")?;
-        serde_json::from_str(&text).context("Failed to parse Qwen3-ASR config.json")
+        serde_json::from_slice(&bytes).context("Failed to parse Qwen3-ASR config.json")
     }
 }
 
 #[cfg(feature = "asr-parakeet")]
-fn load_embed_cache(path: &Path, config: &Qwen3AsrConfig) -> Result<ndarray::Array2<f32>> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read embed_tokens.bin from {}", path.display()))?;
+fn qwen3_asr_pin(local_name: &str) -> Result<&'static str> {
+    qwen3_asr_repo_files()
+        .into_iter()
+        .find(|(_, _, _, name, _)| *name == local_name)
+        .map(|(_, _, _, _, sha256)| sha256)
+        .ok_or_else(|| anyhow::anyhow!("Missing integrity pin for {local_name}"))
+}
 
+/// The whole file, hashed as it is read against its pin.
+#[cfg(feature = "asr-parakeet")]
+fn verified_file_bytes(model_dir: &Path, local_name: &str) -> Result<Vec<u8>> {
+    crate::download::read_verified_model_bytes(
+        &model_dir.join(local_name),
+        qwen3_asr_pin(local_name)?,
+    )
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn verified_session(
+    model_dir: &Path,
+    local_name: &str,
+    build: impl FnOnce(&crate::download::VerifiedModelArtifact) -> Result<ort::session::Session>,
+) -> Result<ort::session::Session> {
+    let file = crate::download::open_verified_model_artifact(
+        &model_dir.join(local_name),
+        qwen3_asr_pin(local_name)?,
+    )?;
+    build(&file)
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn embed_cache_from_bytes(bytes: &[u8], config: &Qwen3AsrConfig) -> Result<ndarray::Array2<f32>> {
     let hidden_size = config.decoder.hidden_size;
     if hidden_size == 0 {
         return Err(anyhow::anyhow!(
@@ -557,14 +598,14 @@ fn load_embed_cache(path: &Path, config: &Qwen3AsrConfig) -> Result<ndarray::Arr
         || config.embed_tokens_dtype.eq_ignore_ascii_case("float16");
 
     if is_fp16 {
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return Err(anyhow::anyhow!(
                 "embed_tokens.bin has {} bytes, not a whole number of float16 values",
                 bytes.len()
             ));
         }
         let element_count = bytes.len() / 2;
-        if element_count % hidden_size != 0 {
+        if !element_count.is_multiple_of(hidden_size) {
             return Err(anyhow::anyhow!(
                 "embed_tokens.bin size {} is not divisible by hidden_size {}",
                 bytes.len(),
@@ -580,14 +621,14 @@ fn load_embed_cache(path: &Path, config: &Qwen3AsrConfig) -> Result<ndarray::Arr
         ndarray::Array2::from_shape_vec((vocab_size, hidden_size), data)
             .context("Failed to shape embed_tokens matrix")
     } else {
-        if bytes.len() % 4 != 0 {
+        if !bytes.len().is_multiple_of(4) {
             return Err(anyhow::anyhow!(
                 "embed_tokens.bin has {} bytes, not a whole number of float32 values",
                 bytes.len()
             ));
         }
         let element_count = bytes.len() / 4;
-        if element_count % hidden_size != 0 {
+        if !element_count.is_multiple_of(hidden_size) {
             return Err(anyhow::anyhow!(
                 "embed_tokens.bin size {} is not divisible by hidden_size {}",
                 bytes.len(),
@@ -606,6 +647,7 @@ fn load_embed_cache(path: &Path, config: &Qwen3AsrConfig) -> Result<ndarray::Arr
 
 #[cfg(feature = "asr-parakeet")]
 fn load_runtime(model_dir: &Path) -> Result<Qwen3AsrRuntime> {
+    let _model_load = crate::llm::local_model_load::guard(&[model_dir])?;
     let config = Qwen3AsrConfig::load(model_dir)?;
 
     if config.mel.n_mels != QWEN3_ASR_N_MELS {
@@ -632,27 +674,56 @@ fn load_runtime(model_dir: &Path) -> Result<Qwen3AsrRuntime> {
         ));
     }
 
-    let tokenizer = tokenizers::Tokenizer::from_file(model_dir.join(QWEN3_ASR_LOCAL_TOKENIZER))
+    let tokenizer_bytes = verified_file_bytes(model_dir, QWEN3_ASR_LOCAL_TOKENIZER)?;
+    let tokenizer = tokenizers::Tokenizer::from_bytes(&tokenizer_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to load Qwen3-ASR tokenizer: {}", e))?;
 
     // The encoder is a standard ONNX model and benefits from CoreML EP.
-    let encoder = crate::ort_utils::build_session(&model_dir.join(QWEN3_ASR_LOCAL_ENCODER))
-        .context("Failed to load Qwen3-ASR encoder")?;
+    let encoder = verified_session(
+        model_dir,
+        QWEN3_ASR_LOCAL_ENCODER,
+        crate::ort_utils::build_verified_session,
+    )
+    .context("Failed to load Qwen3-ASR encoder")?;
+    // Both decoder graphs name their shared weights file by a relative path,
+    // which ONNX Runtime would resolve beside the verified descriptor's path
+    // rather than in the model folder. Hand each graph the verified bytes
+    // under that name instead. Each session keeps its own copy because the
+    // runtime holds the buffer for the session's lifetime.
+    let decoder_weights = verified_file_bytes(model_dir, QWEN3_ASR_LOCAL_DECODER_WEIGHTS)
+        .context("Failed to read Qwen3-ASR decoder weights")?;
+    let with_weights = |weights: Vec<u8>| {
+        move |builder: ort::session::builder::SessionBuilder| {
+            builder
+                .with_external_initializer_file_in_memory(
+                    QWEN3_ASR_LOCAL_DECODER_WEIGHTS,
+                    std::borrow::Cow::Owned(weights),
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to attach Qwen3-ASR decoder weights: {error}")
+                })
+        }
+    };
     // The int4-quantized decoders use matmul ops that CoreML does not support
     // efficiently; routing them through CoreML adds EP dispatch overhead
     // without any acceleration. Use the CPU-only path instead.
-    let decoder_init = crate::ort_utils::build_session_no_coreml(
-        &model_dir.join(QWEN3_ASR_LOCAL_DECODER_INIT),
-        Ok,
-    )
+    let decoder_init = verified_session(model_dir, QWEN3_ASR_LOCAL_DECODER_INIT, |file| {
+        crate::ort_utils::build_verified_session_no_coreml(
+            file,
+            with_weights(decoder_weights.clone()),
+        )
+    })
     .context("Failed to load Qwen3-ASR decoder_init")?;
-    let decoder_step = crate::ort_utils::build_session_no_coreml(
-        &model_dir.join(QWEN3_ASR_LOCAL_DECODER_STEP),
-        Ok,
-    )
+    let decoder_step = verified_session(model_dir, QWEN3_ASR_LOCAL_DECODER_STEP, |file| {
+        crate::ort_utils::build_verified_session_no_coreml(file, with_weights(decoder_weights))
+    })
     .context("Failed to load Qwen3-ASR decoder_step")?;
 
-    let embed_tokens = load_embed_cache(&model_dir.join(QWEN3_ASR_LOCAL_EMBED_TOKENS), &config)?;
+    let embed_tokens = embed_cache_from_bytes(
+        &verified_file_bytes(model_dir, QWEN3_ASR_LOCAL_EMBED_TOKENS)
+            .context("Failed to read embed_tokens.bin")?,
+        &config,
+    )?;
     let roles = RoleTokens::from_tokenizer(&tokenizer)?;
 
     tracing::info!(
@@ -675,7 +746,11 @@ fn load_runtime(model_dir: &Path) -> Result<Qwen3AsrRuntime> {
 #[cfg(feature = "asr-parakeet")]
 fn runtime_cache() -> &'static Mutex<Option<Qwen3AsrRuntime>> {
     static CACHE: OnceLock<Mutex<Option<Qwen3AsrRuntime>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    static REGISTRATION: OnceLock<std::sync::Arc<crate::model_residency::IdleModel>> =
+        OnceLock::new();
+    crate::model_residency::watch_cache(&REGISTRATION, 3 * 1024 * 1024 * 1024, cache);
+    cache
 }
 
 #[cfg(feature = "asr-parakeet")]
@@ -711,7 +786,7 @@ fn prewarm_runtime(model_dir: &Path) -> Result<()> {
     {
         return Ok(());
     }
-    *cache = Some(load_runtime(model_dir)?);
+    *cache = Some(load_runtime(model_dir).map_err(crate::download::mismatch_first)?);
     Ok(())
 }
 
@@ -834,11 +909,13 @@ fn build_prompt_ids(
     special: &SpecialTokens,
     roles: &RoleTokens,
     audio_token_count: usize,
+    context_ids: &[i64],
 ) -> Vec<i64> {
     let mut ids = Vec::with_capacity(audio_token_count + 24);
     ids.push(special.im_start_token_id);
     ids.extend_from_slice(&roles.system);
     ids.extend_from_slice(&roles.newline);
+    ids.extend_from_slice(context_ids);
     ids.push(special.im_end_token_id);
     ids.extend_from_slice(&roles.newline);
 
@@ -934,9 +1011,20 @@ fn run_qwen3_asr_onnx(
     audio_path: &Path,
     cancelled: &AtomicBool,
 ) -> Result<Qwen3Decoded> {
+    run_qwen3_asr_onnx_with_hint(model_dir, audio_path, cancelled, None)
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn run_qwen3_asr_onnx_with_hint(
+    model_dir: &Path,
+    audio_path: &Path,
+    cancelled: &AtomicBool,
+    hint: Option<&VocabularyHint>,
+) -> Result<Qwen3Decoded> {
     let samples = crate::audio::utils::load_audio_file(audio_path)
         .context("Failed to load audio for Qwen3-ASR")?;
 
+    let samples = trim_exact_zero_edges(&samples);
     if samples.is_empty() {
         return Ok(Qwen3Decoded {
             language: None,
@@ -955,18 +1043,23 @@ fn run_qwen3_asr_onnx(
         .map(|rt| rt.model_dir_key != model_dir_key)
         .unwrap_or(true);
     if should_reload {
-        *cache = Some(load_runtime(model_dir)?);
+        *cache = Some(load_runtime(model_dir).map_err(crate::download::mismatch_first)?);
     }
     let runtime = cache
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("Qwen3-ASR runtime cache unavailable"))?;
+    let _working = crate::llm::local_model_load::working_buffers(&[model_dir])?;
 
-    let chunks = split_audio_into_chunks(&samples, QWEN3_ASR_SAMPLE_RATE);
+    let context_ids = match hint {
+        Some(hint) => encode_vocabulary_context(&runtime.tokenizer, hint)?,
+        None => Vec::new(),
+    };
+    let chunks = split_audio_into_chunks(samples, QWEN3_ASR_SAMPLE_RATE);
     let mut language = None;
     let mut texts = Vec::with_capacity(chunks.len());
     let mut generated_tokens = 0usize;
     for chunk in &chunks {
-        let decoded = decode_chunk(runtime, chunk, cancelled)?;
+        let decoded = decode_chunk(runtime, chunk, cancelled, &context_ids)?;
         if language.is_none() {
             language = decoded.language;
         }
@@ -990,6 +1083,7 @@ fn decode_chunk(
     runtime: &mut Qwen3AsrRuntime,
     samples: &[f32],
     cancelled: &AtomicBool,
+    context_ids: &[i64],
 ) -> Result<Qwen3Decoded> {
     use ndarray::{Array1, Array2};
     use ort::value::Tensor;
@@ -1029,6 +1123,7 @@ fn decode_chunk(
             &runtime.config.special_tokens,
             &runtime.roles,
             audio_token_count,
+            context_ids,
         );
         let seq_len = prompt_ids.len();
 
@@ -1290,6 +1385,42 @@ fn run_qwen3_asr_onnx(
     ))
 }
 
+#[cfg(not(feature = "asr-parakeet"))]
+fn run_qwen3_asr_onnx_with_hint(
+    model_dir: &Path,
+    audio_path: &Path,
+    cancelled: &AtomicBool,
+    _hint: Option<&VocabularyHint>,
+) -> Result<Qwen3Decoded> {
+    run_qwen3_asr_onnx(model_dir, audio_path, cancelled)
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn encode_vocabulary_context(
+    tokenizer: &tokenizers::Tokenizer,
+    hint: &VocabularyHint,
+) -> Result<Vec<i64>> {
+    let encoded = tokenizer
+        .encode(hint.as_prompt(), false)
+        .map_err(|e| anyhow::anyhow!("Failed to encode Qwen3-ASR vocabulary context: {e}"))?;
+    // Dictionary content must not introduce chat/audio control tokens.
+    let special_ids: std::collections::HashSet<u32> = tokenizer
+        .get_added_tokens_decoder()
+        .into_iter()
+        .filter_map(|(id, token)| token.special.then_some(id))
+        .collect();
+    let ids = encoded.get_ids();
+    anyhow::ensure!(
+        ids.len() <= 224,
+        "Qwen3-ASR vocabulary context exceeds 224 tokens"
+    );
+    anyhow::ensure!(
+        !ids.iter().any(|id| special_ids.contains(id)),
+        "Qwen3-ASR vocabulary context contains a control token"
+    );
+    Ok(ids.iter().map(|id| i64::from(*id)).collect())
+}
+
 /// Strip the language identification prefix that Qwen3-ASR generates.
 ///
 /// The model outputs "language <Name>\n<transcription>" where \n is
@@ -1347,11 +1478,12 @@ impl Qwen3AsrProvider {
         }
     }
 
-    /// Every pinned artifact carries a valid integrity receipt. Plausible
-    /// bytes on disk are not enough: a swapped `decoder_step.int4.onnx` of
-    /// the right size and header would otherwise run.
+    /// No pinned artifact has failed its integrity check in this session.
+    /// Plausible bytes are not enough to run: loading hashes every file, and
+    /// a swapped `decoder_step.int4.onnx` of the right size and header fails
+    /// there and then reads as missing.
     fn has_trusted_required_files(&self) -> bool {
-        artifacts_trusted(&self.model_dir)
+        artifacts_installed(&self.model_dir)
     }
 
     fn has_required_files(&self) -> bool {
@@ -1399,67 +1531,12 @@ impl Qwen3AsrProvider {
     }
 }
 
-impl Default for Qwen3AsrProvider {
-    fn default() -> Self {
-        Self::new(None)
-    }
-}
-
-#[async_trait]
-impl AsrProvider for Qwen3AsrProvider {
-    fn name(&self) -> &str {
-        "Qwen3-ASR"
-    }
-
-    fn description(&self) -> &str {
-        "Alibaba Qwen3-ASR 0.6B, native ONNX, int4 decoders on CPU. Experimental: 30 languages listed upstream (incl. Chinese, Japanese, Korean); English validated in Plainsong; slower than real time."
-    }
-
-    fn is_available(&self) -> bool {
-        self.has_required_files() && self.has_trusted_required_files()
-    }
-
-    async fn prewarm(&self) -> Result<()> {
-        if !self.has_required_files() {
-            anyhow::bail!(
-                "Qwen3-ASR model is not downloaded. Use the model manager to download it."
-            );
-        }
-        if !self.has_trusted_required_files() {
-            anyhow::bail!(
-                "Qwen3-ASR model files have not passed Plainsong integrity verification. Re-download the model from Settings."
-            );
-        }
-        let model_dir = self.model_dir.clone();
-        tokio::task::spawn_blocking(move || prewarm_runtime(&model_dir))
-            .await
-            .context("Qwen3-ASR model warmup task panicked")??;
-        Ok(())
-    }
-
-    fn model_info(&self) -> ModelInfo {
-        ModelInfo {
-            name: "Qwen3-ASR 0.6B".to_string(),
-            version: "0.6b-int4".to_string(),
-            // MiB across the seven pinned files (2,020,098,572 bytes); the
-            // field is MiB despite its name, like every other provider's.
-            size_mb: 1927.0,
-            parameters: "0.6B".to_string(),
-            languages: QWEN3_ASR_LANGUAGES
-                .iter()
-                .map(|(_, code)| (*code).to_string())
-                .collect(),
-            // Upstream figure for the int4 export on LibriSpeech test-other.
-            word_error_rate: Some(5.16),
-            // Measured in Plainsong on an Apple M4 Pro, CPU int4 decoders,
-            // 44 s fixture: see QWEN3_ASR_MEASURED_RTF.
-            real_time_factor: Some(QWEN3_ASR_MEASURED_RTF),
-            license: "Apache-2.0".to_string(),
-            source_url: format!("https://huggingface.co/{}", QWEN3_ASR_HF_REPO),
-        }
-    }
-
-    async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
+impl Qwen3AsrProvider {
+    async fn transcribe_with_hint(
+        &self,
+        audio_path: &Path,
+        hint: Option<VocabularyHint>,
+    ) -> Result<TranscriptionResult> {
         if !self.has_required_files() {
             return Err(anyhow::anyhow!(
                 "Qwen3-ASR model not downloaded. Use the model manager to download it."
@@ -1467,10 +1544,11 @@ impl AsrProvider for Qwen3AsrProvider {
         }
         if !self.has_trusted_required_files() {
             return Err(anyhow::anyhow!(
-                "Qwen3-ASR model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+                "Qwen3-ASR model files failed their integrity check. Download the model again in Settings > Models."
             ));
         }
 
+        let vocabulary_hint_terms_applied = hint.as_ref().map_or(0, |hint| hint.terms().len());
         let start = std::time::Instant::now();
         let model_dir = self.model_dir.clone();
         let audio_for_dur = audio_path.to_path_buf();
@@ -1481,8 +1559,11 @@ impl AsrProvider for Qwen3AsrProvider {
         // next token and returns, releasing the runtime for the next request.
         let cancelled = Arc::new(AtomicBool::new(false));
         let _cancel_guard = CancelOnDrop(Arc::clone(&cancelled));
-        let decoded = tokio::task::spawn_blocking(move || {
-            run_qwen3_asr_onnx(&model_dir, &audio_path_owned, &cancelled)
+        let decoded = tokio::task::spawn_blocking(move || match hint.as_ref() {
+            Some(hint) => {
+                run_qwen3_asr_onnx_with_hint(&model_dir, &audio_path_owned, &cancelled, Some(hint))
+            }
+            None => run_qwen3_asr_onnx(&model_dir, &audio_path_owned, &cancelled),
         })
         .await
         .context("Qwen3-ASR inference task panicked")??;
@@ -1515,9 +1596,97 @@ impl AsrProvider for Qwen3AsrProvider {
             actual_engine: Some("provider_default".to_string()),
             optimization_applied: false,
             fallback_reason: None,
-            vocabulary_hint_terms_applied: 0,
+            vocabulary_hint_terms_applied,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
+    }
+}
+
+impl Default for Qwen3AsrProvider {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+#[async_trait]
+impl AsrProvider for Qwen3AsrProvider {
+    fn name(&self) -> &str {
+        "Qwen3-ASR"
+    }
+
+    fn description(&self) -> &str {
+        "Alibaba Qwen3-ASR 0.6B, native ONNX, int4 decoders on CPU. Experimental: 30 languages listed upstream (incl. Chinese, Japanese, Korean); English validated in Plainsong; slower than real time."
+    }
+
+    fn is_available(&self) -> bool {
+        self.has_required_files() && self.has_trusted_required_files()
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        if !self.has_required_files() {
+            anyhow::bail!(
+                "Qwen3-ASR model is not downloaded. Use the model manager to download it."
+            );
+        }
+        if !self.has_trusted_required_files() {
+            anyhow::bail!(
+                "Qwen3-ASR model files failed their integrity check. Download the model again in Settings > Models."
+            );
+        }
+        let model_dir = self.model_dir.clone();
+        tokio::task::spawn_blocking(move || prewarm_runtime(&model_dir))
+            .await
+            .context("Qwen3-ASR model warmup task panicked")??;
+        Ok(())
+    }
+
+    fn model_info(&self) -> ModelInfo {
+        ModelInfo {
+            name: "Qwen3-ASR 0.6B".to_string(),
+            version: "0.6b-int4".to_string(),
+            // MiB across the seven pinned files (2,020,098,572 bytes); the
+            // field is MiB despite its name, like every other provider's.
+            size_mb: 1927.0,
+            parameters: "0.6B".to_string(),
+            languages: QWEN3_ASR_LANGUAGES
+                .iter()
+                .map(|(_, code)| (*code).to_string())
+                .collect(),
+            // Upstream figure for the int4 export on LibriSpeech test-other.
+            word_error_rate: Some(5.16),
+            // Measured in Plainsong on an Apple M4 Pro, CPU int4 decoders,
+            // 44 s fixture: see QWEN3_ASR_MEASURED_RTF.
+            real_time_factor: Some(QWEN3_ASR_MEASURED_RTF),
+            license: "Apache-2.0".to_string(),
+            source_url: format!("https://huggingface.co/{}", QWEN3_ASR_HF_REPO),
+        }
+    }
+
+    async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
+        self.transcribe_with_hint(audio_path, None).await
+    }
+
+    async fn transcribe_path_with_options(
+        &self,
+        audio_path: &Path,
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        self.transcribe_with_hint(audio_path, options.vocabulary_hint.clone())
+            .await
+    }
+
+    async fn transcribe_bytes_with_options(
+        &self,
+        audio_data: &[u8],
+        options: &TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        let path = std::env::temp_dir().join(format!("qwen3_asr_{}.wav", uuid::Uuid::new_v4()));
+        let temp = crate::recording_audio::write_secure_temporary_audio(&path, audio_data)
+            .context("Failed to write temp WAV for Qwen3-ASR")?;
+        self.transcribe_with_hint(temp.path(), options.vocabulary_hint.clone())
+            .await
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
@@ -1649,7 +1818,7 @@ mod tests {
             assistant: vec![77091],
             newline: vec![198],
         };
-        let ids = build_prompt_ids(&special, &roles, 3);
+        let ids = build_prompt_ids(&special, &roles, 3, &[]);
         assert_eq!(
             ids,
             vec![
@@ -1660,11 +1829,96 @@ mod tests {
                 151644, 77091, 198, // <|im_start|>assistant\n
             ]
         );
+        let hinted = build_prompt_ids(&special, &roles, 3, &[400, 401]);
+        assert_eq!(&hinted[..7], &[151644, 9125, 198, 400, 401, 151645, 198]);
+        assert_eq!(
+            hinted
+                .iter()
+                .position(|id| *id == special.audio_pad_token_id),
+            Some(11)
+        );
+        assert_eq!(&hinted[11..], &ids[9..]);
         // audio_offset is the first pad's index in this sequence.
         assert_eq!(
             ids.iter().position(|id| *id == special.audio_pad_token_id),
             Some(9)
         );
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn exact_zero_edges_preserve_quiet_samples_and_internal_pauses() {
+        let samples = [0.0, -0.0, f32::MIN_POSITIVE, 0.0, -f32::MIN_POSITIVE, 0.0];
+        assert_eq!(trim_exact_zero_edges(&samples), &samples[2..5]);
+        assert!(trim_exact_zero_edges(&[0.0, -0.0]).is_empty());
+        assert!(trim_exact_zero_edges(&[]).is_empty());
+        assert_eq!(trim_exact_zero_edges(&[0.5, 0.0, -0.5]), &[0.5, 0.0, -0.5]);
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn vocabulary_context_rejects_control_tokens_and_oversized_inputs() {
+        use tokenizers::{AddedToken, Tokenizer};
+        let model = tokenizers::models::wordlevel::WordLevel::builder()
+            .vocab([("[UNK]".into(), 0)].into_iter().collect())
+            .unk_token("[UNK]".into())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(tokenizers::pre_tokenizers::whitespace::Whitespace));
+        tokenizer
+            .add_special_tokens([AddedToken::from("<|audio_pad|>", true)])
+            .unwrap();
+        let plain = VocabularyHint::new(vec!["Plainsong".into()]).unwrap();
+        assert!(!encode_vocabulary_context(&tokenizer, &plain)
+            .unwrap()
+            .is_empty());
+        let control = VocabularyHint::new(vec!["<|audio_pad|>".into()]).unwrap();
+        assert!(encode_vocabulary_context(&tokenizer, &control).is_err());
+        let oversized = VocabularyHint::new(vec!["word ".repeat(225)]).unwrap();
+        assert!(encode_vocabulary_context(&tokenizer, &oversized).is_err());
+    }
+
+    /// Offline opt-in probe. Uses only explicitly provided, already verified model assets.
+    #[cfg(feature = "asr-parakeet")]
+    #[tokio::test]
+    #[ignore]
+    async fn qwen3_asr_offline_hint_probe() {
+        let root = std::env::var_os("PLAINSONG_QWEN_HINT_MODELS").expect("explicit models root");
+        let audio = std::env::var_os("PLAINSONG_QWEN_HINT_AUDIO").expect("explicit public audio");
+        struct ProbeDirectory(PathBuf);
+        impl Drop for ProbeDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let isolated = ProbeDirectory(
+            std::env::temp_dir().join(format!("qwen-hint-{}", uuid::Uuid::new_v4())),
+        );
+        let isolated_models = isolated.0.join("qwen3_asr");
+        std::fs::create_dir_all(&isolated_models).unwrap();
+        for (_, _, _, name, sha) in qwen3_asr_repo_files() {
+            let destination = isolated_models.join(name);
+            std::fs::copy(Path::new(&root).join("qwen3_asr").join(name), &destination).unwrap();
+            assert!(
+                crate::download::verify_or_record_model_integrity(&destination, Some(sha))
+                    .await
+                    .unwrap()
+            );
+        }
+        let provider = Qwen3AsrProvider::with_models_root(&isolated.0, None);
+        let options = TranscriptionOptions {
+            vocabulary_hint: VocabularyHint::new(vec!["Plainsong".into(), "Nautilus".into()]),
+            ..Default::default()
+        };
+        let result = provider
+            .transcribe_path_with_options(Path::new(&audio), &options)
+            .await
+            .unwrap();
+        assert_eq!(result.vocabulary_hint_terms_applied, 2);
+        assert!(!result.text.is_empty());
+        assert!(!result.text.contains("Vocabulary:"));
+        println!("hint_probe_text={}", result.text);
     }
 
     #[cfg(feature = "asr-parakeet")]
@@ -1782,22 +2036,16 @@ mod tests {
         let config: Qwen3AsrConfig =
             serde_json::from_str(r#"{"decoder":{"hidden_size":4},"embed_tokens_dtype":"float16"}"#)
                 .expect("config");
-        let dir = std::env::temp_dir().join(format!("qwen3-embed-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let path = dir.join("embed_tokens.bin");
-
-        std::fs::write(&path, vec![0u8; 2 * 4 * 3 + 1]).expect("write odd");
-        let error = load_embed_cache(&path, &config).expect_err("odd byte length");
+        let error =
+            embed_cache_from_bytes(&[0u8; 2 * 4 * 3 + 1], &config).expect_err("odd byte length");
         assert!(error.to_string().contains("whole number"), "{error}");
 
-        std::fs::write(&path, vec![0u8; 2 * 4 * 3]).expect("write even");
-        let table = load_embed_cache(&path, &config).expect("even byte length");
+        let table = embed_cache_from_bytes(&[0u8; 2 * 4 * 3], &config).expect("even byte length");
         assert_eq!(table.shape(), &[3, 4]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Writes seven files that pass the structural check (sizes, ONNX
-    /// header bytes) but carry no integrity receipts.
+    /// header bytes) but do not match their pins.
     fn write_plausible_but_unverified_artifacts(model_dir: &Path) {
         std::fs::create_dir_all(model_dir).expect("model dir");
         let onnx = {
@@ -1835,46 +2083,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_requires_integrity_receipts_not_just_plausible_files() {
+    async fn plausible_files_read_as_installed_until_loading_finds_them_wrong() {
         let root = std::env::temp_dir().join(format!("qwen3-trust-{}", uuid::Uuid::new_v4()));
         let provider = Qwen3AsrProvider::with_models_root(&root, None);
         write_plausible_but_unverified_artifacts(&provider.model_dir);
 
         assert!(provider.has_required_files(), "structure check passes");
         assert_eq!(provider.download_status(), DownloadStatus::Downloaded);
-        assert!(!provider.is_available(), "no receipts, so not ready");
+        assert!(provider.is_available(), "readiness does not hash");
+
         let error = provider
             .prewarm()
             .await
-            .expect_err("untrusted files must not load");
+            .expect_err("files that do not match their pins must not load");
+        assert!(crate::download::is_integrity_mismatch(&error), "{error:#}");
         assert!(
-            error.to_string().contains("integrity verification"),
+            error.to_string().contains("Download the model again"),
             "{error}"
         );
-
-        // The receipts the download path (or the startup migration) writes
-        // after hashing are what make the same bytes trusted.
-        for (_, _, _, local_name, sha256) in qwen3_asr_repo_files() {
-            crate::download::record_model_integrity_receipt_for_tests(
-                &provider.model_dir.join(local_name),
-                sha256,
-            )
-            .await
-            .expect("receipt");
-        }
-        assert!(provider.has_trusted_required_files());
-        assert!(provider.is_available());
-
-        // One swapped artifact breaks trust for the whole route.
-        std::fs::write(
-            provider.model_dir.join(QWEN3_ASR_LOCAL_DECODER_STEP),
-            vec![0x08u8; 8192 + 1],
-        )
-        .expect("swap decoder_step");
         assert!(
             !provider.is_available(),
-            "a swapped decoder_step is not trusted"
+            "a file found wrong in this session reads as missing"
         );
+
+        // Rewriting the file gives it a new identity, so it is offered again
+        // and hashed again on the next load.
+        std::fs::write(
+            provider.model_dir.join(QWEN3_ASR_LOCAL_CONFIG),
+            format!("{{\"padding\":\"{}\"}}", "y".repeat(80)),
+        )
+        .expect("rewrite config");
+        assert!(provider.is_available());
         let _ = std::fs::remove_dir_all(&root);
     }
 

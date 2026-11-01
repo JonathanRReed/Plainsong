@@ -1,3 +1,7 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -175,6 +179,57 @@ describe("explicit updater installation", () => {
     ).toBe(false);
   });
 
+  it.skipIf(process.platform !== "darwin")("accepts macOS var and tmp aliases with missing staging leaves", () => {
+    for (const [alias, canonical] of [["/var", "/private/var"], ["/tmp", "/private/tmp"]]) {
+      const root = fs.mkdtempSync(`${alias === "/var" ? "/var/tmp" : alias}/plainsong-updater-`);
+      try {
+        const canonicalRoot = canonical + root.slice(alias.length);
+        const app = path.join(root, "Plainsong.app");
+        fs.mkdirSync(app);
+        const shipIt = path.join(root, "ShipIt");
+        const state = {
+          targetBundleUrl: pathToFileURL(app).href,
+          updateBundleUrl: pathToFileURL(path.join(shipIt, "update.123", "Plainsong.app")).href,
+          updateBundleVersion: "0.9.0-beta.7",
+        };
+        expect(macosShipItStateTargetsExpectedUpdate(state, path.join(canonicalRoot, "Plainsong.app"), "0.9.0-beta.7", path.join(canonicalRoot, "ShipIt"))).toBe(true);
+        expect(macosShipItStateTargetsExpectedUpdate(state, path.join(canonicalRoot, "Other.app"), "0.9.0-beta.7", path.join(canonicalRoot, "ShipIt"))).toBe(false);
+        expect(macosShipItStateTargetsExpectedUpdate(state, app, "0.9.0-beta.7", path.join(canonicalRoot, "OtherShipIt"))).toBe(false);
+      } finally { fs.rmSync(root, { recursive: true, force: true }); }
+    }
+  });
+
+  it("accepts a symlinked installation and cache but rejects payload symlinks escaping the cache", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-updater-"));
+    try {
+      const app = path.join(root, "Plainsong.app");
+      const shipIt = path.join(root, "ShipIt");
+      const payload = path.join(shipIt, "update.123", "Plainsong.app");
+      fs.mkdirSync(app);
+      fs.mkdirSync(payload, { recursive: true });
+      const linkedApp = path.join(root, "Linked.app");
+      const linkedCache = path.join(root, "LinkedCache");
+      fs.symlinkSync(app, linkedApp, "dir");
+      fs.symlinkSync(shipIt, linkedCache, "dir");
+      const state = {
+        targetBundleUrl: pathToFileURL(app).href,
+        updateBundleUrl: pathToFileURL(payload).href,
+        updateBundleVersion: "0.9.0-beta.7",
+      };
+      expect(macosShipItStateTargetsExpectedUpdate(state, linkedApp, "0.9.0-beta.7", linkedCache)).toBe(true);
+      const outside = path.join(root, "Outside.app");
+      fs.mkdirSync(outside);
+      fs.rmSync(payload, { recursive: true });
+      fs.symlinkSync(outside, payload, "dir");
+      expect(macosShipItStateTargetsExpectedUpdate(state, linkedApp, "0.9.0-beta.7", linkedCache)).toBe(false);
+      fs.rmSync(outside, { recursive: true });
+      expect(macosShipItStateTargetsExpectedUpdate(state, linkedApp, "0.9.0-beta.7", linkedCache)).toBe(false);
+      fs.rmSync(payload);
+      fs.symlinkSync("Plainsong.app", payload);
+      expect(macosShipItStateTargetsExpectedUpdate(state, linkedApp, "0.9.0-beta.7", linkedCache)).toBe(false);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("rejects malformed or non-file ShipIt bundle URLs", () => {
     const appPath = "/Applications/Plainsong.app";
 
@@ -303,7 +358,8 @@ describe("channel-derived update feed", () => {
       source.indexOf("async function installUpdateInElectron"),
     );
 
-    expect(check).toContain("autoUpdater.setFeedURL(updaterFeedOptions(channel))");
+    expect(check).toContain("...updaterFeedOptions(channel)");
+    expect(check).toContain("qaUpdateFeedUrl === null ? {} : { url: qaUpdateFeedUrl }");
     // allowDowngrade must be assigned after `channel`, whose setter in
     // electron-updater also sets allowDowngrade to true.
     expect(check.indexOf("autoUpdater.channel =")).toBeLessThan(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeMeetingSoakReceipt } from "../../scripts/lib/meeting-soak-receipt.mjs";
+import { sanitizeMeetingSoakReceipt } from "../../scripts/lib/meeting-soak-receipt.ts";
 
 describe("meeting soak receipt sanitization", () => {
   it("removes captured transcript and log content while preserving release proof", () => {

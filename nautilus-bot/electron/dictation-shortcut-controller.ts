@@ -225,20 +225,39 @@ export function resolveDictationShortcutDecision(input: {
 // (helper killed mid-hold, tap outage, ...): stop recording after this long.
 export const DICTATION_HOLD_WATCHDOG_MS = 5 * 60 * 1000;
 
-// Tap to lock: a hold-to-talk press released sooner than this is a tap, and
-// a tap locks the microphone on until the next press, the way Wispr Flow's
-// double-tap and Typeless's press-to-toggle do. Anything longer is a hold.
+// A short press and the gap before a second tap each have this limit.
 const HOLD_TAP_LOCK_MS = 300;
 
 /**
  * What a start issued by this controller tells the sidecar beyond "start":
- * today only the per-session mode a binding named (roadmap item B4). Mirrors
- * `DictationStartOptions.mode_override` in rust-sidecar/src/models.rs.
+ * the selected profile for an inherited binding, or the per-session mode
+ * a binding named, and whether the starting binding asked for Return after
+ * inserting. Mirrors the sidecar's dictation start options.
  */
 export type DictationShortcutStartOptions = {
+  profile?: "normal_speed" | "power_rewrite";
   modeOverride?: { preset: string; customModeId: string | null };
   handsFreeTrigger?: boolean;
+  submitAfterInsert?: boolean;
 };
+
+export function resolveDictationShortcutStartOptions(
+  profile: unknown,
+  modeOverride: { preset: string; customModeId: string | null } | null,
+  submitAfterInsert = false,
+): DictationShortcutStartOptions {
+  const submit = submitAfterInsert ? { submitAfterInsert: true } : {};
+  if (modeOverride) {
+    return {
+      modeOverride: { preset: modeOverride.preset, customModeId: modeOverride.customModeId },
+      ...submit,
+    };
+  }
+  return {
+    profile: profile === "power_rewrite" || profile === "accuracy" ? "power_rewrite" : "normal_speed",
+    ...submit,
+  };
+}
 
 type DictationShortcutSignalInput = {
   behavior: DictationShortcutBehavior;
@@ -251,11 +270,18 @@ type DictationShortcutSignalInput = {
    * it (see HOLD_TAP_LOCK_MS). Off unless the caller asks for it.
    */
   holdTapLocks?: boolean;
+  holdDoubleTapLocks?: boolean;
+  bindingId?: string;
+  pressEpochMs?: number;
+  occurrenceEpochMs?: number;
+  modifierArmDelayMs?: number;
 };
 
 export type DictationShortcutSignalRuntime = {
   handleSignal: (input: DictationShortcutSignalInput) => Promise<void>;
   startHandsFree: (startOptions: DictationShortcutStartOptions) => Promise<void>;
+  cancelOwned: (bindingId?: string, occurrenceEpochMs?: number) => Promise<void>;
+  getActivationState: () => { shortcutLocked: boolean; shortcutBindingId: string | null };
   onPhase: (phase: string) => void;
   dispose: () => void;
 };
@@ -292,6 +318,7 @@ export function createDictationShortcutSignalRuntime(deps: {
   invoke: (command: string, args: Record<string, unknown>) => Promise<unknown>;
   log?: (message: string, payload?: unknown) => void;
   holdWatchdogMs?: number;
+  onLockChanged?: (locked: boolean) => void;
 }): DictationShortcutSignalRuntime {
   const holdWatchdogMs = deps.holdWatchdogMs ?? DICTATION_HOLD_WATCHDOG_MS;
   // Start bookkeeping is per-attempt, not global. These used to be two shared
@@ -299,22 +326,68 @@ export function createDictationShortcutSignalRuntime(deps: {
   // in flight reset `pendingHoldRelease` and the first tap's release was lost —
   // the user held the key and the session never stopped. Each start now owns a
   // generation, and only that generation may consume or clear its own release.
+  let cancelledSessionId: number | null = null;
   let startGeneration = 0;
   let activeStartGeneration: number | null = null;
   let pendingHoldReleaseGeneration: number | null = null;
   let pendingHoldReleaseEpochMs: number | null = null;
-  let pendingHandsFreeStopGeneration: number | null = null;
-  let pendingHandsFreeStopGestureEpochMs: number | null = null;
+  let pendingToggleStopReason: "toggle" | "hands_free_toggle" = "toggle";
+  let pendingToggleStopGeneration: number | null = null;
+  let pendingToggleStopGestureEpochMs: number | null = null;
   let liveShortcutStartGeneration: number | null = null;
   // Tap to lock: when the current hold started, and whether a tap locked it.
   let holdPressEpochMs: number | null = null;
   let tapLocked = false;
+  const setTapLocked = (locked: boolean): void => {
+    if (tapLocked === locked) return;
+    tapLocked = locked;
+    deps.onLockChanged?.(locked);
+  };
+  let ownerBindingId: string | undefined;
+  let ownerSessionId: number | null = null;
+  let pendingBindingCancel = false;
+  let doubleTapTimer: ReturnType<typeof setTimeout> | null = null;
+  let secondTap = false;
+  let pendingRestart: {
+    input: DictationShortcutSignalInput;
+    sessionId: number | null;
+    generation: number;
+    stopSettled: boolean;
+    terminalSeen: boolean;
+  } | null = null;
+  const restartIfReady = (): void => {
+    const pending = pendingRestart;
+    if (!pending || !pending.stopSettled || !pending.terminalSeen) return;
+    pendingRestart = null;
+    if (!isIdleLikePhase(deps.getPhase()) || startGeneration !== pending.generation ||
+        (deps.getSessionId !== undefined && pending.sessionId === null) ||
+        (pending.sessionId !== null && deps.getSessionId?.() !== pending.sessionId)) return;
+    void handleSignal(pending.input).catch((error) => deps.log?.("separate hold start failed", error));
+  };
+  let firstTapReleaseEpochMs: number | null = null;
+  const clearDoubleTap = (): void => {
+    if (doubleTapTimer !== null) clearTimeout(doubleTapTimer);
+    doubleTapTimer = null;
+    secondTap = false;
+    firstTapReleaseEpochMs = null;
+  };
   // The press that unlocked a tap-locked session already stopped it; its
   // release must not send a second stop (the sidecar answers "already
   // stopping" and the HUD shows an error).
   let swallowUnlockRelease = false;
   const invalidatedStartGenerations = new Set<number>();
   let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingStop: { generation: number; sessionId: number | null; work: Promise<unknown> } | null = null;
+  const stop = (args: Record<string, unknown>): Promise<unknown> => {
+    const sessionId = deps.getSessionId?.() ?? null;
+    if (pendingStop?.generation === startGeneration && pendingStop.sessionId === sessionId) return pendingStop.work;
+    const work = deps.invoke("stop_dictation", args);
+    const request = { generation: startGeneration, sessionId, work };
+    pendingStop = request;
+    const clear = () => { if (pendingStop === request) pendingStop = null; };
+    void work.then(clear, clear);
+    return work;
+  };
 
   const clearWatchdog = (): void => {
     if (watchdogTimer !== null) {
@@ -327,31 +400,71 @@ export function createDictationShortcutSignalRuntime(deps: {
     clearWatchdog();
     watchdogTimer = setTimeout(() => {
       watchdogTimer = null;
-      void handleSignal({ ...input, signal: "watchdog_timeout" }).catch((error) => {
+      void handleSignal({ ...input, occurrenceEpochMs: undefined, signal: "watchdog_timeout" }).catch((error) => {
         console.error("[shortcuts] dictation hold watchdog stop failed", error);
       });
     }, holdWatchdogMs);
   };
 
   const handleSignal = async (input: DictationShortcutSignalInput): Promise<void> => {
-    // Captured before any awaiting: the closest this controller can get to
-    // the real stop gesture (hotkey release, hands-free toggle, etc.)
-    // without threading a timestamp through the native shortcut helper's own
-    // event payload. Sent to the sidecar so its dictation timing record can
-    // measure from the actual gesture instead of from whenever its IPC
-    // handler happened to run.
-    const stopGestureEpochMs = Date.now();
+    const stopGestureEpochMs = input.occurrenceEpochMs ?? Date.now();
     const phase = deps.getPhase();
+    if (cancelledSessionId !== null && cancelledSessionId === deps.getSessionId?.()) return;
+    if (pendingRestart && (input.signal === "cancelled" || input.signal === "emergency_stop") &&
+        (input.bindingId === undefined || input.bindingId === pendingRestart.input.bindingId)) {
+      pendingRestart = null;
+    }
+    if (pendingRestart && input.bindingId === pendingRestart.input.bindingId) {
+      if (input.signal === "released" || input.signal === "cancelled") {
+        pendingRestart = null;
+        return;
+      }
+      if (input.signal === "pressed") return;
+    }
+    if (input.bindingId && input.bindingId !== ownerBindingId &&
+        (input.signal !== "pressed" || ownerBindingId !== undefined && input.behavior === "hold_to_talk")) return;
+    if (input.bindingId && ownerSessionId !== null && deps.getSessionId?.() !== ownerSessionId) {
+      clearDoubleTap();
+      clearWatchdog();
+      ownerBindingId = undefined;
+      return;
+    }
+    if (input.signal === "cancelled") {
+      if (activeStartGeneration !== null && invalidatedStartGenerations.has(activeStartGeneration)) return;
+      clearDoubleTap();
+      clearWatchdog();
+      liveShortcutStartGeneration = null;
+      setTapLocked(false);
+      holdPressEpochMs = null;
+      if (input.bindingId && activeStartGeneration === null && ownerBindingId === undefined) return;
+      if (activeStartGeneration !== null) {
+        pendingBindingCancel = true;
+        if (ownerSessionId !== null) await cancelStartingSession();
+        return;
+      }
+      if (input.bindingId) {
+        ownerBindingId = undefined;
+        cancelledSessionId = ownerSessionId;
+        clearWatchdog();
+        await deps.invoke("force_stop_dictation", ownerSessionId === null ? {} : { sessionId: ownerSessionId });
+        return;
+      }
+    }
     const decision = resolveDictationShortcutDecision({ phase, ...input });
     const holdToTalkWithRelease =
       input.behavior === "hold_to_talk" && input.capability === "press_and_release";
 
     // The cached phase can still be idle while a start is in flight or after
-    // its ack. Resolve the second hands-free press against tracked state first.
-    if (input.signal === "pressed" && input.behavior === "hands_free") {
+    // its ack. Resolve a second toggle press against tracked state first.
+    const togglesOnPress = !holdToTalkWithRelease;
+    const toggleStopReason = input.behavior === "hands_free" ? "hands_free_toggle" : "toggle";
+    if (input.signal === "pressed" && togglesOnPress) {
       if (activeStartGeneration !== null) {
-        pendingHandsFreeStopGeneration = activeStartGeneration;
-        pendingHandsFreeStopGestureEpochMs = stopGestureEpochMs;
+        if (pendingToggleStopGeneration !== activeStartGeneration) {
+          pendingToggleStopGeneration = activeStartGeneration;
+          pendingToggleStopGestureEpochMs = stopGestureEpochMs;
+          pendingToggleStopReason = toggleStopReason;
+        }
         return;
       }
       if (liveShortcutStartGeneration !== null) {
@@ -360,10 +473,10 @@ export function createDictationShortcutSignalRuntime(deps: {
           phase,
           behavior: input.behavior,
           capability: input.capability,
-          stopReason: "hands_free_toggle",
+          stopReason: toggleStopReason,
         });
-        await deps.invoke("stop_dictation", {
-          stopReason: "hands_free_toggle",
+        await stop({
+          stopReason: toggleStopReason,
           stopGestureEpochMs,
         });
         return;
@@ -375,7 +488,61 @@ export function createDictationShortcutSignalRuntime(deps: {
       return;
     }
 
-    if (holdToTalkWithRelease && input.holdTapLocks) {
+    if (holdToTalkWithRelease && input.holdDoubleTapLocks && !tapLocked) {
+      if (input.signal === "pressed" && doubleTapTimer !== null) {
+        const withinWindow = firstTapReleaseEpochMs !== null &&
+          (input.occurrenceEpochMs ?? input.pressEpochMs ?? stopGestureEpochMs) - firstTapReleaseEpochMs < HOLD_TAP_LOCK_MS;
+        const firstReleaseEpochMs = firstTapReleaseEpochMs;
+        clearDoubleTap();
+        if (!withinWindow) {
+          const pending = {
+            input,
+            sessionId: ownerSessionId,
+            generation: startGeneration,
+            stopSettled: false,
+            terminalSeen: false,
+          };
+          const startInFlight = activeStartGeneration !== null;
+          try {
+            const stopping = handleSignal({ ...input, occurrenceEpochMs: firstReleaseEpochMs ?? stopGestureEpochMs,
+              signal: "released", holdDoubleTapLocks: false, holdTapLocks: false });
+            pendingRestart = pending;
+            await stopping;
+            if (!startInFlight) pending.stopSettled = true;
+            restartIfReady();
+          } catch (error) {
+            if (pendingRestart === pending) pendingRestart = null;
+            throw error;
+          }
+          return;
+        }
+        secondTap = true;
+        holdPressEpochMs = input.occurrenceEpochMs ?? input.pressEpochMs ?? stopGestureEpochMs;
+        return;
+      }
+      if (input.signal === "released" && holdPressEpochMs !== null &&
+          stopGestureEpochMs - holdPressEpochMs < HOLD_TAP_LOCK_MS) {
+        holdPressEpochMs = null;
+        if (secondTap) {
+          clearDoubleTap();
+          setTapLocked(true);
+          clearWatchdog();
+        } else if (doubleTapTimer === null) {
+          firstTapReleaseEpochMs = stopGestureEpochMs;
+          // Physical press time enforces the window. Allow for the helper's
+          // arm delay before deciding that no second press arrived.
+          doubleTapTimer = setTimeout(() => {
+            doubleTapTimer = null;
+            void handleSignal({ ...input, holdDoubleTapLocks: false, holdTapLocks: false, signal: "released" })
+              .catch((error) => deps.log?.("double tap release failed", error));
+          }, Math.max(0, stopGestureEpochMs + HOLD_TAP_LOCK_MS + (input.modifierArmDelayMs ?? 0) - Date.now()));
+        }
+        return;
+      }
+      if (input.signal === "released") clearDoubleTap();
+    }
+
+    if (holdToTalkWithRelease && (input.holdTapLocks && !input.holdDoubleTapLocks || tapLocked)) {
       if (
         input.signal === "released" &&
         !tapLocked &&
@@ -385,14 +552,14 @@ export function createDictationShortcutSignalRuntime(deps: {
         // A tap, not a hold: keep listening until the next press. The release
         // was seen, so the lost-release watchdog has nothing left to guard;
         // the sidecar's own maximum dictation length still applies.
-        tapLocked = true;
+        setTapLocked(true);
         holdPressEpochMs = null;
         clearWatchdog();
         deps.log?.("dictation shortcut tap locked", { phase });
         return;
       }
       if (input.signal === "pressed" && tapLocked) {
-        tapLocked = false;
+        setTapLocked(false);
         swallowUnlockRelease = true;
         if (activeStartGeneration !== null) {
           // The start is still in flight: stop as soon as it resolves.
@@ -407,13 +574,16 @@ export function createDictationShortcutSignalRuntime(deps: {
           capability: input.capability,
           stopReason: "tap_lock_toggle",
         });
-        await deps.invoke("stop_dictation", { stopReason: "tap_lock_toggle", stopGestureEpochMs });
+        await stop({ stopReason: "tap_lock_toggle", stopGestureEpochMs });
         return;
       }
       if (input.signal === "released") {
         holdPressEpochMs = null;
       }
     }
+
+    if (holdToTalkWithRelease && input.signal === "pressed" &&
+        (activeStartGeneration !== null || watchdogTimer !== null)) return;
 
     if (decision.action === "ignore") {
       if (input.signal === "released" && holdToTalkWithRelease) {
@@ -438,7 +608,7 @@ export function createDictationShortcutSignalRuntime(deps: {
             capability: input.capability,
             stopReason: "release",
           });
-          await deps.invoke("stop_dictation", { stopReason: "release", stopGestureEpochMs });
+          await stop({ stopReason: "release", stopGestureEpochMs });
         }
       }
       return;
@@ -449,12 +619,19 @@ export function createDictationShortcutSignalRuntime(deps: {
         phase,
         behavior: input.behavior,
         capability: input.capability,
+        profile: input.startOptions?.profile,
+        modePreset: input.startOptions?.modeOverride?.preset,
       });
+      if (activeStartGeneration !== null) return;
+      clearDoubleTap();
+      ownerBindingId = input.bindingId;
+      ownerSessionId = null;
+      pendingBindingCancel = false;
       const generation = ++startGeneration;
       activeStartGeneration = generation;
       if (holdToTalkWithRelease) {
-        holdPressEpochMs = stopGestureEpochMs;
-        tapLocked = false;
+        holdPressEpochMs = input.occurrenceEpochMs ?? input.pressEpochMs ?? stopGestureEpochMs;
+        setTapLocked(false);
         swallowUnlockRelease = false;
       }
       // Only clear a release that belongs to an older generation; a release
@@ -467,9 +644,9 @@ export function createDictationShortcutSignalRuntime(deps: {
         pendingHoldReleaseGeneration = null;
         pendingHoldReleaseEpochMs = null;
       }
-      if (pendingHandsFreeStopGeneration !== null && pendingHandsFreeStopGeneration !== generation) {
-        pendingHandsFreeStopGeneration = null;
-        pendingHandsFreeStopGestureEpochMs = null;
+      if (pendingToggleStopGeneration !== null && pendingToggleStopGeneration !== generation) {
+        pendingToggleStopGeneration = null;
+        pendingToggleStopGestureEpochMs = null;
       }
       let started = false;
       try {
@@ -484,32 +661,46 @@ export function createDictationShortcutSignalRuntime(deps: {
         if (activeStartGeneration === generation) {
           activeStartGeneration = null;
         }
+        if (!started && startGeneration === generation) {
+          clearDoubleTap();
+          ownerBindingId = undefined;
+          ownerSessionId = null;
+          holdPressEpochMs = null;
+          setTapLocked(false);
+        }
         if (!started && pendingHoldReleaseGeneration === generation) {
           pendingHoldReleaseGeneration = null;
           pendingHoldReleaseEpochMs = null;
         }
-        if (!started && pendingHandsFreeStopGeneration === generation) {
-          pendingHandsFreeStopGeneration = null;
-          pendingHandsFreeStopGestureEpochMs = null;
+        if (!started && pendingToggleStopGeneration === generation) {
+          pendingToggleStopGeneration = null;
+          pendingToggleStopGestureEpochMs = null;
         }
       }
       if (invalidatedStartGenerations.delete(generation)) {
         return;
       }
-      liveShortcutStartGeneration = input.behavior === "hands_free" ? generation : null;
-      if (pendingHandsFreeStopGeneration === generation) {
-        const pendingStopGestureEpochMs = pendingHandsFreeStopGestureEpochMs ?? stopGestureEpochMs;
-        pendingHandsFreeStopGeneration = null;
-        pendingHandsFreeStopGestureEpochMs = null;
+      if (pendingBindingCancel) {
+        pendingBindingCancel = false;
+        clearDoubleTap();
+        ownerBindingId = undefined;
+        await deps.invoke("force_stop_dictation", ownerSessionId === null ? {} : { sessionId: ownerSessionId });
+        return;
+      }
+      liveShortcutStartGeneration = togglesOnPress ? generation : null;
+      if (pendingToggleStopGeneration === generation) {
+        const pendingStopGestureEpochMs = pendingToggleStopGestureEpochMs ?? stopGestureEpochMs;
+        pendingToggleStopGeneration = null;
+        pendingToggleStopGestureEpochMs = null;
         liveShortcutStartGeneration = null;
         deps.log?.("dictation shortcut stop_dictation", {
           phase: deps.getPhase(),
           behavior: input.behavior,
           capability: input.capability,
-          stopReason: "hands_free_toggle",
+          stopReason: pendingToggleStopReason,
         });
-        await deps.invoke("stop_dictation", {
-          stopReason: "hands_free_toggle",
+        await stop({
+          stopReason: pendingToggleStopReason,
           stopGestureEpochMs: pendingStopGestureEpochMs,
         });
         return;
@@ -524,10 +715,14 @@ export function createDictationShortcutSignalRuntime(deps: {
           capability: input.capability,
           stopReason: "release",
         });
-        await deps.invoke("stop_dictation", {
+        await stop({
           stopReason: "release",
           stopGestureEpochMs: bufferedStopGestureEpochMs,
         });
+        if (pendingRestart) {
+          pendingRestart.stopSettled = true;
+          restartIfReady();
+        }
         return;
       }
       if (holdToTalkWithRelease && !tapLocked) {
@@ -540,13 +735,14 @@ export function createDictationShortcutSignalRuntime(deps: {
     liveShortcutStartGeneration = null;
 
     if (decision.action === "stop") {
+      clearDoubleTap();
       deps.log?.("dictation shortcut stop_dictation", {
         phase,
         behavior: input.behavior,
         capability: input.capability,
         stopReason: decision.stopReason ?? "toggle",
       });
-      await deps.invoke("stop_dictation", {
+      await stop({
         stopReason: decision.stopReason ?? "toggle",
         stopGestureEpochMs,
       });
@@ -554,6 +750,8 @@ export function createDictationShortcutSignalRuntime(deps: {
     }
 
     if (decision.action === "cancel") {
+      ownerBindingId = undefined;
+      clearDoubleTap();
       deps.log?.("dictation shortcut force_stop_dictation", {
         phase,
         behavior: input.behavior,
@@ -561,13 +759,44 @@ export function createDictationShortcutSignalRuntime(deps: {
         stopReason: decision.stopReason ?? "cancelled",
       });
       const sessionId = deps.getSessionId?.();
+      cancelledSessionId = sessionId ?? null;
       await deps.invoke("force_stop_dictation", {
         ...(typeof sessionId === "number" ? { sessionId } : {}),
       });
     }
   };
 
+  const cancelStartingSession = async (): Promise<void> => {
+    if (!pendingBindingCancel || ownerSessionId === null) return;
+    const sessionId = ownerSessionId;
+    cancelledSessionId = sessionId;
+    pendingBindingCancel = false;
+    if (activeStartGeneration !== null) {
+      invalidatedStartGenerations.add(activeStartGeneration);
+    }
+    ownerBindingId = undefined;
+    await deps.invoke("force_stop_dictation", { sessionId });
+  };
+
   const onPhase = (phase: string): void => {
+    if (phase === "idle" || phase === "done" || phase === "error") cancelledSessionId = null;
+    if (pendingRestart) {
+      if (pendingRestart.sessionId === null && ownerBindingId === pendingRestart.input.bindingId &&
+          (phase === "primed" || phase === "recording")) {
+        pendingRestart.sessionId = deps.getSessionId?.() ?? null;
+      }
+      if (pendingRestart.sessionId !== null && deps.getSessionId?.() !== pendingRestart.sessionId) {
+        pendingRestart = null;
+      } else if (phase === "idle" || phase === "done" || phase === "error") {
+        pendingRestart.terminalSeen = true;
+      }
+    }
+    if ((phase === "preparing" || phase === "primed" || phase === "recording") && ownerBindingId !== undefined && ownerSessionId === null) {
+      ownerSessionId = deps.getSessionId?.() ?? null;
+      if (pendingBindingCancel) {
+        void cancelStartingSession().catch((error) => deps.log?.("dictation cancellation failed", error));
+      }
+    }
     // The watchdog guards exactly one hold-to-talk session, armed when its
     // start_dictation resolves. Once the observed phase leaves the session's
     // live phases ("primed"/"recording") — VAD auto-stop, overlay stop,
@@ -585,26 +814,35 @@ export function createDictationShortcutSignalRuntime(deps: {
       clearWatchdog();
     }
     if (phase !== "preparing" && phase !== "primed" && phase !== "recording") {
+      clearDoubleTap();
+      ownerBindingId = undefined;
+      ownerSessionId = null;
+      pendingBindingCancel = false;
       liveShortcutStartGeneration = null;
       holdPressEpochMs = null;
-      tapLocked = false;
+      setTapLocked(false);
       if (activeStartGeneration !== null) {
         invalidatedStartGenerations.add(activeStartGeneration);
         if (pendingHoldReleaseGeneration === activeStartGeneration) {
           pendingHoldReleaseGeneration = null;
           pendingHoldReleaseEpochMs = null;
         }
-        if (pendingHandsFreeStopGeneration === activeStartGeneration) {
-          pendingHandsFreeStopGeneration = null;
-          pendingHandsFreeStopGestureEpochMs = null;
+        if (pendingToggleStopGeneration === activeStartGeneration) {
+          pendingToggleStopGeneration = null;
+          pendingToggleStopGestureEpochMs = null;
         }
         activeStartGeneration = null;
       }
     }
+    restartIfReady();
   };
 
   return {
+    getActivationState: () => ({ shortcutLocked: tapLocked, shortcutBindingId: ownerBindingId ?? null }),
     handleSignal,
+    cancelOwned: (bindingId = pendingRestart?.input.bindingId ?? ownerBindingId, occurrenceEpochMs) => bindingId === undefined ? Promise.resolve() : handleSignal({
+      behavior: "hold_to_talk", capability: "press_and_release", signal: "cancelled", bindingId, occurrenceEpochMs,
+    }),
     startHandsFree: (startOptions) =>
       handleSignal({
         behavior: "hands_free",
@@ -614,19 +852,24 @@ export function createDictationShortcutSignalRuntime(deps: {
       }),
     onPhase,
     dispose: () => {
+      pendingRestart = null;
       clearWatchdog();
       if (activeStartGeneration !== null) {
         invalidatedStartGenerations.add(activeStartGeneration);
         activeStartGeneration = null;
       }
+      clearDoubleTap();
+      ownerBindingId = undefined;
+      ownerSessionId = null;
+      pendingBindingCancel = false;
       liveShortcutStartGeneration = null;
       holdPressEpochMs = null;
-      tapLocked = false;
+      setTapLocked(false);
       swallowUnlockRelease = false;
       pendingHoldReleaseGeneration = null;
       pendingHoldReleaseEpochMs = null;
-      pendingHandsFreeStopGeneration = null;
-      pendingHandsFreeStopGestureEpochMs = null;
+      pendingToggleStopGeneration = null;
+      pendingToggleStopGestureEpochMs = null;
     },
   };
 }

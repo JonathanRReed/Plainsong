@@ -25,6 +25,7 @@ pub(crate) fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> 
         asr::AsrProviderType::Groq => "groq",
         asr::AsrProviderType::CohereTranscribe => "cohere_transcribe",
         asr::AsrProviderType::CohereLocal => "cohere_local",
+        asr::AsrProviderType::Whistle => "whistle",
         asr::AsrProviderType::Qwen3Asr => "qwen3_asr",
         asr::AsrProviderType::Deepgram => "deepgram",
         asr::AsrProviderType::MistralVoxtral => "mistral_voxtral",
@@ -32,8 +33,6 @@ pub(crate) fn asr_provider_to_settings_value(provider: asr::AsrProviderType) -> 
         asr::AsrProviderType::GeminiTranscribe => "gemini_transcribe",
         #[cfg(feature = "asr-transcribe-cpp")]
         asr::AsrProviderType::TranscribeCpp => "transcribe_cpp",
-        #[cfg(feature = "plainsong-plus")]
-        asr::AsrProviderType::PlainsongPlus => "plainsong_plus",
     }
 }
 
@@ -51,6 +50,7 @@ pub(crate) fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrPr
         "groq" => Some(asr::AsrProviderType::Groq),
         "cohere_transcribe" => Some(asr::AsrProviderType::CohereTranscribe),
         "cohere_local" => Some(asr::AsrProviderType::CohereLocal),
+        "whistle" => Some(asr::AsrProviderType::Whistle),
         "qwen3_asr" => Some(asr::AsrProviderType::Qwen3Asr),
         "deepgram" => Some(asr::AsrProviderType::Deepgram),
         "mistral_voxtral" => Some(asr::AsrProviderType::MistralVoxtral),
@@ -58,8 +58,6 @@ pub(crate) fn asr_provider_from_settings_value(value: &str) -> Option<asr::AsrPr
         "gemini_transcribe" => Some(asr::AsrProviderType::GeminiTranscribe),
         #[cfg(feature = "asr-transcribe-cpp")]
         "transcribe_cpp" => Some(asr::AsrProviderType::TranscribeCpp),
-        #[cfg(feature = "plainsong-plus")]
-        "plainsong_plus" => Some(asr::AsrProviderType::PlainsongPlus),
         _ => None,
     }
 }
@@ -159,6 +157,20 @@ pub(crate) fn route_matches_hosting(
     }
 }
 
+/// Whether `provider` is the transcribe.cpp runtime. Always false in a build
+/// without `asr-transcribe-cpp`, which has no such variant to compare against.
+pub(crate) fn is_transcribe_cpp_provider(provider: asr::AsrProviderType) -> bool {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        provider == asr::AsrProviderType::TranscribeCpp
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    {
+        let _ = provider;
+        false
+    }
+}
+
 pub(crate) fn provider_is_dictation_only(provider: asr::AsrProviderType) -> bool {
     !meeting_provider_is_supported(provider)
 }
@@ -176,6 +188,8 @@ pub(crate) fn meeting_route_is_dictation_only(
 ) -> bool {
     match provider {
         asr::AsrProviderType::Whisper => !meeting_model_is_supported(provider, model_id),
+        #[cfg(feature = "asr-transcribe-cpp")]
+        asr::AsrProviderType::TranscribeCpp => !meeting_model_is_supported(provider, model_id),
         _ => provider_is_dictation_only(provider),
     }
 }
@@ -186,6 +200,28 @@ pub(crate) fn meeting_route_is_dictation_only(
 
 pub(crate) fn provider_supports_generic_live_preview(provider: asr::AsrProviderType) -> bool {
     !provider.is_remote() && provider != asr::AsrProviderType::MacosAppleSpeech
+}
+
+pub(crate) fn dictation_route_supports_live_preview(
+    provider: asr::AsrProviderType,
+    model_id: &str,
+) -> bool {
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    let _ = model_id;
+    #[cfg(feature = "asr-transcribe-cpp")]
+    if provider == asr::AsrProviderType::TranscribeCpp
+        && matches!(
+            normalize_asr_model_id(provider, model_id).as_str(),
+            crate::asr::transcribe_cpp::PARAKEET_UNIFIED_EN_GGUF_MODEL_ID
+                | crate::asr::transcribe_cpp::QWEN3_ASR_17_GGUF_MODEL_ID
+                | crate::asr::transcribe_cpp::QWEN3_ASR_06_GGUF_MODEL_ID
+                | crate::asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID
+                | crate::asr::transcribe_cpp::MOONSHINE_STREAM_MEDIUM_MODEL_ID
+        )
+    {
+        return false;
+    }
+    provider_supports_generic_live_preview(provider)
 }
 
 pub(crate) fn provider_allows_automatic_dictation_fallback(provider: asr::AsrProviderType) -> bool {
@@ -240,21 +276,12 @@ pub(crate) fn meeting_provider_is_supported_with(
             // lane on its own (`preferred_meeting_provider_candidates`), only
             // when the meeting slot names one of those models outright.
             | asr::AsrProviderType::Whisper
-    ) || {
-        // Only exists when the spike is compiled in; a default build has no
-        // such variant to match. It returns the same segment rows with
-        // timestamps as the shipped local routes (see transcribe_cpp.rs's
-        // segment contract), which is what the meeting lane needs, and the
-        // renderer already lists it.
-        #[cfg(feature = "asr-transcribe-cpp")]
-        {
-            provider == asr::AsrProviderType::TranscribeCpp
-        }
-        #[cfg(not(feature = "asr-transcribe-cpp"))]
-        {
-            false
-        }
-    }
+    )
+        // transcribe.cpp exists only when its feature is compiled in. It
+        // returns the same segment rows with timestamps as the shipped local
+        // routes (see transcribe_cpp.rs's segment contract), which is what the
+        // meeting lane needs, and the renderer already lists it.
+        || is_transcribe_cpp_provider(provider)
 }
 
 /// The whisper.cpp ggml models allowed in the meeting lane.
@@ -279,10 +306,77 @@ pub(crate) fn meeting_model_is_supported(provider: asr::AsrProviderType, model_i
     if provider == asr::AsrProviderType::Whisper {
         return WHISPER_MEETING_MODEL_IDS.contains(&candidate.as_str());
     }
+    #[cfg(feature = "asr-transcribe-cpp")]
+    if provider == asr::AsrProviderType::TranscribeCpp {
+        return matches!(
+            candidate.as_str(),
+            crate::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+                | crate::asr::transcribe_cpp::PARAKEET_UNIFIED_EN_GGUF_MODEL_ID
+                | crate::asr::transcribe_cpp::FLUID_SPEECH_MINI_GGUF_MODEL_ID
+                | crate::asr::transcribe_cpp::UNDERDOG_BARK_PRO_GGUF_MODEL_ID
+        );
+    }
     provider
         .model_options()
         .iter()
         .any(|option| option.id == candidate)
+}
+
+/// The multilingual route that stands in for an optional English-only
+/// transcribe.cpp model when the transcription language names another
+/// language, or `None` when the selection can run as chosen.
+///
+/// Fluid Speech Mini and Underdog Bark 3.0 Pro were evaluated on English only.
+/// Given German they still return English-sounding words rather than saying
+/// they cannot, so a capture or meeting with another language set goes to
+/// Parakeet TDT 0.6B v3 (the GGUF default, which lists 25 languages) for that
+/// recording, with a warning, and the saved choice is left alone. Auto-detect
+/// and English keep the chosen model. Settings refuses non-English dictation
+/// languages for these routes on save (`settings::dictation_supported_languages`),
+/// the same rule the `.en` whisper builds follow.
+pub(crate) fn english_only_route_language_substitute(
+    provider: asr::AsrProviderType,
+    model_id: &str,
+    language: Option<&str>,
+) -> Option<(asr::AsrProviderType, &'static str)> {
+    let language = language
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("auto"))?;
+    let base = language.split(['-', '_']).next().unwrap_or(language);
+    if base.eq_ignore_ascii_case("en") {
+        return None;
+    }
+    #[cfg(feature = "asr-transcribe-cpp")]
+    if provider == asr::AsrProviderType::TranscribeCpp
+        && matches!(
+            normalize_asr_model_id(provider, model_id).as_str(),
+            crate::asr::transcribe_cpp::FLUID_SPEECH_MINI_GGUF_MODEL_ID
+                | crate::asr::transcribe_cpp::UNDERDOG_BARK_PRO_GGUF_MODEL_ID
+        )
+    {
+        return Some((
+            asr::AsrProviderType::TranscribeCpp,
+            crate::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
+        ));
+    }
+    let _ = (provider, model_id);
+    None
+}
+
+/// The warning shown when `english_only_route_language_substitute` moved one
+/// recording onto another model.
+/// `model_name` and `substitute_name` are the names a reader sees
+/// (`AsrProviderType::speech_model_name`), not ids.
+pub(crate) fn english_only_route_language_warning(
+    model_name: &str,
+    language: &str,
+    substitute_name: &str,
+    what: &str,
+) -> String {
+    format!(
+        "{model_name} transcribes English only and the transcription language is set to '{}', so this {what} uses {substitute_name}. Set the language to English or auto-detect to use {model_name}.",
+        language.trim()
+    )
 }
 
 pub(crate) fn default_meeting_model_id(provider: asr::AsrProviderType) -> &'static str {
@@ -318,16 +412,9 @@ pub(crate) fn ensure_meeting_route_supported(
         return Ok(());
     }
 
-    let apple_speech_choice = if crate::asr::platform::macos_speech::meetings_supported() {
-        "Apple Speech, "
-    } else {
-        ""
-    };
     Err(format!(
-        "Meetings require a meeting-grade ASR route. '{}' with model '{}' is dictation-only or unsupported for meetings. Choose {}Parakeet, whisper.cpp small/medium/large-v3/large-v3-turbo, Distil Whisper, Qwen3-ASR, ElevenLabs, OpenAI, Groq, Cohere, Deepgram, Gemini Transcribe, or Mistral Voxtral in Settings -> ASR / Providers.",
-        provider.display_name(),
-        model_id,
-        apple_speech_choice
+        "{} is for dictation only. Choose a speech model for meetings in Settings > Models.",
+        provider.speech_model_name(model_id)
     ))
 }
 
@@ -339,8 +426,15 @@ pub(crate) fn preferred_meeting_provider_candidates(
     meeting_model_id: Option<&str>,
 ) -> Vec<asr::AsrProviderType> {
     let mut candidates = Vec::new();
+    // The nearest substitute for GGUF Parakeet in the meeting slot is the same
+    // weights on ONNX Runtime (same languages, same chunked path); the generic
+    // order after it would try whatever the shared or dictation slot names.
+    let gguf_substitute = meeting_provider
+        .filter(|provider| is_transcribe_cpp_provider(*provider))
+        .map(|_| asr::AsrProviderType::Parakeet);
     let explicit_candidates = [
         meeting_provider,
+        gguf_substitute,
         Some(default_provider),
         Some(dictation_provider),
     ];
@@ -378,6 +472,17 @@ pub(crate) fn preferred_meeting_provider_candidates(
             // slot would silently move an existing reader's meetings onto a
             // different engine the first time they updated to macOS 26.
             meeting_provider == Some(provider) && meeting_provider_is_supported(provider)
+        } else if is_transcribe_cpp_provider(provider) {
+            // GGUF Parakeet sits in the dictation slot of every Apple Silicon
+            // install since 0.9.0-beta.6, and in the meeting slot only of
+            // installs made after meetings moved to it. Inheriting it from the
+            // dictation slot would move an older install's meetings onto it --
+            // and `persist_repaired_meeting_route` would write that move to
+            // disk -- without the user choosing it. Meetings use it only when
+            // the meeting slot names a meeting-grade GGUF model outright.
+            meeting_provider == Some(provider)
+                && meeting_model_id
+                    .is_some_and(|model_id| meeting_model_is_supported(provider, model_id))
         } else {
             meeting_provider_is_supported(provider)
         };
@@ -433,8 +538,17 @@ pub(crate) fn preferred_dictation_provider_candidates(
     ];
 
     let mut ordered_candidates = Vec::new();
-    ordered_candidates.push(dictation_provider);
-    ordered_candidates.push(default_provider);
+    for explicit in [dictation_provider, default_provider] {
+        ordered_candidates.push(explicit);
+        // The nearest substitute for GGUF Parakeet is the same weights on
+        // ONNX Runtime: same languages, same transducer silence behavior.
+        // Without this, the generic local order below tried Distil-Whisper,
+        // Apple Speech and whisper.cpp first, which changes the language set
+        // and the way pauses are handled for a user who chose neither.
+        if is_transcribe_cpp_provider(explicit) {
+            ordered_candidates.push(asr::AsrProviderType::Parakeet);
+        }
+    }
     match preference {
         DictationRoutePreference::Local => {
             ordered_candidates.extend(local_defaults);

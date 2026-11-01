@@ -168,6 +168,11 @@ export function useOnboardingGate(): {
   // reports "loading" again, and going back to "wait" would swap the whole
   // workspace, or a wizard in progress, for the splash.
   const settledRef = useRef<OnboardingGateDecision | null>(null);
+  // Once setup opens, only the reader's Finish action can complete this run.
+  const setupShownRef = useRef(false);
+  if (resolved.action === "show") {
+    setupShownRef.current = true;
+  }
   if (resolved.action !== "wait") {
     settledRef.current = resolved;
   }
@@ -175,7 +180,7 @@ export function useOnboardingGate(): {
     resolved.action === "wait" && settledRef.current ? settledRef.current : resolved;
 
   useEffect(() => {
-    if (!decision.adoptRecord || adoptionRef.current) {
+    if (!decision.adoptRecord || setupShownRef.current || adoptionRef.current) {
       return;
     }
     adoptionRef.current = true;

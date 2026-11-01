@@ -487,7 +487,7 @@ where
 }
 
 #[cfg(unix)]
-fn open_directory_without_following_links(path: &Path) -> Result<File> {
+pub(crate) fn open_directory_without_following_links(path: &Path) -> Result<File> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;

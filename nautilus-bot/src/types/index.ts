@@ -24,7 +24,7 @@ export interface Recording {
   audioPath: string;
   transcript?: Transcript;
   metadata?: RecordingMetadata;
-  status: "recording" | "processing" | "completed" | "error";
+  status: "recording" | "processing" | "pending" | "completed" | "error";
   summary?: string;
   actionItems?: string[];
   summaryProvenance?: AnalysisProvenance | null;
@@ -103,7 +103,14 @@ export interface Transcript {
   requestedEngine?: string | null;
   actualEngine?: string | null;
   optimizationApplied?: boolean | null;
+  measuredWordTimestamps?: boolean;
   createdAt?: string;
+  /**
+   * Me + Them only: microphone lines that were the other side heard through
+   * the speakers. Kept out of `segments`, `fullText`, search and summaries,
+   * but not deleted, so the meeting view can show them on request.
+   */
+  heardThroughSpeakers?: TranscriptSegment[];
 }
 
 export interface TranscriptSegment {

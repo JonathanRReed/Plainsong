@@ -150,6 +150,25 @@ describe("meeting lifecycle notifications", () => {
     );
     expect(silence?.title).toBe("Meeting stopped: 15 minutes of silence");
     expect(silence?.body).toBe("Plainsong saved the audio and is preparing the transcript.");
+    const duration = notificationForSidecarEvent(
+      "meeting-auto-stopped",
+      { recordingId: "rec-1", reason: "duration_limit", durationMinutes: 120 },
+      context(),
+    );
+    expect(duration?.title).toBe("Meeting stopped: 120-minute limit");
+    expect(duration?.focus).toEqual({ view: "recordings", recordingId: "rec-1" });
+    const invalidDuration = notificationForSidecarEvent(
+      "meeting-auto-stopped",
+      { recordingId: "rec-1", reason: "duration_limit", durationMinutes: Number.POSITIVE_INFINITY },
+      context(),
+    );
+    expect(invalidDuration?.title).toBe("Meeting stopped");
+    const microphone = notificationForSidecarEvent(
+      "meeting-auto-stopped",
+      { recordingId: "rec-1", reason: "microphone_lost" },
+      context(),
+    );
+    expect(microphone?.title).toBe("Meeting stopped: the microphone disconnected");
   });
 
   it("stays silent when meeting notifications are off", () => {
@@ -275,6 +294,7 @@ describe("dictation failure notifications", () => {
     const shown = notificationForSidecarEvent("dictation-text-ready", refused, context());
     expect(shown?.kind).toBe("dictation_refused");
     expect(shown?.title).toBe("Dictation not inserted");
+    expect(shown?.body).toBe("Plainsong didn't insert or copy the words because the field is secure. Open Plainsong to recover them.");
     expect(shown?.focus).toEqual({ view: "dictation" });
     expect(shown?.dedupeKey).toBe("dictation:7");
 
@@ -362,6 +382,7 @@ describe("call detected offer", () => {
     expect(offer?.kind).toBe("call_detected");
     expect(offer?.title).toBe("Zoom call started");
     expect(offer?.body).toBe("Record it with Plainsong?");
+    expect(offer).toHaveProperty("actions", [{ type: "button", text: "Record" }]);
     expect(offer?.focus).toEqual({
       view: "recordings",
       recordingId: null,

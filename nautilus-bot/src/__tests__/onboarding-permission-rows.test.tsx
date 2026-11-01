@@ -23,6 +23,7 @@ vi.mock("@/lib/electron", () => ({
 vi.mock("@/lib/backend/asr", () => ({
   downloadAsrModels: vi.fn(async () => {}),
   getAsrProviders: vi.fn(async () => []),
+  listDownloadedModels: vi.fn(async () => []),
 }));
 
 vi.mock("@/lib/backend/ai", () => ({
@@ -110,7 +111,7 @@ vi.mock("@/lib/backend/settings", () => ({
   openInstalledPlainsongApp: vi.fn(async () => {}),
   openPermissionSettings: vi.fn(async () => {}),
   requestDictationPermissions: vi.fn(async () => ({})),
-  saveSettings: vi.fn(async () => {}),
+  updateSettings: vi.fn(async () => {}),
   verifyMeetingSetup: vi.fn(async () => ({
     ok: true,
     title: "",

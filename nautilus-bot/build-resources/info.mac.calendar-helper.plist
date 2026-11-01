@@ -34,8 +34,10 @@
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSCalendarsUsageDescription</key>
-  <string>Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac.</string>
+  <string>Plainsong reads your calendar to help you prepare for and capture meetings, and, if enabled, spell names locally. It does not change your calendar. If you choose cloud AI, selected meeting details may be sent to that provider.</string>
   <key>NSCalendarsFullAccessUsageDescription</key>
-  <string>Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac.</string>
+  <string>Plainsong reads your calendar to help you prepare for and capture meetings, and, if enabled, spell names locally. It does not change your calendar. If you choose cloud AI, selected meeting details may be sent to that provider.</string>
+  <key>NSContactsUsageDescription</key>
+  <string>Plainsong uses names from Contacts to spell people's names in dictation. It reads only names, never changes Contacts, and they stay on this Mac.</string>
 </dict>
 </plist>

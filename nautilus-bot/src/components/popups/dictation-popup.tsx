@@ -4,12 +4,13 @@ import {
   AppWindow,
   CheckCircle2,
   Clipboard,
+  Clock3,
   History,
   Loader2,
   Mail,
   Mic,
+  MicOff,
   Minimize2,
-  PanelsTopLeft,
   RotateCcw,
   Settings2,
   Square,
@@ -60,12 +61,18 @@ import {
 } from "@/lib/dictation-ui-message";
 import { cn } from "@/lib/utils";
 import { AudioWaveform } from "@/components/ui/audio-waveform";
-import { DictationFinishBar } from "@/components/popups/dictation-finish-bar";
-import type {
-  DictationProcessingStage,
-  DictationProgressPlan,
-} from "@/lib/dictation-progress";
-import { describePillStatus } from "@/lib/dictation-hud-status";
+import {
+  DictationFinishBar,
+  type DictationFinishStage,
+} from "@/components/popups/dictation-finish-bar";
+import type { DictationProgressPlan } from "@/lib/dictation-progress";
+import { describePillStatus, PREPARING_MODEL_LABEL } from "@/lib/dictation-hud-status";
+import {
+  MEETING_ASIDE_LABEL,
+  MEETING_ASIDE_NOTICE,
+  markMeetingAsideNoticeSeen,
+  readMeetingAsideNoticeSeen,
+} from "@/lib/meeting-aside";
 import { SLOW_STAGE_LABEL, slowStageThresholdMs } from "@/lib/dictation-slow-stage";
 import type { DictationCustomMode } from "@/types/settings";
 
@@ -128,7 +135,7 @@ const CONTEXT_META: Record<
 };
 
 const INSERTION_META: Record<
-  DictationInsertionMode,
+  DictationInsertionMode | "preview",
   { label: string; detail: string }
 > = {
   auto: {
@@ -139,6 +146,7 @@ const INSERTION_META: Record<
     label: "Clipboard only",
     detail: "Do not try to insert automatically",
   },
+  preview: { label: "Preview only", detail: "Keep the result in Plainsong" },
 };
 
 const CLOUD_PROVIDER_LABELS: Record<string, string> = {
@@ -150,7 +158,6 @@ const CLOUD_PROVIDER_LABELS: Record<string, string> = {
   mistral_voxtral: "Mistral Voxtral",
   gemini_transcribe: "Gemini",
   xai_stt: "xAI Grok",
-  plainsong_plus: "Plainsong Plus",
 };
 
 function formatRouteLabel(
@@ -205,7 +212,17 @@ function formatDoneTitle(
   }
 
   if (outcome === "error") {
-    return "Not delivered — saved to history";
+    // Not "saved to history": with history off it was not, and the sidecar's
+    // message below says where the words are.
+    return "Not inserted";
+  }
+
+  if (outcome === "paste_dispatched") {
+    return appTarget ? `Check ${appTarget}` : "Check the text";
+  }
+
+  if (outcome === "copied_instead") {
+    return "Copied, press ⌘V to paste";
   }
 
   if (isBacktrackDictationCommand(commandApplied)) {
@@ -241,6 +258,14 @@ function formatDoneMessage(
   const refusal = describeDictationDeliveryRefusal(outcome);
   if (refusal) {
     return refusal.message;
+  }
+
+  if (outcome === "paste_dispatched") {
+    const target = appTarget ?? "the target app";
+    const recovery = leftOnClipboard
+      ? "paste the copied result with Cmd+V"
+      : "use Copy result to recover it";
+    return `Check the text in ${target}. Insertion was not confirmed. If nothing appeared, ${recovery}.`;
   }
 
   if (commandApplied === "backtrack_replace_last_insert") {
@@ -329,6 +354,18 @@ function repeatsTitle(title: string | null | undefined, message: string | null |
   return normalizedTitle.length > 0 && normalizedMessage === normalizedTitle;
 }
 
+function normalizeFinalWarnings(warnings: unknown): string[] {
+  if (!Array.isArray(warnings)) return [];
+  return Array.from(
+    new Set(
+      warnings
+        .filter((warning): warning is string => typeof warning === "string")
+        .map((warning) => warning.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
 // How long the "next profile" announcement stays on screen. Long enough to
 // read one short name, short enough that a second press reads as a second
 // step rather than the same notice lingering.
@@ -357,11 +394,13 @@ function resolveHudState(phase: DictationPhase): HudState {
 function formatCaptureControlHint(
   hudState: HudState,
   shortcut: string | null,
+  locked: boolean,
 ): string | null {
   if (hudState !== "priming" && hudState !== "recording") {
     return null;
   }
 
+  if (locked) return "Locked. Press the shortcut again to finish.";
   const stopHint = shortcut
     ? `${formatShortcutForDisplay(shortcut)} to stop`
     : "Press the dictation shortcut to stop";
@@ -373,10 +412,17 @@ function formatHandsFreeRuntimeHint(
   silenceTimeoutSeconds: number,
   runtimeAppTarget: string | null,
   contextDetail: string,
+  insertionMode: DictationInsertionMode | "preview",
 ) {
-  const targetDetail = runtimeAppTarget
+  const targetDetail = insertionMode === "preview"
+    ? "Preview in Plainsong"
+    : insertionMode === "clipboard_only"
+      ? "Copy to clipboard"
+      : runtimeAppTarget
     ? `Sending to ${runtimeAppTarget}`
-    : contextDetail;
+    : contextDetail === "Fresh dictation"
+      ? "Inserting at your cursor"
+      : contextDetail;
 
   if (!handsFreeEnabled) {
     return targetDetail;
@@ -396,12 +442,14 @@ function PopupActionButton({
   detail,
   onClick,
   tone = "default",
+  disabled = false,
 }: {
   icon: typeof Clipboard;
   label: string;
   detail: string;
   onClick: () => void;
   tone?: "default" | "primary";
+  disabled?: boolean;
 }) {
   // One compact row of actions: the done state is on screen for under two
   // seconds, so a grid of tall tiles only pushed the result out of view.
@@ -409,8 +457,9 @@ function PopupActionButton({
     <button
       type="button"
       title={detail}
+      disabled={disabled}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm transition-colors disabled:opacity-50 disabled:cursor-wait focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         tone === "primary"
           ? "border-foreground/15 bg-foreground/8 text-foreground hover:bg-foreground/12"
           : "border-foreground/10 text-muted-foreground hover:bg-foreground/6 hover:text-foreground",
@@ -426,7 +475,12 @@ function PopupActionButton({
 export function DictationPopup() {
   const window = getCurrentWindow();
   const { stateEvent, textReadyEvent } = useDictationRuntime();
+  const [shortcutLocked, setShortcutLocked] = useState(false);
   const [phase, setPhase] = useState<DictationPhase>("idle");
+  // The session takes its audio from a recording meeting (an aside).
+  const [meetingAside, setMeetingAside] = useState(false);
+  // The once-per-Mac reminder that the call still hears an aside.
+  const [asideNoticeVisible, setAsideNoticeVisible] = useState(false);
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
@@ -444,6 +498,7 @@ export function DictationPopup() {
   const [processingStage, setProcessingStage] = useState<
     "transcribing" | "polishing"
   >("transcribing");
+  const [speechModelPreparing, setSpeechModelPreparing] = useState(false);
   const [progressPlan, setProgressPlan] = useState<DictationProgressPlan>({
     expectedTranscribeMs: 600,
     expectedPolishMs: null,
@@ -452,7 +507,12 @@ export function DictationPopup() {
   // is happening in one word and stays out of the way. The full card is one
   // double-click away and remembered once chosen.
   const [displayMode, setDisplayMode] = useState<DisplayMode>("minimal");
-  // Settings > General. The main process places the window (bottom, or
+  const [showTemporaryDetails, setShowTemporaryDetails] = useState(false);
+  const [isHoldingReview, setIsHoldingReview] = useState(false);
+  const [reviewHoldError, setReviewHoldError] = useState<string | null>(null);
+  const reviewHoldPendingRef = useRef(false);
+  const reviewHoldEpochRef = useRef(0);
+  // Settings > Dictation. The main process places the window (bottom, or
   // against a side); this only decides the pill's shape and scale.
   const [pillScale, setPillScale] = useState(1);
   const [pillDock, setPillDock] = useState<DictationPillDock>("bottom");
@@ -478,7 +538,7 @@ export function DictationPopup() {
   const [dictationResolvedHosting, setDictationResolvedHosting] =
     useState<DictationRoutePreference | null>(null);
   const [dictationInsertionMode, setDictationInsertionMode] =
-    useState<DictationInsertionMode>("auto");
+    useState<DictationInsertionMode | "preview">("auto");
   const [dictationCommandPrefix, setDictationCommandPrefix] =
     useState("command");
   const [dictationShortcut, setDictationShortcut] = useState<string | null>(
@@ -497,7 +557,23 @@ export function DictationPopup() {
   );
   const [finalSnippetAppliedCount, setFinalSnippetAppliedCount] = useState(0);
   const [finalLeftOnClipboard, setFinalLeftOnClipboard] = useState(false);
+  const [finalWarnings, setFinalWarnings] = useState<string[]>([]);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [isCopyingResult, setIsCopyingResult] = useState(false);
+  const finalTextRef = useRef<string | null>(null);
+  const copyResultRevisionRef = useRef(0);
+  const copyResultPendingRef = useRef(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
+  const [isRestarting, setIsRestarting] = useState(false);
+  const restartPendingRef = useRef(false);
+  const [cancelError, setCancelError] = useState<{
+    sessionId: number;
+    message: string;
+  } | null>(null);
+  const [cancellingSessionId, setCancellingSessionId] = useState<number | null>(
+    null,
+  );
+  const cancelPendingSessionIdsRef = useRef(new Set<number>());
   const [isSpeakingAloud, setIsSpeakingAloud] = useState(false);
   const [transcriptionLatencyMs, setTranscriptionLatencyMs] = useState<number | null>(null);
   const [insertLatencyMs, setInsertLatencyMs] = useState<number | null>(null);
@@ -505,6 +581,31 @@ export function DictationPopup() {
   const lastActiveStartedAtRef = useRef<number | null>(null);
   const sessionClockStartedAtRef = useRef<number | null>(null);
   const previousPhaseRef = useRef<DictationPhase>("idle");
+  const currentPhaseRef = useRef<DictationPhase>("idle");
+  const currentReviewSessionIdRef = useRef<number | null>(null);
+  // Deliberately snapshot the ID for this render. Event refs can advance
+  // before React replaces the old DOM, and the click guard below compares
+  // this displayed session with the current one before sending a command.
+  const displayedSessionId = lastSessionIdRef.current;
+  const hasValidDisplayedSessionId =
+    typeof displayedSessionId === "number" &&
+    Number.isSafeInteger(displayedSessionId) &&
+    displayedSessionId > 0;
+  const hasValidReviewSessionId =
+    typeof currentReviewSessionIdRef.current === "number" &&
+    Number.isSafeInteger(currentReviewSessionIdRef.current) &&
+    currentReviewSessionIdRef.current > 0;
+  const canCancelCapture = hasValidDisplayedSessionId &&
+    (phase === "preparing" || phase === "primed" || phase === "recording");
+  const canCancelProcessing =
+    hasValidDisplayedSessionId &&
+    (phase === "stopping" || phase === "transcribing");
+  const isCancelling =
+    hasValidDisplayedSessionId && cancellingSessionId === displayedSessionId;
+  const displayedCancelError =
+    hasValidDisplayedSessionId && cancelError?.sessionId === displayedSessionId
+      ? cancelError.message
+      : null;
 
   const applyPillSettings = (ui: { dictationPillSize?: unknown; dictationPillDock?: unknown } | undefined) => {
     setPillScale(resolveDictationPillScale(ui?.dictationPillSize));
@@ -548,12 +649,25 @@ export function DictationPopup() {
     setDictationShortcut(settings.shortcuts?.toggleDictation ?? null);
   };
 
+  const [savedResult, setSavedResult] = useState<{ recordingId: string; sessionId: number } | null>(null);
+  const savedResultRef = useRef<{ recordingId: string; sessionId: number } | null>(null);
+
   const resetCompletionState = () => {
+    reviewHoldEpochRef.current += 1;
+    reviewHoldPendingRef.current = false;
+    setIsHoldingReview(false);
+    setReviewHoldError(null);
+    savedResultRef.current = null;
+    setSavedResult(null);
+    finalTextRef.current = null;
+    copyResultRevisionRef.current += 1;
     setFinalText(null);
     setFinalCommandApplied(null);
     setFinalSnippetAppliedCount(0);
     setFinalLeftOnClipboard(false);
+    setFinalWarnings([]);
     setActionFeedback(null);
+    setRestartError(null);
     setIsSpeakingAloud(false);
     setTranscriptionLatencyMs(null);
     setInsertLatencyMs(null);
@@ -589,8 +703,13 @@ export function DictationPopup() {
     }
   };
 
-  const applyOverlaySnapshot = (payload: DictationStateChangedEvent) => {
+  const applyOverlaySnapshot = (payload: DictationStateChangedEvent & { shortcutLocked?: boolean }) => {
     if (payload.dismissed) {
+      currentPhaseRef.current = "idle";
+      currentReviewSessionIdRef.current = null;
+      setCancelError(null);
+      setMeetingAside(false);
+      setAsideNoticeVisible(false);
       setPhase("idle");
       setMessage(null);
       setPreview(null);
@@ -613,7 +732,39 @@ export function DictationPopup() {
       return;
     }
 
+    // Keep command guards ahead of React's render cycle. A click from an old
+    // processing DOM must observe a newer delivery or terminal event even if
+    // that event has not rendered yet.
+    currentPhaseRef.current = payload.phase;
+    if (payload.phase === "done" || payload.phase === "error") {
+      const nextReviewSessionId =
+        typeof payload.sessionId === "number" &&
+        Number.isSafeInteger(payload.sessionId) &&
+        payload.sessionId > 0
+          ? payload.sessionId
+          : null;
+      if (currentReviewSessionIdRef.current !== nextReviewSessionId) {
+        reviewHoldEpochRef.current += 1;
+        reviewHoldPendingRef.current = false;
+        setIsHoldingReview(false);
+        setReviewHoldError(null);
+      }
+      currentReviewSessionIdRef.current = nextReviewSessionId;
+    } else if (
+      typeof payload.sessionId === "number" &&
+      Number.isSafeInteger(payload.sessionId) &&
+      payload.sessionId > 0
+    ) {
+      currentReviewSessionIdRef.current = payload.sessionId;
+    }
+    if (payload.phase !== "stopping" && payload.phase !== "transcribing") {
+      setCancelError(null);
+    }
+
     applyRuntimeMetadata(payload);
+    if (typeof payload.meetingAside === "boolean") {
+      setMeetingAside(payload.meetingAside);
+    }
     const sanitizedMessage = sanitizeUserFacingDictationMessage(
       payload.message,
       {
@@ -634,11 +785,22 @@ export function DictationPopup() {
     const isActiveCapturePhase =
       payload.phase === "primed" || payload.phase === "recording";
 
+    if (
+      payload.phase === "preparing" ||
+      payload.phase === "primed" ||
+      payload.phase === "recording"
+    ) {
+      setShowTemporaryDetails(false);
+    }
+
+    setShortcutLocked(payload.shortcutLocked === true &&
+      (payload.phase === "preparing" || payload.phase === "primed" || payload.phase === "recording"));
     setPhase(payload.phase);
     setMessage(sanitizedMessage);
     setProcessingStage(
       payload.processingStage === "polishing" ? "polishing" : "transcribing",
     );
+    setSpeechModelPreparing(payload.speechModelPreparing === true);
     if (typeof payload.expectedTranscribeMs === "number") {
       const expectedTranscribeMs = payload.expectedTranscribeMs;
       const expectedPolishMs =
@@ -660,7 +822,29 @@ export function DictationPopup() {
         : null,
     );
     setOutcome(payload.outcome ?? null);
+    if (payload.phase === "done" || payload.phase === "error") {
+      if (typeof payload.warnings !== "undefined") {
+        setFinalWarnings(normalizeFinalWarnings(payload.warnings));
+      }
+      if (
+        !finalTextRef.current &&
+        typeof payload.preview === "string" &&
+        payload.preview.trim()
+      ) {
+        finalTextRef.current = payload.preview;
+        copyResultRevisionRef.current += 1;
+        setFinalText(payload.preview);
+      }
+      if (payload.reviewHeld === true) {
+        setReviewHoldError(null);
+        setShowTemporaryDetails(true);
+      }
+    }
     if (payload.phase === "idle") {
+      currentReviewSessionIdRef.current = null;
+      setCancelError(null);
+      setMeetingAside(false);
+      setAsideNoticeVisible(false);
       resetCompletionState();
       setPreviewParts(null);
       lastSessionIdRef.current = null;
@@ -672,6 +856,11 @@ export function DictationPopup() {
     }
 
     if (nextSessionId !== null && nextSessionId !== lastSessionIdRef.current) {
+      setCancelError(null);
+      if (typeof payload.meetingAside !== "boolean") {
+        setMeetingAside(false);
+      }
+      setAsideNoticeVisible(false);
       if (payload.phase !== "done") {
         resetCompletionState();
       }
@@ -722,6 +911,15 @@ export function DictationPopup() {
       console.error("Failed to stop dictation from popup:", error);
     }
   };
+
+  // The first aside on this Mac says, once, that the call still hears it. It
+  // stays up for that whole dictation and is marked shown when it appears.
+  useEffect(() => {
+    if (meetingAside && phase === "recording" && !asideNoticeVisible && !readMeetingAsideNoticeSeen()) {
+      markMeetingAsideNoticeSeen();
+      setAsideNoticeVisible(true);
+    }
+  }, [meetingAside, phase, asideNoticeVisible]);
 
   // A dictation that a `plainsong://record` link started, not a keypress.
   // Any web page can send that link (see electron/deep-link-policy.ts), so the
@@ -807,7 +1005,6 @@ export function DictationPopup() {
       unlisten?.();
     };
     // applyPillSettings reads only setters; it is stable for the window's life.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // The overlay is a small card inside a full-screen transparent window. Left
@@ -937,9 +1134,19 @@ export function DictationPopup() {
     }
 
     const payload = textReadyEvent;
+    if (typeof payload.sessionId === "number" && lastSessionIdRef.current !== null
+      && payload.sessionId !== lastSessionIdRef.current) return;
+    const result = typeof payload.recordingId === "string" && payload.recordingId.trim()
+      && typeof payload.sessionId === "number" && Number.isSafeInteger(payload.sessionId) && payload.sessionId > 0
+      ? { recordingId: payload.recordingId, sessionId: payload.sessionId } : null;
+    savedResultRef.current = result;
+    setSavedResult(result);
+    finalTextRef.current = payload.text ?? null;
+    copyResultRevisionRef.current += 1;
     setFinalText(payload.text ?? null);
     setFinalCommandApplied(payload.commandApplied ?? null);
     setFinalSnippetAppliedCount(payload.snippetAppliedCount ?? 0);
+    setFinalWarnings(normalizeFinalWarnings(payload.warnings));
     // `copied` means the text is still on the clipboard once the session
     // settles — with `dictationCopyToClipboard` off the staged copy is
     // restored, so we must not promise a Cmd+V is waiting.
@@ -1059,13 +1266,17 @@ export function DictationPopup() {
       if (phase === "recording" && previousPhase !== "recording") {
         void playDictationEarcon("start");
       } else if (phase === "done" && previousPhase !== "done") {
-        void playDictationEarcon("success");
+        if (outcome === "pasted" || outcome === "replaced") {
+          void playDictationEarcon("success");
+        } else if (outcome === "error" || describeDictationDeliveryRefusal(outcome)) {
+          void playDictationEarcon("error");
+        }
       } else if (phase === "error" && previousPhase !== "error") {
         void playDictationEarcon("error");
       }
       previousPhaseRef.current = phase;
     }
-  }, [phase]);
+  }, [phase, outcome]);
 
   const elapsedText = useMemo(() => {
     const mins = Math.floor(elapsed / 60);
@@ -1090,7 +1301,7 @@ export function DictationPopup() {
       dictationResolvedHosting,
       dictationProvider,
     );
-    const targetDetailValue = runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
+    const targetDetailValue = dictationInsertionMode === "auto" && runtimeAppTarget ? ` for ${runtimeAppTarget}` : "";
     const autoActivationDetailValue =
       activationMatcher && runtimeAppTarget
         ? `Auto for ${runtimeAppTarget} via "${activationMatcher}"`
@@ -1124,10 +1335,14 @@ export function DictationPopup() {
     phase,
   ]);
 
-  const { selectedModeLabel, contextMeta, insertionMeta, routeLabel, targetDetail, autoActivationDetail, isCapturePhase } = computedMeta;
+  const { selectedModeLabel, contextMeta, targetDetail, autoActivationDetail, isCapturePhase } = computedMeta;
   const hudState = resolveHudState(phase);
-  const finishStage: DictationProcessingStage =
-    phase === "stopping" ? "stopping" : processingStage;
+  const finishStage: DictationFinishStage =
+    phase === "delivering"
+      ? "delivering"
+      : phase === "stopping"
+        ? "stopping"
+        : processingStage;
   const stageKeyForSlow = `${lastSessionIdRef.current ?? ""}:${finishStage}`;
   const stageKey = `${lastSessionIdRef.current ?? ""}:${
     phase === "stopping" || phase === "transcribing" ? finishStage : phase
@@ -1139,7 +1354,7 @@ export function DictationPopup() {
   const stageStartedAt = stageStartRef.current.at;
   // "Still working": once the current processing stage runs well past what
   // this Mac usually takes (dictation-slow-stage.ts), the label says so.
-  const processingPhase = phase === "stopping" || phase === "transcribing";
+  const processingPhase = phase === "stopping" || phase === "transcribing" || phase === "delivering";
   const stageExpectedMs =
     finishStage === "polishing"
       ? progressPlan.expectedPolishMs
@@ -1157,7 +1372,10 @@ export function DictationPopup() {
     return () => globalThis.clearTimeout(timer);
   }, [processingPhase, stageKeyForSlow, stageExpectedMs, stageStartedAt]);
   const slowStage = processingPhase && slowStageKey === stageKeyForSlow;
-  const finishStageLabel = slowStage
+  const preparingModel = speechModelPreparing && phase === "transcribing" && finishStage === "transcribing";
+  const finishStageLabel = preparingModel
+    ? PREPARING_MODEL_LABEL
+    : slowStage
     ? SLOW_STAGE_LABEL
     : finishStage === "stopping"
       ? "Finishing"
@@ -1167,15 +1385,34 @@ export function DictationPopup() {
   const captureControlHint = formatCaptureControlHint(
     hudState,
     dictationShortcut,
+    shortcutLocked,
   );
+
+  // The first aside opens the details card once, so the reminder that the
+  // call can still hear has room to be read; the pill itself has none.
+  const temporaryDetailsVisible =
+    (showTemporaryDetails || asideNoticeVisible) && displayMode === "minimal";
+  const effectiveDisplayMode: DisplayMode = temporaryDetailsVisible
+    ? "full"
+    : displayMode;
+  const minimalDetailsAvailable =
+    displayMode === "minimal" &&
+    (phase === "error" ||
+      (phase === "done" &&
+        (outcome === "error" ||
+          outcome === "paste_dispatched" ||
+          outcome === "copied_instead" ||
+          Boolean(describeDictationDeliveryRefusal(outcome)) ||
+          finalWarnings.length > 0)));
 
   const cycleDisplayMode = async () => {
     const next: DisplayMode =
-      displayMode === "full"
+      effectiveDisplayMode === "full"
         ? "compact"
-        : displayMode === "compact"
+        : effectiveDisplayMode === "compact"
           ? "minimal"
           : "full";
+    setShowTemporaryDetails(false);
     setDisplayMode(next);
     try {
       await invoke("__overlay_set_display_mode__", { displayMode: next });
@@ -1186,23 +1423,55 @@ export function DictationPopup() {
 
   useEffect(() => {
     const { width, height } = getPopupSize(
-      displayMode,
+      effectiveDisplayMode,
       phase,
       message,
       preview,
       { dock: pillDock, scale: pillScale },
     );
-    void window.setSize(new LogicalSize(width, height)).catch((error) => {
-      console.error("Failed to resize dictation popup:", error);
-    });
-  }, [displayMode, message, phase, preview, pillDock, pillScale, window]);
+    const actionHeight =
+      effectiveDisplayMode !== "minimal" && canCancelProcessing ? 40 : 0;
+    const errorHeight =
+      effectiveDisplayMode !== "minimal" && (restartError || displayedCancelError)
+        ? 70
+        : 0;
+    const reviewHoldHeight =
+      effectiveDisplayMode !== "minimal" && reviewHoldError ? 72 : 0;
+    // Two text-sm lines at the card widths, py-2 and mb-3.
+    const asideNoticeHeight =
+      effectiveDisplayMode !== "minimal" && asideNoticeVisible ? 72 : 0;
+    void window
+      .setSize(
+        new LogicalSize(
+          width,
+          height + actionHeight + errorHeight + reviewHoldHeight + asideNoticeHeight,
+        ),
+      )
+      .catch((error) => {
+        console.error("Failed to resize dictation popup:", error);
+      });
+  }, [
+    asideNoticeVisible,
+    canCancelProcessing,
+    effectiveDisplayMode,
+    displayedCancelError,
+    message,
+    phase,
+    preview,
+    pillDock,
+    pillScale,
+    restartError,
+    reviewHoldError,
+    window,
+  ]);
 
   const openMainApp = async (
     view?: "dictation" | "settings" | "recordings",
+    recordingId?: string,
   ) => {
     try {
       if (view) {
-        await invoke("open_main_window_to", { view });
+        await invoke("open_main_window_to", { view, ...(recordingId ? { recordingId } : {}) });
       } else {
         await invoke("open_main_window");
       }
@@ -1212,12 +1481,118 @@ export function DictationPopup() {
   };
 
   const hidePopup = useCallback(async () => {
+    reviewHoldEpochRef.current += 1;
+    reviewHoldPendingRef.current = false;
+    setIsHoldingReview(false);
+    setReviewHoldError(null);
+    setShowTemporaryDetails(false);
     try {
       await invoke("dismiss_dictation_overlay");
     } catch (error) {
       console.error("Failed to hide dictation popup:", error);
     }
   }, []);
+
+  const handleShowDetails = async () => {
+    const sessionId = currentReviewSessionIdRef.current;
+    if (
+      reviewHoldPendingRef.current ||
+      (currentPhaseRef.current !== "done" && currentPhaseRef.current !== "error")
+    ) {
+      return;
+    }
+
+    if (
+      typeof sessionId !== "number" ||
+      !Number.isSafeInteger(sessionId) ||
+      sessionId <= 0
+    ) {
+      reviewHoldEpochRef.current += 1;
+      setReviewHoldError(
+        "This review may close automatically. Open the app to continue reviewing.",
+      );
+      setShowTemporaryDetails(true);
+      return;
+    }
+
+    const requestEpoch = ++reviewHoldEpochRef.current;
+    reviewHoldPendingRef.current = true;
+    setIsHoldingReview(true);
+    setReviewHoldError(null);
+    try {
+      const result = await invoke<{ held?: boolean; sessionId?: number }>(
+        "hold_dictation_overlay_review",
+        { sessionId },
+      );
+      if (
+        reviewHoldEpochRef.current === requestEpoch &&
+        currentReviewSessionIdRef.current === sessionId &&
+        (currentPhaseRef.current === "done" || currentPhaseRef.current === "error")
+      ) {
+        if (result?.held === true && result.sessionId === sessionId) {
+          setShowTemporaryDetails(true);
+        } else {
+          setReviewHoldError(
+            "Couldn't keep this review open. It may close automatically. Retry keep open or open the app to continue reviewing.",
+          );
+          setShowTemporaryDetails(true);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to hold dictation overlay review:", error);
+      if (
+        reviewHoldEpochRef.current === requestEpoch &&
+        currentReviewSessionIdRef.current === sessionId &&
+        (currentPhaseRef.current === "done" || currentPhaseRef.current === "error")
+      ) {
+        setReviewHoldError(
+          "Couldn't keep this review open. It may close automatically. Retry keep open or open the app to continue reviewing.",
+        );
+        setShowTemporaryDetails(true);
+      }
+    } finally {
+      if (reviewHoldEpochRef.current === requestEpoch) {
+        reviewHoldPendingRef.current = false;
+        setIsHoldingReview(false);
+      }
+    }
+  };
+
+  const handleCancelProcessing = async () => {
+    const sessionId = displayedSessionId;
+    if (
+      typeof sessionId !== "number" ||
+      !Number.isSafeInteger(sessionId) ||
+      sessionId <= 0 ||
+      cancelPendingSessionIdsRef.current.has(sessionId) ||
+      lastSessionIdRef.current !== sessionId ||
+      !["preparing", "primed", "recording", "stopping", "transcribing"].includes(currentPhaseRef.current)
+    ) {
+      return;
+    }
+
+    cancelPendingSessionIdsRef.current.add(sessionId);
+    setCancellingSessionId(sessionId);
+    setCancelError(null);
+    try {
+      await invoke("force_stop_dictation", { sessionId });
+    } catch {
+      if (
+        lastSessionIdRef.current === sessionId &&
+        ["preparing", "primed", "recording", "stopping", "transcribing"].includes(currentPhaseRef.current)
+      ) {
+        setCancelError({
+          sessionId,
+          message: "Couldn't cancel this dictation. Try again.",
+        });
+      }
+    } finally {
+      cancelPendingSessionIdsRef.current.delete(sessionId);
+      setCancellingSessionId((current) =>
+        current === sessionId ? null : current,
+      );
+    }
+  };
 
   // Note: no in-window Escape handler — the overlay window is created with
   // focusable: false and shown via showInactive() (electron/windows.ts), so
@@ -1226,6 +1601,10 @@ export function DictationPopup() {
   // the native macOS shortcut helper; dismissal here is via the close button.
 
   const handleStartAgain = async () => {
+    if (restartPendingRef.current) return;
+    restartPendingRef.current = true;
+    setIsRestarting(true);
+    setRestartError(null);
     try {
       setActionFeedback(null);
       setIsSpeakingAloud(false);
@@ -1233,20 +1612,42 @@ export function DictationPopup() {
       await startDictation();
     } catch (error) {
       console.error("Failed to restart dictation from popup:", error);
+      setRestartError("Couldn't start dictation. Check your microphone and speech model in Settings, then try again.");
+    } finally {
+      restartPendingRef.current = false;
+      setIsRestarting(false);
     }
   };
 
   const handleCopyResult = async () => {
-    if (!finalText?.trim()) {
+    const text = finalTextRef.current;
+    if (!text?.trim() || copyResultPendingRef.current) {
       return;
     }
 
+    const resultRevision = copyResultRevisionRef.current;
+    copyResultPendingRef.current = true;
+    setIsCopyingResult(true);
+    setActionFeedback(null);
     try {
-      await navigator.clipboard.writeText(finalText);
-      setActionFeedback("Copied result");
+      await invoke("__overlay_copy_text__", { text });
+      if (
+        copyResultRevisionRef.current === resultRevision &&
+        finalTextRef.current === text
+      ) {
+        setActionFeedback("Copied result");
+      }
     } catch (error) {
       console.error("Failed to copy dictation result from popup:", error);
-      setActionFeedback("Copy failed");
+      if (
+        copyResultRevisionRef.current === resultRevision &&
+        finalTextRef.current === text
+      ) {
+        setActionFeedback("Copy failed");
+      }
+    } finally {
+      copyResultPendingRef.current = false;
+      setIsCopyingResult(false);
     }
   };
 
@@ -1286,13 +1687,20 @@ export function DictationPopup() {
 
   // Computed above every early return below: hooks must run in the same order
   // on every render, and the minimal pill returns before this point.
+  // The pill already reads "No speech" from the message; the card must not
+  // say "Transcription ready" with a check mark over the same result.
+  const heardNothing =
+    phase === "done" &&
+    describePillStatus({ phase, stage: finishStage, outcome, message }).label === "No speech";
   const { doneTitle, doneMessage, commandLabel, deliveryRefusal } = useMemo(() => ({
     deliveryRefusal: describeDictationDeliveryRefusal(outcome),
-    doneTitle: formatDoneTitle(
-      outcome,
-      finalCommandApplied,
-      runtimeAppTarget,
-    ),
+    doneTitle: heardNothing
+      ? "Nothing heard"
+      : formatDoneTitle(
+          outcome,
+          finalCommandApplied,
+          runtimeAppTarget,
+        ),
     doneMessage:
       message ??
       formatDoneMessage(
@@ -1304,6 +1712,7 @@ export function DictationPopup() {
       ),
     commandLabel: formatAppliedDictationCommandLabel(finalCommandApplied),
   }), [
+    heardNothing,
     outcome,
     finalCommandApplied,
     runtimeAppTarget,
@@ -1311,6 +1720,10 @@ export function DictationPopup() {
     finalSnippetAppliedCount,
     finalLeftOnClipboard,
   ]);
+  const supplementalFinalWarnings = finalWarnings.filter(
+    (warning) =>
+      !doneMessage?.toLocaleLowerCase("en-US").includes(warning.toLocaleLowerCase("en-US")),
+  );
 
   // The "next profile" announcement. Picking a profile is a mode selector,
   // which STYLE.md §5 makes a rubric control: rust and neutral, never gold.
@@ -1329,6 +1742,31 @@ export function DictationPopup() {
       <span className="text-sm font-medium text-foreground">{cycledModeLabel}</span>
     </div>
   ) : null;
+  const processingCancelControls = canCancelProcessing ? (
+    <>
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          className="rounded-lg border border-foreground/10 bg-foreground/5 px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/8 hover:text-foreground disabled:cursor-wait disabled:opacity-50"
+          onClick={() => void handleCancelProcessing()}
+          disabled={isCancelling}
+        >
+          {isCancelling ? "Cancelling…" : "Cancel dictation"}
+        </button>
+        <span className="font-mono text-xs text-muted-foreground">
+          Esc to cancel
+        </span>
+      </div>
+      {displayedCancelError && (
+        <p
+          role="alert"
+          className="mt-2 max-w-[330px] text-sm leading-relaxed text-rust"
+        >
+          {displayedCancelError}
+        </p>
+      )}
+    </>
+  ) : null;
 
   if (phase === "idle" && cycledModeNotice) {
     return (
@@ -1343,14 +1781,32 @@ export function DictationPopup() {
     );
   }
 
+  if (phase === "idle") {
+    return <div className="h-screen w-screen bg-transparent" />;
+  }
+
   // ── Minimal pill mode ────────────────────────────────────────────────────
   // Fixed size with fixed slots (glyph, trace, label, action), so the pill
   // never jitters as its label changes between states. Docked against a side
   // of the screen the same slots stack into an upright column, and the trace
   // turns with them. The size preset scales the whole pill (type, trace and
   // padding together) through `zoom`, which the window size already matches.
-  if (displayMode === "minimal") {
-    const pill = describePillStatus({ phase, stage: finishStage, outcome, message, slow: slowStage });
+  if (effectiveDisplayMode === "minimal") {
+    const pill = describePillStatus({
+      phase,
+      stage: finishStage,
+      outcome,
+      message,
+      slow: slowStage,
+      preparingModel: speechModelPreparing,
+      meetingAside,
+    });
+    // "Dictating during a meeting" is twice the slot "Listening" fills, so
+    // the horizontal pill sets it on two small lines and gives it half the
+    // trace (measured: 80 px of a 94 px slot in IBM Plex Sans 11/500). The
+    // upright pill keeps its two-line clamp; the full sentence stays in the
+    // tooltip and accessible name.
+    const asideLabel = meetingAside && phase === "recording";
     const pillNeume =
       pill.tone === "live"
         ? "neume neume-lit neume-live"
@@ -1381,14 +1837,19 @@ export function DictationPopup() {
     );
     const statusLabel = (
       <span
-        role="status"
-        aria-live="polite"
-        aria-label={pill.detail ? `${pill.label}. ${pill.detail}` : undefined}
+        role={pill.tone === "alert" ? "alert" : "status"}
+        aria-live={pill.tone === "alert" ? "assertive" : "polite"}
+        aria-label={
+          displayedCancelError ??
+          (pill.detail ? `${pill.label}. ${pill.detail}` : undefined)
+        }
         className={cn(
           "font-medium",
           vertical
             ? "line-clamp-2 w-full text-center text-[11px] leading-tight"
-            : "min-w-0 flex-1 truncate text-sm",
+            : asideLabel
+              ? "line-clamp-2 min-w-0 flex-1 text-[11px] leading-tight"
+              : "min-w-0 flex-1 truncate text-sm",
           pill.tone === "alert"
             ? "text-rust"
             : pill.tone === "live" || pill.tone === "success"
@@ -1397,19 +1858,38 @@ export function DictationPopup() {
         )}
         data-testid="dictation-hud-status"
       >
-        {sourceNotice ?? pill.label}
+        {displayedCancelError ?? sourceNotice ?? pill.label}
       </span>
     );
+    const detailsButton = minimalDetailsAvailable ? (
+      <button
+        type="button"
+        disabled={isHoldingReview}
+        className="shrink-0 rounded-full border border-foreground/10 bg-foreground/5 px-2 py-1 text-[10px] font-medium text-foreground transition-colors hover:bg-foreground/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        onMouseDown={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          void handleShowDetails();
+        }}
+        aria-label="Details"
+      >
+        {isHoldingReview ? "Opening…" : "Details"}
+      </button>
+    ) : null;
 
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-transparent">
         <div
           data-hud-card
-          data-drag-region
           data-tone={pill.tone}
           data-dock={pillDock}
-          onDoubleClick={() => void cycleDisplayMode()}
-          title={pill.detail ?? "Double-click for details"}
+          onDoubleClick={() =>
+            void (phase === "done" || phase === "error"
+              ? handleShowDetails()
+              : cycleDisplayMode())
+          }
+          title={displayedCancelError ?? pill.detail ?? "Double-click for details"}
           style={{ width: pillSize.width, height: pillSize.height, zoom: pillScale }}
           className={cn(
             "flex shrink-0 items-center rounded-full border bg-popover shadow-[0_4px_14px_hsl(34_26%_4%/0.3)] transition-smooth",
@@ -1417,8 +1897,9 @@ export function DictationPopup() {
             pill.tone === "alert" ? "border-rust/35" : "border-foreground/10",
           )}
         >
-          <span aria-hidden="true" className={cn(pillNeume, "shrink-0")} />
-          {pill.tone !== "alert" &&
+          <span aria-hidden="true" data-drag-region title="Drag to move" className={cn(pillNeume, "shrink-0")} />
+          {vertical && detailsButton ? detailsButton : !detailsButton &&
+            pill.tone !== "alert" &&
             (vertical ? (
               // The horizontal trace turned a quarter so it reads bottom to
               // top: the finish bar fills upward and the newest level sample
@@ -1429,7 +1910,12 @@ export function DictationPopup() {
                 </div>
               </div>
             ) : (
-              <div className="flex h-4 w-16 shrink-0 items-center justify-center">
+              <div
+                className={cn(
+                  "flex h-4 shrink-0 items-center justify-center overflow-hidden",
+                  asideLabel ? "w-8" : "w-16",
+                )}
+              >
                 {trace}
               </div>
             ))}
@@ -1440,6 +1926,15 @@ export function DictationPopup() {
           ) : (
             statusLabel
           )}
+          {!vertical && detailsButton}
+          {canCancelCapture && (
+            <button type="button" aria-label="Cancel (discard)" disabled={isCancelling}
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/8 hover:text-foreground"
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={() => void handleCancelProcessing()}>
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
           {/* The pill has no room for a separate Stop, so while capture is
               live this button stops the session instead of only hiding the
               HUD — dismissing alone would leave the microphone open with no
@@ -1449,12 +1944,34 @@ export function DictationPopup() {
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-smooth hover:bg-foreground/8 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onMouseDown={(event) => event.stopPropagation()}
             onClick={() =>
-              void (isCapturePhase ? handleStopFromPopup() : hidePopup())
+              void (isCapturePhase
+                ? handleStopFromPopup()
+                : canCancelProcessing
+                  ? handleCancelProcessing()
+                  : hidePopup())
             }
-            aria-label={isCapturePhase ? "Stop" : "Hide popup"}
+            aria-label={
+              isCapturePhase
+                ? "Stop"
+                : canCancelProcessing
+                  ? isCancelling
+                    ? "Cancelling…"
+                    : "Cancel dictation"
+                  : "Hide popup"
+            }
+            title={
+              canCancelProcessing
+                ? isCancelling
+                  ? "Cancelling…"
+                  : "Cancel dictation"
+                : undefined
+            }
+            disabled={canCancelProcessing && isCancelling}
           >
             {isCapturePhase ? (
               <Square className="h-2.5 w-2.5 fill-current" />
+            ) : canCancelProcessing && isCancelling ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <X className="h-3.5 w-3.5" />
             )}
@@ -1464,19 +1981,21 @@ export function DictationPopup() {
     );
   }
 
-  const compact = displayMode === "compact";
+  const compact = effectiveDisplayMode === "compact";
   // The header carries the phase; the body below never repeats it.
   const phaseLabel =
     phase === "preparing"
       ? "Starting"
       : phase === "primed"
-        ? "Speak now"
+        ? "Starting mic"
       : phase === "recording"
-        ? "Listening"
+        ? meetingAside
+          ? MEETING_ASIDE_LABEL
+          : "Listening"
         : phase === "stopping" || phase === "transcribing"
           ? finishStageLabel
           : phase === "delivering"
-            ? "Inserting"
+            ? slowStage ? SLOW_STAGE_LABEL : "Inserting"
             : phase === "done"
               ? describePillStatus({ phase, stage: finishStage, outcome, message }).label
               : phase === "error"
@@ -1490,17 +2009,17 @@ export function DictationPopup() {
     `${dictationCommandPrefix} rewrite professional`,
   ];
 
-  if (phase === "idle") {
-    return <div className="h-screen w-screen bg-transparent" />;
-  }
-
   // Bottom-anchored: the window sits just above the Dock, so a window taller
   // than its card (a generous estimate) leaves the gap above, not below.
   return (
     <div className="flex h-screen w-screen flex-col justify-end bg-transparent p-3">
       <div
         data-hud-card
-        className="overflow-hidden rounded-[20px] border border-foreground/10 bg-popover px-4 py-3.5 shadow-[0_6px_18px_hsl(34_26%_4%/0.35)]"
+        className={cn(
+          "overflow-hidden rounded-[20px] border border-foreground/10 bg-popover px-4 py-3.5 shadow-[0_6px_18px_hsl(34_26%_4%/0.35)]",
+          phase === "done" && !compact &&
+            "max-h-[calc(100vh-1.5rem)] overflow-y-auto",
+        )}
       >
         {cycledModeNotice && <div className="mb-3">{cycledModeNotice}</div>}
         {/* Header - Minimal. Also the drag handle: the HUD is a floating pill
@@ -1532,9 +2051,10 @@ export function DictationPopup() {
               className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground hover:bg-foreground/5 hover:text-foreground transition-colors"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={() => void cycleDisplayMode()}
-              aria-label={compact ? "Expand" : "Compact"}
+              aria-label={compact ? "Show pill" : "Show compact controls"}
+              title={compact ? "Show pill" : "Show compact controls"}
             >
-              {compact ? <PanelsTopLeft className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
+              <Minimize2 className="h-3.5 w-3.5" />
             </button>
             {/* Hidden while capture is live: dismissing only hides this HUD,
                 it does not stop the microphone, and there would be nothing
@@ -1553,6 +2073,17 @@ export function DictationPopup() {
             )}
           </div>
         </div>
+
+        {asideNoticeVisible && (
+          <p
+            role="status"
+            aria-live="polite"
+            data-testid="meeting-aside-notice"
+            className="settle-in mb-3 rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2 text-sm leading-snug text-foreground"
+          >
+            {MEETING_ASIDE_NOTICE}
+          </p>
+        )}
 
         {isCapturePhase && (
           <div className="settle-in space-y-3">
@@ -1585,6 +2116,13 @@ export function DictationPopup() {
                 {elapsedText}
               </span>
 
+              {canCancelCapture && (
+                <button type="button" aria-label="Cancel (discard)" disabled={isCancelling}
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-foreground/8 hover:text-foreground"
+                  onClick={() => void handleCancelProcessing()}>
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
               {/* Stop Button */}
               <button
                 type="button"
@@ -1596,6 +2134,7 @@ export function DictationPopup() {
               </button>
             </div>
             
+            {displayedCancelError && <p role="alert" className="text-sm text-rust">{displayedCancelError}</p>}
             {/* Subtle Status Line */}
             <p className="text-sm text-muted-foreground text-center">
               {formatHandsFreeRuntimeHint(
@@ -1603,6 +2142,7 @@ export function DictationPopup() {
                 handsFreeSilenceTimeoutSeconds,
                 runtimeAppTarget,
                 contextMeta.detail,
+                dictationInsertionMode,
               )}
             </p>
             {/* Escape-cancel is real (the native macOS shortcut helper handles
@@ -1653,6 +2193,7 @@ export function DictationPopup() {
             <p className="text-sm text-muted-foreground">
               Finishing the recording…
             </p>
+            {processingCancelControls}
           </div>
         )}
 
@@ -1671,14 +2212,15 @@ export function DictationPopup() {
                 {message && !/^(Transcribing|Polishing)…?$/.test(message)
                   ? message
                   : finishStage === "polishing"
-                    ? `Tidying punctuation and wording for ${insertionMeta.label.toLowerCase()}${targetDetail}.`
-                    : `Turning your speech into text for ${insertionMeta.label.toLowerCase()}${targetDetail}.`}
+                    ? `Tidying punctuation${targetDetail}.`
+                    : `Transcribing${targetDetail}.`}
               </p>
               {autoActivationDetail && (
                 <p className="mt-1 text-xs text-muted-foreground line-clamp-2">
                   {autoActivationDetail}
                 </p>
               )}
+              {processingCancelControls}
               {!compact && preview && (
                 <div className="mt-2 max-w-[330px] rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2">
                   <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
@@ -1700,10 +2242,10 @@ export function DictationPopup() {
           <div className="flex items-center gap-3 text-foreground">
             <Loader2 className="h-5 w-5 animate-spin text-foreground" />
             <div>
-              <p className="text-sm font-semibold">Inserting</p>
+              <p className="text-sm font-semibold">{slowStage ? SLOW_STAGE_LABEL : "Inserting"}</p>
               <p className="text-xs text-muted-foreground line-clamp-6">
                 {message ??
-                  `Finishing ${insertionMeta.label.toLowerCase()}${targetDetail} with ${routeLabel}.`}
+                  `Inserting${targetDetail.replace(/^ for /, " into ")}.`}
               </p>
               {!compact && preview && (
                 <div className="commit-shine mt-2 max-w-[330px] rounded-xl border border-foreground/10 bg-foreground/4.5 px-3 py-2">
@@ -1723,6 +2265,10 @@ export function DictationPopup() {
           <div className="flex items-start gap-3 text-foreground">
             {outcome === "error" || deliveryRefusal ? (
               <TriangleAlert className="mt-1 h-5 w-5 shrink-0 text-rust" />
+            ) : heardNothing ? (
+              <MicOff className="mt-1 h-5 w-5 shrink-0 text-muted-foreground" />
+            ) : outcome === "paste_dispatched" ? (
+              <Clock3 className="mt-1 h-5 w-5 shrink-0 text-muted-foreground" />
             ) : (
               <CheckCircle2 className="mt-1 h-5 w-5 shrink-0 text-foreground" />
             )}
@@ -1732,6 +2278,16 @@ export function DictationPopup() {
                 <p className="max-w-[330px] text-sm leading-relaxed text-muted-foreground line-clamp-6">
                   {doneMessage}
                 </p>
+              )}
+              {!compact && supplementalFinalWarnings.length > 0 && (
+                <div
+                  aria-label="Warnings"
+                  className="mt-2 max-w-[330px] space-y-1 rounded-md border border-gold/20 bg-gold/5 px-3 py-2 text-sm leading-relaxed text-muted-foreground"
+                >
+                  {supplementalFinalWarnings.map((warning) => (
+                    <p key={warning}>{warning}</p>
+                  ))}
+                </div>
               )}
               {!compact && (
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-foreground">
@@ -1766,9 +2322,9 @@ export function DictationPopup() {
                     className="rounded-full border border-foreground/10 bg-foreground/5 px-2.5 py-1"
                     title={`Say: ${spokenEditHints.join(", ")}`}
                   >
-                    {deliveryRefusal
+                    {deliveryRefusal || outcome === "error"
                       ? "Kept in history"
-                      : outcome === "copied"
+                      : outcome === "copied" || outcome === "copied_instead"
                         ? "Clipboard ready"
                         : "Edit commands available"}
                   </span>
@@ -1779,9 +2335,14 @@ export function DictationPopup() {
                   <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
                     Latest result
                   </p>
-                  <p className="mt-1 text-xs leading-relaxed text-foreground line-clamp-4">
+                  <div
+                    role="region"
+                    aria-label="Latest result"
+                    tabIndex={0}
+                    className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground select-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
                     {finalText ?? preview}
-                  </p>
+                  </div>
                 </div>
               )}
               {!compact && (
@@ -1791,13 +2352,15 @@ export function DictationPopup() {
                       <PopupActionButton
                         icon={Clipboard}
                         label="Copy result"
+                        disabled={isCopyingResult}
                         detail="Put the latest text on your clipboard again."
                         onClick={() => void handleCopyResult()}
                       />
                     )}
                     <PopupActionButton
                       icon={RotateCcw}
-                      label="Start again"
+                      label={isRestarting ? "Starting…" : "New dictation"}
+                      disabled={isRestarting}
                       detail="Jump straight into another dictation."
                       onClick={() => void handleStartAgain()}
                       tone="primary"
@@ -1808,6 +2371,19 @@ export function DictationPopup() {
                         label={isSpeakingAloud ? "Stop reading" : "Read aloud"}
                         detail="Play the latest result back without leaving the popup."
                         onClick={() => void handleToggleReadAloud()}
+                      />
+                    )}
+                    {finalWarnings.length > 0 && savedResult && savedResult.sessionId === currentReviewSessionIdRef.current && (
+                      <PopupActionButton
+                        icon={History}
+                        label="Review this result"
+                        detail="Open this saved dictation for review."
+                        onClick={() => {
+                          const result = savedResultRef.current;
+                          if (currentPhaseRef.current !== "done" || !result
+                            || result.sessionId !== currentReviewSessionIdRef.current) return;
+                          void openMainApp("dictation", result.recordingId);
+                        }}
                       />
                     )}
                     <PopupActionButton
@@ -1827,6 +2403,21 @@ export function DictationPopup() {
               )}
               {!compact && actionFeedback && (
                 <p className="mt-2 text-xs text-muted-foreground">{actionFeedback}</p>
+              )}
+              {!compact && reviewHoldError && (
+                <div role="alert" className="mt-3 max-w-[330px] rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-sm text-rust">
+                  <p>{reviewHoldError}</p>
+                  {hasValidReviewSessionId && (
+                    <button
+                      type="button"
+                      className="mt-2 rounded-lg border border-rust/30 bg-background/40 px-2.5 py-1.5 text-xs hover:bg-background/70 disabled:opacity-50"
+                      disabled={isHoldingReview}
+                      onClick={() => void handleShowDetails()}
+                    >
+                      {isHoldingReview ? "Keeping open…" : "Retry keep open"}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -1848,21 +2439,37 @@ export function DictationPopup() {
                 {message ??
                   "Dictation stopped before it finished. Check microphone and Accessibility access in System Settings, then try again."}
               </p>
+              {!compact && reviewHoldError && (
+                <div role="alert" className="mt-2 max-w-[330px] rounded-md border border-rust/30 bg-rust/10 px-3 py-2 text-sm text-rust">
+                  <p>{reviewHoldError}</p>
+                  {hasValidReviewSessionId && (
+                    <button
+                      type="button"
+                      className="mt-2 rounded-lg border border-rust/30 bg-background/40 px-2.5 py-1.5 text-xs hover:bg-background/70 disabled:opacity-50"
+                      disabled={isHoldingReview}
+                      onClick={() => void handleShowDetails()}
+                    >
+                      {isHoldingReview ? "Keeping open…" : "Retry keep open"}
+                    </button>
+                  )}
+                </div>
+              )}
               {!compact && (
                 <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
                   <button
                     type="button"
                     className="rounded-lg border border-foreground/10 bg-foreground/5 px-2.5 py-1.5 hover:bg-foreground/8"
                     onClick={() => void handleStartAgain()}
+                    disabled={isRestarting}
                   >
-                    Start again
+                    {isRestarting ? "Starting…" : "New dictation"}
                   </button>
                   <button
                     type="button"
                     className="rounded-lg border border-foreground/10 bg-foreground/5 px-2.5 py-1.5 hover:bg-foreground/10"
                     onClick={() => void openMainApp("dictation")}
                   >
-                    Open dictation
+                    Open history
                   </button>
                   <button
                     type="button"
@@ -1876,6 +2483,11 @@ export function DictationPopup() {
               )}
             </div>
           </div>
+        )}
+        {restartError && (
+          <p role="alert" className="mt-3 max-w-[330px] text-sm leading-relaxed text-rust">
+            {restartError}
+          </p>
         )}
       </div>
     </div>

@@ -1,7 +1,7 @@
 //! LLM provider abstraction for multiple backends
 //!
 //! Supports:
-//! - Bundled local (S1-mini by Superwhisper, in-process via Candle)
+//! - Bundled local (S1-mini by Superwhisper, via the text helper)
 //! - Apple Foundation Models (on-device, macOS 26+)
 //! - Ollama (local)
 //! - Ollama Cloud
@@ -11,31 +11,68 @@
 //! - DeepSeek
 use serde::{Deserialize, Serialize};
 
+mod action_support;
 mod anthropic;
 pub mod apple_language_model;
+pub(crate) mod builtin_embeddings;
 pub mod bundled_local;
+pub mod chatgpt_plan;
+pub(crate) mod claim_support;
 mod cloud;
+mod commitment_frames;
+mod commitments;
 mod deepseek;
 pub mod embeddings;
+mod extractive_recap;
 mod gemini;
 pub mod grounded;
+pub(crate) mod local_model_load;
+mod meeting_facts;
+mod meeting_requirements;
+mod named_role_support;
+mod native_download_control;
+pub(crate) mod native_runtime_gate;
+pub mod notes_queue;
+pub(crate) mod notes_window;
+mod source_claims;
+pub(crate) use native_runtime_gate::is_operation_busy as native_runtime_is_busy;
+pub mod native_text;
+#[cfg(test)]
+mod notes_probe;
 mod ollama;
+mod ollama_completion_policy;
+mod ollama_prewarm_policy;
 mod openai;
+pub(crate) mod speech_priority;
+pub(crate) mod statement_support;
+pub(crate) mod summary_verification;
+pub(crate) mod text_helper;
 pub mod transport;
 
 pub use anthropic::AnthropicClient;
 pub use bundled_local::StyleControl;
+pub use chatgpt_plan::ChatGptPlanClient;
 pub use cloud::OllamaCloudClient;
 pub use deepseek::DeepSeekClient;
-pub use embeddings::{cosine_similarity, OllamaEmbedder};
+pub use embeddings::OllamaEmbedder;
 pub use gemini::GeminiClient;
 pub use grounded::{
-    resolve_summary_instruction, GroundedActionItemsOutput, GroundedOrchestrator, GroundedSegment,
-    GroundedTextOutput, GroundingContext, OrchestrationOptions, OrchestrationProgressCallback,
-    OrchestrationStage, OrchestrationStrategy,
+    is_transcript_facts_notes, resolve_summary_instruction, transcript_facts_notes,
+    GroundedActionItemsOutput, GroundedOrchestrator, GroundedSegment, GroundedTextOutput,
+    GroundingContext, OrchestrationOptions, OrchestrationProgressCallback, OrchestrationStage,
+    OrchestrationStrategy,
 };
 pub use ollama::OllamaClient;
 pub use openai::OpenAIClient;
+
+pub(crate) fn speech_prewarm_has_current_headroom(
+    provider: crate::asr::AsrProviderType,
+    model_id: &str,
+    model_mib: f64,
+) -> bool {
+    local_model_load::asr_prewarm_has_headroom(provider, model_id, model_mib)
+}
+pub(crate) use ollama_prewarm_policy::prime_available_memory_simulation;
 pub use transport::{
     CompletionPurpose, Provider, ProviderRuntime, ProviderSelection, RequestOptions,
 };
@@ -63,6 +100,8 @@ pub struct AnalysisResult {
 #[serde(rename_all = "camelCase")]
 pub struct Citation {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
     #[serde(default)]
     pub line_id: Option<String>,
     #[serde(default)]

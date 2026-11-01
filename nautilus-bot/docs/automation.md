@@ -1,7 +1,7 @@
-# Automation: the `plainsong` command, the MCP server, and deep links
+# Automation: folder publishing, command line, MCP, and deep links
 
-Status: **shipped in source, off by default.** Everything on this page is
-gated by one switch: **Plainsong > Settings > General > Local tools**. With
+Status: **shipped in source, off by default.** Command line, MCP and deep links are
+gated by one switch: **Plainsong > Settings > Advanced > Command line and MCP access**. With
 it off, the command refuses, the MCP server refuses, and `plainsong://` links
 are ignored (and logged as refused). Nothing here needs an account, and
 nothing here leaves the machine unless the app you connect sends it.
@@ -21,6 +21,60 @@ What it never does:
   stops there; recording begins only when you click Start on it.
 - Carry text. Deep links have no text payload; the only parameter is a mode
   id on `mode`.
+
+## Save notes to a folder
+
+In **Settings > Meetings**, choose **Choose notes folder**, select a folder
+through the native picker, then turn on **Save notes to a folder**. Choose a
+Markdown export template and whether to include the transcript. This setting
+is independent of command line and MCP access.
+
+Plainsong saves newly finished meetings and later changes to saved notes,
+summaries, action items, completion checkboxes and meeting titles. Enabling it
+does not export your earlier meetings in bulk. Edit an earlier meeting to
+queue it. Template and transcript choices apply to subsequent saves.
+
+Each meeting gets one Markdown file in the selected folder. Its initial name
+contains the recording date, a sanitized title and an ID suffix. Renaming the
+meeting updates the title inside that same file and keeps its filename.
+`plainsong_recording_id` and `plainsong_revision` in YAML front matter identify
+its source. All templates include saved notes, summaries and action items;
+templates without those sections receive them at the end.
+
+Writes stage a file in the same directory and replace it atomically. If the
+file's hash differs from the last successful save, Plainsong keeps your file
+and reports the conflict in meeting review. Move your version aside, then
+choose **Retry** to write a fresh copy. If an external editor replaces the
+file during a save on macOS, Plainsong keeps that version in a file with
+`conflict` in its name. It does not merge external edits into the meeting.
+
+The SQLite outbox commits with note changes, coalesces pending revisions and
+retries unavailable folders while Plainsong runs. The delay doubles from five
+seconds to one hour. Restarting resumes pending work. **Retry** clears the
+wait. Meeting review shows **Saved to folder**, a pending save, or
+**Couldn't save** with the next action. This is local file I/O, with no model
+or network request from Plainsong.
+
+Deleting a meeting keeps the published file by default. Select **Delete the
+published file too** to remove the current folder's copy. Plainsong refuses
+to delete a copy changed outside the app. Choosing another notes folder keeps
+copies in the previous folder; returning to that folder reuses its recorded
+filename and hash.
+
+These Markdown files are readable text outside Plainsong's vault. Obsidian,
+iCloud Drive or another sync service may read or upload them under its own
+settings. Deleting a meeting from Plainsong does not revoke copies made by
+another service.
+
+The renderer receives an opaque folder ID, not filesystem write authority.
+The native picker supplies the path through the existing privileged export
+approval. The sidecar records a separate notes approval and checks it at each
+write. Manual export folder changes do not revoke that approval. The current
+macOS app entitlements do not enable App Sandbox, so this build does not use
+security-scoped bookmarks. A sandboxed distribution would need bookmark
+creation and lifetime handling before enabling publishing. Atomic replacement
+is implemented for macOS and Linux; other platforms keep existing files and
+refuse automatic replacement.
 
 ## The `plainsong` command
 

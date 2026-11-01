@@ -99,6 +99,16 @@ export interface OnboardingGrants {
  * questions — "draft a follow-up message" makes no sense against a whole
  * library — so the picker filters rather than showing everything everywhere.
  */
+/** "Keep speech model ready for" choices; mirrors asr::speech_residency. */
+export type SpeechModelKeepReady =
+  | "auto"
+  | "2m"
+  | "5m"
+  | "10m"
+  | "30m"
+  | "1h"
+  | "always";
+
 export type SavedPromptScope = "meeting" | "memory" | "both";
 
 /**
@@ -144,6 +154,8 @@ export interface MeetingsSettings {
   autoStopWhenCallAppQuits: boolean;
   /** End a meeting after this many minutes with nothing audible; 0 turns it off. */
   autoStopAfterSilenceMinutes: number;
+  /** Maximum captured audio length in minutes; 0 disables the limit. */
+  maxRecordingMinutes: number;
   /**
    * Keep a numeric voice signature per speaker on this Mac so a voice named
    * once can be suggested later. Off by default; nothing is stored while off.
@@ -162,6 +174,12 @@ export interface MeetingsSettings {
    * for a local meeting.
    */
   preferProviderDiarization: boolean;
+  /**
+   * The reader turned off "Suggest meetings from your calendar". Until it is
+   * turned back on, Plainsong does not poll or read the calendar at all; macOS
+   * keeps its permission. Mirrors `calendar_disconnected` in settings.rs.
+   */
+  calendarDisconnected: boolean;
 }
 
 /** Which events may become an OS notification. Mirrors `NotificationsSettings` in settings.rs. */
@@ -227,7 +245,9 @@ export interface DictationCustomMode {
   translateToEnglish?: boolean;
   /**
    * Voice Edit: the spoken words are an instruction applied to the selected
-   * text, or a request for a draft when nothing is selected. Mirrors
+   * text, or a request for a draft when nothing is selected. Fixed editing
+   * commands run locally without a text model and can select their own phrase.
+   * Mirrors
    * `voice_edit` in rust-sidecar/src/settings.rs.
    */
   voiceEdit?: boolean;
@@ -270,6 +290,13 @@ export interface TranscriptionSettings {
   meetingModelId?: string;
   meetingRoutePolicy?: "prefer_local" | "best_available";
   providerModelIds?: Record<string, string>;
+  /**
+   * The sidecar's one-time move of ONNX Parakeet v3 slots to the GGUF build
+   * has run (it runs once the GGUF build is downloaded and verified).
+   */
+  parakeetUpgradeApplied?: boolean;
+  /** That move changed a slot and the app has not said so yet. */
+  parakeetUpgradeNoticePending?: boolean;
   // `mlxAcceleratedProviders`, `dictationMlxEnabled` and `meetingMlxEnabled`
   // were removed: no MLX inference path was ever shipped, so every one of them
   // could only ever describe a route that did not exist. The Rust side still
@@ -288,11 +315,28 @@ export interface TranscriptionSettings {
   dictationHandsFreeEnabled?: boolean;
   /** Hold-to-talk only: a quick tap locks the mic on. Absent means on. */
   dictationTapToLock?: boolean;
+  /** Explicit double-tap locking. Absent means off. Overrides single-tap locking. */
+  dictationDoubleTapToLock?: boolean;
   /** Fit spacing and casing to the text around the caret. Absent means on. */
   dictationMatchSurroundingText?: boolean;
+  /** Off by default. Nearby visible text supplies local spelling corrections only. */
+  dictationNearbySpelling?: boolean;
+  /**
+   * Off by default. Names from Contacts help spell people's names; macOS is
+   * asked only when this is turned on. Mirrors `dictation_contact_names`.
+   */
+  dictationContactNames?: boolean;
+  /** Off by default. Calendar names supply local, memory-only spelling hints. */
+  dictationCalendarNames?: boolean;
   dictationRoutePreference?: "local" | "cloud";
   dictationRouteOverrideEnabled?: boolean;
   dictationKeepWarm?: "off" | "on";
+  /**
+   * How long the speech model stays loaded after its last use. `auto` follows
+   * the Mac's memory (2 minutes on 8 GB, 5 on 16 GB, 10 on larger Macs).
+   * Only `always` loads it at startup.
+   */
+  speechModelKeepReady?: SpeechModelKeepReady;
   dictationLivePreviewEnabled?: boolean;
   /**
    * Which engine draws the live preview. `auto` uses the streaming engine
@@ -365,13 +409,22 @@ export interface TranscriptionSettings {
    */
   dictationKeepAudio?: boolean;
   meetingAudioStorageMode?: "always" | "transcript_only";
-  meetingRetentionPreset?: "1m" | "2m" | "3m" | "custom" | "never";
+  meetingRetentionConfirmed?: boolean;
+  meetingRetentionPreset?: "1w" | "1m" | "2m" | "3m" | "custom" | "never";
   meetingRetentionCustomMonths?: number;
   meetingRetentionDeleteMode?: "audio_only" | "audio_and_transcript";
   dictationSilenceTimeoutSeconds: number;
   dictationVadBackend?: "energy_threshold" | "silero";
-  memorySearchMode: "fts" | "ollama_embeddings";
+  /**
+   * How Ask finds past recordings. "builtin" is meaning search with a model
+   * Plainsong downloads and runs itself; "ollama_embeddings" uses a model the
+   * user runs in Ollama. Mirrors `memory_search_mode` in settings.rs.
+   */
+  memorySearchMode: "fts" | "builtin" | "ollama_embeddings";
+  /** Ollama embedding model, used only by "ollama_embeddings". */
   embeddingModel: string;
+  /** Built-in search model id, used only by "builtin". */
+  builtinEmbeddingModel?: string;
   enableAutoAnalysis: boolean;
   platformOptimization?: PlatformOptimizationSettings;
   dictationCategoryFormattingEnabled?: boolean;
@@ -469,7 +522,13 @@ export type DictationBindingTrigger =
  * setting (toggle / hold / hands-free); `toggle` and `hold` pin it.
  */
 export type DictationBindingAction =
-  | { kind: "dictation"; modeId: string | null; behavior: "toggle" | "hold" | "inherit" }
+  | {
+      kind: "dictation";
+      modeId: string | null;
+      behavior: "toggle" | "hold" | "inherit";
+      /** Press Return once the text is confirmed in the same field. Off when absent. */
+      submitAfterInsert?: boolean;
+    }
   | { kind: "cycleMode" }
   | { kind: "cancel" };
 

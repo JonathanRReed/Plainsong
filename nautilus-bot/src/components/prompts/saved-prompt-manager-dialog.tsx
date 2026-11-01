@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -43,6 +43,9 @@ interface SavedPromptManagerDialogProps {
   seedPrompt?: SavedPrompt | null;
   onSeedConsumed?: () => void;
   saveError?: string | null;
+  loading?: boolean;
+  loadError?: string | null;
+  onReload?: () => void | Promise<void>;
 }
 
 const SCOPE_LABELS: Record<SavedPromptScope, string> = {
@@ -70,26 +73,46 @@ export function SavedPromptManagerDialog({
   seedPrompt = null,
   onSeedConsumed,
   saveError = null,
+  loading = false,
+  loadError = null,
+  onReload,
 }: SavedPromptManagerDialogProps) {
+  const busyRef = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
   const [editing, setEditing] = useState<SavedPrompt | null>(null);
   const [pendingDelete, setPendingDelete] = useState<SavedPrompt | null>(null);
 
+  const ready = !loading && !loadError;
+
   useEffect(() => {
-    if (open && seedPrompt) {
+    if (open && ready && seedPrompt) {
       setEditing(seedPrompt);
       onSeedConsumed?.();
     }
-  }, [open, seedPrompt, onSeedConsumed]);
+  }, [open, ready, seedPrompt, onSeedConsumed]);
 
   const atCapacity = prompts.length >= MAX_SAVED_PROMPTS;
 
   const commit = async (next: readonly SavedPrompt[]) => {
-    await onPersist(next);
+    if (!ready || busyRef.current) return false;
+    busyRef.current = true;
+    setBusy(true);
+    setLocalError(null);
+    try {
+      return await onPersist(next);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : "Plainsong could not save your prompts.");
+      return false;
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
   };
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog open={open} onOpenChange={(next) => { if (!busyRef.current) onOpenChange(next); }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>Saved prompts</DialogTitle>
@@ -100,142 +123,157 @@ export function SavedPromptManagerDialog({
             </DialogDescription>
           </DialogHeader>
 
-          {saveError ? (
-            <p className="rounded-md border border-rust/30 bg-rust/10 p-3 text-sm text-rust">
-              {saveError}
-            </p>
-          ) : null}
+          {!ready ? (
+            loading ? <p role="status">Loading saved prompts…</p> : (
+              <div className="space-y-3">
+                <p role="alert">{loadError}</p>
+                {onReload ? <Button type="button" onClick={() => void onReload()}>Retry</Button> : null}
+              </div>
+            )
+          ) : (
+            <>
+              {saveError || localError ? (
+                <p className="rounded-md border border-rust/30 bg-rust/10 p-3 text-sm text-rust">
+                  {saveError || localError}
+                </p>
+              ) : null}
 
-          <ul className="max-h-96 space-y-2 overflow-y-auto py-1">
-            {prompts.map((prompt, index) => (
-              <li
-                key={prompt.id}
-                className="flex items-start justify-between gap-3 rounded-md border bg-muted/20 p-3"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">
-                    {prompt.name}
-                    {prompt.hidden ? (
-                      <span className="ml-2 font-normal text-muted-foreground">
-                        hidden
-                      </span>
-                    ) : null}
-                  </p>
-                  <p className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">
-                    {prompt.prompt}
-                  </p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {SCOPE_LABELS[prompt.scope]}
-                    {prompt.builtIn ? " · built in" : ""}
-                  </p>
-                </div>
-                <div className="flex shrink-0 gap-1">
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    aria-label={`Move ${prompt.name} up`}
-                    disabled={index === 0}
-                    onClick={() => void commit(moveSavedPrompt(prompts, prompt.id, -1))}
+              <ul className="max-h-96 space-y-2 overflow-y-auto py-1">
+                {prompts.map((prompt, index) => (
+                  <li
+                    key={prompt.id}
+                    className="flex items-start justify-between gap-3 rounded-md border bg-muted/20 p-3"
                   >
-                    <ArrowUp className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    aria-label={`Move ${prompt.name} down`}
-                    disabled={index === prompts.length - 1}
-                    onClick={() => void commit(moveSavedPrompt(prompts, prompt.id, 1))}
-                  >
-                    <ArrowDown className="h-4 w-4" />
-                  </Button>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    aria-label={
-                      prompt.hidden ? `Show ${prompt.name}` : `Hide ${prompt.name}`
-                    }
-                    onClick={() =>
-                      void commit(
-                        setSavedPromptHidden(prompts, prompt.id, !prompt.hidden),
-                      )
-                    }
-                  >
-                    {prompt.hidden ? (
-                      <Eye className="h-4 w-4" />
-                    ) : (
-                      <EyeOff className="h-4 w-4" />
-                    )}
-                  </Button>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    aria-label={`Edit ${prompt.name}`}
-                    onClick={() => setEditing({ ...prompt })}
-                  >
-                    <Pencil className="h-4 w-4" />
-                  </Button>
-                  {prompt.builtIn ? null : (
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="ghost"
-                      aria-label={`Delete ${prompt.name}`}
-                      onClick={() => setPendingDelete(prompt)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">
+                        {prompt.name}
+                        {prompt.hidden ? (
+                          <span className="ml-2 font-normal text-muted-foreground">
+                            hidden
+                          </span>
+                        ) : null}
+                      </p>
+                      <p className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">
+                        {prompt.prompt}
+                      </p>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {SCOPE_LABELS[prompt.scope]}
+                        {prompt.builtIn ? " · built in" : ""}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 gap-1">
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        aria-label={`Move ${prompt.name} up`}
+                        disabled={busy || index === 0}
+                        onClick={() => void commit(moveSavedPrompt(prompts, prompt.id, -1))}
+                      >
+                        <ArrowUp className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        aria-label={`Move ${prompt.name} down`}
+                        disabled={busy || index === prompts.length - 1}
+                        onClick={() => void commit(moveSavedPrompt(prompts, prompt.id, 1))}
+                      >
+                        <ArrowDown className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        disabled={busy}
+                        aria-label={
+                          prompt.hidden ? `Show ${prompt.name}` : `Hide ${prompt.name}`
+                        }
+                        onClick={() =>
+                          void commit(
+                            setSavedPromptHidden(prompts, prompt.id, !prompt.hidden),
+                          )
+                        }
+                      >
+                        {prompt.hidden ? (
+                          <Eye className="h-4 w-4" />
+                        ) : (
+                          <EyeOff className="h-4 w-4" />
+                        )}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        disabled={busy}
+                        aria-label={`Edit ${prompt.name}`}
+                        onClick={() => setEditing({ ...prompt })}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      {prompt.builtIn ? null : (
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="ghost"
+                          disabled={busy}
+                        aria-label={`Delete ${prompt.name}`}
+                          onClick={() => setPendingDelete(prompt)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
 
-          <DialogFooter className="sm:justify-start">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={atCapacity}
-              onClick={() =>
-                setEditing({
-                  id: newSavedPromptId(),
-                  name: "",
-                  prompt: "",
-                  scope: "both",
-                  builtIn: false,
-                  hidden: false,
-                })
-              }
-            >
-              <Plus className="mr-2 h-4 w-4" />
-              New prompt
-            </Button>
-            {atCapacity ? (
-              <p className="self-center text-sm text-muted-foreground">
-                {MAX_SAVED_PROMPTS} saved prompts is the limit. Delete one to add
-                another.
-              </p>
-            ) : null}
-          </DialogFooter>
+              <DialogFooter className="sm:justify-start">
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy || atCapacity}
+                  onClick={() =>
+                    setEditing({
+                      id: newSavedPromptId(),
+                      name: "",
+                      prompt: "",
+                      scope: "both",
+                      builtIn: false,
+                      hidden: false,
+                    })
+                  }
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  New prompt
+                </Button>
+                {atCapacity ? (
+                  <p className="self-center text-sm text-muted-foreground">
+                    {MAX_SAVED_PROMPTS} saved prompts is the limit. Delete one to add
+                    another.
+                  </p>
+                ) : null}
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 
       <SavedPromptEditorDialog
-        prompt={editing}
-        onCancel={() => setEditing(null)}
+        prompt={ready ? editing : null}
+        busy={busy}
+        saveError={saveError || localError}
+        onCancel={() => { if (!busyRef.current) setEditing(null); }}
         onSave={async (next) => {
-          setEditing(null);
-          await commit(upsertSavedPrompt(prompts, next));
+          if (await commit(upsertSavedPrompt(prompts, next))) setEditing(null);
         }}
       />
 
       <Dialog
-        open={pendingDelete !== null}
+        open={ready && pendingDelete !== null}
         onOpenChange={(next) => {
-          if (!next) setPendingDelete(null);
+          if (!next && !busyRef.current) setPendingDelete(null);
         }}
       >
         <DialogContent>
@@ -247,16 +285,16 @@ export function SavedPromptManagerDialog({
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPendingDelete(null)}>
+            <Button disabled={busy} variant="outline" onClick={() => setPendingDelete(null)}>
               Cancel
             </Button>
             <Button
+              disabled={busy}
               variant="destructive"
-              onClick={() => {
-                if (pendingDelete) {
-                  void commit(removeOrHideSavedPrompt(prompts, pendingDelete.id));
+              onClick={async () => {
+                if (pendingDelete && await commit(removeOrHideSavedPrompt(prompts, pendingDelete.id))) {
+                  setPendingDelete(null);
                 }
-                setPendingDelete(null);
               }}
             >
               <Trash2 className="mr-2 h-4 w-4" />
@@ -273,6 +311,8 @@ interface SavedPromptEditorDialogProps {
   prompt: SavedPrompt | null;
   onCancel: () => void;
   onSave: (prompt: SavedPrompt) => void;
+  busy: boolean;
+  saveError: string | null;
 }
 
 /**
@@ -284,6 +324,8 @@ function SavedPromptEditorDialog({
   prompt,
   onCancel,
   onSave,
+  busy,
+  saveError,
 }: SavedPromptEditorDialogProps) {
   const [name, setName] = useState("");
   const [body, setBody] = useState("");
@@ -303,7 +345,7 @@ function SavedPromptEditorDialog({
     <Dialog
       open={prompt !== null}
       onOpenChange={(next) => {
-        if (!next) onCancel();
+        if (!next && !busy) onCancel();
       }}
     >
       <DialogContent>
@@ -318,10 +360,12 @@ function SavedPromptEditorDialog({
           </DialogDescription>
         </DialogHeader>
 
+        {saveError ? <p role="alert">{saveError}</p> : null}
         <div className="space-y-4">
           <div className="space-y-1.5">
             <Label htmlFor="saved-prompt-name">Name</Label>
             <Input
+              disabled={busy}
               id="saved-prompt-name"
               value={name}
               maxLength={MAX_SAVED_PROMPT_NAME_LENGTH}
@@ -332,6 +376,7 @@ function SavedPromptEditorDialog({
           <div className="space-y-1.5">
             <Label htmlFor="saved-prompt-body">Prompt</Label>
             <Textarea
+              disabled={busy}
               id="saved-prompt-body"
               value={body}
               rows={5}
@@ -343,6 +388,7 @@ function SavedPromptEditorDialog({
           <div className="space-y-1.5">
             <Label htmlFor="saved-prompt-scope">Offered in</Label>
             <Select
+              disabled={busy}
               value={scope}
               onValueChange={(next) => setScope(next as SavedPromptScope)}
             >
@@ -359,11 +405,11 @@ function SavedPromptEditorDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onCancel}>
+          <Button disabled={busy} variant="outline" onClick={onCancel}>
             Cancel
           </Button>
           <Button
-            disabled={!canSave}
+            disabled={busy || !canSave}
             onClick={() => {
               if (!prompt || !canSave) return;
               onSave({ ...prompt, name, prompt: body, scope });

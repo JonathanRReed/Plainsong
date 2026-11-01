@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { applySettingsPatch, diffSettings } from "@/lib/settings-patch";
 import { invoke } from "@/lib/electron";
 
 vi.mock("@/lib/electron", () => ({
@@ -32,7 +33,9 @@ describe("ThemeToggle", () => {
         return settings;
       }
       if (command === "save_settings") {
-        Object.assign(settings, args?.settings);
+        const patch = diffSettings(settings, { ...settings, theme: "light" });
+        expect(args?.patch).toEqual(patch.operations);
+        Object.assign(settings, applySettingsPatch(settings, patch));
         return null;
       }
       return null;
@@ -41,6 +44,7 @@ describe("ThemeToggle", () => {
 
   it("shows the active theme and persists theme changes", async () => {
     const user = userEvent.setup();
+    const expectedPatch = diffSettings(settings, { ...settings, theme: "light" });
 
     render(
       <ThemeProvider>
@@ -61,10 +65,8 @@ describe("ThemeToggle", () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("save_settings", {
-        settings: {
-          ...settings,
-          theme: "light",
-        },
+        patch: expectedPatch.operations,
+        preserveSavedPrompts: true,
       });
     });
     expect(document.documentElement.classList.contains("dark")).toBe(false);

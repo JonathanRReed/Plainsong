@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const ANALYSIS_PROVENANCE_VERSION: u32 = 1;
+/// Bump when summary or action-item acceptance checks change. This is independent of the
+/// persisted provenance format and content hash normalization.
+pub const SUMMARY_GROUNDING_POLICY_VERSION: u32 = 16;
 
 /// Hashes persisted analysis content with an explicit schema/version prefix so
 /// future normalization changes can coexist with existing local data.
@@ -24,6 +27,8 @@ pub fn action_items_content_hash(action_items: &[String]) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisCitation {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
     #[serde(default)]
     pub line_id: Option<String>,
     #[serde(default)]
@@ -35,9 +40,28 @@ pub struct AnalysisCitation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeetingEnhancedNoteDraft {
+    pub text: String,
+    pub generated_at: DateTime<Utc>,
+    pub raw_notes_snapshot: String,
+    pub summary_citations: Vec<AnalysisCitation>,
+    pub action_item_citations: Vec<MeetingEnhancedNoteAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeetingEnhancedNoteAction {
+    pub label: String,
+    pub citations: Vec<AnalysisCitation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnalysisProvenance {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grounding_policy_version: Option<u32>,
     pub content_hash: String,
     pub actual_provider: String,
     pub actual_model: String,
@@ -45,6 +69,10 @@ pub struct AnalysisProvenance {
     pub completed_at: DateTime<Utc>,
     pub citations: Vec<AnalysisCitation>,
     pub grounded: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified_statements: Vec<crate::llm::statement_support::UnverifiedStatement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_diagnostics: Option<crate::llm::summary_verification::SummaryDiagnostics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -55,12 +83,22 @@ pub struct ActionItemProvenance {
     pub grounded: bool,
     #[serde(default)]
     pub generated: bool,
+    /// The source sentences a generated item comes from, as the recap quotes
+    /// them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    /// A generated item quoting a commitment whose owner, date or scope the
+    /// transcript leaves unclear.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unclear: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionItemsProvenance {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grounding_policy_version: Option<u32>,
     pub content_hash: String,
     pub actual_provider: String,
     pub actual_model: String,
@@ -338,7 +376,21 @@ pub struct Transcript {
     pub model_id: Option<String>,
     pub requested_provider: Option<String>,
     pub actual_provider: Option<String>,
+    /// True only when the persisted segment rows retain complete, validated
+    /// word-level timing from the recognizer.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub measured_word_timestamps: bool,
     pub created_at: DateTime<Utc>,
+    /// Microphone rows of a Me + Them meeting that were the far side heard
+    /// through the speakers, moved out of `segments` (and so out of the text,
+    /// search and summaries) but kept, so the meeting view can show them.
+    /// See `meeting_bleed`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heard_through_speakers: Vec<TranscriptSegment>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +402,19 @@ pub struct TranscriptSegment {
     pub text: String,
     pub speaker_id: Option<String>,
     pub confidence: f64,
+}
+
+/// Exact optimistic-concurrency snapshot for destructive transcript edits.
+/// Confidence is excluded because deletion ownership depends on the quoted
+/// words, timing, and speaker assignment the reader confirmed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSegmentExpectation {
+    pub id: String,
+    pub text: String,
+    pub start_time: f64,
+    pub end_time: f64,
+    pub speaker_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,10 +521,17 @@ pub struct DictationStartOptions {
     pub resolved_hosting: Option<String>,
     #[serde(default)]
     pub captured_context_text: Option<String>,
+    /// Session-only vocabulary and consent revision. Never crosses IPC or storage.
+    #[serde(skip)]
+    pub(crate) screen_vocabulary: Option<(u64, crate::dictation_screen_context::Vocabulary)>,
     #[serde(default)]
     pub context_app_name: Option<String>,
     #[serde(default)]
     pub context_app_bundle_id: Option<String>,
+    /// Runtime-only identity of the field focused when system delivery began.
+    /// Never serialized, persisted, logged, or accepted from an IPC caller.
+    #[serde(skip)]
+    pub focused_field_fingerprint: Option<crate::text_insert::DeliveryFieldFingerprint>,
     #[serde(default)]
     pub resolved_mode_preset: Option<String>,
     #[serde(default)]
@@ -487,6 +559,11 @@ pub struct DictationStartOptions {
     /// Settings". The selected mode in Settings is never changed by this.
     #[serde(default)]
     pub mode_override: Option<DictationSessionModeOverride>,
+    /// Set by a binding with "Press Return after inserting" on. A request,
+    /// not a promise: delivery sends Return only after the text is confirmed
+    /// in the same, non-secure field (`dictation_submit`).
+    #[serde(default)]
+    pub submit_after_insert: bool,
 }
 
 /// The mode a single dictation session runs under when a binding named one.
@@ -518,8 +595,10 @@ impl Default for DictationStartOptions {
             provider_model_label: None,
             resolved_hosting: None,
             captured_context_text: None,
+            screen_vocabulary: None,
             context_app_name: None,
             context_app_bundle_id: None,
+            focused_field_fingerprint: None,
             resolved_mode_preset: None,
             resolved_custom_mode_id: None,
             resolved_mode_label: None,
@@ -528,6 +607,7 @@ impl Default for DictationStartOptions {
             delivery_mode: DictationDeliveryMode::System,
             hands_free_trigger: false,
             mode_override: None,
+            submit_after_insert: false,
         }
     }
 }
@@ -581,6 +661,9 @@ pub struct DictationHistoryDetails {
     /// dictation was saved with it (older rows only kept the delivered text).
     #[serde(default)]
     pub raw_transcript: Option<String>,
+    /// Measured recognizer words to review, always bound to raw recognition.
+    #[serde(default)]
+    pub recognition_review_words: Option<Vec<RecognitionReviewWord>>,
     /// Whether the captured audio is still on disk, which is what "Process
     /// again" needs. `None` for dictations saved without audio.
     #[serde(default)]
@@ -591,6 +674,71 @@ pub struct DictationHistoryDetails {
     pub reprocessed_from_id: Option<String>,
     #[serde(default)]
     pub reprocessed_from_created_at: Option<DateTime<Utc>>,
+}
+
+/// A measured Whistle word probability, not a claim that the word is wrong.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecognitionReviewWord {
+    pub word: String,
+    pub score: f64,
+    pub start_time: f64,
+    pub end_time: f64,
+}
+
+pub(crate) fn recognition_word_occurs_in_source(source: &str, word: &str) -> bool {
+    !word.is_empty()
+        && source.match_indices(word).any(|(start, _)| {
+            source[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !ch.is_alphanumeric())
+                && source[start + word.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|ch| !ch.is_alphanumeric())
+        })
+}
+
+pub(crate) fn collect_recognition_review_words(
+    provider: crate::asr::AsrProviderType,
+    segments: &[crate::asr::TranscriptSegment],
+    raw_text: &str,
+    duration_seconds: f64,
+) -> Option<Vec<RecognitionReviewWord>> {
+    if provider != crate::asr::AsrProviderType::Whistle
+        || !duration_seconds.is_finite()
+        || duration_seconds <= 0.0
+    {
+        return None;
+    }
+    let words: Vec<_> = segments
+        .iter()
+        .filter_map(|segment| {
+            let word = segment.text.trim();
+            if word.is_empty()
+                || !recognition_word_occurs_in_source(raw_text, word)
+                || word.chars().count() > 128
+                || !segment.confidence.is_finite()
+                || !(0.0..0.6).contains(&segment.confidence)
+                || !segment.start_time.is_finite()
+                || !segment.end_time.is_finite()
+                || segment.start_time < 0.0
+                || segment.end_time <= segment.start_time
+                || segment.end_time > duration_seconds + 0.5
+            {
+                return None;
+            }
+            Some(RecognitionReviewWord {
+                word: word.to_owned(),
+                score: segment.confidence,
+                start_time: segment.start_time,
+                end_time: segment.end_time,
+            })
+        })
+        .take(128)
+        .collect();
+    (!words.is_empty()).then_some(words)
 }
 
 /// The result of running a saved dictation's audio through the pipeline
@@ -608,6 +756,8 @@ pub struct DictationReprocessOutcome {
     pub provider: String,
     pub model_id: String,
     pub used_ai: bool,
+    #[serde(default)]
+    pub ai_rewrite_failed: bool,
     pub reprocessed_from_id: String,
     pub reprocessed_from_created_at: DateTime<Utc>,
     pub transcription_latency_ms: u64,
@@ -878,6 +1028,15 @@ pub struct LearnDictationCorrectionResult {
     pub spoken_form: Option<String>,
     pub replacement: Option<String>,
     pub entry: Option<DictationDictionaryEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undo_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoDictationCorrectionApprovalResult {
+    pub entry_id: String,
+    pub entry: Option<DictationDictionaryEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -889,9 +1048,25 @@ pub struct DictationDictionaryCsvImportResult {
     pub errors: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CorrectionApprovalDictionarySnapshot {
+    Missing,
+    Entry {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+        revision: i64,
+        #[serde(rename = "spokenForm")]
+        spoken_form: String,
+        replacement: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationCorrectionSuggestion {
+    #[serde(default)]
+    pub approval_dictionary: Option<CorrectionApprovalDictionarySnapshot>,
     pub id: String,
     pub original_text: String,
     pub corrected_text: String,
@@ -1110,6 +1285,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn citation_source_kind_is_backward_compatible_and_omits_transcript_default() {
+        let legacy: AnalysisCitation = serde_json::from_value(serde_json::json!({
+            "text": "Transcript evidence",
+            "lineId": "L1",
+            "segmentId": "s1",
+            "startTime": 1.0,
+            "endTime": 2.0,
+            "recordingId": "r1",
+            "certainty": 1.0
+        }))
+        .expect("deserialize legacy citation");
+        assert_eq!(legacy.source_kind, None);
+        let legacy_json = serde_json::to_value(&legacy).expect("serialize legacy citation");
+        assert!(legacy_json.get("sourceKind").is_none());
+
+        let written_note = AnalysisCitation {
+            source_kind: Some("meeting_note".to_string()),
+            ..legacy
+        };
+        let note_json = serde_json::to_value(written_note).expect("serialize note citation");
+        assert_eq!(note_json["sourceKind"], "meeting_note");
+    }
+
+    #[test]
     fn only_a_known_video_service_key_is_kept_as_a_tag() {
         assert_eq!(known_video_service(Some("zoom")).as_deref(), Some("zoom"));
         assert_eq!(
@@ -1142,5 +1341,145 @@ mod tests {
         let back = serde_json::to_value(&recording).expect("serialize");
         assert_eq!(back["videoService"], "zoom");
         assert_eq!(back["pauseSpans"], serde_json::json!([]));
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingNoteRecoveryDraft {
+    pub id: String,
+    pub recording_id: String,
+    pub base_notes: String,
+    pub notes: String,
+}
+
+#[cfg(test)]
+mod correction_approval_undo_wire_tests {
+    use super::*;
+
+    #[test]
+    fn correction_approval_undo_old_learning_response_deserializes_without_token() {
+        let result: LearnDictationCorrectionResult = serde_json::from_value(serde_json::json!({
+            "learned": false, "action": null, "reason": "No word correction",
+            "spokenForm": null, "replacement": null, "entry": null,
+        }))
+        .unwrap();
+        assert!(result.undo_token.is_none());
+        assert!(serde_json::to_value(result)
+            .unwrap()
+            .get("undoToken")
+            .is_none());
+    }
+
+    #[test]
+    fn correction_approval_undo_wire_uses_opaque_token_and_nullable_entry() {
+        let learned = LearnDictationCorrectionResult {
+            learned: true,
+            action: Some("created".into()),
+            reason: None,
+            spoken_form: Some("Jon".into()),
+            replacement: Some("John".into()),
+            entry: None,
+            undo_token: Some("opaque-receipt".into()),
+        };
+        let value = serde_json::to_value(learned).unwrap();
+        assert_eq!(value["undoToken"], "opaque-receipt");
+        let undone = UndoDictationCorrectionApprovalResult {
+            entry_id: "entry-1".into(),
+            entry: None,
+        };
+        assert_eq!(
+            serde_json::to_value(undone).unwrap(),
+            serde_json::json!({"entryId": "entry-1", "entry": null})
+        );
+    }
+}
+
+#[cfg(test)]
+mod recognition_review_tests {
+    use super::*;
+    use crate::asr::{AsrProviderType, TranscriptSegment};
+    #[test]
+    fn recognition_review_matches_whole_source_words() {
+        assert!(recognition_word_occurs_in_source(
+            "the tailie text button",
+            "tailie"
+        ));
+        assert!(recognition_word_occurs_in_source(
+            "button, or something",
+            "or"
+        ));
+        assert!(!recognition_word_occurs_in_source(
+            "before the button",
+            "or"
+        ));
+        assert!(!recognition_word_occurs_in_source("control", "or"));
+        assert!(!recognition_word_occurs_in_source(
+            "the text button",
+            "tailie"
+        ));
+    }
+    fn word(text: &str, score: f64) -> TranscriptSegment {
+        TranscriptSegment {
+            text: text.into(),
+            start_time: 1.0,
+            end_time: 1.2,
+            confidence: score,
+        }
+    }
+    #[test]
+    fn retains_individual_probability_despite_high_average() {
+        let mut segments = vec![word("other", 0.99); 20];
+        segments.push(word("tailie", 0.533));
+        assert!(segments.iter().map(|s| s.confidence).sum::<f64>() / segments.len() as f64 > 0.95);
+        let review = collect_recognition_review_words(
+            AsrProviderType::Whistle,
+            &segments,
+            "other tailie",
+            27.0,
+        )
+        .unwrap();
+        assert_eq!(review.len(), 1);
+        assert_eq!(review[0].word, "tailie");
+        assert_eq!(review[0].score, 0.533);
+    }
+    #[test]
+    fn suppresses_placeholders_and_invalid_words() {
+        let segments = vec![word("tailie", 0.533)];
+        assert!(collect_recognition_review_words(
+            AsrProviderType::Whisper,
+            &segments,
+            "tailie",
+            27.0
+        )
+        .is_none());
+        assert!(
+            collect_recognition_review_words(AsrProviderType::Whistle, &[], "", 27.0).is_none()
+        );
+        let mut invalid = vec![
+            word("", 0.1),
+            word("x", f64::NAN),
+            word("x", -0.1),
+            word("x", 1.1),
+            word("x", 0.6),
+        ];
+        let mut bad_time = word("x", 0.1);
+        bad_time.end_time = 28.0;
+        invalid.push(bad_time);
+        assert!(
+            collect_recognition_review_words(AsrProviderType::Whistle, &invalid, "x", 27.0)
+                .is_none()
+        );
+        assert_eq!(
+            collect_recognition_review_words(
+                AsrProviderType::Whistle,
+                &vec![word("x", 0.1); 200],
+                "x",
+                27.0
+            )
+            .unwrap()
+            .len(),
+            128
+        );
     }
 }

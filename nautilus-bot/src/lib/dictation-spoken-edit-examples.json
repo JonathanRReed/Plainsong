@@ -1,0 +1,78 @@
+[
+  {
+    "phrase": "new line",
+    "commandKey": "newline"
+  },
+  {
+    "phrase": "new paragraph",
+    "commandKey": "paragraph"
+  },
+  {
+    "phrase": "replace selection with approved plan",
+    "commandKey": "replace_selection_text"
+  },
+  {
+    "phrase": "append today",
+    "commandKey": "append_to_selection"
+  },
+  {
+    "phrase": "prepend please",
+    "commandKey": "prepend_to_selection"
+  },
+  {
+    "phrase": "delete phrase roadmap",
+    "commandKey": "delete_phrase"
+  },
+  {
+    "phrase": "delete selection",
+    "commandKey": "delete_selection"
+  },
+  {
+    "phrase": "uppercase selection",
+    "commandKey": "uppercase_selection"
+  },
+  {
+    "phrase": "lowercase selection",
+    "commandKey": "lowercase_selection"
+  },
+  {
+    "phrase": "title case selection",
+    "commandKey": "title_case_selection"
+  },
+  {
+    "phrase": "sentence case selection",
+    "commandKey": "sentence_case_selection"
+  },
+  {
+    "phrase": "undo that",
+    "commandKey": "undo_last_insert"
+  },
+  {
+    "phrase": "select approved plan",
+    "commandKey": "select_phrase"
+  },
+  {
+    "phrase": "replace that with revised plan",
+    "commandKey": "replace_selection_text"
+  },
+  {
+    "phrase": "capitalise that",
+    "commandKey": "sentence_case_selection"
+  },
+  {
+    "phrase": "delete that",
+    "commandKey": "delete_that"
+  },
+  {
+    "phrase": "delete last sentence",
+    "commandKey": "delete_last_sentence"
+  },
+  {
+    "phrase": "move to start",
+    "commandKey": "move_to_start"
+  },
+  {
+    "phrase": "move to end",
+    "commandKey": "move_to_end"
+  }
+]

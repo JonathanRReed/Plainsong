@@ -20,6 +20,23 @@ describe("formatShortcutForDisplay", () => {
     expect(formatShortcutForDisplay("Cmd+Shift+Space", false)).toBe("Cmd + Shift + Space");
   });
 
+  it.each([
+    ["RightCommand", "Right Command"],
+    ["rightcommand", "Right Command"],
+    ["RIGHTCOMMAND", "Right Command"],
+    ["RightOption", "Right Option"],
+    ["rightoption", "Right Option"],
+    ["RIGHTOPTION", "Right Option"],
+  ])("displays native modifier %s as %s", (shortcut, label) => {
+    expect(formatShortcutForDisplay(shortcut, true)).toBe(label);
+    expect(formatShortcutForDisplay(shortcut, false)).toBe(label);
+    expect(formatShortcutForDisplay(formatShortcutForDisplay(shortcut, true), true)).toBe(label);
+    expect(formatShortcutForDisplay(formatShortcutForDisplay(shortcut, false), false)).toBe(label);
+    expect(normalizeShortcut(shortcut)).toBe(
+      shortcut.charAt(0).toUpperCase() + shortcut.slice(1).toLowerCase(),
+    );
+  });
+
   it("reads an already formatted label back without mangling it", () => {
     expect(normalizeShortcut("⌘ ⇧ Space")).toBe("Cmd+Shift+Space");
     expect(normalizeShortcut("⌥Space")).toBe("Alt+Space");

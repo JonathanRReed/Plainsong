@@ -10,8 +10,8 @@
 //!
 //! Two rules are structural rather than tuned, and neither has a setting:
 //!
-//! 1. **Never across embedding models.** ECAPA-TDNN, CAM++, ResNet34 and
-//!    ERes2NetV2 produce vectors in unrelated spaces; a cosine similarity
+//! 1. **Never across embedding models.** ECAPA-TDNN, CAM++, ResNet34,
+//!    ERes2NetV2 and pyannote community-1 produce vectors in unrelated spaces; a cosine similarity
 //!    between two of them is a number with no meaning. A profile recorded
 //!    under one model is invisible to a cluster embedded with another.
 //! 2. **A name never outvotes the voice.** Attendee lists reorder what the
@@ -188,6 +188,30 @@ const ERES2NETV2_THRESHOLDS: VoiceprintThresholds = VoiceprintThresholds {
     auto_apply: 0.68,
 };
 
+/// pyannote community-1's own speaker signatures: per speaker, the VBx
+/// responsibility-weighted mean of its WeSpeaker ResNet34 embeddings (the
+/// centroid pyannote itself assigns windows with), length-normalized. Stored
+/// under `pyannote_community1`, so they never meet an ECAPA-TDNN profile.
+///
+/// Calibrated on real meetings rather than synthetic voices: AMI ES2004a-d,
+/// IS1009a-d, TS3003a-d and EN2002a-d on the headset mix, plus five of them
+/// from the far-field array (16 speakers, 86 community-1 speakers with at
+/// least 10 clean windows, each labelled with the AMI speaker it mostly
+/// holds). Pairs from different meetings only: 172 same-speaker and 3,254
+/// different-speaker. `accept` 0.43 lets 30 of the 3,254 through (0.9%) and
+/// keeps 91.9% of same-speaker pairs; `auto_apply` 0.54 lets none through
+/// and keeps 89.5%. With one profile per speaker enrolled from the first
+/// headset meeting of each series, the matcher (accept 0.43, margin 0.05)
+/// named 53 of the 55 speakers of the other meetings correctly, none wrongly,
+/// and offered nothing for 2. The mean of the PLDA features, weighted or not,
+/// and the mean of unit-length embeddings separated speakers less well.
+/// Receipt: `artifacts/qa/voiceprint-community1-2026-10-21.md`.
+const COMMUNITY1_THRESHOLDS: VoiceprintThresholds = VoiceprintThresholds {
+    accept: 0.43,
+    margin: VOICEPRINT_MATCH_MARGIN,
+    auto_apply: 0.54,
+};
+
 /// The thresholds calibrated for `model_id`, or `None` for an embedder this
 /// build has never measured.
 ///
@@ -202,6 +226,7 @@ pub fn thresholds_for_model(model_id: &str) -> Option<VoiceprintThresholds> {
         "campplus_speaker" => Some(CAMPPLUS_THRESHOLDS),
         "resnet34_speaker" => Some(RESNET34_THRESHOLDS),
         "eres2netv2_speaker" => Some(ERES2NETV2_THRESHOLDS),
+        crate::download::COMMUNITY1_MODEL_ID => Some(COMMUNITY1_THRESHOLDS),
         _ => None,
     }
 }
@@ -529,7 +554,7 @@ pub fn confirm_name_options(attendees: &[String], remembered: &[String]) -> Vec<
 /// One string, because the two write paths must not drift into telling the
 /// reader different things about the same switch.
 pub const VOICEPRINTS_OFF_MESSAGE: &str =
-    "Remembering voices is off. Turn on \"Remember voices\" in Settings > General > Meetings first.";
+    "Remembering voices is off. Turn on \"Remember voices\" in Settings > Meetings first.";
 
 /// Whether a write to the voiceprint columns may proceed.
 ///
@@ -742,6 +767,7 @@ mod tests {
             "campplus_speaker",
             "resnet34_speaker",
             "eres2netv2_speaker",
+            "pyannote_community1",
         ] {
             let thresholds = thresholds_for_model(model_id)
                 .unwrap_or_else(|| panic!("{model_id} has no calibrated thresholds"));
@@ -802,6 +828,9 @@ mod tests {
             ("campplus_speaker", 0.57, 0.62),
             ("resnet34_speaker", 0.65, 0.70),
             ("eres2netv2_speaker", 0.63, 0.68),
+            // artifacts/qa/voiceprint-community1-2026-10-21.md: <= 1% and 0
+            // false accepts over 3,254 different-speaker AMI pairs.
+            ("pyannote_community1", 0.43, 0.54),
         ] {
             let thresholds = thresholds_for_model(model_id).expect("calibrated");
             assert!(
@@ -833,7 +862,11 @@ mod tests {
     #[test]
     fn every_shipped_threshold_constant_cites_its_receipt() {
         const SOURCE: &str = include_str!("voiceprints.rs");
-        const RECEIPTS: [(&str, &str); 2] = [
+        const RECEIPTS: [(&str, &str); 3] = [
+            (
+                "artifacts/qa/voiceprint-community1-2026-10-21.md",
+                include_str!("../../../artifacts/qa/voiceprint-community1-2026-10-21.md"),
+            ),
             (
                 "artifacts/qa/voiceprint-recalibration-2026-09-03.md",
                 include_str!("../../../artifacts/qa/voiceprint-recalibration-2026-09-03.md"),
@@ -853,6 +886,7 @@ mod tests {
             "CAMPPLUS_THRESHOLDS",
             "RESNET34_THRESHOLDS",
             "ERES2NETV2_THRESHOLDS",
+            "COMMUNITY1_THRESHOLDS",
         ] {
             let declaration = format!("const {name}: ");
             let position = SOURCE
@@ -1195,10 +1229,7 @@ mod tests {
         assert_eq!(refusal, VOICEPRINTS_OFF_MESSAGE);
         // The refusal has to say what to do about it, not just that it failed.
         assert!(refusal.contains("Remember voices"), "{refusal}");
-        assert!(
-            refusal.contains("Settings > General > Meetings"),
-            "{refusal}"
-        );
+        assert!(refusal.contains("Settings > Meetings"), "{refusal}");
     }
 
     // ── Session-only centroids ───────────────────────────────────────────

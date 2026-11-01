@@ -309,10 +309,16 @@ describe("settings shortcut refresh wiring", () => {
 
   it("forces a bounded process exit if Electron's graceful quit stalls", () => {
     const mainSource = readFileSync(resolve(process.cwd(), "electron/main.ts"), "utf8");
+    const beforeQuitStart = mainSource.indexOf('app.on("before-quit"');
+    const quitStart = mainSource.indexOf('app.on("quit"', beforeQuitStart);
+    expect(beforeQuitStart).toBeGreaterThan(-1);
+    expect(quitStart).toBeGreaterThan(beforeQuitStart);
+    const beforeQuit = mainSource.slice(beforeQuitStart, quitStart);
 
-    expect(mainSource).toMatch(
-      /app\.on\("before-quit"[\s\S]{0,1400}setTimeout\(\(\) => \{[\s\S]{0,180}app\.exit\(0\)[\s\S]{0,180}FORCED_QUIT_TIMEOUT_MS/,
+    expect(beforeQuit).toMatch(
+      /forcedQuitTimer = setTimeout\(\(\) => \{[^}]*app\.exit\(0\)[^}]*\}, FORCED_QUIT_TIMEOUT_MS\)/,
     );
+    expect(beforeQuit).toContain("forcedQuitTimer.unref()");
     expect(mainSource).toMatch(
       /app\.on\("quit"[\s\S]{0,180}clearTimeout\(forcedQuitTimer\)/,
     );

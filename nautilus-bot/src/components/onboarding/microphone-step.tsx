@@ -13,8 +13,9 @@ import {
   listAudioInputDevices,
   type AudioInputDeviceInfo,
 } from "@/lib/backend/recordings";
-import { getSettings, saveSettings } from "@/lib/backend/settings";
+import { getSettings, updateSettings } from "@/lib/backend/settings";
 import type { Settings } from "@/types/settings";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
 
 type DevicePreference = Settings["audio"]["preferredInputDevice"];
 
@@ -22,6 +23,7 @@ type DevicePreference = Settings["audio"]["preferredInputDevice"];
 const QUIET_HINT_AFTER_MS = 6000;
 
 const ERROR_TITLES: Record<MicErrorKind, string> = {
+  timeout: "The microphone took too long to start",
   denied: "Microphone access is off",
   "no-device": "No microphone found",
   busy: "In use by another app",
@@ -68,6 +70,11 @@ export function MicrophoneStep({
   onHeardChange(heardOn: { deviceName: string | null } | null): void;
   onOpenMicrophoneSettings(): void;
 }) {
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const pickerId = useId();
   const mic = useMicLevel();
   const { start, state, level, heard, error, usingSystemDefault, getStream } = mic;
@@ -75,12 +82,13 @@ export function MicrophoneStep({
   const [selected, setSelected] = useState<DevicePreference>(null);
   const [loaded, setLoaded] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [failedDeviceId, setFailedDeviceId] = useState<string | null>(null);
   const [quiet, setQuiet] = useState(false);
   const selectedRef = useRef<DevicePreference>(null);
   selectedRef.current = selected;
 
-  // Settings first, then the device list: the meter opens on the microphone
-  // dictation will really use, not whatever the system default happens to be.
+  // Load the selected input before listening, so it can be changed first.
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -102,12 +110,11 @@ export function MicrophoneStep({
           : null;
       setSelected(current);
       setLoaded(true);
-      void start(current);
     })();
     return () => {
       active = false;
     };
-  }, [start]);
+  }, []);
 
   const defaultDevice = devices.find((device) => device.isDefault);
   // The microphone the meter is really reading, which is the default when
@@ -139,24 +146,31 @@ export function MicrophoneStep({
   const chooseDevice = useCallback(
     async (deviceId: string) => {
       const next = toPreference(devices.find((device) => device.deviceId === deviceId));
+      const previous = selectedRef.current;
+      setSaveBusy(true);
       setSelected(next);
       setSaveError(null);
-      void start(next);
+      if (state !== "idle") void start(next);
       try {
-        // Read fresh and change only the one field: saveSettings replaces the
-        // whole struct, and other steps save while this one is open.
-        const settings = await getSettings();
-        if (settings.audio.dictationInputOverrideEnabled) {
-          settings.audio.dictationInputDevice = next;
-        } else {
-          settings.audio.preferredInputDevice = next;
-        }
-        await saveSettings(settings);
+        await updateSettings((settings) => {
+          if (settings.audio.dictationInputOverrideEnabled) {
+            settings.audio.dictationInputDevice = next;
+          } else {
+            settings.audio.preferredInputDevice = next;
+          }
+        });
+        if (mountedRef.current) setFailedDeviceId(null);
       } catch (caught) {
-        setSaveError(caught instanceof Error ? caught.message : String(caught));
+        if (!mountedRef.current) return;
+        setSelected(previous);
+        if (state !== "idle") void start(previous);
+        setFailedDeviceId(deviceId);
+        setSaveError(userFacingErrorMessage(caught, "Couldn't save your microphone choice. Try again."));
+      } finally {
+        if (mountedRef.current) setSaveBusy(false);
       }
     },
-    [devices, start],
+    [devices, start, state],
   );
 
   const retry = useCallback(() => {
@@ -222,6 +236,10 @@ export function MicrophoneStep({
                 <p className="mt-1 max-w-md text-xs text-muted-foreground">{fallbackNote}</p>
               ) : null}
             </>
+          ) : state === "idle" ? (
+            <p className="text-sm text-muted-foreground">
+              Choose your microphone below, then test it.
+            </p>
           ) : (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
@@ -230,6 +248,11 @@ export function MicrophoneStep({
           )}
         </div>
 
+        {state === "idle" ? (
+          <div className="relative z-[5] mt-4 flex justify-center">
+            <Button size="sm" disabled={!loaded || saveBusy} onClick={retry}>Test microphone</Button>
+          </div>
+        ) : null}
         {state === "error" ? (
           <div className="relative z-[5] mt-4 flex flex-wrap justify-center gap-2">
             <Button size="sm" onClick={retry}>
@@ -252,7 +275,7 @@ export function MicrophoneStep({
         <OptionSelect
           id={pickerId}
           value={selected?.deviceId ?? ""}
-          disabled={!loaded}
+          disabled={!loaded || saveBusy}
           onValueChange={(value) => void chooseDevice(value)}
         >
           <option value="">
@@ -275,9 +298,15 @@ export function MicrophoneStep({
           Dictation uses this microphone. You can change it later in Settings.
         </p>
         {saveError ? (
-          <p className="text-xs text-destructive" role="alert">
-            Couldn&apos;t save the microphone choice: {saveError}
-          </p>
+          <div className="space-y-2">
+            <p className="text-xs text-destructive" role="alert">
+              Couldn&apos;t save the microphone choice: {saveError}
+            </p>
+            <Button size="sm" variant="outline" disabled={saveBusy}
+              onClick={() => { if (failedDeviceId !== null) void chooseDevice(failedDeviceId); }}>
+              Retry
+            </Button>
+          </div>
         ) : null}
       </div>
     </div>

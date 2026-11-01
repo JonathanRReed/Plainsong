@@ -37,14 +37,18 @@ any noticeable pause between Stop and visible text.
 
 ## Mission 4: Me + Them Meeting
 
-1. From Setup, run Test system audio and wait for verified non-silent capture.
-2. Start Me + Them capture with a permitted test call or public audio source.
-3. Speak from the microphone while the other source is audible.
-4. Stop and confirm both sides appear in the transcript.
+1. From Setup, choose Allow meeting audio (or Check meeting audio) and answer
+   the macOS prompt. The check is silent.
+2. Start Me + Them capture with a permitted test call or public audio source,
+   once with headphones and once through the speakers.
+3. Speak from the microphone while the other source is audible. In the live
+   meeting window, "You" should move when you speak and "Meeting audio" when
+   they do.
+4. Stop and confirm both sides appear in the transcript, each once.
 5. Verify notes, action items, follow-up, export, retention, and deletion.
 
 On macOS below 14.7, use mic-only capture unless you already understand and
-have configured a virtual loopback route.
+have configured an audio routing app such as BlackHole.
 
 ## Mission 5: Recovery under interruption
 

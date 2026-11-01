@@ -7,7 +7,6 @@ import {
   type CalendarSnapshot,
 } from "@/lib/calendar-events";
 import {
-  CALENDAR_DISCONNECTED_STORAGE_KEY,
   CALENDAR_IGNORED_STORAGE_KEY,
   readDismissedCalendarEventKeys,
 } from "@/lib/calendar-preferences";
@@ -21,6 +20,20 @@ vi.mock("@/lib/backend/calendar", () => ({
   requestCalendarAccess: (...args: unknown[]) => requestCalendarAccess(...args),
   openCalendarPrivacySettings: (...args: unknown[]) =>
     openCalendarPrivacySettings(...args),
+}));
+
+/** The saved settings the calendar's connection is read from and written to. */
+const backend = vi.hoisted(() => ({
+  settings: {} as { meetings?: Record<string, unknown> },
+}));
+
+vi.mock("@/lib/backend", () => ({
+  getSettings: async () => structuredClone(backend.settings),
+  updateSettings: async (mutate: (draft: Record<string, unknown>) => void) => {
+    const draft = structuredClone(backend.settings) as Record<string, unknown>;
+    mutate(draft);
+    backend.settings = draft as typeof backend.settings;
+  },
 }));
 
 /**
@@ -73,6 +86,7 @@ function upcomingEvent(overrides: Record<string, unknown> = {}) {
 beforeEach(() => {
   vi.setSystemTime(NOW);
   window.localStorage.clear();
+  backend.settings = {};
   getCalendarSnapshot.mockReset();
   requestCalendarAccess.mockReset();
   openCalendarPrivacySettings.mockReset();
@@ -105,6 +119,63 @@ describe("CalendarMeetingCue permission states", () => {
     await userEvent.click(screen.getByRole("button", { name: "Connect calendar" }));
 
     expect(requestCalendarAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("says so when macOS answers Connect without showing a prompt", async () => {
+    // What a signed build without the calendar entitlement on the app got:
+    // EventKit returned "no" in milliseconds, TCC stored nothing, and the card
+    // looked exactly as it did before the click.
+    getCalendarSnapshot.mockResolvedValue(snapshot({ authorization: "not_determined" }));
+    requestCalendarAccess.mockResolvedValue(snapshot({ authorization: "not_determined" }));
+
+    render(<CalendarMeetingCue captureInProgress={false} onStartCapture={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Connect calendar" }));
+
+    expect(
+      await screen.findByText(/macOS didn't show a calendar prompt/),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+    expect(openCalendarPrivacySettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a rejected request instead of swallowing it", async () => {
+    getCalendarSnapshot.mockResolvedValue(snapshot({ authorization: "not_determined" }));
+    requestCalendarAccess.mockRejectedValue(
+      new Error("This action requires a recent click or key press"),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    render(<CalendarMeetingCue captureInProgress={false} onStartCapture={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Connect calendar" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Click Connect calendar again/,
+    );
+    warn.mockRestore();
+  });
+
+  it("reports a helper that could not answer", async () => {
+    getCalendarSnapshot.mockResolvedValue(snapshot({ authorization: "not_determined" }));
+    requestCalendarAccess.mockResolvedValue(snapshot({ authorization: "unknown" }));
+
+    render(<CalendarMeetingCue captureInProgress={false} onStartCapture={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Connect calendar" }));
+
+    // "unknown" hides the connect card, so the failure has nowhere to show;
+    // the snapshot it came with is not trusted over the earlier answer.
+    expect(
+      await screen.findByText(/couldn't reach the macOS calendar service/),
+    ).toBeInTheDocument();
+  });
+
+  it("confirms a successful connection even with no meeting coming up", async () => {
+    getCalendarSnapshot.mockResolvedValue(snapshot({ authorization: "not_determined" }));
+    requestCalendarAccess.mockResolvedValue(snapshot({ authorization: "authorized" }));
+
+    render(<CalendarMeetingCue captureInProgress={false} onStartCapture={vi.fn()} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Connect calendar" }));
+
+    expect(await screen.findByText(/Calendar connected/)).toBeInTheDocument();
   });
 
   it("names the switch to flip when access was refused", async () => {
@@ -211,6 +282,21 @@ describe("CalendarMeetingCue offer", () => {
     });
   });
 
+  it("offers join intent only on the join button and dismisses without capture", async () => {
+    const onStartCapture = vi.fn();
+    getCalendarSnapshot.mockResolvedValue(snapshot({ events: [upcomingEvent({ conferenceUrl: "https://zoom.us/j/123" })] }));
+    render(<CalendarMeetingCue captureInProgress={false} onStartCapture={onStartCapture} />);
+    await screen.findByRole("button", { name: "Join and capture" });
+    expect(onStartCapture).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Join and capture" }));
+    expect(onStartCapture.mock.calls[0][0].conferenceUrl).toBe("https://zoom.us/j/123");
+    await userEvent.click(screen.getByRole("button", { name: "Start capture" }));
+    expect(onStartCapture.mock.calls[1][0].conferenceUrl).toBeUndefined();
+    onStartCapture.mockClear();
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(onStartCapture).not.toHaveBeenCalled();
+  });
+
   it("stays dismissed while the snapshot keeps returning the event", async () => {
     // The mock never stops offering the event, so the suppression can only be
     // coming from the dismissal — this is the in-session half of "stays gone
@@ -277,15 +363,17 @@ describe("CalendarMeetingCue offer", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("goes quiet entirely when suggestions are turned off in settings", async () => {
-    window.localStorage.setItem(CALENDAR_DISCONNECTED_STORAGE_KEY, "true");
+  it("does not read the calendar at all when it is disconnected in settings", async () => {
+    backend.settings = { meetings: { calendarDisconnected: true } };
     getCalendarSnapshot.mockResolvedValue(snapshot({ events: [upcomingEvent()] }));
 
     const { container } = render(
       <CalendarMeetingCue captureInProgress={false} onStartCapture={vi.fn()} />,
     );
 
-    await waitFor(() => expect(getCalendarSnapshot).toHaveBeenCalled());
+    // Long enough for the settings read and a first poll, had there been one.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(getCalendarSnapshot).not.toHaveBeenCalled();
     expect(container).toBeEmptyDOMElement();
   });
 });

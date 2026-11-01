@@ -11,6 +11,10 @@ pub enum DictationCommandAction {
     InsertText(String),
     UndoLastInsert,
     DeleteLastSentence,
+    DeleteThat,
+    SelectPhrase(String),
+    MoveToStart,
+    MoveToEnd,
     ReplaceEntireSelection(String),
     ReplaceSelection { target: String, replacement: String },
     AppendToSelection(String),
@@ -200,7 +204,11 @@ fn replace_case_insensitive_all(
     if applied == 0 {
         return (haystack.to_string(), 0);
     }
-    (re.replace_all(haystack, replacement).to_string(), applied)
+    (
+        re.replace_all(haystack, regex::NoExpand(replacement))
+            .to_string(),
+        applied,
+    )
 }
 
 pub(crate) fn snippet_app_scope_matches(
@@ -242,7 +250,24 @@ pub(crate) fn category_scope_matches(
 }
 
 fn is_dictionary_word_boundary(ch: char) -> bool {
-    !(ch.is_ascii_alphanumeric() || ch == '_')
+    use std::sync::LazyLock;
+    // Combining marks and joiners belong to the word too: an ASCII-only
+    // boundary lets a rule replace part of an accented name or RTL word.
+    static WORD: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\A\w\z").expect("dictionary word character"));
+    let mut encoded = [0; 4];
+    !WORD.is_match(ch.encode_utf8(&mut encoded))
+}
+
+pub(crate) fn dictionary_match_is_word_bounded(text: &str, range: std::ops::Range<usize>) -> bool {
+    text[..range.start]
+        .chars()
+        .next_back()
+        .is_none_or(is_dictionary_word_boundary)
+        && text[range.end..]
+            .chars()
+            .next()
+            .is_none_or(is_dictionary_word_boundary)
 }
 
 // Dictionary entries can be restored from an untrusted backup, so the
@@ -262,6 +287,7 @@ fn replace_dictionary_word_bounded_all(
     replacement: &str,
     case_insensitive: bool,
     replacement_budget: usize,
+    allow_joined_words: bool,
 ) -> Option<(String, usize)> {
     if haystack.len() > MAX_DICTIONARY_OUTPUT_BYTES {
         return None;
@@ -271,7 +297,15 @@ fn replace_dictionary_word_bounded_all(
         return Some((haystack.to_string(), 0));
     }
 
-    let escaped = regex::escape(trimmed);
+    let escaped = if allow_joined_words {
+        trimmed
+            .split_whitespace()
+            .map(regex::escape)
+            .collect::<Vec<_>>()
+            .join(r"[ \t]*")
+    } else {
+        regex::escape(trimmed)
+    };
     let Ok(re) = regex::RegexBuilder::new(&escaped)
         .case_insensitive(case_insensitive)
         .build()
@@ -283,15 +317,7 @@ fn replace_dictionary_word_bounded_all(
     let mut last_end = 0usize;
     let mut applied = 0usize;
     for found in re.find_iter(haystack) {
-        let boundary_before = haystack[..found.start()]
-            .chars()
-            .next_back()
-            .is_none_or(is_dictionary_word_boundary);
-        let boundary_after = haystack[found.end()..]
-            .chars()
-            .next()
-            .is_none_or(is_dictionary_word_boundary);
-        if !(boundary_before && boundary_after) {
+        if !dictionary_match_is_word_bounded(haystack, found.range()) {
             continue;
         }
         if applied >= replacement_budget {
@@ -326,7 +352,14 @@ fn replace_dictionary_case_sensitive_all(
     replacement: &str,
     replacement_budget: usize,
 ) -> Option<(String, usize)> {
-    replace_dictionary_word_bounded_all(haystack, needle, replacement, false, replacement_budget)
+    replace_dictionary_word_bounded_all(
+        haystack,
+        needle,
+        replacement,
+        false,
+        replacement_budget,
+        false,
+    )
 }
 
 fn replace_dictionary_case_insensitive_all(
@@ -335,7 +368,30 @@ fn replace_dictionary_case_insensitive_all(
     replacement: &str,
     replacement_budget: usize,
 ) -> Option<(String, usize)> {
-    replace_dictionary_word_bounded_all(haystack, needle, replacement, true, replacement_budget)
+    replace_dictionary_word_bounded_all(
+        haystack,
+        needle,
+        replacement,
+        true,
+        replacement_budget,
+        false,
+    )
+}
+
+fn is_spelled_code_identifier(rule: &DictionaryRule) -> bool {
+    let words: Vec<_> = rule.spoken_form.split_whitespace().collect();
+    let replacement = rule.replacement.as_bytes();
+    words.len() >= 2
+        && words.len() <= 16
+        && words
+            .iter()
+            .all(|word| word.bytes().all(|ch| ch.is_ascii_alphanumeric()))
+        && replacement.first().is_some_and(u8::is_ascii_alphabetic)
+        && replacement.iter().all(u8::is_ascii_alphanumeric)
+        && replacement
+            .windows(2)
+            .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+        && words.concat().eq_ignore_ascii_case(&rule.replacement)
 }
 
 pub fn apply_dictation_dictionary(
@@ -343,7 +399,13 @@ pub fn apply_dictation_dictionary(
     rules: &[DictionaryRule],
     app_target: Option<&str>,
 ) -> (String, usize) {
-    apply_dictation_dictionary_for_category(input, rules, app_target, DictationAppCategory::Other)
+    let (text, count, _) = apply_dictation_dictionary_for_category(
+        input,
+        rules,
+        app_target,
+        DictationAppCategory::Other,
+    );
+    (text, count)
 }
 
 /// Same as `apply_dictation_dictionary`, but additionally scopes rules whose
@@ -357,16 +419,17 @@ pub fn apply_dictation_dictionary_for_category(
     rules: &[DictionaryRule],
     app_target: Option<&str>,
     destination_category: DictationAppCategory,
-) -> (String, usize) {
+) -> (String, usize, Vec<String>) {
     if input.trim().is_empty() || rules.is_empty() {
-        return (input.to_string(), 0);
+        return (input.to_string(), 0, Vec::new());
     }
     if input.len() > MAX_DICTIONARY_OUTPUT_BYTES {
-        return (input.to_string(), 0);
+        return (input.to_string(), 0, Vec::new());
     }
 
     let mut output = input.to_string();
     let mut applied_total = 0usize;
+    let mut applied_replacements = Vec::new();
     let mut ordered = rules.to_vec();
     ordered.sort_by_key(|rule| std::cmp::Reverse(rule.spoken_form.len()));
 
@@ -391,6 +454,17 @@ pub fn apply_dictation_dictionary_for_category(
                 rule.replacement.as_str(),
                 MAX_DICTIONARY_REPLACEMENTS - applied_total,
             )
+        } else if destination_category == DictationAppCategory::CodeEditor
+            && is_spelled_code_identifier(&rule)
+        {
+            replace_dictionary_word_bounded_all(
+                output.as_str(),
+                rule.spoken_form.as_str(),
+                rule.replacement.as_str(),
+                true,
+                MAX_DICTIONARY_REPLACEMENTS - applied_total,
+                true,
+            )
         } else {
             replace_dictionary_case_insensitive_all(
                 output.as_str(),
@@ -400,15 +474,18 @@ pub fn apply_dictation_dictionary_for_category(
             )
         };
         let Some((next, applied)) = transformed else {
-            return (input.to_string(), 0);
+            return (input.to_string(), 0, Vec::new());
         };
         if applied > 0 {
+            if !rule.replacement.is_empty() && !applied_replacements.contains(&rule.replacement) {
+                applied_replacements.push(rule.replacement.clone());
+            }
             output = next;
             applied_total += applied;
         }
     }
 
-    (output, applied_total)
+    (output, applied_total, applied_replacements)
 }
 
 pub fn apply_dictation_snippets(
@@ -466,6 +543,7 @@ pub fn apply_dictation_snippets_for_category(
             snippet.expansion.as_str(),
             !snippet.case_sensitive,
             MAX_DICTIONARY_REPLACEMENTS - applied_total,
+            false,
         ) else {
             return (input.to_string(), 0);
         };
@@ -631,7 +709,21 @@ fn command_payload<'a>(raw: &'a str, phrase: &str) -> Option<&'a str> {
     if !head.eq_ignore_ascii_case(phrase) {
         return None;
     }
-    Some(tail.trim_start_matches([' ', ':', ',']).trim())
+    if tail.is_empty()
+        || (matches!(
+            phrase,
+            "rewrite shorter" | "rewrite professional" | "bulletize selection"
+        ) && tail.trim().chars().all(|ch| matches!(ch, '.' | '!' | '?')))
+    {
+        return Some("");
+    }
+    if !tail.starts_with(|ch: char| ch.is_whitespace() || matches!(ch, ':' | ',')) {
+        return None;
+    }
+    Some(
+        tail.trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | ','))
+            .trim(),
+    )
 }
 
 fn trim_command_value(raw: &str) -> &str {
@@ -761,6 +853,14 @@ fn normalize_command_prefix(prefix: &str) -> &str {
     }
 }
 
+pub fn has_dictation_command_prefix(raw_text: &str, prefix: &str) -> bool {
+    raw_text.split_whitespace().next().is_some_and(|first| {
+        first
+            .trim_end_matches([':', ','])
+            .eq_ignore_ascii_case(normalize_command_prefix(prefix))
+    })
+}
+
 pub fn parse_dictation_command(
     raw_text: &str,
     prefix: &str,
@@ -770,48 +870,87 @@ pub fn parse_dictation_command(
         return None;
     }
 
-    let normalized_prefix = normalize_command_prefix(prefix);
-    let mut words = text.split_whitespace();
-    let first = words.next()?;
-    let first_normalized = first.trim_end_matches([':', ',']);
-    if !first_normalized.eq_ignore_ascii_case(normalized_prefix) {
+    if !has_dictation_command_prefix(text, prefix) {
         return None;
     }
 
+    let mut words = text.split_whitespace();
+    words.next()?;
     let remainder = words.collect::<Vec<_>>().join(" ");
+    let instruction = remainder.trim_end_matches(['.', '!', '?']).trim_end();
     if remainder.is_empty() {
         return None;
     }
 
-    if remainder.eq_ignore_ascii_case("newline") {
+    if instruction.eq_ignore_ascii_case("newline") || instruction.eq_ignore_ascii_case("new line") {
         return Some((
             "newline".to_string(),
             DictationCommandAction::InsertText("\n".to_string()),
         ));
     }
-    if remainder.eq_ignore_ascii_case("paragraph") {
+    if instruction.eq_ignore_ascii_case("paragraph")
+        || instruction.eq_ignore_ascii_case("new paragraph")
+    {
         return Some((
             "paragraph".to_string(),
             DictationCommandAction::InsertText("\n\n".to_string()),
         ));
     }
-    if remainder.eq_ignore_ascii_case("undo last insert") {
+    if instruction.eq_ignore_ascii_case("undo last insert") {
         return Some((
             "undo_last_insert".to_string(),
             DictationCommandAction::UndoLastInsert,
         ));
     }
-    if remainder.eq_ignore_ascii_case("undo that")
-        || remainder.eq_ignore_ascii_case("undo it")
-        || remainder.eq_ignore_ascii_case("scratch that")
-        || remainder.eq_ignore_ascii_case("never mind")
+    if instruction.eq_ignore_ascii_case("undo that")
+        || instruction.eq_ignore_ascii_case("undo it")
+        || instruction.eq_ignore_ascii_case("scratch that")
+        || instruction.eq_ignore_ascii_case("never mind")
     {
         return Some((
             "undo_last_insert".to_string(),
             DictationCommandAction::UndoLastInsert,
         ));
     }
-    if remainder.eq_ignore_ascii_case("delete last sentence") {
+    for (phrase, key, action) in [
+        (
+            "delete that",
+            "delete_that",
+            DictationCommandAction::DeleteThat,
+        ),
+        (
+            "move to start",
+            "move_to_start",
+            DictationCommandAction::MoveToStart,
+        ),
+        (
+            "move to end",
+            "move_to_end",
+            DictationCommandAction::MoveToEnd,
+        ),
+        (
+            "capitalise that",
+            "sentence_case_selection",
+            DictationCommandAction::SentenceCaseSelection,
+        ),
+        (
+            "capitalize that",
+            "sentence_case_selection",
+            DictationCommandAction::SentenceCaseSelection,
+        ),
+    ] {
+        if instruction.eq_ignore_ascii_case(phrase) {
+            return Some((key.into(), action));
+        }
+    }
+    if let Some(phrase) = command_payload(instruction, "select").filter(|phrase| !phrase.is_empty())
+    {
+        return Some((
+            "select_phrase".into(),
+            DictationCommandAction::SelectPhrase(phrase.into()),
+        ));
+    }
+    if instruction.eq_ignore_ascii_case("delete last sentence") {
         return Some((
             "delete_last_sentence".to_string(),
             DictationCommandAction::DeleteLastSentence,
@@ -835,7 +974,9 @@ pub fn parse_dictation_command(
             DictationCommandAction::ReplaceEntireSelection(payload.to_string()),
         ));
     }
-    if let Some((target, replacement)) = parse_phrase_swap_command(&remainder, "replace", "with") {
+    // A swap edits inside a sentence, so the full stop speech recognition
+    // adds at the end of the utterance is not part of the replacement.
+    if let Some((target, replacement)) = parse_phrase_swap_command(instruction, "replace", "with") {
         return Some((
             "replace_selection".to_string(),
             DictationCommandAction::ReplaceSelection {
@@ -844,7 +985,7 @@ pub fn parse_dictation_command(
             },
         ));
     }
-    if let Some((target, replacement)) = parse_phrase_swap_command(&remainder, "change", "to") {
+    if let Some((target, replacement)) = parse_phrase_swap_command(instruction, "change", "to") {
         return Some((
             "replace_selection".to_string(),
             DictationCommandAction::ReplaceSelection {
@@ -877,40 +1018,40 @@ pub fn parse_dictation_command(
             DictationCommandAction::DeletePhrase(payload.to_string()),
         ));
     }
-    if remainder.eq_ignore_ascii_case("delete selection")
-        || remainder.eq_ignore_ascii_case("clear selection")
+    if instruction.eq_ignore_ascii_case("delete selection")
+        || instruction.eq_ignore_ascii_case("clear selection")
     {
         return Some((
             "delete_selection".to_string(),
             DictationCommandAction::DeleteSelection,
         ));
     }
-    if remainder.eq_ignore_ascii_case("uppercase selection")
-        || remainder.eq_ignore_ascii_case("make that uppercase")
+    if instruction.eq_ignore_ascii_case("uppercase selection")
+        || instruction.eq_ignore_ascii_case("make that uppercase")
     {
         return Some((
             "uppercase_selection".to_string(),
             DictationCommandAction::UppercaseSelection,
         ));
     }
-    if remainder.eq_ignore_ascii_case("lowercase selection")
-        || remainder.eq_ignore_ascii_case("make that lowercase")
+    if instruction.eq_ignore_ascii_case("lowercase selection")
+        || instruction.eq_ignore_ascii_case("make that lowercase")
     {
         return Some((
             "lowercase_selection".to_string(),
             DictationCommandAction::LowercaseSelection,
         ));
     }
-    if remainder.eq_ignore_ascii_case("title case selection")
-        || remainder.eq_ignore_ascii_case("make that title case")
+    if instruction.eq_ignore_ascii_case("title case selection")
+        || instruction.eq_ignore_ascii_case("make that title case")
     {
         return Some((
             "title_case_selection".to_string(),
             DictationCommandAction::TitleCaseSelection,
         ));
     }
-    if remainder.eq_ignore_ascii_case("sentence case selection")
-        || remainder.eq_ignore_ascii_case("make that sentence case")
+    if instruction.eq_ignore_ascii_case("sentence case selection")
+        || instruction.eq_ignore_ascii_case("make that sentence case")
     {
         return Some((
             "sentence_case_selection".to_string(),
@@ -939,24 +1080,49 @@ pub fn parse_dictation_command(
     None
 }
 
-/// Whether `action` still needs selected/clipboard text to do anything.
-///
-/// Actions that carry their own spoken payload ("command rewrite shorter make
-/// this snappy") answer `false`, because `resolve_contextual_command_input`
-/// prefers the spoken text over any captured context. Used by the stop path to
-/// decide whether it is worth capturing the frontmost app's selection at
-/// execution time — capturing on every dictation would fire a synthetic copy
-/// into the target app and clobber the clipboard for no reason.
-pub fn dictation_command_action_needs_context(action: &DictationCommandAction) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictationCommandContextRequirement {
+    None,
+    Text,
+    SelectedText,
+}
+
+impl DictationCommandContextRequirement {
+    pub fn accepts_context(self, source: &str, text: Option<&str>) -> bool {
+        let has_text = text.is_some_and(|text| !text.trim().is_empty());
+        match self {
+            Self::None => true,
+            Self::Text => source != "none" || has_text,
+            Self::SelectedText => source == "selected_text" && has_text,
+        }
+    }
+}
+
+/// Destructive selection commands need an owned selection even when their
+/// replacement text is spoken. Other transforms may use captured text.
+pub fn dictation_command_context_requirement(
+    action: &DictationCommandAction,
+) -> DictationCommandContextRequirement {
+    use DictationCommandContextRequirement::{None, SelectedText, Text};
     match action {
+        DictationCommandAction::DeleteSelection
+        | DictationCommandAction::ReplaceEntireSelection(_) => SelectedText,
         DictationCommandAction::InsertText(_)
         | DictationCommandAction::UndoLastInsert
         | DictationCommandAction::DeleteLastSentence
-        | DictationCommandAction::DeleteSelection => false,
-        DictationCommandAction::ReplaceEntireSelection(payload)
-        | DictationCommandAction::RewriteShorter(payload)
+        | DictationCommandAction::DeleteThat
+        | DictationCommandAction::SelectPhrase(_)
+        | DictationCommandAction::MoveToStart
+        | DictationCommandAction::MoveToEnd => None,
+        DictationCommandAction::RewriteShorter(payload)
         | DictationCommandAction::RewriteProfessional(payload)
-        | DictationCommandAction::Bulletize(payload) => payload.trim().is_empty(),
+        | DictationCommandAction::Bulletize(payload) => {
+            if payload.trim().is_empty() {
+                Text
+            } else {
+                None
+            }
+        }
         DictationCommandAction::ReplaceSelection { .. }
         | DictationCommandAction::AppendToSelection(_)
         | DictationCommandAction::PrependToSelection(_)
@@ -964,7 +1130,7 @@ pub fn dictation_command_action_needs_context(action: &DictationCommandAction) -
         | DictationCommandAction::UppercaseSelection
         | DictationCommandAction::LowercaseSelection
         | DictationCommandAction::TitleCaseSelection
-        | DictationCommandAction::SentenceCaseSelection => true,
+        | DictationCommandAction::SentenceCaseSelection => Text,
     }
 }
 
@@ -1277,6 +1443,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hands_free_grammar_is_whole_utterance_only() {
+        for (spoken, key) in [
+            ("command delete that", "delete_that"),
+            ("command select roadmap", "select_phrase"),
+            ("command move to end", "move_to_end"),
+            ("command move to start", "move_to_start"),
+            ("command capitalise that", "sentence_case_selection"),
+        ] {
+            assert_eq!(
+                parse_dictation_command(spoken, "command").map(|v| v.0),
+                Some(key.into()),
+                "{spoken}"
+            );
+        }
+        for spoken in [
+            "I want to delete that file tomorrow",
+            "command I want to delete that file tomorrow",
+            "command delete that file tomorrow",
+            "command move to end tomorrow",
+            "select roadmap",
+            "new line cooks start Monday",
+        ] {
+            assert!(
+                parse_dictation_command(spoken, "command").is_none(),
+                "{spoken}"
+            );
+        }
+    }
+
+    #[test]
     fn dictionary_replacements_respect_word_boundaries_and_longest_match() {
         let rules = vec![
             DictionaryRule {
@@ -1304,6 +1500,68 @@ mod tests {
         );
         assert_eq!(output, "please email OpenAI today and reopen the task");
         assert_eq!(applied, 1);
+    }
+
+    #[test]
+    fn learned_code_identifiers_tolerate_joined_alias_words() {
+        let rule = DictionaryRule {
+            spoken_form: "fetch user ID".into(),
+            replacement: "fetchUserId".into(),
+            app_scope: Some("Code QA".into()),
+            case_sensitive: false,
+            enabled: true,
+            category_scope: Some("code_editor".into()),
+        };
+        let (output, count, _) = apply_dictation_dictionary_for_category(
+            "fetch userId fetchUserID fetch user ID prefetchUserId fetchUserIds fetch_userId fetch\nuserId",
+            std::slice::from_ref(&rule), Some("Code QA"), DictationAppCategory::CodeEditor,
+        );
+        assert_eq!(output, "fetchUserId fetchUserId fetchUserId prefetchUserId fetchUserIds fetch_userId fetch\nuserId");
+        assert_eq!(count, 3);
+        for (app, category) in [
+            (Some("Other QA"), DictationAppCategory::CodeEditor),
+            (Some("Code QA"), DictationAppCategory::Other),
+        ] {
+            assert_eq!(
+                apply_dictation_dictionary_for_category(
+                    "fetch userId",
+                    std::slice::from_ref(&rule),
+                    app,
+                    category
+                )
+                .0,
+                "fetch userId"
+            );
+        }
+        let strict = DictionaryRule {
+            case_sensitive: true,
+            ..rule.clone()
+        };
+        assert_eq!(
+            apply_dictation_dictionary_for_category(
+                "fetch userId",
+                &[strict],
+                Some("Code QA"),
+                DictationAppCategory::CodeEditor
+            )
+            .0,
+            "fetch userId"
+        );
+        let phrase = DictionaryRule {
+            spoken_form: "follow up".into(),
+            replacement: "follow-up".into(),
+            ..rule
+        };
+        assert_eq!(
+            apply_dictation_dictionary_for_category(
+                "followup",
+                &[phrase],
+                Some("Code QA"),
+                DictationAppCategory::CodeEditor
+            )
+            .0,
+            "followup"
+        );
     }
 
     #[test]
@@ -1368,7 +1626,7 @@ mod tests {
             DictationAppCategory::AiChat,
             DictationAppCategory::Messaging,
         ] {
-            let (output, applied) =
+            let (output, applied, _) =
                 apply_dictation_dictionary_for_category("brb everyone", &rules, None, category);
             assert_eq!(output, "brb everyone", "scope must not match {category:?}");
             assert_eq!(applied, 0);
@@ -1408,7 +1666,7 @@ mod tests {
             category_scope: Some("messaging".to_string()),
         }];
 
-        let (matching, matching_count) = apply_dictation_dictionary_for_category(
+        let (matching, matching_count, _) = apply_dictation_dictionary_for_category(
             "brb everyone",
             &rules,
             Some("Slack"),
@@ -1429,7 +1687,7 @@ mod tests {
             category_scope: Some("messaging".to_string()),
         }];
 
-        let (output, applied) = apply_dictation_dictionary_for_category(
+        let (output, applied, _) = apply_dictation_dictionary_for_category(
             "brb everyone",
             &rules,
             Some("Gmail"),
@@ -1462,7 +1720,7 @@ mod tests {
             DictationAppCategory::AiChat,
             DictationAppCategory::CodeEditor,
         ] {
-            let (output, applied) = apply_dictation_dictionary_for_category(
+            let (output, applied, _) = apply_dictation_dictionary_for_category(
                 "please email open ai today",
                 &rules,
                 None,
@@ -1517,22 +1775,37 @@ mod tests {
     }
 
     #[test]
-    fn command_actions_only_need_context_when_no_spoken_payload_carries_it() {
-        assert!(dictation_command_action_needs_context(
-            &DictationCommandAction::UppercaseSelection
-        ));
-        assert!(dictation_command_action_needs_context(
-            &DictationCommandAction::RewriteShorter(String::new())
-        ));
-        assert!(!dictation_command_action_needs_context(
-            &DictationCommandAction::RewriteShorter("make this snappy".to_string())
-        ));
-        assert!(!dictation_command_action_needs_context(
-            &DictationCommandAction::InsertText("\n".to_string())
-        ));
-        assert!(!dictation_command_action_needs_context(
-            &DictationCommandAction::UndoLastInsert
-        ));
+    fn command_actions_require_owned_selection_for_destructive_edits() {
+        use DictationCommandContextRequirement::{None, SelectedText, Text};
+        for action in [
+            DictationCommandAction::DeleteSelection,
+            DictationCommandAction::ReplaceEntireSelection(String::new()),
+            DictationCommandAction::ReplaceEntireSelection("approved plan".into()),
+        ] {
+            let requirement = dictation_command_context_requirement(&action);
+            assert_eq!(requirement, SelectedText);
+            for source in ["none", "clipboard", "application_context"] {
+                assert!(!requirement.accepts_context(source, Some("original text")));
+            }
+            assert!(!requirement.accepts_context("selected_text", std::option::Option::None));
+            assert!(!requirement.accepts_context("selected_text", Some(" ")));
+            assert!(requirement.accepts_context("selected_text", Some("original text")));
+        }
+        for (action, expected) in [
+            (DictationCommandAction::UppercaseSelection, Text),
+            (DictationCommandAction::RewriteShorter(String::new()), Text),
+            (
+                DictationCommandAction::RewriteShorter("make this snappy".into()),
+                None,
+            ),
+            (DictationCommandAction::InsertText("\n".into()), None),
+            (DictationCommandAction::UndoLastInsert, None),
+        ] {
+            assert_eq!(dictation_command_context_requirement(&action), expected);
+        }
+        assert!(Text.accepts_context("clipboard", Some("original text")));
+        assert!(!Text.accepts_context("none", std::option::Option::None));
+        assert!(None.accepts_context("none", std::option::Option::None));
     }
 
     #[test]
@@ -1652,7 +1925,7 @@ mod tests {
             category_scope: Some("notes".to_string()),
         }];
 
-        let (output, applied) = apply_dictation_dictionary_for_category(
+        let (output, applied, _) = apply_dictation_dictionary_for_category(
             "patient has htn",
             &rules,
             Some("Epic EHR"),
@@ -1717,6 +1990,65 @@ mod tests {
     }
 
     #[test]
+    fn advertised_spoken_edits_resolve_to_their_intended_commands() {
+        let examples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../src/lib/dictation-spoken-edit-examples.json"
+        ))
+        .expect("spoken edit examples");
+        assert!(!examples.is_empty());
+        for prefix in [DEFAULT_COMMAND_PREFIX, "plainsong"] {
+            for example in &examples {
+                let phrase = example["phrase"].as_str().expect("example phrase");
+                let intended = example["commandKey"].as_str().expect("intended command");
+                for punctuation in ["", ".", "!", "?"] {
+                    let spoken = format!("{prefix} {phrase}{punctuation}");
+                    let (command, _) = parse_dictation_command(&spoken, prefix)
+                        .unwrap_or_else(|| panic!("Advertised command did not resolve: {spoken}"));
+                    assert_eq!(command, intended, "{spoken}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn command_boundaries_preserve_payload_and_reject_fused_words() {
+        for input in [
+            "command appendectomy",
+            "command append.",
+            "command prependix",
+            "command delete phraseroadmap",
+            "command replace selection without a plan",
+            "command new line and more words",
+            "command new line. command undo that",
+            "ordinary command new line",
+            "new line.",
+        ] {
+            assert_eq!(parse_dictation_command(input, "command"), None, "{input}");
+        }
+        assert_eq!(
+            parse_dictation_command("COMMAND: append today.", "command"),
+            Some((
+                "append_to_selection".into(),
+                DictationCommandAction::AppendToSelection("today.".into())
+            ))
+        );
+        assert_eq!(
+            parse_dictation_command("plainsong, rewrite shorter.!?", "plainsong"),
+            Some((
+                "rewrite_shorter".into(),
+                DictationCommandAction::RewriteShorter(String::new())
+            ))
+        );
+        assert_eq!(
+            parse_dictation_command("command append today. command undo that", "command"),
+            Some((
+                "append_to_selection".into(),
+                DictationCommandAction::AppendToSelection("today. command undo that".into())
+            ))
+        );
+    }
+
+    #[test]
     fn parse_dictation_command_supports_replace_selection() {
         let (command, action) = parse_dictation_command(
             "command replace roadmap with launch plan",
@@ -1729,6 +2061,36 @@ mod tests {
             DictationCommandAction::ReplaceSelection {
                 target: "roadmap".to_string(),
                 replacement: "launch plan".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn phrase_swaps_drop_the_utterance_full_stop() {
+        for spoken in [
+            "command change Smith to Smyth.",
+            "command replace Smith with Smyth!",
+        ] {
+            let (_, action) =
+                parse_dictation_command(spoken, DEFAULT_COMMAND_PREFIX).expect("parses swap");
+            assert_eq!(
+                action,
+                DictationCommandAction::ReplaceSelection {
+                    target: "Smith".to_string(),
+                    replacement: "Smyth".to_string(),
+                },
+                "{spoken}"
+            );
+        }
+        // Punctuation inside the replacement stays.
+        let (_, action) =
+            parse_dictation_command("command change 3.5 to 4.0.", DEFAULT_COMMAND_PREFIX)
+                .expect("parses swap");
+        assert_eq!(
+            action,
+            DictationCommandAction::ReplaceSelection {
+                target: "3.5".to_string(),
+                replacement: "4.0".to_string(),
             }
         );
     }

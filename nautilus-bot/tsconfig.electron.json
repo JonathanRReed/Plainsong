@@ -6,7 +6,7 @@
     // `"type": "module"`, the main process still emits CommonJS as before.
     "module": "node16",
     "moduleResolution": "node16",
-    "lib": ["ES2020"],
+    "lib": ["ES2020", "ES2021.Promise"],
     "outDir": "dist-electron",
     "rootDir": "electron",
     "strict": true,

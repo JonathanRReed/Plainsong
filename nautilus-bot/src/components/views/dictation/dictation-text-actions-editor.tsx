@@ -10,6 +10,7 @@ import {
 interface DictationTextActionsEditorProps {
   presets: DictationCommandPreset[];
   commandPrefix: string;
+  saveStates?: Record<string, { pending?: boolean; failure?: "save" | "reset"; unsaved?: boolean }>;
   onDraftChange: (
     commandKey: SelectedTextActionCommandPresetKey,
     updates: Partial<Pick<DictationCommandPreset, "systemPrompt" | "enabled">>,
@@ -32,6 +33,7 @@ interface DictationTextActionsEditorProps {
 export function DictationTextActionsEditor({
   presets,
   commandPrefix,
+  saveStates = {},
   onDraftChange,
   onCommit,
   onReset,
@@ -52,6 +54,7 @@ export function DictationTextActionsEditor({
           const promptValue =
             preset?.systemPrompt ?? action.commandDefaultPrompt;
           const enabledValue = preset?.enabled ?? true;
+          const saveState = saveStates[action.commandPresetKey];
           const spokenExample = action.spokenCommandExamples?.[0];
           return (
             <div
@@ -98,6 +101,7 @@ export function DictationTextActionsEditor({
                   <Button
                     variant="ghost"
                     size="sm"
+                    disabled={saveState?.pending}
                     onClick={() => onReset(action.commandPresetKey)}
                   >
                     Reset
@@ -122,6 +126,19 @@ export function DictationTextActionsEditor({
                   onCommit(action.commandPresetKey, nextPrompt, enabledValue);
                 }}
               />
+              {saveState?.pending ? (
+                <p role="status" className="text-sm text-muted-foreground">Saving changes…</p>
+              ) : saveState?.failure ? (
+                <div role="alert" className="flex items-center gap-2 text-sm">
+                  <p>{saveState.failure === "reset" ? "Reset wasn't confirmed." : "Save wasn't confirmed."} Your local changes are still here.</p>
+                  <Button variant="outline" size="sm" onClick={() => {
+                    if (saveState.failure === "reset") onReset(action.commandPresetKey);
+                    else onCommit(action.commandPresetKey, promptValue.trim() || action.commandDefaultPrompt, enabledValue);
+                  }}>{saveState.failure === "reset" ? "Retry reset" : "Retry save"}</Button>
+                </div>
+              ) : saveState?.unsaved ? (
+                <p role="status" className="text-sm text-muted-foreground">Unsaved changes</p>
+              ) : null}
             </div>
           );
         })}

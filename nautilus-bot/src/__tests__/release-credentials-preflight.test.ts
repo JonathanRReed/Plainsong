@@ -27,9 +27,9 @@ function createTempRepo(scriptName: string) {
   return { tempRoot, tempScript };
 }
 
-describe("release-credentials-preflight.mjs", () => {
+describe("release-credentials-preflight.ts", () => {
   it("writes secret-safe JSON and Markdown artifacts using dummy credentials and a fake codesigning identity count", () => {
-    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
+    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.ts");
     try {
       const tempBinDir = path.join(tempRoot, "bin");
       mkdirSync(tempBinDir, { recursive: true });
@@ -51,7 +51,7 @@ describe("release-credentials-preflight.mjs", () => {
         APPLE_TEAM_ID: "DUMMYTEAMID",
       };
 
-      const result = spawnSync("node", [tempScript], {
+      const result = spawnSync("bun", [tempScript], {
         encoding: "utf8",
         env,
       });
@@ -116,7 +116,7 @@ describe("release-credentials-preflight.mjs", () => {
   }, 30_000);
 
   macIt("accepts a Developer ID identity and a Keychain notarization profile", () => {
-    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
+    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.ts");
     try {
       const tempBinDir = path.join(tempRoot, "bin");
       mkdirSync(tempBinDir, { recursive: true });
@@ -137,7 +137,7 @@ describe("release-credentials-preflight.mjs", () => {
       );
       chmodSync(xcrunScript, 0o755);
 
-      const result = spawnSync("node", [tempScript], {
+      const result = spawnSync("bun", [tempScript], {
         encoding: "utf8",
         env: {
           PATH: `${tempBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -191,7 +191,7 @@ describe("release-credentials-preflight.mjs", () => {
   }, 30_000);
 
   macIt("rejects a named Keychain profile that cannot authenticate", () => {
-    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
+    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.ts");
     try {
       const tempBinDir = path.join(tempRoot, "bin");
       mkdirSync(tempBinDir, { recursive: true });
@@ -208,7 +208,7 @@ describe("release-credentials-preflight.mjs", () => {
       writeFileSync(xcrunScript, "#!/bin/sh\nexit 1\n", "utf8");
       chmodSync(xcrunScript, 0o755);
 
-      const result = spawnSync("node", [tempScript], {
+      const result = spawnSync("bun", [tempScript], {
         encoding: "utf8",
         env: {
           PATH: `${tempBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
@@ -253,7 +253,7 @@ describe("release-credentials-preflight.mjs", () => {
   }, 30_000);
 
   it("rejects the certificate prefix that electron-builder does not accept in CSC_NAME", () => {
-    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.mjs");
+    const { tempRoot, tempScript } = createTempRepo("release-credentials-preflight.ts");
     try {
       const tempBinDir = path.join(tempRoot, "bin");
       mkdirSync(tempBinDir, { recursive: true });
@@ -266,7 +266,7 @@ describe("release-credentials-preflight.mjs", () => {
       );
       chmodSync(securityScript, 0o755);
 
-      const result = spawnSync("node", [tempScript], {
+      const result = spawnSync("bun", [tempScript], {
         encoding: "utf8",
         env: {
           PATH: `${tempBinDir}${path.delimiter}${process.env.PATH ?? ""}`,

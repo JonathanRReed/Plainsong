@@ -108,7 +108,7 @@ impl SpeakerEmbeddingExtractor {
 
     /// Check if the embedding model is available
     pub fn is_model_available(&self) -> bool {
-        let exists = crate::download::is_diarization_model_artifact_trusted(
+        let exists = crate::download::is_diarization_model_artifact_installed(
             &self.model_id,
             &self.model_path,
         );
@@ -130,10 +130,11 @@ impl SpeakerEmbeddingExtractor {
     ) -> Result<Vec<(f64, f64, Array1<f32>)>> {
         if !self.is_model_available() {
             return Err(anyhow!(
-                "Diarization model '{}' has not passed Plainsong integrity verification. Re-download it from Settings.",
+                "Diarization model '{}' is missing or failed its integrity check. Download it again in Settings > Models.",
                 self.model_id
             ));
         }
+        let (_cancel_background, control) = crate::llm::local_model_load::background_job();
         let audio_path = audio_path.to_path_buf();
         let model_path = self.model_path.clone();
         let model_id = self.model_id.clone();
@@ -141,23 +142,33 @@ impl SpeakerEmbeddingExtractor {
         let sample_rate = self.sample_rate;
 
         tokio::task::spawn_blocking(move || -> Result<Vec<(f64, f64, Array1<f32>)>> {
-            // WAV loading, channel conversion, and resampling are CPU/blocking work.
-            let samples = crate::audio::utils::load_audio_file(&audio_path)
-                .context("Failed to load audio for diarization")?;
+            let mut reader = crate::audio::utils::AudioWindowReader::open(&audio_path)
+                .context("Failed to inspect audio for diarization")?;
+            if crate::llm::local_model_load::background_should_yield() {
+                anyhow::bail!(crate::llm::native_runtime_gate::OPERATION_BUSY);
+            }
+            // Declared first so the session drops before its QA load-state guard.
+            let _qa_residency;
             let mut session = load_embedding_session(&model_path, &model_id)?;
+            _qa_residency = crate::memory_pressure::QaResidency::loaded("speaker", std::process::id());
+            let mut gate = crate::llm::local_model_load::admit_background_speaker(
+                &[&model_path], reader.decoded_buffer_bytes()?, control,
+            )?;
+            let samples = reader.read_all_with(|| gate.between_batches().map(|_| ()))
+                .context("Failed to load audio for diarization")?;
             let mut embeddings = Vec::new();
 
-            for (start_sec, end_sec) in segments {
+            for_each_embedding_window(&mut gate, &segments, |&(start_sec, end_sec)| {
                 let start_sample = (start_sec * sample_rate as f64) as usize;
                 let end_sample = (end_sec * sample_rate as f64) as usize;
 
                 if start_sample >= samples.len() || end_sample > samples.len() {
-                    continue;
+                    return Ok(());
                 }
 
                 let segment_samples = &samples[start_sample..end_sample];
-                if segment_samples.is_empty() {
-                    continue;
+                if segment_samples.is_empty() || is_digital_silence(segment_samples) {
+                    return Ok(());
                 }
 
                 match run_embedding_inference(&mut session, segment_samples, &model_id) {
@@ -180,13 +191,36 @@ impl SpeakerEmbeddingExtractor {
                         e
                     ),
                 }
-            }
+                Ok(())
+            })?;
 
             Ok(embeddings)
         })
         .await
         .context("Failed to join diarization inference task")?
     }
+}
+
+#[cfg(feature = "diarization")]
+fn for_each_embedding_window(
+    gate: &mut crate::llm::local_model_load::YieldingGate<'_>,
+    segments: &[(f64, f64)],
+    mut process: impl FnMut(&(f64, f64)) -> Result<()>,
+) -> Result<()> {
+    for segment in segments {
+        gate.between_batches()?;
+        process(segment)?;
+    }
+    Ok(())
+}
+
+/// Digital silence has no speaker identity. Keep quiet speech and non-finite
+/// input on the normal inference/error path rather than guessing it is silent.
+#[cfg(feature = "diarization")]
+fn is_digital_silence(samples: &[f32]) -> bool {
+    samples
+        .iter()
+        .all(|sample| sample.is_finite() && sample.abs() <= 1e-6)
 }
 
 #[cfg(feature = "diarization")]
@@ -208,7 +242,15 @@ pub(super) fn load_embedding_session(model_path: &Path, artifact_id: &str) -> Re
     // multiple of 100 -- including the 198-frame window this app feeds.
     // Measured in artifacts/qa/campplus-divergence-2026-09-02.md.
     let level = super::embedding_window::graph_optimization_level_for(artifact_id);
-    let session = crate::ort_utils::build_session_with(model_path, move |builder| {
+    let _model_load = crate::llm::local_model_load::admit_speaker_embedding(
+        &[model_path],
+        crate::llm::local_model_load::NativeAllocation::Constructor,
+    )?;
+    let sha256 = crate::download::diarization_model_expected_sha256(artifact_id)
+        .ok_or_else(|| anyhow!("Missing integrity pin for diarization model '{artifact_id}'"))?;
+    let model = crate::download::open_verified_model_artifact(model_path, sha256)
+        .map_err(crate::download::mismatch_first)?;
+    let session = crate::ort_utils::build_verified_session_with(&model, move |builder| {
         builder
             .with_intra_threads(1)
             .map_err(|error| anyhow!("Failed to configure ONNX intra-op threads: {}", error))?
@@ -579,7 +621,7 @@ fn finalize_embedding(array: ArrayViewD<'_, f32>) -> Result<Array1<f32>> {
         if embedding_len == 0 {
             return Err(anyhow!("Diarization model returned zero-length embedding"));
         }
-        if flat.len() % embedding_len != 0 {
+        if !flat.len().is_multiple_of(embedding_len) {
             flat
         } else {
             let chunks = flat.len() / embedding_len;
@@ -655,6 +697,22 @@ impl Ord for ClusterDistance {
             .then_with(|| self.generation_i.cmp(&other.generation_i))
             .then_with(|| self.generation_j.cmp(&other.generation_j))
     }
+}
+
+/// When [`EmbeddingClusterer::absorb_minor_clusters`] folds a cluster.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MinorClusterFold {
+    /// A cluster under this share of all windows is small...
+    pub(crate) min_share: f64,
+    /// ...or under this many windows, whichever is fewer.
+    pub(crate) max_windows: usize,
+    /// A small cluster of at least this many windows is folded only when its
+    /// centroid is closer than this (cosine distance) to an established one.
+    /// `None` folds every small cluster.
+    pub(crate) max_distance: Option<f32>,
+    /// Below this many windows a cluster is folded whatever its distance:
+    /// one or two windows are too little audio to call a voice.
+    pub(crate) min_voice_windows: usize,
 }
 
 impl EmbeddingClusterer {
@@ -855,12 +913,140 @@ impl EmbeddingClusterer {
         labels
     }
 
+    /// Fold small clusters into the nearest established voice, then renumber
+    /// by first occurrence.
+    ///
+    /// A cluster is small when it holds fewer windows than the smaller of
+    /// `min_share` of all windows and `max_windows`. A small cluster of
+    /// `min_voice_windows` or more is folded only when its centroid lies
+    /// within `max_distance` (cosine) of the nearest cluster that is not
+    /// small; one smaller than that is always folded. Each folded window goes
+    /// to whichever remaining cluster (established or kept) it is closest to.
+    ///
+    /// Centroid-linkage AHC under a fixed threshold leaves a long tail of tiny
+    /// clusters on real meeting audio: laughter, crosstalk, a cough, a voice
+    /// turned away from the microphone. Each becomes a "speaker" of its own as
+    /// soon as two neighbouring windows agree, and on AMI meetings with four
+    /// people it reported dozens. Such a cluster is nearly always one of the
+    /// main voices in an unusual moment. A guest who says one sentence in an
+    /// hour is not, and the two limits keep that voice: the window cap stops
+    /// a long meeting's 1% from swallowing a sentence or two, and the distance
+    /// limit leaves a cluster that sounds like nobody else alone. The distance
+    /// limit cannot apply to the one- and two-window tail: on AMI a fifth of
+    /// those sit further than 0.70 from every voice, so sparing them brought
+    /// the dozens of speakers back, while clusters of three or more windows
+    /// were within 0.70 in all but 2 of 52 (see `DEFAULT_CLUSTER_REFINEMENT`).
+    /// With no established cluster to anchor to, the labels are returned
+    /// unchanged.
+    ///
+    /// Also returns which windows were moved, so a caller can keep them out
+    /// of anything that should describe a voice only by its own windows (the
+    /// voiceprint centroids), and mark the turns they make as less certain.
+    pub(crate) fn absorb_minor_clusters(
+        &self,
+        embeddings: &[(f64, f64, Array1<f32>)],
+        labels: &[usize],
+        rule: MinorClusterFold,
+    ) -> (Vec<usize>, Vec<bool>) {
+        let unchanged = || (labels.to_vec(), vec![false; labels.len()]);
+        if embeddings.len() != labels.len() || labels.is_empty() {
+            return unchanged();
+        }
+        let cluster_count = labels.iter().copied().max().unwrap_or(0) + 1;
+        let mut members: Vec<Vec<usize>> = vec![Vec::new(); cluster_count];
+        for (index, label) in labels.iter().enumerate() {
+            members[*label].push(index);
+        }
+        let floor = ((rule.min_share * labels.len() as f64).ceil() as usize)
+            .min(rule.max_windows)
+            .max(1);
+        let is_major = |label: usize| members[label].len() >= floor;
+        let major: Vec<usize> = (0..cluster_count)
+            .filter(|label| is_major(*label))
+            .collect();
+        if major.is_empty() || major.len() == cluster_count {
+            return unchanged();
+        }
+        let sum_of = |label: usize| {
+            let mut sum = Array1::<f32>::zeros(embeddings[members[label][0]].2.len());
+            for index in &members[label] {
+                sum += &embeddings[*index].2;
+            }
+            sum
+        };
+        let centroids: Vec<(usize, Array1<f32>)> =
+            major.iter().map(|label| (*label, sum_of(*label))).collect();
+        let folds: Vec<bool> = (0..cluster_count)
+            .map(|label| {
+                if members[label].is_empty() || is_major(label) {
+                    return false;
+                }
+                let own = sum_of(label);
+                let nearest = centroids
+                    .iter()
+                    .map(|(_, centroid)| cosine_distance(&own, centroid))
+                    .fold(f32::INFINITY, f32::min);
+                let folds = members[label].len() < rule.min_voice_windows
+                    || rule.max_distance.is_none_or(|limit| nearest < limit);
+                tracing::debug!(
+                    "Minor cluster of {} window(s) at {:.1}s: nearest established voice {:.4}; {}",
+                    members[label].len(),
+                    embeddings[members[label][0]].0,
+                    nearest,
+                    if folds { "folded" } else { "kept" }
+                );
+                folds
+            })
+            .collect();
+        // A kept small cluster is a voice of its own, so the fragments of a
+        // brief guest can join it rather than one of the main voices.
+        let targets: Vec<(usize, Array1<f32>)> = centroids
+            .into_iter()
+            .chain(
+                (0..cluster_count)
+                    .filter(|&label| {
+                        !members[label].is_empty() && !is_major(label) && !folds[label]
+                    })
+                    .map(|label| (label, sum_of(label))),
+            )
+            .collect();
+        let reassigned: Vec<usize> = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                if !folds[*label] {
+                    return *label;
+                }
+                targets
+                    .iter()
+                    .min_by(|a, b| {
+                        cosine_distance(&embeddings[index].2, &a.1)
+                            .total_cmp(&cosine_distance(&embeddings[index].2, &b.1))
+                    })
+                    .map(|(major_label, _)| *major_label)
+                    .unwrap_or(*label)
+            })
+            .collect();
+        let moved = labels.iter().map(|label| folds[*label]).collect();
+        let mut renumbered = std::collections::HashMap::new();
+        let labels = reassigned
+            .iter()
+            .map(|label| {
+                let next = renumbered.len();
+                *renumbered.entry(*label).or_insert(next)
+            })
+            .collect();
+        (labels, moved)
+    }
+
     /// Merge consecutive same-label windows into turns, and drop any turn
     /// shorter than [`MIN_TURN_SECONDS`].
     ///
     /// Dropping, rather than relabelling, is deliberate and it is what makes
     /// the returned turns non-contiguous: audio under a dropped run comes back
-    /// with no speaker, and `merge_with_transcript` keeps that text anonymous.
+    /// with no speaker, and the merge keeps words inside it anonymous (only a
+    /// measured word that also touches one neighbouring turn takes that
+    /// neighbour; see `word_owner`).
     /// Attaching a short run to the neighbour its embedding is closest to was
     /// measured against this on 24 fixtures and lost. It helps only where the
     /// floor is high enough to be deleting real turns — at a 5-second floor it
@@ -869,6 +1055,25 @@ impl EmbeddingClusterer {
     /// single-window one onto a neighbour and so launders noise into a named
     /// speaker.
     /// Receipt: `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
+    #[cfg(test)]
+    pub(crate) fn smooth_established_segments(
+        &self,
+        segments: &[(f64, f64)],
+        labels: &[usize],
+    ) -> Vec<(f64, f64, usize)> {
+        let established: std::collections::HashSet<_> = self
+            .smooth_segments(segments, labels)
+            .iter()
+            .map(|turn| turn.2)
+            .collect();
+        Self::new()
+            .with_min_segment_duration(MIN_SEGMENT_SECONDS)
+            .smooth_segments(segments, labels)
+            .into_iter()
+            .filter(|turn| established.contains(&turn.2))
+            .collect()
+    }
+
     pub fn smooth_segments(
         &self,
         segments: &[(f64, f64)],
@@ -882,10 +1087,11 @@ impl EmbeddingClusterer {
             let label = labels[i];
             let mut current_end = end;
 
-            // Merge consecutive segments with same label
+            // Merge only touching or overlapping windows. A skipped window or
+            // VAD silence gap is not evidence that this speaker kept talking.
             let mut j = i + 1;
-            while j < segments.len() && labels[j] == label {
-                current_end = segments[j].1;
+            while j < segments.len() && labels[j] == label && segments[j].0 <= current_end + 1e-6 {
+                current_end = current_end.max(segments[j].1);
                 j += 1;
             }
 
@@ -978,6 +1184,268 @@ pub fn generate_segments(duration: f64, segment_duration: f64, overlap: f64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The share rule alone: no window cap, no distance limit.
+    fn share_only(min_share: f64) -> MinorClusterFold {
+        MinorClusterFold {
+            min_share,
+            max_windows: usize::MAX,
+            max_distance: None,
+            min_voice_windows: 0,
+        }
+    }
+
+    fn unit(values: &[f32]) -> Array1<f32> {
+        let norm = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        Array1::from(values.iter().map(|v| v / norm).collect::<Vec<_>>())
+    }
+
+    #[cfg(feature = "diarization")]
+    #[test]
+    fn ecapa_yields_after_the_first_window_and_resumes_without_repeating_it() {
+        use std::sync::{Arc, Barrier};
+        use std::time::{Duration, Instant};
+        let runtime = crate::llm::native_runtime_gate::RuntimeGate::new();
+        let (_cancel, control) = crate::llm::local_model_load::background_job();
+        let mut gate = crate::llm::local_model_load::YieldingGate::for_test(&runtime, control);
+        let first = Arc::new(Barrier::new(2));
+        let foreground_started = Arc::new(Barrier::new(2));
+        let mut completed = Vec::new();
+        std::thread::scope(|scope| {
+            let foreground_first = Arc::clone(&first);
+            let started = Arc::clone(&foreground_started);
+            let runtime = &runtime;
+            let foreground = scope.spawn(move || {
+                foreground_first.wait();
+                let waiting = crate::llm::local_model_load::user_waiting_decode();
+                started.wait();
+                let asked = Instant::now();
+                let permit = loop {
+                    if let Ok(permit) = runtime.acquire() {
+                        break permit;
+                    }
+                    assert!(asked.elapsed() < Duration::from_secs(1));
+                    std::thread::yield_now();
+                };
+                drop(permit);
+                drop(waiting);
+                asked.elapsed()
+            });
+            for_each_embedding_window(
+                &mut gate,
+                &[(0.0, 2.0), (1.0, 3.0), (2.0, 4.0)],
+                |&(start, _)| {
+                    completed.push(start as usize);
+                    if completed.len() == 1 {
+                        first.wait();
+                        foreground_started.wait();
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(foreground.join().unwrap() < Duration::from_secs(1));
+        });
+        assert_eq!(completed, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn minor_clusters_fold_into_the_nearest_major_voice() {
+        // Two voices along x and y with ten windows each, plus two one-window
+        // "speakers" that lean towards y and x respectively.
+        let mut embeddings = Vec::new();
+        let mut labels = Vec::new();
+        for i in 0..10 {
+            embeddings.push((i as f64, i as f64 + 2.0, unit(&[1.0, 0.05 * i as f32])));
+            labels.push(0);
+        }
+        for i in 0..10 {
+            embeddings.push((
+                10.0 + i as f64,
+                12.0 + i as f64,
+                unit(&[0.05 * i as f32, 1.0]),
+            ));
+            labels.push(1);
+        }
+        embeddings.push((20.0, 22.0, unit(&[0.3, 1.0])));
+        labels.push(2);
+        embeddings.push((21.0, 23.0, unit(&[1.0, 0.4])));
+        labels.push(3);
+
+        let clusterer = EmbeddingClusterer::new();
+        let (folded, moved) =
+            clusterer.absorb_minor_clusters(&embeddings, &labels, share_only(0.1));
+        assert_eq!(&folded[..20], &labels[..20]);
+        assert_eq!(folded[20], 1);
+        assert_eq!(folded[21], 0);
+        assert_eq!(moved.iter().filter(|moved| **moved).count(), 2);
+        assert!(moved[20] && moved[21]);
+
+        // A share no cluster reaches, or one every cluster reaches, changes
+        // nothing.
+        for share in [0.9, 0.0] {
+            let (unchanged, moved) =
+                clusterer.absorb_minor_clusters(&embeddings, &labels, share_only(share));
+            assert_eq!(unchanged, labels);
+            assert!(moved.iter().all(|moved| !moved));
+        }
+    }
+
+    /// The rule the product runs, from `DEFAULT_CLUSTER_REFINEMENT`.
+    fn product_rule() -> MinorClusterFold {
+        let refinement = crate::diarization::DEFAULT_CLUSTER_REFINEMENT;
+        MinorClusterFold {
+            min_share: refinement.minor_cluster_share.expect("folding is on"),
+            max_windows: refinement.minor_cluster_max_windows,
+            max_distance: refinement.minor_cluster_fold_distance,
+            min_voice_windows: refinement.minor_cluster_min_voice_windows,
+        }
+    }
+
+    /// An hour of two people at one window a second, with a guest who says a
+    /// few seconds' worth near the middle, plus the stray one-window clusters
+    /// real audio leaves (a cough, laughter, a voice turned away). Labels as
+    /// AHC would leave them: 0 and 1 the hosts, 2 the guest's main run, 3 one
+    /// guest window that did not join it, 4.. the strays.
+    type Windows = Vec<(f64, f64, Array1<f32>)>;
+
+    fn hour_with_a_guest(guest_windows: usize) -> (Windows, Vec<usize>) {
+        let mut embeddings = Vec::new();
+        let mut labels = Vec::new();
+        let mut push = |embedding: Array1<f32>, label: usize| {
+            let start = embeddings.len() as f64;
+            embeddings.push((start, start + 2.0, embedding));
+            labels.push(label);
+        };
+        for i in 0..3_600usize {
+            let wobble = 0.02 * (i % 5) as f32;
+            if i == 1_800 {
+                for g in 0..guest_windows {
+                    push(unit(&[0.05, 0.05, 1.0, 0.02 * (g % 3) as f32]), 2);
+                }
+                push(unit(&[0.15, 0.1, 1.0, 0.2]), 3);
+            }
+            if i % 400 == 7 {
+                // A stray: far from both hosts and from the guest.
+                push(unit(&[0.35, 0.1, 0.0, 1.0]), 4 + i / 400);
+                continue;
+            }
+            if (i / 30) % 2 == 0 {
+                push(unit(&[1.0, wobble, 0.0, 0.0]), 0);
+            } else {
+                push(unit(&[wobble, 1.0, 0.0, 0.0]), 1);
+            }
+        }
+        (embeddings, labels)
+    }
+
+    #[test]
+    fn a_brief_guest_in_a_long_meeting_keeps_a_voice_of_its_own() {
+        let clusterer = EmbeddingClusterer::new();
+        for guest_windows in [8, 15] {
+            let (embeddings, labels) = hour_with_a_guest(guest_windows);
+            let guest: Vec<usize> = (0..labels.len()).filter(|i| labels[*i] == 2).collect();
+            let fragment = labels.iter().position(|label| *label == 3).unwrap();
+
+            let (folded, moved) =
+                clusterer.absorb_minor_clusters(&embeddings, &labels, product_rule());
+            let guest_label = folded[guest[0]];
+            assert!(
+                guest
+                    .iter()
+                    .all(|i| folded[*i] == guest_label && !moved[*i]),
+                "{guest_windows} guest windows must keep one unmoved label"
+            );
+            let host_labels = host_labels_after(&labels, &folded);
+            assert_eq!(host_labels.len(), 2, "the hosts stay two voices");
+            assert!(
+                !host_labels.contains(&guest_label),
+                "the guest is not a host"
+            );
+            // The guest window that clustered alone joins the guest, not a host.
+            assert_eq!(folded[fragment], guest_label);
+            // Every stray folds: three voices in all, not a dozen.
+            let distinct: std::collections::HashSet<usize> = folded.iter().copied().collect();
+            assert_eq!(distinct.len(), 3, "{guest_windows} guest windows");
+
+            // The old rule, 1% of windows with no cap and no distance limit,
+            // gave the guest's words to a host.
+            let (old, _) = clusterer.absorb_minor_clusters(&embeddings, &labels, share_only(0.01));
+            assert!(host_labels_after(&labels, &old).contains(&old[guest[0]]));
+        }
+    }
+
+    fn host_labels_after(before: &[usize], after: &[usize]) -> std::collections::HashSet<usize> {
+        before
+            .iter()
+            .zip(after)
+            .filter(|(before, _)| **before < 2)
+            .map(|(_, after)| *after)
+            .collect()
+    }
+
+    #[test]
+    fn a_small_cluster_near_a_main_voice_still_folds() {
+        // Five windows of host 0 in an unusual moment: small, and within the
+        // distance limit, so it is the host and not a new person.
+        let (mut embeddings, mut labels) = hour_with_a_guest(0);
+        for k in 0..5 {
+            let start = embeddings.len() as f64;
+            embeddings.push((
+                start,
+                start + 2.0,
+                unit(&[1.0, 0.3, 0.0, 0.25 + 0.01 * k as f32]),
+            ));
+            labels.push(99);
+        }
+        let labels: Vec<usize> = {
+            // Keep labels dense for the clusterer's bookkeeping.
+            let mut dense = std::collections::HashMap::new();
+            labels
+                .iter()
+                .map(|label| {
+                    let next = dense.len();
+                    *dense.entry(*label).or_insert(next)
+                })
+                .collect()
+        };
+        let (folded, moved) =
+            EmbeddingClusterer::new().absorb_minor_clusters(&embeddings, &labels, product_rule());
+        let tail = folded.len() - 5;
+        assert!(moved[tail..].iter().all(|moved| *moved));
+        assert!(folded[tail..].iter().all(|label| *label == folded[0]));
+    }
+
+    #[test]
+    fn folded_labels_are_renumbered_by_first_occurrence() {
+        let embeddings = vec![
+            (0.0, 2.0, unit(&[0.0, 1.0])),
+            (1.0, 3.0, unit(&[1.0, 0.0])),
+            (2.0, 4.0, unit(&[1.0, 0.1])),
+            (3.0, 5.0, unit(&[0.1, 1.0])),
+            (4.0, 6.0, unit(&[0.2, 1.0])),
+            (5.0, 7.0, unit(&[1.0, 0.2])),
+        ];
+        // Label 0 is a one-window cluster; it joins label 2, which then
+        // speaks first and so becomes 0, leaving no gap at S1.
+        let (folded, moved) = EmbeddingClusterer::new().absorb_minor_clusters(
+            &embeddings,
+            &[0, 1, 1, 2, 2, 1],
+            share_only(0.3),
+        );
+        assert_eq!(folded, [0, 1, 1, 0, 0, 1]);
+        assert_eq!(moved, [true, false, false, false, false, false]);
+    }
+
+    #[cfg(feature = "diarization")]
+    #[test]
+    fn digital_silence_has_no_embedding_but_quiet_speech_is_kept() {
+        assert!(is_digital_silence(&[0.0; 32_000]));
+        assert!(is_digital_silence(&[1e-7, -1e-7]));
+        assert!(!is_digital_silence(&[0.0, 1e-5, 0.0]));
+        assert!(!is_digital_silence(&[f32::NAN]));
+        assert!(!is_digital_silence(&[f32::INFINITY]));
+    }
 
     /// The two numbers the voiceprint thresholds were measured at. A change
     /// here invalidates
@@ -1078,6 +1546,34 @@ mod tests {
         let windows = generate_segments(7.0, SEGMENT_SECONDS, SEGMENT_OVERLAP_SECONDS);
         let turns = clusterer.smooth_segments(&windows, &[0, 0, 1, 1, 0, 0]);
         assert_eq!(turns, vec![(0.0, 3.0, 0), (2.0, 5.0, 1), (4.0, 7.0, 0)]);
+    }
+
+    #[test]
+    fn same_speaker_runs_do_not_fill_a_silence_gap() {
+        let turns = EmbeddingClusterer::new().smooth_segments(
+            &[(0.0, 2.0), (1.0, 3.0), (8.0, 10.0), (9.0, 11.0)],
+            &[0, 0, 0, 0],
+        );
+        assert_eq!(turns, vec![(0.0, 3.0, 0), (8.0, 11.0, 0)]);
+    }
+
+    #[test]
+    fn short_turns_need_an_established_label_and_keep_their_gaps() {
+        assert_eq!(
+            EmbeddingClusterer::new().smooth_established_segments(
+                &[(0.0, 2.0), (1.0, 3.0), (7.0, 9.0), (10.0, 12.0)],
+                &[0, 0, 0, 1],
+            ),
+            vec![(0.0, 3.0, 0), (7.0, 9.0, 0)]
+        );
+    }
+
+    #[test]
+    fn nested_windows_do_not_shorten_a_speaker_run() {
+        assert_eq!(
+            EmbeddingClusterer::new().smooth_segments(&[(0.0, 4.0), (1.0, 2.0)], &[0, 0],),
+            vec![(0.0, 4.0, 0)]
+        );
     }
 
     /// A dropped run leaves a hole, and the hole is the point: the caller
@@ -1261,7 +1757,7 @@ mod tests {
 
         /// Frame errors under the best one-to-one map from predicted labels to
         /// reference speakers — the same accounting
-        /// `scripts/score-diarization-eval.mjs` reports as `frameErrorRate`.
+        /// `scripts/score-diarization-eval.ts` reports as `frameErrorRate`.
         fn frame_errors(&self, floor: f64) -> TurnFloorScore {
             let turns = EmbeddingClusterer::new()
                 .with_min_segment_duration(floor)

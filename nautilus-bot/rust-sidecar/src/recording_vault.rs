@@ -272,7 +272,10 @@ mod vault_key_migration_tests {
         assert!(notice.contains("still readable without your"), "{notice}");
         assert!(notice.contains("No space left on device."), "{notice}");
         assert!(notice.contains("Your meetings are unchanged."), "{notice}");
-        assert!(notice.contains("Settings > Privacy"), "{notice}");
+        assert!(
+            notice.contains("Settings > Privacy & data > Encryption"),
+            "{notice}"
+        );
     }
 
     #[test]
@@ -366,7 +369,8 @@ pub(crate) async fn migrate_storage_encryption(
     }
     let _operation_lease = state
         .operation_coordinator
-        .try_acquire(operation_coordinator::OperationKind::VaultMigration)?;
+        .acquire_library_replacement(operation_coordinator::OperationKind::VaultMigration)
+        .await?;
     let _storage_guard = state.audio_storage_gate.lock().await;
 
     let (already_initialized, existing_salt) = {
@@ -1516,23 +1520,116 @@ pub(crate) enum RuntimeAudioResolveMode {
     /// Post-processing, diarization and export: every ready track, each one
     /// re-decoded and re-hashed against what the database recorded.
     Full,
-    /// Playback: the primary mix alone. A temporary this process just
-    /// decrypted from an authenticated stream is checked by header, length,
-    /// and hash, but is not decoded sample by sample.
-    ///
-    /// Serving only the primary is not a shortcut — `prepare_recording_playback`
-    /// never used any other track. Resolving all three on a dual-track meeting
-    /// meant three decryptions and three full-length plaintext files on disk to
-    /// play one of them.
+    /// Playback resolves a stored primary, or the sources needed to rebuild it.
     PlaybackPrimary,
 }
 
 impl RuntimeAudioResolveMode {
-    fn wants(self, role: recording_audio::RecordingAudioRole) -> bool {
+    fn wants(
+        self,
+        bundle: &recording_audio::RecordingAudioBundle,
+        role: recording_audio::RecordingAudioRole,
+    ) -> bool {
         match self {
             Self::Full => true,
-            Self::PlaybackPrimary => role == recording_audio::RecordingAudioRole::Primary,
+            Self::PlaybackPrimary => {
+                bundle.primary.is_none() || role == recording_audio::RecordingAudioRole::Primary
+            }
         }
+    }
+}
+
+struct RecordingAudioSnapshot {
+    bundle: recording_audio::RecordingAudioBundle,
+    copies: Vec<(std::fs::File, std::fs::File)>,
+    owners: Vec<recording_audio::DurableTempFile>,
+}
+
+fn stage_audio_snapshot(
+    bundle: &recording_audio::RecordingAudioBundle,
+    runtime: &Path,
+    roots: &[PathBuf],
+    mode: RuntimeAudioResolveMode,
+    link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<RecordingAudioSnapshot, String> {
+    let mut snapshot = RecordingAudioSnapshot {
+        bundle: recording_audio::RecordingAudioBundle::empty(&bundle.recording_id),
+        copies: Vec::new(),
+        owners: Vec::new(),
+    };
+    for asset in bundle
+        .assets()
+        .filter(|asset| mode.wants(bundle, asset.role))
+    {
+        if asset.lifecycle != recording_audio::RecordingAudioLifecycle::Ready {
+            return Err("Recording audio is not ready".into());
+        }
+        let source = ensure_regular_file_in_roots(&asset.path, "saved audio snapshot", roots)?;
+        let input = std::fs::File::open(&source).map_err(|e| e.to_string())?;
+        let extension = if asset.protection == recording_audio::RecordingAudioProtection::Encrypted
+        {
+            "enc"
+        } else if crate::audio_compression::is_flac(&source) {
+            "flac"
+        } else {
+            "wav"
+        };
+        let path = runtime.join(format!("source-{}.{}", uuid::Uuid::new_v4(), extension));
+        if link(&source, &path).is_err() {
+            let output = recording_audio::create_new_file(&path).map_err(|e| e.to_string())?;
+            snapshot.copies.push((input, output));
+        }
+        snapshot
+            .owners
+            .push(recording_audio::DurableTempFile::new(path.clone()));
+        let mut staged = asset.clone();
+        staged.path = path;
+        snapshot.bundle.insert(staged).map_err(|e| e.to_string())?;
+    }
+    Ok(snapshot)
+}
+
+impl RecordingAudioSnapshot {
+    fn resolve(
+        self,
+        key: Option<&[u8; 32]>,
+        runtime: &Path,
+        roots: &[PathBuf],
+        mode: RuntimeAudioResolveMode,
+        aside_spans: &[crate::meeting_asides::AsideSpan],
+    ) -> Result<recording_audio::ResolvedRecordingAudioBundle, String> {
+        let Self {
+            bundle,
+            copies,
+            owners,
+        } = self;
+        if !copies.is_empty() {
+            let needed = copies
+                .iter()
+                .try_fold(64_u64 * 1024 * 1024, |bytes, (input, _)| {
+                    input.metadata().map(|m| bytes.saturating_add(m.len()))
+                })
+                .map_err(|e| e.to_string())?;
+            if crate::download::available_space_for_path(runtime).map_err(|e| e.to_string())?
+                < needed
+            {
+                return Err("Not enough free space to prepare this audio for reading".into());
+            }
+        }
+        for (mut input, mut output) in copies {
+            std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+        }
+        let mut trusted = roots.to_vec();
+        trusted.push(runtime.to_owned());
+        resolve_recording_audio_bundle_in_directory(
+            &bundle,
+            key,
+            runtime,
+            &trusted,
+            mode,
+            aside_spans,
+        )
+        .map(|resolved| resolved.with_source_snapshots(owners))
     }
 }
 
@@ -1542,13 +1639,18 @@ pub(crate) fn resolve_recording_audio_bundle_in_directory(
     runtime_dir: &Path,
     approved_roots: &[PathBuf],
     mode: RuntimeAudioResolveMode,
+    aside_spans: &[crate::meeting_asides::AsideSpan],
 ) -> Result<recording_audio::ResolvedRecordingAudioBundle, String> {
-    let primary_asset = bundle.primary.as_ref().ok_or_else(|| {
-        format!(
-            "Recording '{}' has no primary audio asset",
-            bundle.recording_id
-        )
-    })?;
+    let primary_asset = bundle
+        .primary
+        .as_ref()
+        .or(bundle.system.as_ref())
+        .ok_or_else(|| {
+            format!(
+                "Recording '{}' has no primary audio asset",
+                bundle.recording_id
+            )
+        })?;
     if primary_asset.lifecycle != recording_audio::RecordingAudioLifecycle::Ready {
         return Err(format!(
             "Recording '{}' primary audio is not ready",
@@ -1561,7 +1663,7 @@ pub(crate) fn resolve_recording_audio_bundle_in_directory(
     let mut mic = None;
     let mut system = None;
     for asset in bundle.assets() {
-        if !mode.wants(asset.role) {
+        if !mode.wants(bundle, asset.role) {
             continue;
         }
         if asset.lifecycle != recording_audio::RecordingAudioLifecycle::Ready {
@@ -1624,6 +1726,11 @@ pub(crate) fn resolve_recording_audio_bundle_in_directory(
                 )?;
                 let temp_guard = recording_audio::DurableTempFile::new(temp_path.clone());
                 match mode {
+                    _ if crate::audio_compression::is_flac(&temp_path) => {
+                        let metadata = crate::audio_compression::validate_flac(&temp_path)
+                            .map_err(|error| error.to_string())?;
+                        validate_runtime_recording_audio_metadata(asset, &metadata)?;
+                    }
                     RuntimeAudioResolveMode::Full => {
                         let metadata = match recording_audio::validate_plaintext_wav(&temp_path) {
                             recording_audio::RecordingAudioValidation::Ready(metadata) => metadata,
@@ -1687,6 +1794,15 @@ pub(crate) fn resolve_recording_audio_bundle_in_directory(
                 temp_path
             }
         };
+        let runtime_path = if crate::audio_compression::is_flac(&runtime_path) {
+            let decoded = crate::audio_compression::decode_flac(&runtime_path, runtime_dir)
+                .map_err(|error| error.to_string())?;
+            let path = decoded.path().to_owned();
+            temporary_files.push(decoded);
+            path
+        } else {
+            runtime_path
+        };
         match asset.role {
             recording_audio::RecordingAudioRole::Primary => primary = Some(runtime_path),
             recording_audio::RecordingAudioRole::Mic => mic = Some(runtime_path),
@@ -1694,6 +1810,20 @@ pub(crate) fn resolve_recording_audio_bundle_in_directory(
         }
     }
 
+    if primary.is_none() {
+        let call = system
+            .as_ref()
+            .ok_or_else(|| "Meeting has no call track".to_string())?;
+        primary = Some(if let Some(mic) = mic.as_ref() {
+            let mixed = recording_audio::rebuild_meeting_mix(mic, call, runtime_dir, aside_spans)
+                .map_err(|e| e.to_string())?;
+            let path = mixed.path().to_owned();
+            temporary_files.push(mixed);
+            path
+        } else {
+            call.clone()
+        });
+    }
     Ok(recording_audio::ResolvedRecordingAudioBundle::new(
         primary
             .ok_or_else(|| format!("Recording '{}' has no primary audio", bundle.recording_id))?,
@@ -1715,14 +1845,24 @@ pub(crate) async fn resolve_recording_audio_for_runtime(
     recording_id: &str,
     mode: RuntimeAudioResolveMode,
 ) -> Result<recording_audio::ResolvedRecordingAudioBundle, String> {
-    let bundle = {
+    // Every reader owns the source until its resolved bundle drops. This also
+    // covers waveform and export callers that do not register post-processing.
+    let lease = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::RuntimeAudio)?;
+    let storage = state.audio_storage_gate.clone().lock_owned().await;
+    let (bundle, aside_spans) = {
         let db = state.db.lock().await;
-        db.load_recording_audio_bundle(recording_id)
-            .map_err(|error| error.to_string())?
+        (
+            db.load_recording_audio_bundle(recording_id)
+                .map_err(|error| error.to_string())?,
+            db.aside_spans(recording_id)
+                .map_err(|error| error.to_string())?,
+        )
     };
     let has_encrypted = bundle
         .assets()
-        .filter(|asset| mode.wants(asset.role))
+        .filter(|asset| mode.wants(&bundle, asset.role))
         .any(|asset| asset.protection == recording_audio::RecordingAudioProtection::Encrypted);
     let key = if has_encrypted {
         let vault_state = state.vault_state.lock().await;
@@ -1744,13 +1884,25 @@ pub(crate) async fn resolve_recording_audio_for_runtime(
     // stalled every other task sharing the thread — transcription progress,
     // the next command — for as long as it took.
     tokio::task::spawn_blocking(move || {
-        resolve_recording_audio_bundle_in_directory(
+        // Pin immutable source files before releasing the storage gate. Readers
+        // survive a later codec switch or pruning; slow copies run off the gate.
+        let snapshot = stage_audio_snapshot(
             &bundle,
-            key.as_ref(),
             &runtime_dir,
             &approved_roots,
             mode,
-        )
+            |source, target| std::fs::hard_link(source, target),
+        );
+        drop(storage);
+        snapshot?
+            .resolve(
+                key.as_ref(),
+                &runtime_dir,
+                &approved_roots,
+                mode,
+                &aside_spans,
+            )
+            .map(|bundle| bundle.with_runtime_lease(lease))
     })
     .await
     .map_err(|error| format!("Preparing recording audio did not finish: {error}"))?
@@ -1955,4 +2107,120 @@ pub fn sweep_runtime_playback_audio_for_sidecar() -> Result<bool, String> {
     let data_dir = crate::paths::data_dir()
         .ok_or("Could not find data directory while sweeping playback audio")?;
     remove_decrypted_runtime_audio_directory(&data_dir)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod audio_snapshot_tests {
+    use super::*;
+    #[test]
+    fn source_snapshots_survive_canonical_deletion_and_release_their_files() {
+        struct Scratch(PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        for compressed in [false, true] {
+            for copy in [false, true] {
+                let root = Scratch(
+                    std::env::temp_dir()
+                        .join(format!("plainsong-audio-snapshot-{}", uuid::Uuid::new_v4())),
+                );
+                std::fs::create_dir(&root.0).unwrap();
+                let runtime = root.0.join("runtime");
+                std::fs::create_dir(&runtime).unwrap();
+                let wav = root.0.join("source.wav");
+                let mut writer = hound::WavWriter::create(
+                    &wav,
+                    hound::WavSpec {
+                        channels: 1,
+                        sample_rate: 48_000,
+                        bits_per_sample: 16,
+                        sample_format: hound::SampleFormat::Int,
+                    },
+                )
+                .unwrap();
+                for n in 0..96_000 {
+                    writer.write_sample((n % 2048) as i16).unwrap();
+                }
+                writer.finalize().unwrap();
+                let expected = crate::audio::utils::load_audio_file(&wav).unwrap();
+                let source = if compressed {
+                    let path = root.0.join("source.flac");
+                    crate::audio_import_runtime::run_audio_conversion(
+                        vec![
+                            wav.as_os_str().to_owned(),
+                            path.as_os_str().to_owned(),
+                            "-f".into(),
+                            "flac".into(),
+                            "-d".into(),
+                            "flac".into(),
+                        ],
+                        Duration::from_secs(60),
+                    )
+                    .unwrap();
+                    path
+                } else {
+                    wav
+                };
+                let recording_audio::RecordingAudioValidation::Ready(metadata) =
+                    recording_audio::validate_plaintext_wav(&source)
+                else {
+                    panic!("audio fixture");
+                };
+                let mut bundle = recording_audio::RecordingAudioBundle::empty("snapshot");
+                bundle
+                    .insert(recording_audio::RecordingAudioAsset {
+                        recording_id: "snapshot".into(),
+                        role: recording_audio::RecordingAudioRole::Primary,
+                        path: source.clone(),
+                        lifecycle: recording_audio::RecordingAudioLifecycle::Ready,
+                        protection: recording_audio::RecordingAudioProtection::Plaintext,
+                        plaintext_bytes: Some(metadata.plaintext_bytes),
+                        plaintext_sha256: Some(metadata.plaintext_sha256),
+                        last_error: None,
+                    })
+                    .unwrap();
+                let snapshot = stage_audio_snapshot(
+                    &bundle,
+                    &runtime,
+                    std::slice::from_ref(&root.0),
+                    RuntimeAudioResolveMode::Full,
+                    |source, target| {
+                        if copy {
+                            Err(std::io::Error::from_raw_os_error(libc::EXDEV))
+                        } else {
+                            std::fs::hard_link(source, target)
+                        }
+                    },
+                )
+                .unwrap();
+                std::fs::remove_file(&source).unwrap();
+                let resolved = snapshot
+                    .resolve(
+                        None,
+                        &runtime,
+                        std::slice::from_ref(&root.0),
+                        RuntimeAudioResolveMode::Full,
+                        &[],
+                    )
+                    .unwrap();
+                assert_eq!(
+                    hound::WavReader::open(&resolved.primary)
+                        .unwrap()
+                        .spec()
+                        .sample_rate,
+                    48_000
+                );
+                assert_eq!(
+                    crate::audio::utils::load_audio_file(&resolved.primary).unwrap(),
+                    expected
+                );
+                let working = resolved.primary.clone();
+                drop(resolved);
+                assert!(!working.exists());
+                assert_eq!(std::fs::read_dir(&runtime).unwrap().count(), 0);
+            }
+        }
+    }
 }

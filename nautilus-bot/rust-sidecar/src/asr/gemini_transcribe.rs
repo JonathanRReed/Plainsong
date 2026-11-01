@@ -695,7 +695,7 @@ impl GeminiTranscribeProvider {
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context(
-            "Gemini API key not set. Add it in Settings → API Keys or set GEMINI_API_KEY.",
+            "Gemini API key not set. Add it in Settings > Search & AI > API keys or set GEMINI_API_KEY.",
         )?;
         let start = std::time::Instant::now();
 
@@ -754,6 +754,7 @@ impl GeminiTranscribeProvider {
             Ok(TranscriptionResult {
                 text: parsed.text,
                 segments: parsed.segments,
+                measured_word_timestamps: false,
                 speaker_turns: parsed.speaker_turns,
                 language: "auto".to_string(),
                 confidence: GEMINI_CONFIDENCE,
@@ -767,6 +768,7 @@ impl GeminiTranscribeProvider {
                 optimization_applied: false,
                 fallback_reason: None,
                 vocabulary_hint_terms_applied,
+                vocabulary_candidates: Vec::new(),
             })
         }
         .await;

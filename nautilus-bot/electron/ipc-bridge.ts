@@ -12,6 +12,10 @@ import {
   SIDECAR_SHUTDOWN_MESSAGE,
 } from "./sidecar-recovery-policy";
 
+// Aborted starts have two bounded cleanup stages of ten seconds, and native
+// model warmup may need another 45 seconds to release provider globals.
+export const SIDECAR_SHUTDOWN_GRACE_MS = 70_000;
+
 interface JsonRpcRequest {
   jsonrpc: "2.0";
   id: string;
@@ -21,11 +25,27 @@ interface JsonRpcRequest {
 
 interface JsonRpcResponse {
   jsonrpc: "2.0";
-  id: string | null;
+  id?: string | null;
   result?: unknown;
-  error?: { code: number; message: string; data?: unknown };
+  error?: { message: string };
   method?: string;
   params?: { event: string; payload: unknown };
+}
+
+function isSidecarMessage(value: unknown): value is JsonRpcResponse {
+  if (!value || typeof value !== "object" || !("jsonrpc" in value) || value.jsonrpc !== "2.0") return false;
+  if ("id" in value && value.id !== null && typeof value.id !== "string") return false;
+  if ("method" in value) {
+    return value.method === "event" && "params" in value && value.params !== null &&
+      typeof value.params === "object" && "event" in value.params &&
+      typeof value.params.event === "string" && value.params.event.length > 0 && "payload" in value.params;
+  }
+  if (!("id" in value) || typeof value.id !== "string" || !value.id) return false;
+  if ("error" in value) {
+    return !("result" in value) && value.error !== null && typeof value.error === "object" &&
+      "message" in value.error && typeof value.error.message === "string";
+  }
+  return "result" in value;
 }
 
 type PendingRequest = {
@@ -86,9 +106,15 @@ export function sidecarError(rawMessage: string): SidecarError {
  */
 export type SidecarTerminationReason =
   | "crash"
+  | "credential_required"
   | "killed"
   | "spawn_failed"
   | "unresponsive";
+export type SidecarRuntimeStatus = Readonly<{
+  ready: boolean;
+  reason?: SidecarTerminationReason;
+  message?: string;
+}>;
 type SenderValidator = (senderUrl: string) => boolean;
 type LocalCommandResult = { handled: boolean; result?: unknown };
 type LocalCommandCallback = (
@@ -99,6 +125,18 @@ type LocalCommandCallback = (
 
 // Renderer-initiated commands must be explicitly approved here.
 const ALLOWED_RENDERER_COMMANDS = new Set<string>([
+  "get_sidecar_runtime_status",
+  "retry_sidecar_with_credential_access",
+  "get_chatgpt_plan_status",
+  "list_chatgpt_plan_models",
+  "chatgpt_get_status",
+  "chatgpt_refresh",
+  "chatgpt_connect",
+  "chatgpt_select_account",
+  "chatgpt_sign_out",
+  "chatgpt_cancel_connect",
+  "__overlay_copy_text__",
+  "__overlay_notes_focus__",
   "__overlay_placement__",
   "__overlay_set_display_mode__",
   "__window_hide__",
@@ -112,17 +150,20 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "analyze_recordings",
   "apply_global_shortcuts_now",
   "approve_dictation_correction_suggestion",
+  "undo_dictation_correction_approval",
   "ask_memory",
-  "benchmark_asr_providers",
   "benchmark_asr_providers_bytes",
   "begin_meeting_capture",
+  "begin_calendar_meeting_capture",
   "cancel_analysis_run",
   "cancel_apple_speech_language_install",
+  "cancel_meeting_notes_wait",
   "capture_selected_text_for_playback",
   "check_for_updates",
   "create_support_bundle",
   "check_system_audio_availability",
   "clear_provider_secret",
+  "clear_dictation_draft",
   "create_backup_default",
   "create_dictation_dictionary_entry",
   "create_dictation_snippet",
@@ -132,6 +173,9 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "delete_dictation_dictionary_entry",
   "delete_bundled_cleanup_model",
   "delete_dictation_snippet",
+  "accept_embedding_model_terms",
+  "cancel_embedding_model_download",
+  "delete_embedding_model",
   "delete_live_preview_engine_model",
   "delete_model",
   "delete_project",
@@ -143,6 +187,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "download_asr_models",
   "download_bundled_cleanup_model",
   "download_diarization_model",
+  "download_embedding_model",
   "download_live_preview_engine_model",
   "download_platform_assets",
   "download_silero_vad_model",
@@ -158,6 +203,9 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "extract_action_items",
   "extract_action_items_grounded",
   "force_stop_dictation",
+  "get_pending_dictation_recovery",
+  "recover_pending_dictation",
+  "discard_pending_dictation_recovery",
   "forget_all_remembered_voices",
   "forget_remembered_voice",
   "get_apple_language_model_availability",
@@ -166,28 +214,40 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_asr_provider_model_options",
   "get_asr_providers",
   "get_asr_runtime_diagnostics",
+  "get_speech_model_download_notice",
   "get_audit_log",
   "get_available_space",
   "get_backup_config",
   "get_backup_setup_report",
   "get_bundled_cleanup_model_status",
+  "get_native_text_model_status",
+  "download_native_text_model",
+  "cancel_native_text_model_download",
+  "delete_native_text_model",
   "get_calendar_snapshot",
+  "get_contacts_access_status",
   "get_cli_tool_status",
   "get_default_asr_provider",
+  "get_diarization_model_plan",
   "get_dictation_audio_level",
+  "get_dictation_edit",
   "get_dictation_history_details",
   "get_dictation_insights",
   "get_dictation_overlay_state",
+  "hold_dictation_overlay_review",
   "get_dictation_shortcut_capability_status",
   "get_embedding_status",
   "get_live_preview_engine_status",
   "get_loopback_device_name",
   "get_meeting_call_status",
+  "get_meeting_action_completion",
   "get_system_audio_capability",
   "get_meeting_chat_messages",
   "get_meeting_consent_notice_status",
+  "get_meeting_source_levels",
   "get_meeting_transcript_details",
   "get_ollama_status",
+  "get_local_text_runtime_health",
   "get_curated_ollama_model_catalog",
   "list_ollama_model_catalog",
   "get_permission_diagnostics",
@@ -195,6 +255,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "get_recent_dictation_results",
   "get_recording",
   "get_recording_overlay_state",
+  "dismiss_meeting_microphone_warning",
   "get_recording_waveform",
   "get_recordings",
   "get_relationship_memory",
@@ -223,11 +284,13 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "list_dictation_command_presets",
   "list_dictation_correction_suggestions",
   "list_dictation_dictionary_entries",
+  "list_dictation_drafts",
   "list_dictation_snippets",
   "list_downloaded_models",
   "list_elevenlabs_asr_models",
   "list_export_templates",
   "list_gemini_models",
+  "list_meeting_followups",
   "list_ollama_cloud_models",
   "list_ollama_models",
   "cancel_ollama_model_install",
@@ -244,9 +307,6 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "open_permission_settings",
   "open_recording_audio",
   "pause_meeting_capture",
-  "plus_activate",
-  "plus_get_status",
-  "plus_sign_out",
   "prepare_meeting_brief",
   "preview_support_bundle",
   "prepare_recording_playback",
@@ -268,6 +328,7 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "reprocess_dictation_text",
   "request_apple_speech_permission",
   "request_calendar_access",
+  "request_contacts_access",
   "request_dictation_permissions",
   "register_capture_admission",
   "reset_app_state",
@@ -280,24 +341,44 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "remember_speaker_voice",
   "revalidate_recording_audio",
   "run_diarization",
+  "get_audio_storage_status",
+  "get_recording_asides",
+  "get_recording_aside_ranges",
+  "delete_recording_aside",
+  "export_recording_audio",
   "run_storage_retention_maintenance",
   "save_backup_config",
+  "save_dictation_draft",
+  "save_dictation_edit",
   "save_settings",
+  "set_dictation_external_correction_learning",
+  "set_saved_prompts",
   "search_dictation_history",
   "search_transcripts",
   "select_audio_file_to_import",
   "select_backup_location",
   "select_cloud_backup_location",
   "select_export_location",
+  "get_note_publish_config",
+  "save_note_publish_config",
+  "get_note_publish_status",
+  "retry_note_publish",
   "set_asr_provider_model",
   "set_default_asr_provider",
+  "set_meeting_action_completed",
+  "edit_meeting_action",
+  "add_meeting_action",
+  "delete_meeting_action",
   "set_provider_secret",
   "set_recording_source_type",
   "set_update_channel",
+  "stage_saved_dictation_result",
   "start_dictation",
   "stop_dictation",
   "summarize_recording",
   "summarize_recording_grounded",
+  "get_summary_regeneration_undo",
+  "undo_summary_regeneration",
   "suggest_speaker_voices",
   "sync_backup_to_cloud",
   // The command palette's selected-text actions have always called this
@@ -311,6 +392,11 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "update_recording_analysis",
   "update_recording_attendees",
   "update_recording_notes",
+  "get_meeting_enhanced_note_draft",
+  "save_meeting_enhanced_note_draft",
+  "delete_meeting_enhanced_note_draft",
+  "queue_meeting_note_recovery",
+  "list_meeting_note_recovery",
   "update_recording_template",
   "upsert_dictation_command_preset",
   "verify_backup_cloud_connection",
@@ -319,6 +405,8 @@ const ALLOWED_RENDERER_COMMANDS = new Set<string>([
   "test_system_audio_capture",
   "verify_system_audio_setup",
 ]);
+
+const CAPTURE_START_COMMANDS = new Set(["start_dictation", "start_recording"]);
 
 export function isRendererCommandAllowed(command: string): boolean {
   return ALLOWED_RENDERER_COMMANDS.has(command);
@@ -350,8 +438,9 @@ export class IpcBridge {
   private firstResponseCallback: LifecycleCallback | null = null;
   private firstResponseSeen = false;
   private sidecarGeneration = 0;
+  private runtimeStatus: SidecarRuntimeStatus = Object.freeze({ ready: false });
 
-  constructor(sidecarPath: string, spawnProcess: typeof spawn = spawn) {
+  constructor(sidecarPath: string, spawnProcess: typeof spawn = spawn, private readonly trustedStartupEnvironment: Readonly<Record<string, string>> = {}) {
     this.sidecarPath = sidecarPath;
     this.spawnProcess = spawnProcess;
   }
@@ -421,23 +510,57 @@ export class IpcBridge {
     this.registerIpcHandler();
   }
 
-  private spawnSidecar(): void {
+  getRuntimeStatus(): SidecarRuntimeStatus {
+    return this.runtimeStatus;
+  }
+
+  retryWithCredentialAccess(): void {
+    if (this.shuttingDown || this.quitPending) {
+      throw new Error(SIDECAR_SHUTDOWN_MESSAGE);
+    }
+    if (this.runtimeStatus.reason !== "credential_required") {
+      throw new Error("Sidecar is not in a credential-required state");
+    }
+    if (this.process) {
+      throw new Error("Cannot retry while the sidecar is still running");
+    }
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+    this.restartAttempts = 0;
+    this.spawnSidecar(true);
+  }
+
+  private spawnSidecar(startupCredentialAccess = false): void {
     this.firstResponseSeen = false;
     const generation = ++this.sidecarGeneration;
+    let terminationHandled = false;
+    let credentialRequired = false;
+    let credentialUpgradeHandled = false;
+    let startupStderrTail = "";
     console.log(`[sidecar] spawning: ${this.sidecarPath}`);
 
+    const env = {
+      ...buildSidecarEnv(process.env),
+      ...this.trustedStartupEnvironment,
+    };
+    delete env.PLAINSONG_STARTUP_CREDENTIAL_ACCESS;
+    if (startupCredentialAccess) {
+      env.PLAINSONG_STARTUP_CREDENTIAL_ACCESS = "1";
+    }
     this.process = this.spawnProcess(this.sidecarPath, [], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: buildSidecarEnv(process.env),
+      env,
     });
 
     const rl = createInterface({ input: this.process.stdout! });
 
     rl.on("line", (line) => {
-      if (!line.trim()) return;
+      if (terminationHandled || !line.trim()) return;
       try {
-        const msg = JSON.parse(line) as JsonRpcResponse;
-        this.handleSidecarMessage(msg, generation);
+        const msg: unknown = JSON.parse(line);
+        if (isSidecarMessage(msg)) this.handleSidecarMessage(msg, generation);
       } catch (e) {
         console.warn("[sidecar] unparseable stdout:", line, e);
       }
@@ -449,6 +572,26 @@ export class IpcBridge {
       // Kept in memory only, for the support bundle the reader may ask for.
       // See electron/diagnostic-log-buffer.ts.
       diagnosticLogBuffer.record("sidecar", text);
+      if (generation === this.sidecarGeneration && !this.firstResponseSeen) {
+        const combinedStartupStderr = startupStderrTail + text;
+        if (combinedStartupStderr.includes("[PLAINSONG_CREDENTIAL_REQUIRED]")) {
+          credentialRequired = true;
+        }
+        startupStderrTail = combinedStartupStderr.slice(-8_192);
+        if (
+          credentialRequired &&
+          !credentialUpgradeHandled &&
+          !this.process &&
+          (this.runtimeStatus.reason === "crash" ||
+            this.runtimeStatus.reason === "killed")
+        ) {
+          credentialUpgradeHandled = true;
+          this.handleSidecarTermination(
+            "credential_required",
+            "Sidecar startup requires credential access",
+          );
+        }
+      }
     });
 
     this.process.stdin!.on("error", (error: NodeJS.ErrnoException) => {
@@ -466,29 +609,41 @@ export class IpcBridge {
     });
 
     this.process.on("exit", (code, signal) => {
+      if (generation !== this.sidecarGeneration || terminationHandled) return;
+      terminationHandled = true;
+      this.process = null;
       console.warn(`[sidecar] exited: code=${code} signal=${signal}`);
       // A recycle we initiated knows why it killed the process; anything else
       // is classified from how the process actually died. A signal means
       // something killed it, no signal means it went away on its own.
       const reason =
-        this.pendingTerminationReason ?? (signal ? "killed" : "crash");
+        this.pendingTerminationReason ??
+        (credentialRequired ? "credential_required" : signal ? "killed" : "crash");
       this.pendingTerminationReason = null;
       this.handleSidecarTermination(
         reason,
-        `Sidecar process exited (code=${code}, signal=${signal})`,
+        reason === "credential_required"
+          ? "Sidecar startup requires credential access"
+          : `Sidecar process exited (code=${code}, signal=${signal})`,
       );
     });
 
     this.process.on("error", (err) => {
+      if (generation !== this.sidecarGeneration || terminationHandled) return;
+      terminationHandled = true;
+      this.process = null;
       console.error(`[sidecar] failed to start: path=${this.sidecarPath}`, err);
       this.pendingTerminationReason = null;
       this.handleSidecarTermination(
-        "spawn_failed",
-        `Sidecar process failed to start (${this.sidecarPath}): ${err.message}`,
+        credentialRequired ? "credential_required" : "spawn_failed",
+        credentialRequired
+          ? "Sidecar startup requires credential access"
+          : `Sidecar process failed to start (${this.sidecarPath}): ${err.message}`,
       );
     });
 
     this.process.on("spawn", () => {
+      if (terminationHandled || generation !== this.sidecarGeneration) return;
       console.log("[sidecar] connected");
       this.spawnedCallback?.();
       // Deliberately NOT resetting restartAttempts here. 'spawn' only means the
@@ -519,11 +674,12 @@ export class IpcBridge {
     message: string,
   ): void {
     this.sidecarHealthy = false;
-    this.eventCallback?.("sidecar-runtime-changed", {
+    this.runtimeStatus = Object.freeze({
       ready: false,
       reason,
       message,
     });
+    this.eventCallback?.("sidecar-runtime-changed", this.runtimeStatus);
     // A single dead process can emit both 'error' and 'exit'. Without this
     // guard each one schedules its own restart, so the pool of live sidecars
     // grows instead of being replaced.
@@ -532,7 +688,12 @@ export class IpcBridge {
       this.restartTimer = null;
     }
 
-    if (!this.shuttingDown && !this.quitPending && this.restartAttempts < this.maxRestarts) {
+    if (
+      reason !== "credential_required" &&
+      !this.shuttingDown &&
+      !this.quitPending &&
+      this.restartAttempts < this.maxRestarts
+    ) {
       const delay = Math.min(1000 * 2 ** this.restartAttempts, 30000);
       this.restartAttempts++;
       console.log(`[sidecar] restarting in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestarts})`);
@@ -563,17 +724,19 @@ export class IpcBridge {
     if (generation !== this.sidecarGeneration) {
       return;
     }
-    if (!this.firstResponseSeen && msg.id !== null && msg.id !== undefined) {
+    const answersPendingRequest = typeof msg.id === "string" && this.pending.has(msg.id);
+    if (!this.firstResponseSeen && answersPendingRequest) {
       this.firstResponseSeen = true;
       this.firstResponseCallback?.();
     }
     if (!this.sidecarHealthy) {
       this.sidecarHealthy = true;
-      this.eventCallback?.("sidecar-runtime-changed", { ready: true });
+      this.runtimeStatus = Object.freeze({ ready: true });
+      this.eventCallback?.("sidecar-runtime-changed", this.runtimeStatus);
     }
-    // First readable message from this generation: the sidecar is talking, so
-    // the backoff budget has been earned back. See the 'spawn' handler.
-    if (this.restartAttempts > 0) {
+    // A reply to our request earns back the restart budget. Startup events
+    // alone do not show that the replacement can service commands.
+    if (this.restartAttempts > 0 && answersPendingRequest) {
       console.log("[sidecar] healthy, clearing restart budget");
       this.restartAttempts = 0;
     }
@@ -610,8 +773,16 @@ export class IpcBridge {
   }
 
   invokeSidecar(command: string, args?: unknown): Promise<unknown> {
-    if (this.shuttingDown) {
+    if (
+      this.shuttingDown ||
+      (this.quitPending && CAPTURE_START_COMMANDS.has(command))
+    ) {
       return Promise.reject(new Error(SIDECAR_SHUTDOWN_MESSAGE));
+    }
+    if (this.runtimeStatus.reason === "credential_required" && !this.process) {
+      return Promise.reject(
+        new Error("Sidecar startup requires credential access before commands can run"),
+      );
     }
     return new Promise((resolve, reject) => {
       const id = randomUUID();
@@ -719,7 +890,7 @@ export class IpcBridge {
   }
 
   private registerIpcHandler(): void {
-    ipcMain.handle("sidecar:invoke", async (event, command: string, args?: unknown) => {
+    ipcMain.handle("sidecar:invoke", async (event, command: unknown, args?: unknown) => {
       // The allowlist checks *what* is being asked for; this checks *who* is
       // asking. Without it any frame that ends up in a window with our preload
       // — including one loaded from an unexpected origin — reaches the sidecar.
@@ -731,8 +902,16 @@ export class IpcBridge {
         throw new Error("Renderer command rejected: untrusted sender");
       }
 
+      if (typeof command !== "string") {
+        throw new Error("Renderer command must be a string");
+      }
       if (!isRendererCommandAllowed(command)) {
         throw new Error(`Renderer command is not allowed: ${command}`);
+      }
+
+      if (args !== undefined && (!args || typeof args !== "object" || Array.isArray(args) ||
+        (Object.getPrototypeOf(args) !== Object.prototype && Object.getPrototypeOf(args) !== null))) {
+        throw new Error("Renderer command arguments must be an object");
       }
 
       if (this.localCommandCallback) {
@@ -742,6 +921,9 @@ export class IpcBridge {
         }
       }
 
+      if (command === "__overlay_copy_text__") {
+        throw new Error("Overlay clipboard handler is unavailable.");
+      }
       return await this.invoke(command, args);
     });
   }
@@ -777,7 +959,7 @@ export class IpcBridge {
         if (this.process && !this.process.killed) {
           this.process.kill("SIGTERM");
         }
-      }, 3000);
+      }, SIDECAR_SHUTDOWN_GRACE_MS);
     }
   }
 

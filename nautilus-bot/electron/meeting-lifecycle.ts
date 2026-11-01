@@ -26,9 +26,16 @@ const TERMINAL_PHASES = new Set<MeetingLifecyclePhase>([
   "recoverable",
 ]);
 
+/**
+ * Which meeting the menu bar follows after a lifecycle event. A meeting that
+ * has finished capturing and is only transcribing gives way to a new meeting
+ * that starts capturing: otherwise the menu bar keeps showing "Finishing the
+ * meeting…" with Stop disabled for the whole of the new one.
+ */
 export function nextActiveMeetingRecordingId(
   currentRecordingId: string | null,
   event: MeetingLifecycleEvent,
+  currentPhase: MeetingLifecyclePhase | null = null,
 ): string | null {
   const incomingId = event.recordingId?.trim() || null;
   const phase = event.phase === "transcribing" ? "processing" : event.phase;
@@ -47,7 +54,9 @@ export function nextActiveMeetingRecordingId(
     incomingId &&
     incomingId !== currentRecordingId
   ) {
-    return currentRecordingId;
+    const currentOnlyTranscribing = currentPhase === "processing";
+    const incomingCaptures = phase === "preparing" || phase === "recording";
+    return currentOnlyTranscribing && incomingCaptures ? incomingId : currentRecordingId;
   }
   return incomingId ?? currentRecordingId;
 }
@@ -71,6 +80,19 @@ export function nextActiveMeetingPhase(
     return currentPhase;
   }
   return event.phase === "transcribing" ? "processing" : event.phase;
+}
+
+/**
+ * What to tell the reader when the background service stops under a meeting.
+ * Capture stopping and transcription stopping are different losses: the
+ * first ends the recording early, the second only needs the saved audio
+ * transcribed again.
+ */
+export function interruptedMeetingMessage(phase: MeetingLifecyclePhase | null): string {
+  if (phase === "processing") {
+    return "Plainsong restarted while this meeting was being transcribed. The recording is saved; open the meeting to transcribe it again.";
+  }
+  return "Recording stopped unexpectedly because Plainsong's audio service restarted. Open the meeting to check for saved audio.";
 }
 
 export function resolveMeetingStopId(

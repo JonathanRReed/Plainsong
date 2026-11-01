@@ -4,16 +4,41 @@
 //! with resume support, checksum verification, and progress callbacks.
 
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 const WHISPER_MODEL_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
-const MODEL_INTEGRITY_RECEIPT_VERSION: &str = "plainsong-model-integrity-v2";
 const MAX_GENERIC_MODEL_ARTIFACT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+const MAX_DOWNLOAD_ERROR_BODY_BYTES: usize = 4 * 1024;
+
+async fn bounded_download_error_snippet<S, B, E>(body: S) -> String
+where
+    S: Stream<Item = std::result::Result<B, E>>,
+    B: AsRef<[u8]>,
+{
+    futures_util::pin_mut!(body);
+    let mut prefix = Vec::with_capacity(MAX_DOWNLOAD_ERROR_BODY_BYTES);
+    while prefix.len() < MAX_DOWNLOAD_ERROR_BODY_BYTES {
+        let Some(Ok(chunk)) = body.next().await else {
+            break;
+        };
+        let bytes = chunk.as_ref();
+        let remaining = MAX_DOWNLOAD_ERROR_BODY_BYTES - prefix.len();
+        prefix.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+    }
+    // Dropping the stream discards the rest without draining an untrusted body.
+    String::from_utf8_lossy(&prefix)
+        .trim()
+        .chars()
+        .take(200)
+        .collect()
+}
 
 /// Download manager for ASR models
 pub struct DownloadManager {
@@ -28,7 +53,7 @@ pub struct DownloadManager {
 /// See `crate::audio::silero_vad` for the model's input/output contract.
 const SILERO_VAD_ONNX_URL: &str =
     "https://raw.githubusercontent.com/snakers4/silero-vad/76e3dc408eb2a5c655c34e230d2d5459b4439daa/src/silero_vad/data/silero_vad.onnx";
-const SILERO_VAD_ONNX_SHA256: &str =
+pub(crate) const SILERO_VAD_ONNX_SHA256: &str =
     "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3";
 const SILERO_VAD_ONNX_FILE: &str = "silero_vad.onnx";
 /// The real file is ~2.2MB; tolerate upstream size drift but reject tiny
@@ -47,6 +72,12 @@ struct DiarizationModelInfo {
 
 fn diarization_model_info(model_id: &str) -> Option<DiarizationModelInfo> {
     match model_id {
+        NEMOTRON_DIARIZATION_MODEL_ID => Some(DiarizationModelInfo {
+            url: "https://huggingface.co/altunenes/parakeet-rs/resolve/4d2a8bc71f5c896ec40faa59732e6716295edaf2/nemotron-3-diarization/nemotron3_diar_v3.onnx",
+            file_name: "nemotron3_diar_v3.onnx",
+            sha256: "915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a",
+            max_bytes: 512 * 1024 * 1024,
+        }),
         "ecapa_tdnn_speaker" => Some(DiarizationModelInfo {
             url: "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/a2f3dcb1c8702caccc7a55ceb57f5e8d1842112b/voxceleb_ECAPA512_LM.onnx",
             file_name: "ecapa_tdnn_speaker.onnx",
@@ -65,146 +96,142 @@ fn diarization_model_info(model_id: &str) -> Option<DiarizationModelInfo> {
             sha256: "1068e4ac3a76bb9c769e6816ef30bf89363f6e966f1d938210cb8ed4038f8e93",
             max_bytes: 256 * 1024 * 1024,
         }),
-        "eres2netv2_speaker" => Some(DiarizationModelInfo {
-            url: "https://huggingface.co/phoenix124/kept-models/resolve/42de48f3d8cb1c33ad29f4dbe2db0801a0759ddf/diarize-embedding-eres2netv2-int8.onnx",
-            file_name: "eres2netv2_speaker.onnx",
-            sha256: "be6b162137d8b08854268a97763c007e49882f221e02950242923d40d2be157e",
-            max_bytes: 64 * 1024 * 1024,
-        }),
         _ => None,
     }
 }
 
-/// Model id for the experimental speakrs (pyannote community-1) diarizer.
-///
-/// Not a `DiarizationModelInfo` entry because speakrs needs a *bundle* of ten
-/// files (segmentation ONNX, embedding ONNX + external weights, and six PLDA
-/// parameter arrays), not one `.onnx`. Only defined when the backend is
-/// compiled in, so a default build cannot offer, download, or select a model
-/// it has no code to run.
-#[cfg(feature = "diarization-speakrs")]
-pub(crate) const SPEAKRS_MODEL_ID: &str = "speakrs_community1";
+pub(crate) const NEMOTRON_DIARIZATION_MODEL_ID: &str = "nemotron3_diarization";
 
-/// Sub-directory of `models/diarization/` holding the speakrs bundle.
-/// speakrs resolves every file of the bundle by name inside one directory
-/// (`ModelBundle::from_dir`), so the layout is fixed by the crate.
-///
-/// Not feature-gated, unlike the file list: a build that can no longer download
-/// the bundle still has to find, size and delete a copy an earlier build left
-/// on disk.
-pub(crate) const SPEAKRS_BUNDLE_DIR: &str = "speakrs";
+/// Model id of the pyannote community-1 speaker model (Plainsong's Rust port,
+/// `diarization::community1`).
+pub(crate) const COMMUNITY1_MODEL_ID: &str = "pyannote_community1";
 
-#[cfg(feature = "diarization-speakrs")]
+/// A failed community-1 download, said so a reader can act on it. A 404
+/// means Plainsong's model release does not carry the file (yet), which is
+/// not the user's network and not worth retrying today. The reader sees one
+/// plain sentence (`to_string`); the file name and HTTP status stay in the
+/// error chain (`{:#}`) and the log.
+fn community1_download_error(file_name: &str, error: anyhow::Error) -> anyhow::Error {
+    let detail = format!("{error:#}");
+    tracing::warn!("Speaker model download failed ({file_name}): {detail}");
+    let error = error.context(format!("speaker model file {file_name}"));
+    if detail.contains("HTTP 404") {
+        error.context("The speaker model isn't available to download yet.")
+    } else {
+        error.context("The speaker model download didn't finish. Try again.")
+    }
+}
+
+/// Per-destination download locks, so two in-process downloads of the same
+/// file never write the same `.tmp` at once. Entries are a few bytes per
+/// model file this process ever fetched; they are not worth reclaiming.
+type DownloadDestinationLocks =
+    Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>;
+
+fn download_destination_locks() -> &'static DownloadDestinationLocks {
+    static LOCKS: OnceLock<DownloadDestinationLocks> = OnceLock::new();
+    LOCKS.get_or_init(Default::default)
+}
+
+/// Wait for, then hold, the download lock of `destination`.
+async fn lock_download_destination(destination: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = download_destination_locks()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Arc::clone(locks.entry(destination.to_path_buf()).or_default())
+    };
+    lock.lock_owned().await
+}
+
+/// Sub-directory of `models/diarization/` holding the community-1 bundle.
+pub(crate) const COMMUNITY1_BUNDLE_DIR: &str = "pyannote-community-1";
+
 #[derive(Clone, Copy)]
-pub(crate) struct SpeakrsBundleFile {
+pub(crate) struct ModelBundleFile {
     pub(crate) url: &'static str,
     pub(crate) file_name: &'static str,
     pub(crate) sha256: &'static str,
     pub(crate) max_bytes: u64,
 }
 
-/// The ten files speakrs 0.5's `ExecutionMode::Cpu` pipeline needs, pinned to
-/// one immutable `avencera/speakrs-models` revision (never `/resolve/main/`).
-/// Every SHA-256 below was verified by downloading the file at this revision
-/// and hashing it locally; they also match the LFS object ids the Hugging Face
-/// tree API reports for the same revision.
-///
-/// Licensing (recorded here because the app redistributes nothing but does
-/// fetch these at runtime): the `avencera/speakrs-models` card declares NO
-/// license of its own and says users are responsible for the upstream terms.
-/// Upstream is `pyannote/speaker-diarization-community-1`, which is CC-BY-4.0
-/// and gated on Hugging Face; its segmentation component
-/// (`pyannote/segmentation-3.0`) is MIT and the embedder
-/// (`pyannote/wespeaker-voxceleb-resnet34-LM`) is CC-BY-4.0. See
-/// artifacts/qa/diarization-speakrs-spike-2026-09-02.md.
-#[cfg(feature = "diarization-speakrs")]
-pub(crate) const SPEAKRS_BUNDLE: &[SpeakrsBundleFile] = &[
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/segmentation-3.0.onnx",
-        file_name: "segmentation-3.0.onnx",
-        sha256: "038b971741ed623af9773ecafdefa4b7bc523520099c2a68f8568b24189e8ad9",
-        max_bytes: 32 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.onnx",
-        file_name: "wespeaker-voxceleb-resnet34.onnx",
-        sha256: "203a4c67112167580ab1fcb62f4568c633499fb283805890aebe1c48564fcc0f",
-        max_bytes: 128 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.onnx.data",
-        file_name: "wespeaker-voxceleb-resnet34.onnx.data",
-        sha256: "dc105e7857156611381b95cc961b277d8e1e098e7af1c919a77c68c7257ce956",
-        max_bytes: 128 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_lda.npy",
-        file_name: "plda_lda.npy",
-        sha256: "e20c9b012bebd1aabda5a38a127e63a43cf35debdc502715fc143e2fb6bc3c4b",
-        max_bytes: 4 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_tr.npy",
-        file_name: "plda_tr.npy",
-        sha256: "e700b68cb319de3fafb5fa093eb9222c23c447084741f8d3a533640d425510ee",
-        max_bytes: 4 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mu.npy",
-        file_name: "plda_mu.npy",
-        sha256: "d286d48acf99bbc1ed1502fed0a3e361ae5626ce1870c8be9f7397c5e47886c6",
-        max_bytes: 4 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_psi.npy",
-        file_name: "plda_psi.npy",
-        sha256: "d7128c9ed2f28a9781971805131129f077c04f948e2df12e52dcdb99f2b4e5f5",
-        max_bytes: 4 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mean1.npy",
-        file_name: "plda_mean1.npy",
-        sha256: "e424c0c352182aa8e0f555dec1f3b30e29a20b9ed6b25d339f112af92e51e36f",
-        max_bytes: 4 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/plda_mean2.npy",
-        file_name: "plda_mean2.npy",
-        sha256: "6f6fb708a2037197b5b84ffeaa8f140cb878088fbecd6ab042ad26a7691bd2cf",
-        max_bytes: 4 * 1024 * 1024,
-    },
-    SpeakrsBundleFile {
-        url: "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/wespeaker-voxceleb-resnet34.min_num_samples.txt",
-        file_name: "wespeaker-voxceleb-resnet34.min_num_samples.txt",
-        sha256: "e4df891c484d7abb985dadf539fa1883a646dab6337af5cae4159c587b7050cc",
-        max_bytes: 4 * 1024,
-    },
+macro_rules! community1_file {
+    ($name:literal, $sha:literal, $max:expr) => {
+        ModelBundleFile {
+            url: concat!(
+                "https://github.com/JonathanRReed/Plainsong/releases/download/models-2026-10/",
+                $name
+            ),
+            file_name: $name,
+            sha256: $sha,
+            max_bytes: $max,
+        }
+    };
+}
+
+/// The pyannote community-1 bundle (CC BY 4.0), served from Plainsong's
+/// `models-2026-10` release because the ONNX graphs are Plainsong's own
+/// exports: `scripts/pyannote-community1/export_onnx.py` turns
+/// `pyannote-community/speaker-diarization-community-1` into these bytes
+/// deterministically, from source revision 8a527374977391da736e0daaef26855d949d9685. The two `.npz` files are upstream's, byte for byte
+/// (their SHA-256 equals the Hugging Face LFS ids at that revision). The
+/// LICENSE and NOTICE travel with the weights, as CC BY requires.
+pub(crate) const COMMUNITY1_BUNDLE: &[ModelBundleFile] = &[
+    community1_file!(
+        "pyannote-community-1-segmentation.onnx",
+        "298eb9736b09b350733083d04cdaedb67bd68144d1727a9e278489112362c4dd",
+        16 * 1024 * 1024
+    ),
+    community1_file!(
+        "pyannote-community-1-embedding.onnx",
+        "00b1cb7b3c5244cdc89eed0668efd1bd0699f7a371fa4eea1c63afe7e9a64c6d",
+        64 * 1024 * 1024
+    ),
+    community1_file!(
+        "pyannote-community-1-plda.npz",
+        "9b77bcd840692710dd3496f62ecfeed8d8e5f002fd991b785079b244eab7d255",
+        1024 * 1024
+    ),
+    community1_file!(
+        "pyannote-community-1-xvec_transform.npz",
+        "325f1ce8e48f7e55e9c8aa47e05d2766b7c48c4b25b8de8dd751e7a4cc5fbe8f",
+        1024 * 1024
+    ),
+    community1_file!(
+        "pyannote-community-1-LICENSE.txt",
+        "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+        64 * 1024
+    ),
+    community1_file!(
+        "pyannote-community-1-NOTICE.txt",
+        "73c0019490cfdc57752cfbf217f4dee39330f6fa12a1f75625dc8fc852b7d49c",
+        64 * 1024
+    ),
 ];
 
+/// Every file of the community-1 bundle is verified against its pin.
+#[cfg(any(test, feature = "diarization"))]
+pub(crate) fn is_community1_bundle_installed(bundle_dir: &Path) -> bool {
+    is_bundle_installed(
+        bundle_dir,
+        COMMUNITY1_BUNDLE
+            .iter()
+            .map(|file| (file.file_name, file.sha256)),
+    )
+}
+
 /// All-or-nothing readiness for a multi-file model bundle: every named file
-/// must exist in `bundle_dir` and carry an integrity receipt matching the
-/// expected hash beside it. Generic over the file list so the rule can be
+/// must exist in `bundle_dir` and be recorded as verified against its
+/// expected hash. Generic over the file list so the rule can be
 /// tested with fixtures instead of the real multi-megabyte weights.
-#[cfg(feature = "diarization-speakrs")]
-fn is_bundle_trusted<'a>(
+#[cfg(any(test, feature = "diarization"))]
+fn is_bundle_installed<'a>(
     bundle_dir: &Path,
     files: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> bool {
     files.into_iter().all(|(file_name, sha256)| {
-        is_model_artifact_trusted(&bundle_dir.join(file_name), Some(sha256))
+        is_model_artifact_installed(&bundle_dir.join(file_name), Some(sha256))
     })
-}
-
-/// Every file of the speakrs bundle carries a receipt whose hash matches its
-/// pin. Bundle-wide, because a partial bundle loads no pipeline at all.
-#[cfg(feature = "diarization-speakrs")]
-pub(crate) fn is_speakrs_bundle_trusted(bundle_dir: &Path) -> bool {
-    is_bundle_trusted(
-        bundle_dir,
-        SPEAKRS_BUNDLE
-            .iter()
-            .map(|file| (file.file_name, file.sha256)),
-    )
 }
 
 fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -213,7 +240,10 @@ fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn model_integrity_receipt_path(path: &Path) -> PathBuf {
+/// The sibling receipt file older builds wrote beside each model. Nothing
+/// trusts it any more; listings still hide it, and deleting or re-verifying a
+/// model still removes it.
+fn legacy_integrity_receipt_path(path: &Path) -> PathBuf {
     path_with_suffix(path, ".plainsong-integrity")
 }
 
@@ -225,258 +255,24 @@ fn is_internal_model_metadata_file(path: &Path) -> bool {
         })
 }
 
-/// OS-keychain secret name for the receipt MAC key, generated on first use.
-#[cfg(not(test))]
-const MODEL_INTEGRITY_MAC_KEY_SECRET: &str = "model_integrity_receipt_mac_key";
-const MODEL_INTEGRITY_MAC_KEY_BYTES: usize = 32;
+mod model_trust;
 
-/// Prefix that marks a MAC-key error as a keychain *availability* problem
-/// (transient I/O, locked keychain, no credential-store backend in this
-/// sandbox) as opposed to a data-corruption problem (a stored key of the
-/// wrong shape). Callers that want to react differently to "the keychain is
-/// down" than to "trust nothing until this is fixed" can match on this
-/// prefix instead of guessing from the message.
-const KEYCHAIN_UNAVAILABLE_PREFIX: &str = "keychain unavailable";
-
-/// The MAC key never changes once generated, so once a lookup succeeds (or
-/// definitively fails) there is nothing more to learn from asking again.
-/// Memoized because the naive per-call keychain round trip was measured at
-/// 60+ synchronous keychain reads during the startup integrity migration
-/// alone -- see `migrate_legacy_model_integrity_receipts`. Stores `String`
-/// rather than `anyhow::Error` because the latter is not `Clone` and
-/// `OnceLock::get_or_init` needs a value it can hand back on every call.
-#[cfg(not(test))]
-static MODEL_INTEGRITY_MAC_KEY: std::sync::OnceLock<
-    Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES], String>,
-> = std::sync::OnceLock::new();
-
-/// Fetches the keychain-held MAC key for model-integrity receipts, generating
-/// and persisting a fresh one on first use.
-///
-/// Receipts are plaintext sibling files (hash plus file identity and change
-/// metadata) that let a relaunch skip re-hashing multi-gigabyte models.
-/// Without a MAC, anything
-/// that can write into the models directory can swap a model file and hand-
-/// write a receipt that reproduces the exact same format -- the format and
-/// even the app's own pinned digests are public (open source). Keying the
-/// receipt to a secret held in the OS keychain means forging one also
-/// requires keychain access, not just filesystem write access.
-#[cfg(not(test))]
-fn model_integrity_mac_key() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES]> {
-    MODEL_INTEGRITY_MAC_KEY
-        .get_or_init(model_integrity_mac_key_uncached)
-        .clone()
-        .map_err(|message| anyhow::anyhow!(message))
-}
-
-#[cfg(not(test))]
-fn model_integrity_mac_key_uncached() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES], String> {
-    let existing = crate::secrets::get_internal_secret(MODEL_INTEGRITY_MAC_KEY_SECRET)
-        .map_err(|error| {
-            format!(
-                "{KEYCHAIN_UNAVAILABLE_PREFIX}: failed to read the model-integrity receipt MAC key ({error})"
-            )
-        })?;
-    if let Some(existing) = existing {
-        let bytes = hex::decode(existing.trim()).map_err(|error| {
-            format!(
-                "model-integrity receipt MAC key stored in the keychain is not valid hex: {error}"
-            )
-        })?;
-        return bytes.try_into().map_err(|bytes: Vec<u8>| {
-            format!(
-                "model-integrity receipt MAC key stored in the keychain has {} bytes, expected {}",
-                bytes.len(),
-                MODEL_INTEGRITY_MAC_KEY_BYTES
-            )
-        });
-    }
-
-    let mut key = [0u8; MODEL_INTEGRITY_MAC_KEY_BYTES];
-    use rand::Rng;
-    rand::rng().fill_bytes(&mut key);
-    crate::secrets::set_internal_secret(MODEL_INTEGRITY_MAC_KEY_SECRET, &hex::encode(key))
-        .map_err(|error| {
-            format!(
-                "{KEYCHAIN_UNAVAILABLE_PREFIX}: failed to persist a new model-integrity receipt MAC key ({error})"
-            )
-        })?;
-    Ok(key)
-}
-
-/// Test builds never touch the real OS keychain for this key: it is
-/// unavailable or flaky in headless CI/sandbox runners, and would make every
-/// model-integrity test's outcome depend on whatever a previous run (or a
-/// concurrent test binary) happened to persist there. A fixed in-process key
-/// still exercises the MAC's real format and tamper-detection behavior,
-/// matching how `secrets.rs`'s own vault-key tests inject a fake store
-/// instead of hitting the keychain.
+use model_trust::{assert_pinned_digest_is_never_empty, forget_verified_models_under};
+pub(crate) use model_trust::{
+    forget_verified_model, is_integrity_mismatch, is_model_artifact_changed,
+    is_model_artifact_installed, is_model_artifact_verified, mismatch_first,
+    open_model_artifact_to_hash, open_verified_model_artifact, preverify_models_in_background,
+    read_verified_model_bytes, remove_legacy_verified_model_cache, verify_and_remember_model,
+    verify_or_record_model_integrity, VerifiedModelArtifact,
+};
 #[cfg(test)]
-fn model_integrity_mac_key() -> Result<[u8; MODEL_INTEGRITY_MAC_KEY_BYTES]> {
-    Ok([0x42; MODEL_INTEGRITY_MAC_KEY_BYTES])
-}
-
-fn compute_receipt_mac(payload: &[u8]) -> Result<String> {
-    use hmac::{
-        digest::{KeyInit, Mac},
-        Hmac,
-    };
-    use sha2::Sha256;
-
-    let key = model_integrity_mac_key()?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).map_err(|error| {
-        anyhow::anyhow!("Failed to initialize model-integrity receipt MAC: {error}")
-    })?;
-    mac.update(payload);
-    Ok(hex::encode(mac.finalize().into_bytes()))
-}
-
-fn model_integrity_receipt_contents(path: &Path, expected_sha256: &str) -> Result<String> {
-    let metadata = std::fs::metadata(path)?;
-    model_integrity_receipt_contents_for_metadata(&metadata, expected_sha256)
-}
-
-#[cfg(unix)]
-fn model_integrity_receipt_contents_for_metadata(
-    metadata: &std::fs::Metadata,
-    expected_sha256: &str,
-) -> Result<String> {
-    use std::os::unix::fs::MetadataExt;
-
-    let modified_nanos = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("Model modification time predates the Unix epoch")?
-        .as_nanos();
-    let payload = format!(
-        "{}\nsha256={}\nsize={}\nmodified_nanos={}\ndevice={}\ninode={}\nchanged_seconds={}\nchanged_nanos={}\n",
-        MODEL_INTEGRITY_RECEIPT_VERSION,
-        expected_sha256,
-        metadata.len(),
-        modified_nanos,
-        metadata.dev(),
-        metadata.ino(),
-        metadata.ctime(),
-        metadata.ctime_nsec()
-    );
-    let mac = compute_receipt_mac(payload.as_bytes())?;
-    Ok(format!("{payload}mac={mac}\n"))
-}
-
-#[cfg(not(unix))]
-fn model_integrity_receipt_contents_for_metadata(
-    metadata: &std::fs::Metadata,
-    expected_sha256: &str,
-) -> Result<String> {
-    let modified_nanos = metadata
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .context("Model modification time predates the Unix epoch")?
-        .as_nanos();
-    let payload = format!(
-        "{}\nsha256={}\nsize={}\nmodified_nanos={}\n",
-        MODEL_INTEGRITY_RECEIPT_VERSION,
-        expected_sha256,
-        metadata.len(),
-        modified_nanos
-    );
-    let mac = compute_receipt_mac(payload.as_bytes())?;
-    Ok(format!("{payload}mac={mac}\n"))
-}
-
-/// Keeps the verified file description alive while a model library loads it.
-/// On Unix the load path names that open description, so a concurrent rename
-/// cannot redirect the loader to different bytes after the receipt check.
-pub(crate) struct VerifiedModelArtifact {
-    _file: std::fs::File,
-    load_path: PathBuf,
-}
-
-impl VerifiedModelArtifact {
-    pub(crate) fn load_path(&self) -> &Path {
-        &self.load_path
-    }
-}
-
-pub(crate) fn open_verified_model_artifact(
-    path: &Path,
-    expected_sha256: &str,
-) -> Result<VerifiedModelArtifact> {
-    let file = std::fs::File::open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        anyhow::bail!("Model artifact is not a regular file: {}", path.display());
-    }
-    let expected_receipt =
-        model_integrity_receipt_contents_for_metadata(&metadata, expected_sha256)?;
-    let receipt = std::fs::read_to_string(model_integrity_receipt_path(path))?;
-    if receipt != expected_receipt {
-        anyhow::bail!(
-            "Model artifact has not passed integrity verification: {}",
-            path.display()
-        );
-    }
-    #[cfg(unix)]
-    let load_path = {
-        use std::os::fd::AsRawFd;
-        PathBuf::from(format!("/dev/fd/{}", file.as_raw_fd()))
-    };
-    #[cfg(not(unix))]
-    let load_path = path.to_path_buf();
-    Ok(VerifiedModelArtifact {
-        _file: file,
-        load_path,
-    })
-}
-
-/// Every call site pins a real digest; `Some("")` is a programmer error (an
-/// accidentally-empty struct field, not a deliberate "not yet pinned" state)
-/// and is rejected loudly in debug/test builds rather than silently treated
-/// as untrusted-forever in release builds. `None` is the only correct way to
-/// say "not yet pinned".
-fn assert_pinned_digest_is_never_empty(expected_sha256: Option<&str>) {
-    debug_assert!(
-        expected_sha256.is_none_or(|digest| !digest.is_empty()),
-        "expected_sha256 must be None (\"not yet pinned\"), never Some(\"\"); an empty pinned \
-         digest used to silently disable integrity verification"
-    );
-}
-
-/// Returning `false` here (rather than a `Result`) is deliberate: this is
-/// used broadly for simple boolean gating, and its callers already have a
-/// safe fallback --
-/// `verify_or_record_model_integrity` falls through to a full re-hash of
-/// the file, which succeeds independently of the keychain and correctly
-/// re-confirms a genuinely valid file as trusted. So a keychain hiccup here
-/// costs a slower re-verify, never a false "this model is missing/corrupt".
-/// The keychain-specific failure is still surfaced distinctly (as a log
-/// warning, not silently folded into "untrusted" with no explanation) so
-/// the slowdown is attributable instead of looking like receipt corruption.
-pub(crate) fn is_model_artifact_trusted(path: &Path, expected_sha256: Option<&str>) -> bool {
-    assert_pinned_digest_is_never_empty(expected_sha256);
-    let Some(digest) = expected_sha256.filter(|digest| !digest.is_empty()) else {
-        return false;
-    };
-    if !path.is_file() {
-        return false;
-    }
-    let expected_receipt = match model_integrity_receipt_contents(path, digest) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            if error.to_string().contains(KEYCHAIN_UNAVAILABLE_PREFIX) {
-                tracing::warn!(
-                    "Could not verify {} via its cached integrity receipt because the OS \
-                     keychain is unavailable ({error}); falling back to re-hashing the file \
-                     directly instead of reporting it as untrusted.",
-                    path.display()
-                );
-            }
-            return false;
-        }
-    };
-    std::fs::read_to_string(model_integrity_receipt_path(path))
-        .is_ok_and(|receipt| receipt == expected_receipt)
-}
+pub(crate) use model_trust::{full_hash_count_for_tests, mark_model_verified_for_tests};
+#[cfg(test)]
+use model_trust::{
+    is_model_artifact_installed_in, is_model_artifact_verified_in, open_verified_model_artifact_in,
+    preverify_models_in, verify_or_record_model_integrity_in, ModelTrustSession,
+    LEGACY_VERIFIED_MODEL_CACHE_FILE_NAME,
+};
 
 #[cfg(feature = "asr-whisper")]
 pub(crate) fn whisper_model_expected_sha256(model_id: &str) -> Option<String> {
@@ -484,186 +280,38 @@ pub(crate) fn whisper_model_expected_sha256(model_id: &str) -> Option<String> {
 }
 
 #[cfg(feature = "asr-whisper")]
-pub(crate) fn is_whisper_model_artifact_trusted(model_id: &str, path: &Path) -> bool {
+pub(crate) fn is_whisper_model_artifact_installed(model_id: &str, path: &Path) -> bool {
     whisper_model_expected_sha256(model_id)
-        .is_some_and(|sha256| is_model_artifact_trusted(path, Some(&sha256)))
+        .is_some_and(|sha256| is_model_artifact_installed(path, Some(&sha256)))
 }
 
-pub(crate) fn is_diarization_model_artifact_trusted(model_id: &str, path: &Path) -> bool {
-    diarization_model_info(model_id)
-        .is_some_and(|model| is_model_artifact_trusted(path, Some(model.sha256)))
+/// The Whisper route's one model file.
+pub(crate) fn whisper_route_artifacts(
+    models_root: &Path,
+    model_id: &str,
+) -> Vec<(PathBuf, String)> {
+    get_whisper_model_info(model_id)
+        .map(|model| {
+            (
+                models_root.join("whisper").join(model.file_name),
+                model.sha256,
+            )
+        })
+        .into_iter()
+        .collect()
 }
 
-/// Test seam: the digest `is_diarization_model_artifact_trusted` demands for
-/// `model_id`, so a readiness test can write the receipt the download path
-/// would have written for that model.
-#[cfg(test)]
 pub(crate) fn diarization_model_expected_sha256(model_id: &str) -> Option<&'static str> {
     diarization_model_info(model_id).map(|model| model.sha256)
 }
 
-/// Test seam: write the receipt the download path writes once a file's hash
-/// matched its pin, so a provider test can prove readiness follows the
-/// receipt rather than the bytes. Test builds use a fixed MAC key.
-#[cfg(test)]
-pub(crate) async fn record_model_integrity_receipt_for_tests(
-    path: &Path,
-    expected_sha256: &str,
-) -> Result<()> {
-    write_model_integrity_receipt(path, expected_sha256).await
+pub(crate) fn is_diarization_model_artifact_installed(model_id: &str, path: &Path) -> bool {
+    diarization_model_info(model_id)
+        .is_some_and(|model| is_model_artifact_installed(path, Some(model.sha256)))
 }
 
-async fn write_model_integrity_receipt(path: &Path, expected_sha256: &str) -> Result<()> {
-    let receipt_path = model_integrity_receipt_path(path);
-    let temp_receipt_path = path_with_suffix(&receipt_path, ".tmp");
-    let contents = model_integrity_receipt_contents(path, expected_sha256)?;
-    tokio::fs::write(&temp_receipt_path, contents).await?;
-    tokio::fs::rename(&temp_receipt_path, &receipt_path).await?;
-    Ok(())
-}
-
-/// `expected_sha256` of `None` means "not yet pinned": verification is
-/// skipped and the file is trusted purely on existence, for a model table
-/// entry whose digest genuinely has not been recorded yet. `Some("")` is
-/// rejected as a hard error rather than silently treated the same way --
-/// see `assert_pinned_digest_is_never_empty`.
-async fn verify_or_record_model_integrity(
-    path: &PathBuf,
-    expected_sha256: Option<&str>,
-) -> Result<bool> {
-    assert_pinned_digest_is_never_empty(expected_sha256);
-    if is_model_artifact_trusted(path, expected_sha256) {
-        return Ok(true);
-    }
-
-    let Some(expected_sha256) = expected_sha256 else {
-        let exists = tokio::fs::metadata(path).await.is_ok();
-        if exists {
-            tracing::warn!(
-                "Model {} has no pinned SHA256 — skipping integrity verification",
-                path.display()
-            );
-        }
-        return Ok(exists);
-    };
-    if expected_sha256.is_empty() {
-        // Reached only in release builds, where the debug_assert! above is
-        // compiled out. Fail closed instead of reproducing the old silent
-        // bypass.
-        anyhow::bail!(
-            "Refusing to verify {}: expected_sha256 was an empty string, not None. \
-             This is a bug in the artifact table, not a legitimate \"unpinned\" model.",
-            path.display()
-        );
-    }
-
-    let actual_sha256 = calculate_sha256(path).await?;
-    if actual_sha256 != expected_sha256 {
-        return Ok(false);
-    }
-    // The direct hash comparison above already confirmed the file is
-    // correct -- the receipt is only a cache for next time. Losing that
-    // cache to a keychain hiccup must not turn an already-verified file
-    // into a reported failure; log it and still report the file trusted.
-    if let Err(error) = write_model_integrity_receipt(path, expected_sha256).await {
-        tracing::warn!(
-            "Verified {} but could not persist an integrity receipt ({error}); the next \
-             launch will re-verify by hashing the file directly.",
-            path.display()
-        );
-    }
-    Ok(true)
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct ModelIntegrityMigrationReport {
-    pub migrated_count: usize,
-    pub rejected_paths: Vec<PathBuf>,
-    pub errors: Vec<(PathBuf, String)>,
-}
-
-/// Upgrade model caches created before integrity receipts were introduced.
-///
-/// Each existing artifact is hashed once against an application-pinned
-/// digest. Exact matches receive a metadata-bound receipt, so all later
-/// readiness checks stay fast. Mismatches remain installed but untrusted,
-/// preserving the fail-closed security boundary without deleting user data
-/// during startup.
-pub(crate) async fn migrate_legacy_model_integrity_receipts(
-    artifacts: &[(PathBuf, String)],
-) -> ModelIntegrityMigrationReport {
-    use futures_util::StreamExt;
-
-    // Hashing the artifacts one after another held the sidecar's first
-    // post-upgrade launch hostage for over a minute on a full model library --
-    // long enough for the packaged smoke harness (and a person) to decide the
-    // engine was dead. The hash loop is streaming-async, so a few artifacts in
-    // flight genuinely overlap; four keeps the disk busy without turning
-    // startup into an I/O stampede. Trust semantics are unchanged: every
-    // artifact is still verified before anything relies on it.
-    const MAX_CONCURRENT_VERIFICATIONS: usize = 4;
-
-    enum Outcome {
-        Skipped,
-        Migrated,
-        Rejected(PathBuf),
-        Error(PathBuf, String),
-    }
-
-    let outcomes =
-        futures_util::stream::iter(artifacts.iter().map(|(path, expected_sha256)| async move {
-            // An empty string is never a legitimate "not yet pinned" entry here
-            // (every hand-written table caller passes a real 64-hex-char digest;
-            // see `managed_model_integrity_artifacts` and its per-provider
-            // equivalents). Rather than silently trusting the file as-is -- the
-            // exact foot-gun this migration exists to close -- treat it as a
-            // hard failure so a future accidentally-blank table entry is loud.
-            if expected_sha256.is_empty() {
-                return Outcome::Error(
-                    path.clone(),
-                    "expected_sha256 is an empty string; refusing to skip integrity verification. \
-                     Pin a real digest for this artifact."
-                        .to_string(),
-                );
-            }
-
-            if !path.is_file() || is_model_artifact_trusted(path, Some(expected_sha256)) {
-                return Outcome::Skipped;
-            }
-
-            match verify_or_record_model_integrity(path, Some(expected_sha256)).await {
-                Ok(true) => Outcome::Migrated,
-                Ok(false) => {
-                    tokio::fs::remove_file(model_integrity_receipt_path(path))
-                        .await
-                        .ok();
-                    Outcome::Rejected(path.clone())
-                }
-                Err(error) => {
-                    tokio::fs::remove_file(model_integrity_receipt_path(path))
-                        .await
-                        .ok();
-                    Outcome::Error(path.clone(), error.to_string())
-                }
-            }
-        }))
-        .buffer_unordered(MAX_CONCURRENT_VERIFICATIONS)
-        .collect::<Vec<_>>()
-        .await;
-
-    let mut report = ModelIntegrityMigrationReport::default();
-    for outcome in outcomes {
-        match outcome {
-            Outcome::Skipped => {}
-            Outcome::Migrated => report.migrated_count += 1,
-            Outcome::Rejected(path) => report.rejected_paths.push(path),
-            Outcome::Error(path, error) => report.errors.push((path, error)),
-        }
-    }
-
-    report
-}
-
+/// Startup verifies nothing; this is the full pinned set, for the export
+/// inventory and the guard test that every entry carries a real digest.
 pub(crate) fn managed_model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let mut artifacts = Vec::new();
 
@@ -691,7 +339,7 @@ pub(crate) fn managed_model_integrity_artifacts(models_root: &Path) -> Vec<(Path
         "ecapa_tdnn_speaker",
         "resnet34_speaker",
         "campplus_speaker",
-        "eres2netv2_speaker",
+        NEMOTRON_DIARIZATION_MODEL_ID,
     ] {
         if let Some(model) = diarization_model_info(model_id) {
             artifacts.push((
@@ -701,12 +349,11 @@ pub(crate) fn managed_model_integrity_artifacts(models_root: &Path) -> Vec<(Path
         }
     }
 
-    #[cfg(feature = "diarization-speakrs")]
-    for file in SPEAKRS_BUNDLE {
+    for file in COMMUNITY1_BUNDLE {
         artifacts.push((
             models_root
                 .join("diarization")
-                .join(SPEAKRS_BUNDLE_DIR)
+                .join(COMMUNITY1_BUNDLE_DIR)
                 .join(file.file_name),
             file.sha256.to_string(),
         ));
@@ -720,8 +367,9 @@ pub(crate) fn managed_model_integrity_artifacts(models_root: &Path) -> Vec<(Path
 }
 
 async fn remove_model_artifact(path: &Path) {
+    forget_verified_model(path);
     tokio::fs::remove_file(path).await.ok();
-    tokio::fs::remove_file(model_integrity_receipt_path(path))
+    tokio::fs::remove_file(legacy_integrity_receipt_path(path))
         .await
         .ok();
 }
@@ -734,10 +382,26 @@ async fn remove_model_artifact(path: &Path) {
 /// long a read may sit idle, which still catches dead connections quickly.
 fn build_download_client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
+        .https_only(true)
         .connect_timeout(std::time::Duration::from_secs(30))
         .read_timeout(std::time::Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()
+}
+
+/// The partial file a download appends to before it is verified and renamed.
+///
+/// The whole file name plus `.tmp`, not `with_extension("tmp")`: that turned
+/// both `model_quantized.onnx` and `model_quantized.onnx_data` into
+/// `model_quantized.tmp`, so one file's resume could start from the other's
+/// bytes.
+pub(crate) fn download_temp_path(destination: &Path) -> PathBuf {
+    let mut name = destination
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".tmp");
+    destination.with_file_name(name)
 }
 
 fn download_size_limit_error(url: &str, max_bytes: u64) -> anyhow::Error {
@@ -815,7 +479,7 @@ impl DownloadManager {
         }
 
         // Create temp file
-        let temp_path = destination.with_extension("tmp");
+        let temp_path = download_temp_path(destination);
 
         // Check for partial download
         let mut start_byte = if temp_path.exists() {
@@ -854,8 +518,7 @@ impl DownloadManager {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let snippet = body.trim().chars().take(200).collect::<String>();
+            let snippet = bounded_download_error_snippet(response.bytes_stream()).await;
             return Err(anyhow::anyhow!(
                 "Download failed for {}: HTTP {}{}",
                 url,
@@ -1001,9 +664,9 @@ impl DownloadManager {
         let destination = self.models_dir.join("whisper").join(&model_info.file_name);
         let min_expected_bytes = min_expected_model_bytes(model_info.size_mb);
 
-        // Upgrade legacy caches in place by hashing them once and recording a
-        // receipt. Future launches can validate the small receipt plus file
-        // metadata instead of re-reading multi-gigabyte models.
+        // An existing file is hashed once and recorded as verified. Future
+        // launches compare its file identity instead of re-reading
+        // multi-gigabyte models.
         if destination.exists() {
             if validate_whisper_artifact(&destination, min_expected_bytes).await
                 && verify_or_record_model_integrity(&destination, Some(&model_info.sha256)).await?
@@ -1078,6 +741,12 @@ impl DownloadManager {
         progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<()> {
         assert_pinned_digest_is_never_empty(expected_sha256);
+        // One download per destination at a time in this process. A second
+        // caller (a Settings click while the meeting's own Download button is
+        // still fetching the same file) waits here, then finds the verified
+        // file below and returns without touching the network or the shared
+        // `.tmp` the first one was appending to.
+        let _destination_guard = lock_download_destination(destination).await;
         if destination.exists() {
             if verify_or_record_model_integrity(destination, expected_sha256).await? {
                 return Ok(());
@@ -1090,7 +759,7 @@ impl DownloadManager {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let temp_path = destination.with_extension("tmp");
+        let temp_path = download_temp_path(destination);
 
         let client = &self.client;
         let mut request = client.get(url);
@@ -1128,8 +797,7 @@ impl DownloadManager {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            let snippet = body.trim().chars().take(200).collect::<String>();
+            let snippet = bounded_download_error_snippet(response.bytes_stream()).await;
             return Err(anyhow::anyhow!(
                 "Download failed for {}: HTTP {}{}",
                 url,
@@ -1302,15 +970,14 @@ impl DownloadManager {
             );
             tokio::fs::rename(&temp_path, destination).await?;
             // The freshly-downloaded file already passed the real hash
-            // comparison above -- it IS correct. The receipt is purely a
-            // cache so a later launch can skip re-hashing a multi-gigabyte
-            // file; losing that cache to a keychain hiccup (the receipt's
-            // MAC key lives there) must never fail an otherwise-successful
-            // multi-gigabyte download and force the user to redo it.
-            if let Err(error) = write_model_integrity_receipt(destination, expected_sha256).await {
+            // comparison above -- it IS correct. Recording it binds the hash
+            // to the identity of the installed file; failing to (the file was
+            // replaced after the rename) must not fail an otherwise-successful
+            // multi-gigabyte download, it only leaves the file unverified.
+            if let Err(error) = verify_and_remember_model(destination, expected_sha256).await {
                 tracing::warn!(
-                    "Downloaded and verified {} but could not persist an integrity receipt \
-                     ({error}); the next launch will re-verify by hashing the file directly.",
+                    "Downloaded and verified {} but could not record it as verified \
+                     ({error}); it will be hashed again before use.",
                     destination.display()
                 );
             }
@@ -1332,12 +999,34 @@ impl DownloadManager {
         model_id: &str,
         _progress_callback: impl Fn(DownloadProgress) + Send + Sync + 'static,
     ) -> Result<PathBuf> {
+        if model_id == crate::diarization::LICENSE_BLOCKED_SPEAKER_MODEL_ID {
+            anyhow::bail!(
+                "ERes2NetV2 is turned off while its license is unresolved. Choose another speaker model."
+            );
+        }
+        // Like the picker and the run path: a build that cannot run
+        // community-1 does not download it either.
+        #[cfg(not(feature = "diarization"))]
+        if model_id == COMMUNITY1_MODEL_ID {
+            anyhow::bail!("pyannote community-1 is not compiled into this build.");
+        }
+        #[cfg(feature = "diarization")]
+        if model_id == COMMUNITY1_MODEL_ID {
+            let progress = std::sync::Arc::new(_progress_callback);
+            return self
+                .download_community1_bundle(move |update| progress(update))
+                .await;
+        }
+        #[cfg(not(feature = "diarization-nemotron"))]
+        if model_id == NEMOTRON_DIARIZATION_MODEL_ID {
+            anyhow::bail!("Nemotron diarization is not compiled into this build.");
+        }
         let diarization_dir = self.models_dir.join("diarization");
         tokio::fs::create_dir_all(&diarization_dir).await?;
 
         let model = diarization_model_info(model_id).ok_or_else(|| {
             anyhow::anyhow!(
-                "Unknown diarization model: {}. Supported: ecapa_tdnn_speaker, resnet34_speaker, campplus_speaker, eres2netv2_speaker",
+                "Unknown diarization model: {}. Supported: ecapa_tdnn_speaker, resnet34_speaker, campplus_speaker, nemotron3_diarization, pyannote_community1",
                 model_id
             )
         })?;
@@ -1394,25 +1083,60 @@ impl DownloadManager {
         Ok(destination)
     }
 
-    /// Directory the speakrs (pyannote community-1) bundle lives in.
-    #[cfg(feature = "diarization-speakrs")]
-    pub fn speakrs_bundle_dir(&self) -> PathBuf {
-        self.models_dir.join("diarization").join(SPEAKRS_BUNDLE_DIR)
+    /// Verify an installed diarization model in this process without ever
+    /// downloading it: a missing or untrusted file is an error. For the
+    /// headless evaluation binary, which must not reach the network.
+    pub(crate) async fn verify_installed_diarization_model(
+        &self,
+        model_id: &str,
+    ) -> Result<PathBuf> {
+        if model_id == COMMUNITY1_MODEL_ID {
+            return self.verify_installed_community1_bundle().await;
+        }
+        let model = diarization_model_info(model_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown diarization model: {model_id}"))?;
+        let destination = self.models_dir.join("diarization").join(model.file_name);
+        if !destination.exists() {
+            anyhow::bail!(
+                "Diarization model {model_id} is not installed at {}",
+                destination.display()
+            );
+        }
+        if !verify_or_record_model_integrity(&destination, Some(model.sha256)).await? {
+            anyhow::bail!(
+                "Diarization model {model_id} at {} failed integrity verification",
+                destination.display()
+            );
+        }
+        Ok(destination)
     }
 
-    /// Download every file of the speakrs bundle, each pinned by SHA-256 and
-    /// size-bounded like the single-file diarization models. Files already
-    /// present with a valid integrity receipt are left alone, so a retry after
+    /// Directory the pyannote community-1 bundle lives in.
+    pub fn community1_bundle_dir(&self) -> PathBuf {
+        self.models_dir
+            .join("diarization")
+            .join(COMMUNITY1_BUNDLE_DIR)
+    }
+
+    /// Download every file of the community-1 bundle, each pinned by SHA-256
+    /// and size-bounded like the single-file diarization models. Files already
+    /// present that match their pins are left alone, so a retry after
     /// a dropped connection only fetches what is missing.
-    #[cfg(feature = "diarization-speakrs")]
-    pub async fn download_speakrs_bundle(
+    #[cfg_attr(
+        not(feature = "diarization"),
+        expect(
+            dead_code,
+            reason = "only a build that can run community-1 downloads it"
+        )
+    )]
+    pub async fn download_community1_bundle(
         &self,
         progress_callback: impl Fn(DownloadProgress) + Send + Sync + Clone + 'static,
     ) -> Result<PathBuf> {
-        let bundle_dir = self.speakrs_bundle_dir();
+        let bundle_dir = self.community1_bundle_dir();
         tokio::fs::create_dir_all(&bundle_dir).await?;
 
-        for file in SPEAKRS_BUNDLE {
+        for file in COMMUNITY1_BUNDLE {
             let destination = bundle_dir.join(file.file_name);
             if destination.exists()
                 && verify_or_record_model_integrity(&destination, Some(file.sha256)).await?
@@ -1421,7 +1145,7 @@ impl DownloadManager {
             }
             if destination.exists() {
                 tracing::warn!(
-                    "speakrs bundle file {} failed integrity verification. Re-downloading.",
+                    "pyannote community-1 file {} failed integrity verification. Re-downloading.",
                     file.file_name
                 );
                 remove_model_artifact(&destination).await;
@@ -1434,10 +1158,29 @@ impl DownloadManager {
                 file.max_bytes,
                 progress_callback.clone(),
             )
-            .await?;
+            .await
+            .map_err(|error| community1_download_error(file.file_name, error))?;
         }
 
-        tracing::info!("speakrs diarization bundle ready at {:?}", bundle_dir);
+        tracing::info!("pyannote community-1 bundle ready at {:?}", bundle_dir);
+        Ok(bundle_dir)
+    }
+
+    /// Verify an installed community-1 bundle without downloading anything.
+    /// For the headless evaluation binary, which must not reach the network.
+    pub(crate) async fn verify_installed_community1_bundle(&self) -> Result<PathBuf> {
+        let bundle_dir = self.community1_bundle_dir();
+        for file in COMMUNITY1_BUNDLE {
+            let destination = bundle_dir.join(file.file_name);
+            if !destination.exists()
+                || !verify_or_record_model_integrity(&destination, Some(file.sha256)).await?
+            {
+                anyhow::bail!(
+                    "pyannote community-1 file {} is missing or failed integrity verification",
+                    destination.display()
+                );
+            }
+        }
         Ok(bundle_dir)
     }
 
@@ -1451,7 +1194,7 @@ impl DownloadManager {
             .models_dir
             .join("diarization")
             .join("ecapa_tdnn_speaker.onnx");
-        is_diarization_model_artifact_trusted("ecapa_tdnn_speaker", &path)
+        is_diarization_model_artifact_installed("ecapa_tdnn_speaker", &path)
     }
 
     /// Path Silero VAD's ONNX model is stored at once downloaded.
@@ -1461,7 +1204,7 @@ impl DownloadManager {
 
     /// Whether the Silero VAD ONNX model has already been downloaded.
     pub fn is_silero_vad_model_downloaded(&self) -> bool {
-        is_model_artifact_trusted(&self.silero_vad_model_path(), Some(SILERO_VAD_ONNX_SHA256))
+        is_model_artifact_installed(&self.silero_vad_model_path(), Some(SILERO_VAD_ONNX_SHA256))
     }
 
     /// Download the Silero VAD ONNX model (MIT-licensed, ~2.2MB), the small
@@ -1665,6 +1408,26 @@ impl DownloadManager {
             }
         }
 
+        // Keep both Whistle assets visible to readiness and storage.
+        let whistle_dir = crate::asr::whistle::model_dir(&self.models_dir);
+        for name in [
+            crate::asr::whistle::MODEL_FILE,
+            crate::asr::whistle::CLI_FILE,
+        ] {
+            let path = whistle_dir.join(name);
+            if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                if metadata.is_file() {
+                    models.push(DownloadedModel {
+                        name: format!("Whistle 2.0 {name}"),
+                        provider: "whistle".to_string(),
+                        path,
+                        size_bytes: metadata.len(),
+                        downloaded_at: metadata.modified()?,
+                    });
+                }
+            }
+        }
+
         // Check Silero VAD model
         let vad_dir = self.models_dir.join("vad");
         if vad_dir.exists() {
@@ -1688,7 +1451,7 @@ impl DownloadManager {
         }
 
         // Check diarization models. Without this branch the four speaker
-        // embedders and any speakrs bundle on disk were invisible in the models
+        // embedders and any model bundle on disk were invisible in the models
         // list and missing from the storage total, so a user could neither see
         // them nor delete them -- the app downloaded files it then refused to
         // account for. Named with the picker's own labels so a row can be
@@ -1704,10 +1467,20 @@ impl DownloadManager {
                 let metadata = entry.metadata().await?;
                 if metadata.is_file() {
                     let file_name = entry.file_name().to_string_lossy().to_string();
-                    let model_id = file_name.strip_suffix(".onnx").unwrap_or(&file_name);
+                    let nemotron = file_name == "nemotron3_diar_v3.onnx";
+                    let model_id = if nemotron {
+                        NEMOTRON_DIARIZATION_MODEL_ID
+                    } else {
+                        file_name.strip_suffix(".onnx").unwrap_or(&file_name)
+                    };
                     models.push(DownloadedModel {
                         name: format!(
-                            "Speaker embedding {}",
+                            "{} {}",
+                            if nemotron {
+                                "Speaker labels"
+                            } else {
+                                "Speaker embedding"
+                            },
                             crate::diarization::model_label(model_id)
                         ),
                         provider: "diarization".to_string(),
@@ -1721,7 +1494,7 @@ impl DownloadManager {
                     continue;
                 }
 
-                // A bundle is one model in several files (speakrs needs ten),
+                // A bundle is one model in several files (community-1 has six),
                 // so it is summed into a single deletable entry the way the
                 // Qwen3-ASR and cleanup bundles are.
                 let dir_name = path
@@ -1754,8 +1527,11 @@ impl DownloadManager {
                 if files == 0 {
                     continue;
                 }
-                let name = if dir_name == SPEAKRS_BUNDLE_DIR {
-                    "Speaker diarization pyannote community-1 (speakrs)".to_string()
+                let name = if dir_name == COMMUNITY1_BUNDLE_DIR {
+                    format!(
+                        "Speaker labels {}",
+                        crate::diarization::model_label(COMMUNITY1_MODEL_ID)
+                    )
                 } else {
                     format!("Speaker diarization {dir_name}")
                 };
@@ -1989,6 +1765,39 @@ impl DownloadManager {
             }
         }
 
+        // The Core ML builds of Parakeet: on a Mac that runs them they are
+        // the whole Parakeet download, so they must be listed, counted and
+        // removable. One summed entry per model directory; the name is the
+        // model id only once every pinned file is here, so an interrupted
+        // download does not read as an installed model.
+        let neural_engine_dir = self.models_dir.join("neural_engine");
+        if neural_engine_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&neural_engine_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let dir = entry.path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                let model_id = entry.file_name().to_string_lossy().to_string();
+                let (size_bytes, modified) = bundle_size_and_modified(&dir);
+                if size_bytes == 0 {
+                    continue;
+                }
+                let name = if neural_engine_bundle_installed(&self.models_dir, &model_id) {
+                    model_id
+                } else {
+                    format!("{model_id} (incomplete)")
+                };
+                models.push(DownloadedModel {
+                    name,
+                    provider: "transcribe_cpp".to_string(),
+                    path: dir,
+                    size_bytes,
+                    downloaded_at: modified.unwrap_or_else(std::time::SystemTime::now),
+                });
+            }
+        }
+
         Ok(models)
     }
 
@@ -2041,23 +1850,25 @@ impl DownloadManager {
             ));
         }
 
-        // Several listed models are bundles: a directory of files with their
-        // receipts beside them (speakrs, Qwen3-ASR, the cleanup model). The
-        // listing hands back the directory as the deletable path, so deleting
-        // one has to remove the directory rather than fail on `remove_file`.
+        // Several listed models are bundles: a directory of files
+        // (community-1, Qwen3-ASR, the cleanup model). The listing hands back
+        // the directory as the deletable path, so deleting one has to remove
+        // the directory rather than fail on `remove_file`.
         if canonical.is_dir() {
+            forget_verified_models_under(&canonical);
             tokio::fs::remove_dir_all(&canonical).await?;
             tracing::info!("Deleted model bundle at {:?}", canonical);
             return Ok(());
         }
 
+        forget_verified_model(&canonical);
         tokio::fs::remove_file(&canonical).await?;
-        let receipt_path = model_integrity_receipt_path(&canonical);
+        let receipt_path = legacy_integrity_receipt_path(&canonical);
         if let Err(error) = tokio::fs::remove_file(&receipt_path).await {
             if error.kind() != std::io::ErrorKind::NotFound {
                 return Err(error).with_context(|| {
                     format!(
-                        "Deleted model but failed to remove its integrity receipt: {:?}",
+                        "Deleted model but failed to remove the receipt an older build left: {:?}",
                         receipt_path
                     )
                 });
@@ -2066,6 +1877,44 @@ impl DownloadManager {
         tracing::info!("Deleted model at {:?}", canonical);
         Ok(())
     }
+}
+
+/// Every regular file under `dir`, summed, and the newest modification time.
+/// Plainsong's own metadata files are not model bytes.
+fn bundle_size_and_modified(dir: &Path) -> (u64, Option<std::time::SystemTime>) {
+    let mut total = 0u64;
+    let mut newest: Option<std::time::SystemTime> = None;
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if is_internal_model_metadata_file(entry.path()) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        total += metadata.len();
+        if let Ok(modified) = metadata.modified() {
+            newest = Some(newest.map_or(modified, |current| current.max(modified)));
+        }
+    }
+    (total, newest)
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+fn neural_engine_bundle_installed(models_dir: &Path, model_id: &str) -> bool {
+    crate::asr::neural_engine::bundle_installed(models_dir, model_id)
+}
+
+/// A build without the runtime cannot use the bundles, but still lists them
+/// so their bytes stay visible and removable.
+#[cfg(not(feature = "asr-transcribe-cpp"))]
+fn neural_engine_bundle_installed(_models_dir: &Path, _model_id: &str) -> bool {
+    false
 }
 
 impl Default for DownloadManager {
@@ -2082,13 +1931,8 @@ impl Default for DownloadManager {
                         create_error
                     );
                 }
-                let client = build_download_client().unwrap_or_else(|client_error| {
-                    tracing::error!(
-                        "Failed to build configured download client, using default client: {}",
-                        client_error
-                    );
-                    reqwest::Client::new()
-                });
+                let client = build_download_client()
+                    .expect("Could not build HTTPS-only model download client");
                 Self { client, models_dir }
             }
         }
@@ -2241,22 +2085,28 @@ fn get_whisper_model_info(model_name: &str) -> Option<WhisperModelInfo> {
 }
 
 /// Calculate SHA256 checksum of a file
-async fn calculate_sha256(path: &PathBuf) -> Result<String> {
-    use sha2::{Digest, Sha256};
+async fn calculate_sha256(path: &Path) -> Result<String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)?;
+        model_trust::hash_open_file(&file, &path, |_| {}).map(|(digest, _)| digest)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("Hashing stopped: {error}"))?
+}
 
-    let mut file = File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    loop {
-        let bytes_read = file.read(&mut buffer).await?;
-        if bytes_read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..bytes_read]);
+/// Verify an existing model for this process only, writing nothing beside
+/// it. Ignored diagnostics use it to reuse the user's pinned model bytes
+/// while keeping the source directory strictly read-only.
+#[cfg(test)]
+pub(crate) async fn verify_existing_model_in_process(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<bool> {
+    if expected_sha256.is_empty() {
+        anyhow::bail!("expected_sha256 is empty; refusing to trust an unpinned model artifact");
     }
-    let result = hasher.finalize();
-
-    Ok(hex::encode(result))
+    verify_or_record_model_integrity(path, Some(expected_sha256)).await
 }
 
 fn min_expected_model_bytes(size_mb: f64) -> u64 {
@@ -2331,6 +2181,175 @@ pub fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn download_client_refuses_plaintext_http_before_connecting() {
+        let error = build_download_client()
+            .expect("download client")
+            .get("http://127.0.0.1:9/model.bin")
+            .send()
+            .await
+            .expect_err("model transfers must require HTTPS, including redirect targets");
+        assert!(
+            error.is_builder(),
+            "plaintext URL reached the transport: {error}"
+        );
+    }
+
+    #[test]
+    fn sibling_files_never_share_a_partial_download() {
+        let dir = Path::new("/models/embeddinggemma");
+        let model = download_temp_path(&dir.join("model_quantized.onnx"));
+        let data = download_temp_path(&dir.join("model_quantized.onnx_data"));
+        assert_ne!(model, data);
+        assert_eq!(model, dir.join("model_quantized.onnx.tmp"));
+        assert_eq!(data, dir.join("model_quantized.onnx_data.tmp"));
+    }
+
+    #[cfg(not(feature = "diarization-nemotron"))]
+    #[tokio::test]
+    async fn feature_off_refuses_nemotron_download_before_creating_files() {
+        let dir = crate::test_fs::TempDir::new("nemotron-feature-off");
+        let manager = DownloadManager {
+            models_dir: dir.path().join("models"),
+            client: build_download_client().expect("client"),
+        };
+        let error = manager
+            .download_diarization_model_by_id(NEMOTRON_DIARIZATION_MODEL_ID, |_| {})
+            .await
+            .expect_err("runtime unavailable");
+        assert!(error.to_string().contains("not compiled"));
+        assert!(!manager.models_dir.exists());
+    }
+
+    /// Two downloads of the same file in one process: the second waits for
+    /// the first, then finds the verified file and returns without reaching
+    /// the network (its URL here goes nowhere) or the first one's `.tmp`.
+    #[tokio::test]
+    async fn a_second_download_of_the_same_file_waits_and_reuses_the_first() {
+        let dir = crate::test_fs::TempDir::new("download-lock");
+        let manager = std::sync::Arc::new(DownloadManager {
+            models_dir: dir.path().join("models"),
+            client: build_download_client().expect("client"),
+        });
+        let destination = dir.path().join("models").join("speaker.onnx");
+        tokio::fs::create_dir_all(destination.parent().unwrap())
+            .await
+            .unwrap();
+        let bytes = b"verified speaker model bytes";
+        let scratch = dir.path().join("scratch.onnx");
+        tokio::fs::write(&scratch, bytes).await.unwrap();
+        let digest = calculate_sha256(&scratch).await.expect("hash");
+
+        // The "first download" holds the lock while it writes the file.
+        let first = lock_download_destination(&destination).await;
+        let second = {
+            let manager = std::sync::Arc::clone(&manager);
+            let destination = destination.clone();
+            let digest = digest.clone();
+            tokio::spawn(async move {
+                manager
+                    .download_verified_model_asset(
+                        "http://127.0.0.1:9/never-reached.onnx",
+                        &destination,
+                        Some(&digest),
+                        1024,
+                        |_| {},
+                    )
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !second.is_finished(),
+            "the second caller waits for the first"
+        );
+        tokio::fs::write(&destination, bytes).await.unwrap();
+        drop(first);
+
+        second
+            .await
+            .expect("join")
+            .expect("the second caller reuses the verified file");
+        assert!(!download_temp_path(&destination).exists());
+    }
+
+    #[tokio::test]
+    async fn download_locks_are_per_destination() {
+        let a = lock_download_destination(Path::new("/nonexistent/plainsong-a.onnx")).await;
+        // A different file does not wait behind `a`.
+        let b = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            lock_download_destination(Path::new("/nonexistent/plainsong-b.onnx")),
+        )
+        .await
+        .expect("another destination is not blocked");
+        drop((a, b));
+    }
+
+    #[tokio::test]
+    async fn license_blocked_speaker_download_leaves_existing_files_untouched() {
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-blocked-speaker-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let model_path = root.join("diarization/eres2netv2_speaker.onnx");
+        tokio::fs::create_dir_all(model_path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&model_path, b"existing model")
+            .await
+            .unwrap();
+        let manager = DownloadManager {
+            client: build_download_client().unwrap(),
+            models_dir: root.clone(),
+        };
+        let error = manager
+            .download_diarization_model_by_id("eres2netv2_speaker", |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "ERes2NetV2 is turned off while its license is unresolved. Choose another speaker model."
+        );
+        assert!(diarization_model_info("eres2netv2_speaker").is_none());
+        assert_eq!(
+            tokio::fs::read(&model_path).await.unwrap(),
+            b"existing model"
+        );
+        let listed = manager.list_downloaded_models().await.unwrap();
+        assert!(listed
+            .iter()
+            .any(|model| model.path == model_path && model.name.contains("ERes2NetV2")));
+        manager.delete_model(&model_path).await.unwrap();
+        assert!(!model_path.exists());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn a_missing_community1_file_reads_as_not_published_yet() {
+        let error = community1_download_error(
+            "pyannote-community-1-embedding.onnx",
+            anyhow::anyhow!("Download failed: HTTP 404 Not Found"),
+        );
+        assert_eq!(
+            error.to_string(),
+            "The speaker model isn't available to download yet."
+        );
+        // The file and the status stay in the details.
+        let details = format!("{error:#}");
+        assert!(details.contains("pyannote-community-1-embedding.onnx"));
+        assert!(details.contains("HTTP 404"));
+        let other = community1_download_error(
+            "pyannote-community-1-embedding.onnx",
+            anyhow::anyhow!("connection reset"),
+        );
+        assert_eq!(
+            other.to_string(),
+            "The speaker model download didn't finish. Try again."
+        );
+        assert!(format!("{other:#}").contains("connection reset"));
+    }
 
     #[test]
     fn test_format_bytes() {
@@ -2416,16 +2435,6 @@ mod tests {
                 .all(|character| character.is_ascii_hexdigit()));
         }
 
-        // ERes2NetV2 has a pinned commit URL and verified SHA256.
-        let eres2netv2 =
-            diarization_model_info("eres2netv2_speaker").expect("known diarization model");
-        assert!(!eres2netv2.url.contains("/resolve/main/"));
-        assert_eq!(eres2netv2.sha256.len(), 64);
-        assert!(eres2netv2
-            .sha256
-            .chars()
-            .all(|character| character.is_ascii_hexdigit()));
-
         assert!(!SILERO_VAD_ONNX_URL.contains("/master/"));
         assert_eq!(SILERO_VAD_ONNX_SHA256.len(), 64);
         assert!(SILERO_VAD_ONNX_SHA256
@@ -2433,312 +2442,616 @@ mod tests {
             .all(|character| character.is_ascii_hexdigit()));
     }
 
-    /// The feature gate has to cover the download path, not only the picker: a
-    /// default build that listed no speakrs entry but still fetched the bundle
-    /// when asked by id would ship a route to weights whose license is
-    /// unresolved. The id is written out rather than referenced, because
-    /// `SPEAKRS_MODEL_ID` does not exist in this build -- which is the point.
-    #[cfg(not(feature = "diarization-speakrs"))]
-    #[tokio::test]
-    async fn a_default_build_refuses_to_download_the_speakrs_bundle() {
-        let models_dir = std::env::temp_dir()
-            .join("plainsong-speakrs-gate")
-            .join(uuid::Uuid::new_v4().to_string());
-        let manager = DownloadManager {
-            client: build_download_client().expect("client"),
-            models_dir: models_dir.clone(),
-        };
-
-        let error = manager
-            .download_diarization_model_by_id("speakrs_community1", |_| {})
-            .await
-            .expect_err("a build without the backend must not fetch its weights");
-        assert!(
-            error.to_string().contains("Unknown diarization model"),
-            "got {error}"
-        );
-
-        // Nor is the bundle reachable as a "trusted" artifact by that id.
-        assert!(!is_diarization_model_artifact_trusted(
-            "speakrs_community1",
-            &models_dir.join("diarization").join("speakrs")
-        ));
-
-        std::fs::remove_dir_all(&models_dir).ok();
-    }
-
-    #[cfg(feature = "diarization-speakrs")]
     #[test]
-    fn speakrs_bundle_is_pinned_by_revision_hash_and_size() {
-        // The bundle is only useful whole: speakrs's CPU pipeline loads the
-        // segmentation ONNX, the embedding ONNX with its external weights, and
-        // six PLDA arrays plus the min-samples marker.
-        assert_eq!(SPEAKRS_BUNDLE.len(), 10);
-
-        let mut names: Vec<&str> = SPEAKRS_BUNDLE.iter().map(|f| f.file_name).collect();
+    fn community1_bundle_is_pinned_to_plainsongs_release_by_hash_and_size() {
+        // The pipeline needs both networks, both PLDA archives, and CC BY 4.0
+        // needs the license and notice to travel with them.
+        assert_eq!(COMMUNITY1_BUNDLE.len(), 6);
+        let mut names: Vec<&str> = COMMUNITY1_BUNDLE.iter().map(|f| f.file_name).collect();
         names.sort_unstable();
         let mut unique = names.clone();
         unique.dedup();
         assert_eq!(names, unique, "bundle file names must be unique");
-        assert!(names.contains(&"segmentation-3.0.onnx"));
-        assert!(names.contains(&"wespeaker-voxceleb-resnet34.onnx"));
-        assert!(names.contains(&"wespeaker-voxceleb-resnet34.onnx.data"));
-
-        for file in SPEAKRS_BUNDLE {
-            // Pinned to one immutable revision: `/resolve/main/` would let the
-            // upstream repo swap weights under a hash we verified once.
-            assert!(
-                !file.url.contains("/resolve/main/"),
-                "{} must not track a branch",
-                file.file_name
-            );
-            assert!(
-                file.url
-                    .starts_with("https://huggingface.co/avencera/speakrs-models/resolve/"),
-                "{} must come from the pinned model repo",
-                file.file_name
-            );
-            assert!(
-                file.url.ends_with(file.file_name),
-                "{} URL and destination name must agree",
-                file.file_name
+        for needed in [
+            "pyannote-community-1-segmentation.onnx",
+            "pyannote-community-1-embedding.onnx",
+            "pyannote-community-1-plda.npz",
+            "pyannote-community-1-xvec_transform.npz",
+            "pyannote-community-1-LICENSE.txt",
+            "pyannote-community-1-NOTICE.txt",
+        ] {
+            assert!(names.contains(&needed), "{needed}");
+        }
+        for file in COMMUNITY1_BUNDLE {
+            assert_eq!(
+                file.url,
+                format!(
+                    "https://github.com/JonathanRReed/Plainsong/releases/download/models-2026-10/{}",
+                    file.file_name
+                )
             );
             assert_eq!(file.sha256.len(), 64, "{}", file.file_name);
-            assert!(file
-                .sha256
-                .chars()
-                .all(|character| character.is_ascii_hexdigit()));
+            assert!(file.sha256.chars().all(|c| c.is_ascii_hexdigit()));
             assert!(file.max_bytes > 0, "{}", file.file_name);
         }
-
-        // One revision for the whole bundle, or the PLDA arrays could come
-        // from a different export than the embedder they transform.
-        let revisions: std::collections::BTreeSet<&str> = SPEAKRS_BUNDLE
-            .iter()
-            .filter_map(|file| file.url.split("/resolve/").nth(1))
-            .filter_map(|rest| rest.split('/').next())
-            .collect();
-        assert_eq!(revisions.len(), 1, "bundle must pin a single revision");
+        // The upstream PLDA archives are re-served byte for byte: their pins
+        // are the Hugging Face LFS ids at the source revision.
+        let pin = |name: &str| {
+            COMMUNITY1_BUNDLE
+                .iter()
+                .find(|f| f.file_name == name)
+                .map(|f| f.sha256)
+        };
+        assert_eq!(
+            pin("pyannote-community-1-plda.npz"),
+            Some("9b77bcd840692710dd3496f62ecfeed8d8e5f002fd991b785079b244eab7d255")
+        );
+        assert_eq!(
+            pin("pyannote-community-1-xvec_transform.npz"),
+            Some("325f1ce8e48f7e55e9c8aa47e05d2766b7c48c4b25b8de8dd751e7a4cc5fbe8f")
+        );
+        // The managed-artifact sweep knows every file.
+        let root = Path::new("/models");
+        let managed = managed_model_integrity_artifacts(root);
+        for file in COMMUNITY1_BUNDLE {
+            let path = root
+                .join("diarization")
+                .join(COMMUNITY1_BUNDLE_DIR)
+                .join(file.file_name);
+            assert!(managed
+                .iter()
+                .any(|(p, sha)| p == &path && sha == file.sha256));
+        }
     }
 
-    #[cfg(feature = "diarization-speakrs")]
-    #[tokio::test]
-    async fn a_model_bundle_is_trusted_only_when_every_file_is() {
+    /// A scratch models folder holding `bytes` as one pinned file.
+    fn trust_fixture(name: &str, bytes: &[u8]) -> (PathBuf, PathBuf, String) {
         use sha2::Digest as _;
+        let root = std::env::temp_dir()
+            .join("plainsong-model-trust")
+            .join(format!("{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create fixture dir");
+        let model = root.join("model.bin");
+        std::fs::write(&model, bytes).expect("write model");
+        (root, model, hex::encode(sha2::Sha256::digest(bytes)))
+    }
 
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-speakrs-bundle")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
-            .await
-            .expect("temp dir");
+    /// A fresh sidecar process's verification state.
+    fn new_session() -> &'static ModelTrustSession {
+        Box::leak(Box::new(ModelTrustSession::default()))
+    }
 
-        // Fixture stand-ins for the real weights: the rule under test is
-        // "every file, with a receipt, matching its pin", which does not
-        // depend on the bytes being 26 MB of ONNX.
-        let names = ["segmentation.onnx", "weights.data", "plda.npy"];
-        let mut expected: Vec<(String, String)> = Vec::new();
-        for name in names {
-            let contents = format!("speakrs-fixture-{name}");
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(contents.as_bytes());
-            expected.push((name.to_string(), hex::encode(hasher.finalize())));
-            tokio::fs::write(test_dir.join(name), contents)
-                .await
-                .expect("write fixture");
+    fn set_modified(path: &Path, time: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open model")
+            .set_times(std::fs::FileTimes::new().set_modified(time))
+            .expect("set modification time");
+    }
+
+    /// Overwrite one byte in place, keeping the size and putting the
+    /// modification time back: only the change time records the write.
+    fn edit_one_byte_in_place(path: &Path) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(3)).unwrap();
+        file.write_all(b"X").unwrap();
+        drop(file);
+        set_modified(path, mtime);
+    }
+
+    #[test]
+    fn startup_removes_the_old_verified_model_list_and_hashes_nothing() {
+        let (root, model, digest) = trust_fixture("startup", b"pinned model bytes");
+        let list = root.join(LEGACY_VERIFIED_MODEL_CACHE_FILE_NAME);
+        let partial = root.join(format!("{LEGACY_VERIFIED_MODEL_CACHE_FILE_NAME}.tmp-1234"));
+        let forged = format!(
+            r#"{{"version":1,"entries":[{{"path":"{}","sha256":"{digest}"}}]}}"#,
+            model.display()
+        );
+        std::fs::write(&list, &forged).unwrap();
+        std::fs::write(&partial, &forged).unwrap();
+
+        remove_legacy_verified_model_cache(&root);
+
+        assert!(!list.exists() && !partial.exists());
+        assert!(model.exists(), "models are never touched");
+        let session = new_session();
+        assert!(is_model_artifact_installed_in(
+            session,
+            &model,
+            Some(&digest)
+        ));
+        assert!(!is_model_artifact_verified_in(session, &model, &digest));
+        assert_eq!(
+            full_hash_count_for_tests(&model),
+            0,
+            "readiness reads no bytes"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn first_use_hashes_once_and_later_uses_in_the_session_do_not() {
+        let (root, model, digest) = trust_fixture("first-use", b"pinned model bytes");
+        let session = new_session();
+
+        let (first, hashed) = open_verified_model_artifact_in(session, &model, &digest).unwrap();
+        assert!(hashed);
+        assert_eq!(
+            std::fs::read(first.load_path()).unwrap(),
+            b"pinned model bytes"
+        );
+        drop(first);
+        for _ in 0..3 {
+            let (again, hashed) =
+                open_verified_model_artifact_in(session, &model, &digest).unwrap();
+            assert!(!hashed);
+            assert_eq!(
+                std::fs::read(again.load_path()).unwrap(),
+                b"pinned model bytes"
+            );
         }
+        assert_eq!(full_hash_count_for_tests(&model), 1);
+
+        let (_, hashed) = open_verified_model_artifact_in(new_session(), &model, &digest).unwrap();
+        assert!(hashed, "a new process trusts nothing from the last one");
+        assert_eq!(full_hash_count_for_tests(&model), 2);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_byte_changed_in_place_with_size_and_mtime_kept_is_caught() {
+        let (root, model, digest) = trust_fixture("edit", b"pinned model bytes");
+        let session = new_session();
+        open_verified_model_artifact_in(session, &model, &digest).unwrap();
+
+        edit_one_byte_in_place(&model);
+
+        let error = open_verified_model_artifact_in(session, &model, &digest).unwrap_err();
+        assert!(is_integrity_mismatch(&error), "{error:#}");
+        assert!(
+            error.to_string().contains("Download the model again"),
+            "{error}"
+        );
+        assert_eq!(
+            full_hash_count_for_tests(&model),
+            2,
+            "the change time forced a hash"
+        );
+        assert!(
+            !is_model_artifact_installed_in(session, &model, Some(&digest)),
+            "a file found wrong reads as missing, which offers the download"
+        );
+
+        let next = new_session();
+        assert!(is_model_artifact_installed_in(next, &model, Some(&digest)));
+        assert!(is_integrity_mismatch(
+            &open_verified_model_artifact_in(next, &model, &digest).unwrap_err()
+        ));
+
+        // A fresh copy of the right bytes is a new file and verifies again.
+        std::fs::write(&model, b"pinned model bytes").unwrap();
+        assert!(is_model_artifact_installed_in(next, &model, Some(&digest)));
+        assert!(
+            open_verified_model_artifact_in(next, &model, &digest)
+                .unwrap()
+                .1
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// setattrlist accepts a change time but the kernel stamps the change
+    /// itself, so a same-user process cannot hide a write by restoring both
+    /// times.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn restoring_the_change_time_with_setattrlist_does_not_hide_a_write() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::MetadataExt;
+        let (root, model, digest) = trust_fixture("chgtime", b"pinned model bytes");
+        let session = new_session();
+        open_verified_model_artifact_in(session, &model, &digest).unwrap();
+        let before = std::fs::metadata(&model).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        edit_one_byte_in_place(&model);
+        #[repr(C, packed)]
+        struct Times {
+            modified: libc::timespec,
+            changed: libc::timespec,
+        }
+        let mut times = Times {
+            modified: libc::timespec {
+                tv_sec: before.mtime(),
+                tv_nsec: before.mtime_nsec(),
+            },
+            changed: libc::timespec {
+                tv_sec: before.ctime(),
+                tv_nsec: before.ctime_nsec(),
+            },
+        };
+        let mut list = libc::attrlist {
+            bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+            reserved: 0,
+            commonattr: libc::ATTR_CMN_MODTIME | libc::ATTR_CMN_CHGTIME,
+            volattr: 0,
+            dirattr: 0,
+            fileattr: 0,
+            forkattr: 0,
+        };
+        let path = std::ffi::CString::new(model.as_os_str().as_bytes()).unwrap();
+        let result = unsafe {
+            libc::setattrlist(
+                path.as_ptr(),
+                (&mut list as *mut libc::attrlist).cast(),
+                (&mut times as *mut Times).cast(),
+                std::mem::size_of::<Times>(),
+                0,
+            )
+        };
+        assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+
+        let after = std::fs::metadata(&model).unwrap();
+        assert_eq!((after.len(), after.ino()), (before.len(), before.ino()));
+        assert_eq!(
+            (after.mtime(), after.mtime_nsec()),
+            (before.mtime(), before.mtime_nsec())
+        );
+        assert_ne!(
+            (after.ctime(), after.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec()),
+            "the kernel set the change time to now"
+        );
+        assert!(is_integrity_mismatch(
+            &open_verified_model_artifact_in(session, &model, &digest).unwrap_err()
+        ));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_new_identity_mid_session_is_hashed_again() {
+        let (root, model, digest) = trust_fixture("identity", b"pinned model bytes");
+        let session = new_session();
+        assert!(
+            open_verified_model_artifact_in(session, &model, &digest)
+                .unwrap()
+                .1
+        );
+
+        set_modified(
+            &model,
+            std::time::SystemTime::now() + std::time::Duration::from_secs(5),
+        );
+        assert!(!is_model_artifact_verified_in(session, &model, &digest));
+        assert!(
+            open_verified_model_artifact_in(session, &model, &digest)
+                .unwrap()
+                .1
+        );
+        assert!(
+            !open_verified_model_artifact_in(session, &model, &digest)
+                .unwrap()
+                .1
+        );
+
+        // Same bytes and times under a new inode.
+        let mtime = std::fs::metadata(&model).unwrap().modified().unwrap();
+        let copy = model.with_file_name("copy.bin");
+        std::fs::write(&copy, b"pinned model bytes").unwrap();
+        set_modified(&copy, mtime);
+        std::fs::rename(&copy, &model).unwrap();
+        assert!(
+            open_verified_model_artifact_in(session, &model, &digest)
+                .unwrap()
+                .1
+        );
+
+        // A different pin for the same file is a different question.
+        let other_pin = "f".repeat(64);
+        assert!(is_integrity_mismatch(
+            &open_verified_model_artifact_in(session, &model, &other_pin).unwrap_err()
+        ));
+        assert_eq!(full_hash_count_for_tests(&model), 4);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_failed_native_load_drops_the_session_entry() {
+        let (root, model, digest) = trust_fixture("load-fails", b"pinned model bytes");
+        let session = new_session();
+        let (artifact, _) = open_verified_model_artifact_in(session, &model, &digest).unwrap();
+        let error = artifact
+            .load(|_| -> Result<()> { anyhow::bail!("the runtime rejected the graph") })
+            .unwrap_err();
+        assert!(error.to_string().contains("rejected the graph"));
+        assert!(!is_model_artifact_verified_in(session, &model, &digest));
+        assert!(
+            open_verified_model_artifact_in(session, &model, &digest)
+                .unwrap()
+                .1
+        );
+        assert_eq!(full_hash_count_for_tests(&model), 2);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_changes_during_load_rehash_the_pin_and_preserve_path_checks() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, model, digest) = trust_fixture("load-metadata", b"pinned model bytes");
+        let session = new_session();
+        let (artifact, _) = open_verified_model_artifact_in(session, &model, &digest).unwrap();
+        artifact
+            .load(|_| {
+                let mode = std::fs::metadata(&model)?.permissions().mode();
+                std::fs::set_permissions(&model, std::fs::Permissions::from_mode(mode ^ 0o100))?;
+                Ok(())
+            })
+            .unwrap();
+        artifact.confirm_path_unchanged().unwrap();
+        assert!(
+            full_hash_count_for_tests(&model) >= 2,
+            "metadata changes require a fresh hash"
+        );
+        assert!(is_model_artifact_verified_in(session, &model, &digest));
+        std::fs::rename(&model, model.with_file_name("moved.bin")).unwrap();
+        std::fs::write(&model, b"pinned model bytes").unwrap();
+        let error = artifact.confirm_path_unchanged().unwrap_err();
+        assert!(is_model_artifact_changed(&error), "{error:#}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_during_a_native_load_fails_the_load() {
+        let (root, model, digest) = trust_fixture("load-write", b"pinned model bytes");
+        let session = new_session();
+        let (artifact, _) = open_verified_model_artifact_in(session, &model, &digest).unwrap();
+        let error = artifact
+            .load(|_| {
+                edit_one_byte_in_place(&model);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(is_integrity_mismatch(&error), "{error:#}");
+        assert!(!is_model_artifact_installed_in(
+            session,
+            &model,
+            Some(&digest)
+        ));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loaders_read_the_verified_file_even_after_the_path_is_swapped() {
+        let (root, model, digest) = trust_fixture("swap", b"verified bytes");
+        let session = new_session();
+        let (artifact, _) = open_verified_model_artifact_in(session, &model, &digest).unwrap();
+        assert_ne!(artifact.load_path(), model.as_path());
+        // Move the checked file aside and put other bytes at its path.
+        std::fs::rename(&model, model.with_file_name("moved-aside.bin")).unwrap();
+        std::fs::write(&model, b"attacker bytes").unwrap();
+
+        // Each open of the load path gets the verified bytes from the start.
+        for _ in 0..2 {
+            assert_eq!(
+                std::fs::read(artifact.load_path()).unwrap(),
+                b"verified bytes"
+            );
+        }
+        // The rename may itself move the checked file's change time, which
+        // fails the load closed. Either way the swapped-in bytes never load.
+        match artifact.load(|path| Ok(std::fs::read(path)?)) {
+            Ok(loaded) => assert_eq!(loaded, b"verified bytes"),
+            Err(error) => {
+                assert!(
+                    error.to_string().contains("changed while it was loading"),
+                    "{error}"
+                )
+            }
+        }
+        assert!(
+            artifact.confirm_path_unchanged().is_err(),
+            "a loader that must open the path itself sees the swap"
+        );
+        assert!(is_integrity_mismatch(
+            &open_verified_model_artifact_in(session, &model, &digest).unwrap_err()
+        ));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_verified_file_replaced_by_rename_never_loads_the_new_bytes() {
+        let (root, model, digest) = trust_fixture("replace", b"verified bytes");
+        let (artifact, _) =
+            open_verified_model_artifact_in(new_session(), &model, &digest).unwrap();
+        let replacement = model.with_file_name("replacement.bin");
+        std::fs::write(&replacement, b"attacker bytes").unwrap();
+        std::fs::rename(&replacement, &model).unwrap();
+        // With its last link gone the checked file may no longer open by
+        // inode; the loader then fails instead of reading the replacement.
+        match std::fs::read(artifact.load_path()) {
+            Ok(bytes) => assert_eq!(bytes, b"verified bytes"),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        }
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn hashing_rejects_a_file_written_between_read_chunks() {
+        use std::io::{Seek, SeekFrom, Write};
+        let (root, model, _) = trust_fixture("mid-hash", &vec![0x5a; 2 * 1024 * 1024]);
+        let file = std::fs::File::open(&model).unwrap();
+        let mut mutated = false;
+        let result = model_trust::hash_open_file(&file, &model, |_| {
+            if std::mem::replace(&mut mutated, true) {
+                return;
+            }
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&model)
+                .unwrap();
+            writer.seek(SeekFrom::Start(1024 * 1024 + 32)).unwrap();
+            writer.write_all(b"changed").unwrap();
+            writer.sync_all().unwrap();
+        });
+        assert!(result.is_err());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn bytes_hashed_as_they_are_read_are_the_bytes_returned() {
+        let (root, model, digest) = trust_fixture("read-bytes", b"tokenizer bytes");
+        assert_eq!(
+            read_verified_model_bytes(&model, &digest).unwrap(),
+            b"tokenizer bytes"
+        );
+        std::fs::write(&model, b"tokenizer bytez").unwrap();
+        let error = read_verified_model_bytes(&model, &digest).unwrap_err();
+        assert!(is_integrity_mismatch(&error));
+        assert!(!is_model_artifact_installed(&model, Some(&digest)));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn preverification_hashes_each_file_once_so_first_use_does_not_wait() {
+        let (root, model, digest) = trust_fixture("preverify", b"pinned model bytes");
+        let wrong = root.join("wrong.bin");
+        std::fs::write(&wrong, b"not the pinned bytes").unwrap();
+        let missing = root.join("missing.bin");
+        let artifacts = vec![
+            (model.clone(), digest.clone()),
+            (wrong.clone(), digest.clone()),
+            (missing, digest.clone()),
+        ];
+        let session = new_session();
+
+        let report = preverify_models_in(session, &artifacts);
+        assert_eq!(report.hashed, 1);
+        assert_eq!(report.rejected, vec![wrong.clone()]);
+        assert!(report.errors.is_empty());
+        assert!(!is_model_artifact_installed_in(
+            session,
+            &wrong,
+            Some(&digest)
+        ));
+
+        let (_, hashed) = open_verified_model_artifact_in(session, &model, &digest).unwrap();
+        assert!(!hashed, "the first load found the file already checked");
+        let again = preverify_models_in(session, &artifacts);
+        assert_eq!((again.hashed, again.already_verified), (0, 1));
+        assert_eq!(full_hash_count_for_tests(&model), 1);
+        assert_eq!(full_hash_count_for_tests(&wrong), 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_load_racing_the_background_check_shares_its_hash() {
+        let (root, model, digest) = trust_fixture("race", &vec![7u8; 8 * 1024 * 1024]);
+        let session = new_session();
+        let artifacts = vec![(model.clone(), digest.clone())];
+        let background = std::thread::spawn(move || preverify_models_in(session, &artifacts));
+        let (_, _) = open_verified_model_artifact_in(session, &model, &digest).unwrap();
+        background.join().unwrap();
+        assert_eq!(full_hash_count_for_tests(&model), 1);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_bundle_reads_as_installed_until_one_file_is_found_wrong() {
+        use sha2::Digest as _;
+        let test_dir = std::env::temp_dir()
+            .join("plainsong-model-bundle")
+            .join(uuid::Uuid::new_v4().to_string());
+        tokio::fs::create_dir_all(&test_dir).await.unwrap();
+        let names = ["segmentation.onnx", "weights.data", "plda.npy"];
+        let expected: Vec<(String, String)> = names
+            .iter()
+            .map(|name| {
+                let contents = format!("bundle-fixture-{name}");
+                std::fs::write(test_dir.join(name), &contents).unwrap();
+                (
+                    name.to_string(),
+                    hex::encode(sha2::Sha256::digest(contents)),
+                )
+            })
+            .collect();
         let pins = || {
             expected
                 .iter()
                 .map(|(name, sha)| (name.as_str(), sha.as_str()))
         };
 
-        // Bytes alone are not enough: readiness follows the receipt.
-        assert!(!is_bundle_trusted(&test_dir, pins()));
-
-        for (index, (name, sha)) in expected.iter().enumerate() {
-            record_model_integrity_receipt_for_tests(&test_dir.join(name), sha)
-                .await
-                .expect("receipt");
-            let complete = index + 1 == expected.len();
-            assert_eq!(
-                is_bundle_trusted(&test_dir, pins()),
-                complete,
-                "bundle with {} of {} receipts",
-                index + 1,
-                expected.len()
-            );
-        }
-
-        // One file swapped after verification invalidates the whole bundle,
-        // not just that file.
-        tokio::fs::write(test_dir.join(names[1]), "tampered")
-            .await
-            .expect("tamper");
-        assert!(!is_bundle_trusted(&test_dir, pins()));
-
-        // And the real table is wired to the same rule: nothing is downloaded
-        // here, so the shipped bundle must read as not installed.
-        assert!(!is_speakrs_bundle_trusted(&test_dir));
-
-        tokio::fs::remove_dir_all(&test_dir).await.ok();
-    }
-
-    #[tokio::test]
-    async fn integrity_receipt_trusts_only_the_unchanged_verified_artifact() {
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-model-integrity")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
-            .await
-            .expect("create integrity test directory");
-        let model_path = test_dir.join("model.onnx");
-        tokio::fs::write(&model_path, b"trusted model bytes")
-            .await
-            .expect("write model");
-        let digest = calculate_sha256(&model_path).await.expect("hash model");
-
-        assert!(verify_or_record_model_integrity(&model_path, Some(&digest))
-            .await
-            .expect("verify model"));
-        assert!(is_model_artifact_trusted(&model_path, Some(&digest)));
-
-        tokio::fs::write(&model_path, b"tampered model bytes with a different size")
-            .await
-            .expect("tamper model");
-        assert!(!is_model_artifact_trusted(&model_path, Some(&digest)));
         assert!(
-            !verify_or_record_model_integrity(&model_path, Some(&digest))
-                .await
-                .expect("reject tampered model")
+            is_bundle_installed(&test_dir, pins()),
+            "readiness does not hash"
         );
+        std::fs::remove_file(test_dir.join(names[2])).unwrap();
+        assert!(
+            !is_bundle_installed(&test_dir, pins()),
+            "every file must be present"
+        );
+        std::fs::write(
+            test_dir.join(names[2]),
+            format!("bundle-fixture-{}", names[2]),
+        )
+        .unwrap();
 
+        std::fs::write(test_dir.join(names[1]), "tampered").unwrap();
+        assert!(is_bundle_installed(&test_dir, pins()));
+        assert!(
+            !verify_or_record_model_integrity(&test_dir.join(names[1]), Some(&expected[1].1))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !is_bundle_installed(&test_dir, pins()),
+            "one file found wrong makes the whole bundle missing"
+        );
+        assert!(!is_community1_bundle_installed(&test_dir));
         tokio::fs::remove_dir_all(&test_dir).await.ok();
     }
 
     #[tokio::test]
-    async fn integrity_receipt_rejects_same_size_replacement_with_restored_mtime() {
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-model-integrity-replay")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
+    async fn verifying_writes_nothing_beside_the_model_and_clears_an_old_receipt() {
+        let (root, model, digest) = trust_fixture("no-sibling", b"never verified bytes");
+        std::fs::write(
+            legacy_integrity_receipt_path(&model),
+            format!("plainsong-model-integrity-v2\nsha256={digest}\nmac=00\n"),
+        )
+        .unwrap();
+        assert!(verify_or_record_model_integrity(&model, Some(&digest))
             .await
-            .expect("create integrity test directory");
-        let model_path = test_dir.join("model.onnx");
-        tokio::fs::write(&model_path, b"original model bytes")
+            .unwrap());
+        assert!(!legacy_integrity_receipt_path(&model).exists());
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "verification writes nothing into the models folder"
+        );
+        assert!(is_model_artifact_verified(&model, &digest));
+        assert!(
+            verify_existing_model_in_process(&model, &digest)
+                .await
+                .unwrap(),
+            "read-only verification of an existing model"
+        );
+        assert_eq!(std::fs::read(&model).unwrap(), b"never verified bytes");
+        assert!(!verify_existing_model_in_process(&model, &"0".repeat(64))
             .await
-            .expect("write model");
-        let digest = calculate_sha256(&model_path).await.expect("hash model");
-
-        assert!(verify_or_record_model_integrity(&model_path, Some(&digest))
-            .await
-            .expect("verify model"));
-        let original_mtime = std::fs::metadata(&model_path)
-            .expect("model metadata")
-            .modified()
-            .expect("model modification time");
-
-        tokio::fs::write(&model_path, b"replaced model bytes")
-            .await
-            .expect("replace model with same-size bytes");
-        std::fs::File::options()
-            .write(true)
-            .open(&model_path)
-            .expect("open replacement")
-            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
-            .expect("restore modification time");
-
-        assert!(!is_model_artifact_trusted(&model_path, Some(&digest)));
-
-        tokio::fs::remove_dir_all(&test_dir).await.ok();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn verified_handle_loads_checked_inode_after_path_swap() {
-        use std::io::Read;
-
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-model-integrity-load-race")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
-            .await
-            .expect("create test directory");
-        let model_path = test_dir.join("model.bin");
-        tokio::fs::write(&model_path, b"verified bytes")
-            .await
-            .expect("write model");
-        let digest = calculate_sha256(&model_path).await.expect("hash model");
-        verify_or_record_model_integrity(&model_path, Some(&digest))
-            .await
-            .expect("verify model");
-
-        let verified =
-            open_verified_model_artifact(&model_path, &digest).expect("open verified handle");
-        let replacement = test_dir.join("replacement.bin");
-        tokio::fs::write(&replacement, b"attacker bytes")
-            .await
-            .expect("write replacement");
-        tokio::fs::rename(&replacement, &model_path)
-            .await
-            .expect("swap path");
-
-        let mut loaded = String::new();
-        std::fs::File::open(verified.load_path())
-            .expect("reopen verified descriptor")
-            .read_to_string(&mut loaded)
-            .expect("read verified bytes");
-        assert_eq!(loaded, "verified bytes");
-        tokio::fs::remove_dir_all(&test_dir).await.ok();
-    }
-
-    #[tokio::test]
-    async fn startup_integrity_migration_upgrades_exact_legacy_artifacts_only() {
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-model-integrity-migration")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
-            .await
-            .expect("create migration test directory");
-
-        let exact_path = test_dir.join("exact-model.bin");
-        let altered_path = test_dir.join("altered-model.bin");
-        tokio::fs::write(&exact_path, b"known pinned model bytes")
-            .await
-            .expect("write exact model");
-        tokio::fs::write(&altered_path, b"unexpected model bytes")
-            .await
-            .expect("write altered model");
-        let expected_digest = calculate_sha256(&exact_path)
-            .await
-            .expect("hash exact model");
-
-        let report = migrate_legacy_model_integrity_receipts(&[
-            (exact_path.clone(), expected_digest.clone()),
-            (altered_path.clone(), expected_digest.clone()),
-        ])
-        .await;
-
-        assert_eq!(report.migrated_count, 1);
-        assert_eq!(report.rejected_paths, vec![altered_path.clone()]);
-        assert!(report.errors.is_empty());
-        assert!(is_model_artifact_trusted(
-            &exact_path,
-            Some(&expected_digest)
-        ));
-        assert!(!is_model_artifact_trusted(
-            &altered_path,
-            Some(&expected_digest)
-        ));
-        assert!(!model_integrity_receipt_path(&altered_path).exists());
-
-        tokio::fs::remove_dir_all(&test_dir).await.ok();
+            .unwrap());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
     fn every_managed_integrity_artifact_carries_a_real_pinned_digest() {
-        // The startup/registration-time guardrail for finding 8: a future
-        // hand-added table entry with a forgotten or blank sha256 must fail
+        // A hand-added table entry with a forgotten or blank sha256 must fail
         // this test rather than silently disabling verification for that
         // artifact (see the historical `expected_sha256.is_empty()` bypass
         // this whole module used to have).
@@ -2766,132 +3079,54 @@ mod tests {
 
     #[tokio::test]
     async fn verify_or_record_model_integrity_treats_none_as_not_yet_pinned() {
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-model-integrity-unpinned")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
-            .await
-            .expect("create test directory");
-        let model_path = test_dir.join("unpinned-model.bin");
-        tokio::fs::write(&model_path, b"any bytes at all")
-            .await
-            .expect("write model");
-
-        // `None` means "not yet pinned": the file is trusted on existence
-        // alone, and no receipt is written (there is nothing to pin it to).
-        assert!(verify_or_record_model_integrity(&model_path, None)
-            .await
-            .expect("unpinned artifacts are trusted on existence"));
-        assert!(!model_integrity_receipt_path(&model_path).exists());
-
-        tokio::fs::remove_dir_all(&test_dir).await.ok();
+        let (root, model, _) = trust_fixture("unpinned", b"any bytes at all");
+        // `None` means "not yet pinned": the file is accepted on existence
+        // alone, and nothing is recorded (there is nothing to pin it to).
+        assert!(
+            verify_or_record_model_integrity_in(new_session(), &model, None)
+                .await
+                .expect("unpinned artifacts are accepted on existence")
+        );
+        assert!(!is_model_artifact_installed(&model, None));
+        assert_eq!(full_hash_count_for_tests(&model), 0);
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]
     #[should_panic(expected = "expected_sha256 must be None")]
     async fn verify_or_record_model_integrity_rejects_empty_string_as_a_hard_error() {
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-model-integrity-empty-digest")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
-            .await
-            .expect("create test directory");
-        let model_path = test_dir.join("model.bin");
-        tokio::fs::write(&model_path, b"some bytes")
-            .await
-            .expect("write model");
-
+        let (_root, model, _) = trust_fixture("empty-digest", b"some bytes");
         // Some("") must never be silently treated as "not yet pinned" (that
-        // is what `None` is for) or as "trust it" -- it is the exact
-        // foot-gun this finding closes. Debug/test builds (debug_assertions
-        // enabled, which `cargo test` always has) make this a loud panic via
-        // `assert_pinned_digest_is_never_empty`; the `anyhow::bail!` further
-        // down in the same function is the release-build backstop for when
-        // `debug_assert!` compiles out and is not separately exercisable
-        // here since `cargo test` cannot disable debug_assertions.
-        let _ = verify_or_record_model_integrity(&model_path, Some("")).await;
+        // is what `None` is for) or as "trust it". Debug/test builds make
+        // this a loud panic via `assert_pinned_digest_is_never_empty`; the
+        // `anyhow::bail!` further down is the release-build backstop.
+        let _ = verify_or_record_model_integrity(&model, Some("")).await;
     }
 
     #[tokio::test]
-    async fn migrate_legacy_model_integrity_receipts_hard_fails_on_empty_digest_entries() {
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-model-integrity-migration-empty")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
-            .await
-            .expect("create test directory");
-        let path = test_dir.join("model.bin");
-        tokio::fs::write(&path, b"some bytes")
-            .await
-            .expect("write model");
-
-        let report =
-            migrate_legacy_model_integrity_receipts(&[(path.clone(), String::new())]).await;
-
-        assert_eq!(report.migrated_count, 0);
-        assert!(report.rejected_paths.is_empty());
-        assert_eq!(report.errors.len(), 1);
-        assert_eq!(report.errors[0].0, path);
-        assert!(!is_model_artifact_trusted(&path, None));
-
-        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    async fn download_error_body_stops_at_four_kib_without_draining() {
+        use std::cell::Cell;
+        let polls = Cell::new(0);
+        let body = futures_util::stream::poll_fn(|_| {
+            polls.set(polls.get() + 1);
+            assert!(polls.get() <= 4, "error body was drained beyond its limit");
+            std::task::Poll::Ready(Some(Ok::<_, std::io::Error>(vec![b'x'; 1024])))
+        });
+        assert_eq!(bounded_download_error_snippet(body).await, "x".repeat(200));
+        assert_eq!(polls.get(), 4);
     }
 
     #[tokio::test]
-    async fn integrity_receipt_is_mac_protected_against_hand_forged_files() {
-        // Forging a receipt requires reproducing the exact bytes
-        // `model_integrity_receipt_contents` would compute -- including the
-        // MAC, which needs the keychain-held key. A receipt written with the
-        // attacker-known plaintext fields but
-        // without a matching `mac=` line -- exactly what someone with only
-        // filesystem access to the models directory could produce by reading
-        // this module's public source -- must be rejected.
-        let test_dir = std::env::temp_dir()
-            .join("plainsong-model-integrity-mac")
-            .join(uuid::Uuid::new_v4().to_string());
-        tokio::fs::create_dir_all(&test_dir)
-            .await
-            .expect("create test directory");
-        let model_path = test_dir.join("model.bin");
-        tokio::fs::write(&model_path, b"model bytes")
-            .await
-            .expect("write model");
-        let digest = calculate_sha256(&model_path).await.expect("hash model");
-
-        let metadata = tokio::fs::metadata(&model_path).await.expect("stat model");
-        let modified_nanos = metadata
-            .modified()
-            .expect("mtime")
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("mtime after epoch")
-            .as_nanos();
-        let forged_receipt_without_mac = format!(
-            "{}\nsha256={}\nsize={}\nmodified_nanos={}\n",
-            MODEL_INTEGRITY_RECEIPT_VERSION,
-            digest,
-            metadata.len(),
-            modified_nanos
-        );
-        tokio::fs::write(
-            model_integrity_receipt_path(&model_path),
-            &forged_receipt_without_mac,
-        )
-        .await
-        .expect("write forged receipt");
-
-        assert!(
-            !is_model_artifact_trusted(&model_path, Some(&digest)),
-            "a receipt missing its MAC must never be trusted"
-        );
-
-        // The real receipt-writing path (which does know the MAC key)
-        // produces a receipt this same check accepts.
-        assert!(verify_or_record_model_integrity(&model_path, Some(&digest))
-            .await
-            .expect("verify model"));
-        assert!(is_model_artifact_trusted(&model_path, Some(&digest)));
-
-        tokio::fs::remove_dir_all(&test_dir).await.ok();
+    async fn download_error_body_handles_large_chunks_empty_bodies_and_invalid_utf8() {
+        let large = futures_util::stream::iter([Ok::<_, std::io::Error>(vec![b'a'; 1024 * 1024])]);
+        assert_eq!(bounded_download_error_snippet(large).await, "a".repeat(200));
+        let empty = futures_util::stream::empty::<std::io::Result<Vec<u8>>>();
+        assert_eq!(bounded_download_error_snippet(empty).await, "");
+        let broken = futures_util::stream::iter([
+            Ok(vec![b' ', 0xff, b' ']),
+            Err(std::io::Error::other("mock read error")),
+        ]);
+        assert_eq!(bounded_download_error_snippet(broken).await, "\u{fffd}");
     }
 
     #[cfg(unix)]
@@ -2955,6 +3190,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downloaded_model_listing_includes_both_whistle_assets() {
+        let models_dir = std::env::temp_dir().join(format!(
+            "plainsong-whistle-listing-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let dir = crate::asr::whistle::model_dir(&models_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("whistle.cact"), b"model").unwrap();
+        std::fs::write(dir.join("needle"), b"cli").unwrap();
+        std::fs::write(dir.join("needle.installing"), b"partial").unwrap();
+        let manager = DownloadManager {
+            client: build_download_client().unwrap(),
+            models_dir: models_dir.clone(),
+        };
+        let rows = manager.list_downloaded_models().await.unwrap();
+        let rows = rows
+            .iter()
+            .filter(|row| row.provider == "whistle")
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().map(|row| row.size_bytes).sum::<u64>(), 8);
+        assert!(rows.iter().any(|row| row.path == dir.join("whistle.cact")));
+        assert!(rows.iter().any(|row| row.path == dir.join("needle")));
+        std::fs::remove_dir_all(models_dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn downloaded_model_listing_sums_the_flat_qwen3_bundle() {
         let models_dir = std::env::temp_dir()
             .join("plainsong-download-qwen3-listing")
@@ -3011,7 +3273,7 @@ mod tests {
         std::fs::write(bundled_dir.join("LICENSE"), vec![0u8; 80]).expect("license");
         std::fs::write(bundled_dir.join("NOTICE"), vec![0u8; 20]).expect("notice");
         std::fs::write(
-            model_integrity_receipt_path(&bundled_dir.join("LICENSE")),
+            legacy_integrity_receipt_path(&bundled_dir.join("LICENSE")),
             b"receipt",
         )
         .expect("receipt is metadata, not model footprint");
@@ -3057,7 +3319,7 @@ mod tests {
         let nemotron = dir.join("nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf");
         std::fs::write(&parakeet, vec![0u8; 4096]).expect("parakeet gguf");
         std::fs::write(&nemotron, vec![0u8; 2048]).expect("nemotron gguf");
-        std::fs::write(model_integrity_receipt_path(&parakeet), b"receipt").expect("receipt");
+        std::fs::write(legacy_integrity_receipt_path(&parakeet), b"receipt").expect("receipt");
 
         let manager = DownloadManager {
             client: build_download_client().expect("client"),
@@ -3094,7 +3356,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("delete {}: {error}", model.display()));
             assert!(!model.exists());
         }
-        assert!(!model_integrity_receipt_path(&parakeet).exists());
+        assert!(!legacy_integrity_receipt_path(&parakeet).exists());
         assert!(manager
             .list_downloaded_models()
             .await
@@ -3105,7 +3367,61 @@ mod tests {
         std::fs::remove_dir_all(&models_dir).ok();
     }
 
-    /// The four speaker embedders and any speakrs bundle were downloaded into
+    /// On a Mac that runs it, Parakeet's download is the Core ML build alone:
+    /// it must be listed (or Parakeet reads as not downloaded), counted, and
+    /// removable as one bundle.
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[tokio::test]
+    async fn downloaded_model_listing_shows_and_can_delete_core_ml_bundles() {
+        use crate::asr::neural_engine::{PARAKEET_CTC_VOCABULARY, PARAKEET_V3_COREML};
+        let models_dir = std::env::temp_dir()
+            .join("plainsong-download-neural-engine-listing")
+            .join(uuid::Uuid::new_v4().to_string());
+        for spec in [&PARAKEET_V3_COREML, &PARAKEET_CTC_VOCABULARY] {
+            let dir = spec.dir(&models_dir);
+            for file in spec.files {
+                let path = dir.join(file.path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"xx").unwrap();
+            }
+        }
+        // An interrupted download of the English build: only one file.
+        let partial = models_dir
+            .join("neural_engine")
+            .join("parakeet-tdt-0.6b-v2-coreml");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("config.json"), b"{}").unwrap();
+
+        let manager = DownloadManager {
+            client: build_download_client().expect("client"),
+            models_dir: models_dir.clone(),
+        };
+        let listed = manager.list_downloaded_models().await.expect("listing");
+        let entry = |dir: &Path| {
+            listed
+                .iter()
+                .find(|model| model.path == dir)
+                .unwrap_or_else(|| panic!("{} is listed", dir.display()))
+        };
+        let v3 = entry(&PARAKEET_V3_COREML.dir(&models_dir));
+        assert_eq!(v3.provider, "transcribe_cpp");
+        assert_eq!(v3.name, PARAKEET_V3_COREML.model_id);
+        assert_eq!(v3.size_bytes, 2 * PARAKEET_V3_COREML.files.len() as u64);
+        assert_eq!(
+            entry(&PARAKEET_CTC_VOCABULARY.dir(&models_dir)).name,
+            PARAKEET_CTC_VOCABULARY.model_id
+        );
+        assert_eq!(
+            entry(&partial).name,
+            "parakeet-tdt-0.6b-v2-coreml (incomplete)"
+        );
+
+        manager.delete_model(&v3.path).await.expect("delete bundle");
+        assert!(!PARAKEET_V3_COREML.dir(&models_dir).exists());
+        std::fs::remove_dir_all(&models_dir).ok();
+    }
+
+    /// The four speaker embedders and any model bundle were downloaded into
     /// `models/diarization` and then never listed, so the Models screen could
     /// not show them and `delete_model` had no path to hand back.
     #[tokio::test]
@@ -3114,7 +3430,7 @@ mod tests {
             .join("plainsong-download-diarization-listing")
             .join(uuid::Uuid::new_v4().to_string());
         let diarization_dir = models_dir.join("diarization");
-        let bundle_dir = diarization_dir.join(SPEAKRS_BUNDLE_DIR);
+        let bundle_dir = diarization_dir.join(COMMUNITY1_BUNDLE_DIR);
         std::fs::create_dir_all(&bundle_dir).expect("create bundle dir");
 
         std::fs::write(
@@ -3123,19 +3439,32 @@ mod tests {
         )
         .expect("ecapa");
         std::fs::write(
+            diarization_dir.join("nemotron3_diar_v3.onnx"),
+            vec![0u8; 4_000],
+        )
+        .expect("nemotron");
+        std::fs::write(
             diarization_dir.join("campplus_speaker.onnx"),
             vec![0u8; 3_000],
         )
         .expect("campplus");
         std::fs::write(
-            model_integrity_receipt_path(&diarization_dir.join("campplus_speaker.onnx")),
+            legacy_integrity_receipt_path(&diarization_dir.join("campplus_speaker.onnx")),
             b"receipt",
         )
         .expect("receipt is metadata, not model footprint");
-        std::fs::write(bundle_dir.join("segmentation-3.0.onnx"), vec![0u8; 500]).expect("seg");
-        std::fs::write(bundle_dir.join("plda_lda.npy"), vec![0u8; 120]).expect("plda");
         std::fs::write(
-            model_integrity_receipt_path(&bundle_dir.join("plda_lda.npy")),
+            bundle_dir.join("pyannote-community-1-segmentation.onnx"),
+            vec![0u8; 500],
+        )
+        .expect("seg");
+        std::fs::write(
+            bundle_dir.join("pyannote-community-1-plda.npz"),
+            vec![0u8; 120],
+        )
+        .expect("plda");
+        std::fs::write(
+            legacy_integrity_receipt_path(&bundle_dir.join("pyannote-community-1-plda.npz")),
             b"receipt",
         )
         .expect("bundle receipt");
@@ -3155,8 +3484,8 @@ mod tests {
             .collect();
         assert_eq!(
             diarization.len(),
-            3,
-            "two embedders and one bundle: {diarization:?}"
+            4,
+            "two embedders, Nemotron and one bundle: {diarization:?}"
         );
 
         let ecapa = diarization
@@ -3167,6 +3496,15 @@ mod tests {
         // downloaded it.
         assert_eq!(ecapa.name, "Speaker embedding ECAPA-TDNN 512");
         assert_eq!(ecapa.size_bytes, 2_000);
+        let nemotron = diarization
+            .iter()
+            .find(|model| model.path == diarization_dir.join("nemotron3_diar_v3.onnx"))
+            .expect("Nemotron listed");
+        assert_eq!(
+            nemotron.name,
+            "Speaker labels Nemotron 3 Diarization (experimental)"
+        );
+        assert_eq!(nemotron.size_bytes, 4_000);
 
         let campplus = diarization
             .iter()
@@ -3178,8 +3516,8 @@ mod tests {
         let bundle = diarization
             .iter()
             .find(|model| model.path == bundle_dir)
-            .expect("speakrs bundle listed as one entry");
-        assert!(bundle.name.contains("community-1"), "{}", bundle.name);
+            .expect("community-1 bundle listed as one entry");
+        assert_eq!(bundle.name, "Speaker labels pyannote community-1");
         assert_eq!(
             bundle.size_bytes,
             500 + 120,
@@ -3197,18 +3535,18 @@ mod tests {
 
     /// A bundle is listed by its directory, so deleting one has to remove the
     /// directory. `remove_file` returned an error on every bundle entry, which
-    /// is why the speakrs bundle (and the Qwen3-ASR and cleanup bundles beside
+    /// is why a diarization bundle (and the Qwen3-ASR and cleanup bundles beside
     /// it) could be seen but not deleted.
     #[tokio::test]
     async fn deleting_a_model_bundle_removes_the_whole_directory() {
         let models_dir = std::env::temp_dir()
             .join("plainsong-download-delete-bundle")
             .join(uuid::Uuid::new_v4().to_string());
-        let bundle_dir = models_dir.join("diarization").join(SPEAKRS_BUNDLE_DIR);
+        let bundle_dir = models_dir.join("diarization").join(COMMUNITY1_BUNDLE_DIR);
         std::fs::create_dir_all(&bundle_dir).expect("create bundle dir");
-        let payload = bundle_dir.join("segmentation-3.0.onnx");
+        let payload = bundle_dir.join("pyannote-community-1-segmentation.onnx");
         std::fs::write(&payload, b"weights").expect("write payload");
-        std::fs::write(model_integrity_receipt_path(&payload), b"receipt").expect("write receipt");
+        std::fs::write(legacy_integrity_receipt_path(&payload), b"receipt").expect("write receipt");
 
         let manager = DownloadManager {
             client: build_download_client().expect("client"),
@@ -3266,9 +3604,9 @@ mod tests {
         let parakeet_model = parakeet_dir.join("encoder.int8.onnx");
         for path in [&whisper_model, &parakeet_model] {
             std::fs::write(path, b"model").expect("write model");
-            std::fs::write(model_integrity_receipt_path(path), b"receipt").expect("write receipt");
+            std::fs::write(legacy_integrity_receipt_path(path), b"receipt").expect("write receipt");
             std::fs::write(
-                path_with_suffix(&model_integrity_receipt_path(path), ".tmp-123"),
+                path_with_suffix(&legacy_integrity_receipt_path(path), ".tmp-123"),
                 b"temporary receipt",
             )
             .expect("write temporary receipt");
@@ -3301,7 +3639,7 @@ mod tests {
         let whisper_dir = models_dir.join("whisper");
         std::fs::create_dir_all(&whisper_dir).expect("create Whisper dir");
         let model_path = whisper_dir.join("ggml-base.en.bin");
-        let receipt_path = model_integrity_receipt_path(&model_path);
+        let receipt_path = legacy_integrity_receipt_path(&model_path);
         std::fs::write(&model_path, b"model").expect("write model");
         std::fs::write(&receipt_path, b"receipt").expect("write receipt");
 

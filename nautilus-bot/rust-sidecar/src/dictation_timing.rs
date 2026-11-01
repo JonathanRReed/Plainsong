@@ -201,6 +201,46 @@ pub fn format_dictation_timing_summary(record: &DictationTimingRecord) -> String
     )
 }
 
+/// Splits the insertion stage (`insert_dispatch` to `insert_confirm`) into its
+/// steps, so a slow delivery shows which check or write it was waiting on.
+#[derive(Debug)]
+pub(crate) struct DeliveryStepClock {
+    last: std::time::Instant,
+    laps: Vec<(&'static str, u64)>,
+}
+
+impl DeliveryStepClock {
+    pub(crate) fn start() -> Self {
+        Self::start_at(std::time::Instant::now())
+    }
+
+    fn start_at(now: std::time::Instant) -> Self {
+        Self {
+            last: now,
+            laps: Vec::new(),
+        }
+    }
+
+    pub(crate) fn lap(&mut self, step: &'static str) {
+        self.lap_at(step, std::time::Instant::now());
+    }
+
+    fn lap_at(&mut self, step: &'static str, now: std::time::Instant) {
+        let elapsed = now.saturating_duration_since(self.last).as_millis();
+        self.laps
+            .push((step, elapsed.min(u128::from(u64::MAX)) as u64));
+        self.last = now;
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        self.laps
+            .iter()
+            .map(|(step, ms)| format!("{step}={ms}ms"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
 fn format_stage_ms(value: Option<u64>) -> String {
     match value {
         Some(ms) => format!("{ms}ms"),
@@ -330,6 +370,21 @@ mod tests {
         assert_eq!(resolve_stop_timing(10_000, Some(10_001)), (10_000, 0));
         assert_eq!(resolve_stop_timing(100_000, Some(39_999)), (100_000, 0));
         assert_eq!(resolve_stop_timing(i64::MAX, Some(-1)), (i64::MAX, 0));
+    }
+
+    #[test]
+    fn delivery_steps_report_each_step_since_the_previous_one() {
+        let start = std::time::Instant::now();
+        let mut clock = DeliveryStepClock::start_at(start);
+        clock.lap_at("restore", start + std::time::Duration::from_millis(2));
+        clock.lap_at("field_check", start + std::time::Duration::from_millis(9));
+        // A clock that steps backwards reads as zero, not as a wrap.
+        clock.lap_at("cursor_fit", start + std::time::Duration::from_millis(5));
+        clock.lap_at("write", start + std::time::Duration::from_millis(30));
+        assert_eq!(
+            clock.summary(),
+            "restore=2ms field_check=7ms cursor_fit=0ms write=25ms"
+        );
     }
 
     fn base_inputs() -> DictationTimingInputs {

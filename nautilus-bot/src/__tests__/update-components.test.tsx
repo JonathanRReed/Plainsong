@@ -41,7 +41,7 @@ describe("update components", () => {
 
     render(<UpdateStatusWidget />);
 
-    expect(await screen.findByText("Update Available")).toBeInTheDocument();
+    expect(await screen.findByText("Update available")).toBeInTheDocument();
     expect(screen.getByText("Version 1.2.3 is available.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /install update/i }));
@@ -56,12 +56,62 @@ describe("update components", () => {
 
     render(<UpdateStatusWidget />);
 
-    expect(await screen.findByText("Up to Date")).toBeInTheDocument();
+    expect(await screen.findByText("Up to date")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /check for updates/i }));
 
     expect(await screen.findByText("Error")).toBeInTheDocument();
-    expect(screen.getByText("network unreachable")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Plainsong couldn't reach the update server. Check your internet connection, then try again.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("drops Electron's wrapper from an error it can't name", async () => {
+    updates.checkForUpdates.mockRejectedValue(
+      new Error(
+        "Error invoking remote method 'sidecar:invoke': Error: Finish the active meeting before installing the update.",
+      ),
+    );
+    render(<UpdateStatusWidget />);
+    await screen.findByText("Up to date");
+    fireEvent.click(screen.getByRole("button", { name: /check for updates/i }));
+    expect(
+      await screen.findByText("Finish the active meeting before installing the update."),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no status badge before anything was checked", async () => {
+    updates.getUpdateStatus.mockResolvedValue({ status: "unknown" });
+    render(<UpdateStatusWidget />);
+    await screen.findByRole("button", { name: /check for updates/i });
+    expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
+  });
+
+  it("offers the same update again after an install fails, and no new check while downloading", async () => {
+    let pushStatus;
+    electron.listen.mockImplementation(async (event, handler) => {
+      pushStatus = (payload) => handler({ event, payload, id: 1 });
+      return () => {};
+    });
+    render(<UpdateStatusWidget />);
+    await screen.findByText("Up to date");
+    await waitFor(() => expect(pushStatus).toBeDefined());
+    const info = { version: "1.2.3", notes: "", pubDate: "", isBeta: false };
+
+    act(() => pushStatus({ status: "downloading", info, progress: 10 }));
+    expect(await screen.findByRole("button", { name: /check for updates/i })).toBeDisabled();
+
+    act(() =>
+      pushStatus({
+        status: "error",
+        info,
+        error: "The update is prepared. Save failed. Retry installation when ready.",
+      }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /try installing again/i }));
+    await waitFor(() => expect(updates.installUpdate).toHaveBeenCalledTimes(1));
   });
 
   it("renders download progress pushed via update-status-changed events", async () => {
@@ -74,7 +124,7 @@ describe("update components", () => {
 
     render(<UpdateStatusWidget />);
 
-    expect(await screen.findByText("Up to Date")).toBeInTheDocument();
+    expect(await screen.findByText("Up to date")).toBeInTheDocument();
     await waitFor(() => {
       expect(pushStatus).toBeDefined();
     });
@@ -87,7 +137,7 @@ describe("update components", () => {
       });
     });
 
-    expect(await screen.findByText("Downloading...")).toBeInTheDocument();
+    expect(await screen.findByText("Downloading…")).toBeInTheDocument();
     expect(screen.getByText("Downloading update… 42%")).toBeInTheDocument();
 
     act(() => {
@@ -112,7 +162,7 @@ describe("update components", () => {
 
     render(<UpdateStatusWidget />);
 
-    expect(await screen.findByText("Update Available")).toBeInTheDocument();
+    expect(await screen.findByText("Update available")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /install update/i })
     ).not.toBeInTheDocument();

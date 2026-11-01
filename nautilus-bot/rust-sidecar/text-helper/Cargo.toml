@@ -1,0 +1,41 @@
+# Built-in text generation helper: llama.cpp in its own signed process.
+#
+# A separate package, not a binary of the sidecar crate: the sidecar links
+# whisper.cpp and transcribe.cpp, which each carry their own static ggml, and a
+# third ggml in the same image would collide. Its own lockfile keeps the
+# llama.cpp pin out of the sidecar's dependency graph.
+#
+# llama-cpp-2 / llama-cpp-sys-2 are MIT OR Apache-2.0 bindings that vendor
+# llama.cpp and ggml (MIT, "The ggml authors"). Pinned exactly; the sys crate
+# 0.1.160 was published from utilityai/llama-cpp-rs 0dd5814c9b06.
+# `common` provides the JSON-schema-to-grammar converter; OpenMP is left out
+# (Apple clang has none, and Metal does the work).
+[package]
+name = "plainsong-text-helper"
+version = "0.9.0-beta.7"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "plainsong-text-helper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+llama-cpp-sys-2 = { version = "=0.1.160", default-features = false }
+llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["common"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+llama-cpp-2 = { version = "=0.1.160", default-features = false, features = ["common", "metal"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"
+strip = false

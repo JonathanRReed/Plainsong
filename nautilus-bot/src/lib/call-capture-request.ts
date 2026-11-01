@@ -1,8 +1,8 @@
 /**
- * The hand-off from a clicked "Zoom call started" notification to the
+ * The hand-off from a call notification's Record action to the
  * Meetings view's consent dialog.
  *
- * The main process answers the click by focusing the window and broadcasting
+ * The main process answers the action by focusing the window and broadcasting
  * `meeting-call-capture-requested`. `App` switches to the Meetings view and
  * publishes the request here; the view, whenever it mounts, takes the one
  * that is waiting. A plain event alone would be lost when the click lands

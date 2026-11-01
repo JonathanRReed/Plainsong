@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type InputHTMLAttributes, type KeyboardEvent, type ReactNode } from "react";
 import { SavedPromptManagerDialog } from "@/components/prompts/saved-prompt-manager-dialog";
 import { SavedPromptPicker } from "@/components/prompts/saved-prompt-picker";
 import { useSavedPrompts } from "@/hooks/use-saved-prompts";
@@ -36,6 +36,7 @@ interface SavedPromptChat {
    * path stays sendable.
    */
   pickerOpen: boolean;
+  inputProps: InputHTMLAttributes<HTMLInputElement>;
   /** Wire onto the chat input's `onKeyDown`, before its own handling. */
   onInputKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
   /** Opens the manage dialog with a new prompt seeded from this text. */
@@ -60,12 +61,13 @@ export function useSavedPromptChat({
   onPickPrompt,
   label,
 }: UseSavedPromptChatOptions): SavedPromptChat {
-  const { prompts, persist, saveError } = useSavedPrompts();
+  const { prompts, loaded, loadError, persist, saveError, reload } = useSavedPrompts();
   const [managerOpen, setManagerOpen] = useState(false);
   const [seed, setSeed] = useState<SavedPrompt | null>(null);
   const [dismissed, setDismissed] = useState(false);
   const [activeId, setActiveId] = useState("");
 
+  const listId = useId();
   const query = savedPromptQueryFor(inputValue);
   const matches = useMemo(() => {
     if (query === null) return [];
@@ -147,11 +149,19 @@ export function useSavedPromptChat({
   const onSeedConsumed = useCallback(() => setSeed(null), []);
 
   return {
+    inputProps: {
+      role: "combobox",
+      "aria-autocomplete": "list",
+      "aria-expanded": pickerOpen,
+      "aria-controls": pickerOpen ? listId : undefined,
+      "aria-activedescendant": pickerOpen && activeId ? `${listId}-${activeId}` : undefined,
+    },
     pickerOpen,
     onInputKeyDown,
     saveTextAsPrompt,
     picker: pickerOpen ? (
       <SavedPromptPicker
+        listId={listId}
         matches={matches}
         activeId={activeId}
         onActiveIdChange={setActiveId}
@@ -169,6 +179,9 @@ export function useSavedPromptChat({
         seedPrompt={seed}
         onSeedConsumed={onSeedConsumed}
         saveError={saveError}
+        loading={!loaded && !loadError}
+        loadError={loadError}
+        onReload={reload}
       />
     ),
   };

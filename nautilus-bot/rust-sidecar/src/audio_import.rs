@@ -118,18 +118,37 @@ pub(crate) fn validate_import_duration(seconds: f64) -> Result<(), String> {
 /// `--mix` (rather than a bare `-c 1`) is what downmixes a stereo or 5.1
 /// source instead of discarding every channel but the first, which would drop
 /// one side of a two-person recording entirely.
-pub(crate) fn afconvert_args(input: &Path, output: &Path) -> Vec<OsString> {
-    vec![
+pub(crate) fn afconvert_args(
+    input: &Path,
+    output: &Path,
+    source_channels: Option<u32>,
+) -> Vec<OsString> {
+    let mut args = vec![
         OsString::from("-f"),
         OsString::from("WAVE"),
         OsString::from("-d"),
         OsString::from(format!("LEI16@{IMPORT_SAMPLE_RATE_HZ}")),
         OsString::from("-c"),
         OsString::from("1"),
-        OsString::from("--mix"),
-        input.as_os_str().to_os_string(),
-        output.as_os_str().to_os_string(),
-    ]
+    ];
+    // CoreAudio rejects PerformDownmix for some already-mono inputs.
+    // Unknown layouts still request mixing so a second channel is not lost.
+    if source_channels != Some(1) {
+        args.push(OsString::from("--mix"));
+    }
+    args.push(input.as_os_str().to_os_string());
+    args.push(output.as_os_str().to_os_string());
+    args
+}
+
+pub(crate) fn parse_afinfo_channel_count(output: &str) -> Option<u32> {
+    let pattern = regex::Regex::new(r"(?:Data format:|format:)\s*(\d+)\s+ch(?:,|\s|$)")
+        .expect("channel count pattern");
+    let mut counts = pattern
+        .captures_iter(output)
+        .map(|capture| capture[1].parse::<u32>().ok().filter(|count| *count > 0));
+    let first = counts.next()??;
+    counts.all(|count| count == Some(first)).then_some(first)
 }
 
 /// Pulls the duration out of `afinfo` output.
@@ -328,8 +347,36 @@ mod tests {
     }
 
     #[test]
+    fn channel_counts_control_mixing_without_guessing_unknown_layouts() {
+        assert_eq!(
+            parse_afinfo_channel_count("Data format: 1 ch, 16000 Hz, Int16"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_afinfo_channel_count("1.492 sec, format: 2 ch, 44100 Hz"),
+            Some(2)
+        );
+        for text in [
+            "File: 1 ch.wav",
+            "Data format: 0 ch,",
+            "Data format: 1 ch,\nData format: 2 ch,",
+            "Data format: 999999999999999999 ch,",
+        ] {
+            assert_eq!(parse_afinfo_channel_count(text), None);
+        }
+        for channels in [Some(1), Some(2), None] {
+            let args = afconvert_args(Path::new("/in.wav"), Path::new("/out.wav"), channels);
+            assert_eq!(args.contains(&OsString::from("--mix")), channels != Some(1));
+        }
+    }
+
+    #[test]
     fn afconvert_args_ask_for_16k_mono_wav_and_downmix_rather_than_drop_channels() {
-        let args = afconvert_args(Path::new("/in/two channel.m4a"), Path::new("/out/one.wav"));
+        let args = afconvert_args(
+            Path::new("/in/two channel.m4a"),
+            Path::new("/out/one.wav"),
+            Some(2),
+        );
         let rendered: Vec<String> = args
             .iter()
             .map(|value| value.to_string_lossy().to_string())

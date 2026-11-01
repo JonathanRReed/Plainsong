@@ -7,7 +7,8 @@ use std::time::Duration;
 use thiserror::Error;
 
 use super::{
-    AnthropicClient, DeepSeekClient, GeminiClient, OllamaClient, OllamaCloudClient, OpenAIClient,
+    AnthropicClient, ChatGptPlanClient, DeepSeekClient, GeminiClient, OllamaClient,
+    OllamaCloudClient, OpenAIClient,
 };
 
 pub(crate) const MODEL_LIST_BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -79,10 +80,11 @@ fn body_snippet(body: &[u8]) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Provider {
     /// The zero-setup bundled cleanup model (S1-mini by Superwhisper), run
-    /// in-process through Candle. Dictation lane only; see `bundled_local`.
+    /// in the llama.cpp helper. Dictation lane only; see `bundled_local`.
     BundledLocal,
+    NativeText,
     /// Apple's on-device system model via the FoundationModels helper.
-    /// Dictation lane only; see `apple_language_model`.
+    /// Cleanup and chunked notes; see `apple_language_model`.
     AppleLanguageModel,
     Ollama,
     OpenAi,
@@ -90,11 +92,9 @@ pub enum Provider {
     Gemini,
     DeepSeek,
     OllamaCloud,
-    /// Plainsong Plus, the paid hosted tier (feature `plainsong-plus`, OFF
-    /// and NOT LAUNCHED). Its "key" is the entitlement token from
-    /// `crate::plus`, and its models are the relay's two aliases.
-    #[cfg(feature = "plainsong-plus")]
-    PlainsongPlus,
+    /// The signed-in ChatGPT account, reached only through Electron's private
+    /// process-local relay. Rust never receives the account's OAuth material.
+    ChatGptPlan,
 }
 
 impl Provider {
@@ -102,16 +102,16 @@ impl Provider {
         match value.trim().to_ascii_lowercase().as_str() {
             "bundled_local" | "bundled-local" => Ok(Self::BundledLocal),
             "apple_language_model" | "apple-language-model" => Ok(Self::AppleLanguageModel),
+            "native_text" | "native-text" => Ok(Self::NativeText),
             "ollama" => Ok(Self::Ollama),
             "openai" => Ok(Self::OpenAi),
             "anthropic" => Ok(Self::Anthropic),
             "gemini" => Ok(Self::Gemini),
             "deepseek" => Ok(Self::DeepSeek),
             "ollama-cloud" => Ok(Self::OllamaCloud),
-            #[cfg(feature = "plainsong-plus")]
-            "plainsong-plus" => Ok(Self::PlainsongPlus),
+            "chatgpt_plan" | "chatgpt-plan" => Ok(Self::ChatGptPlan),
             unknown => Err(format!(
-                "Unsupported analysis provider '{}'. Choose bundled_local, apple_language_model, ollama, openai, anthropic, gemini, deepseek, or ollama-cloud.",
+                "Unsupported analysis provider '{}'. Choose bundled_local, apple_language_model, ollama, openai, chatgpt_plan, anthropic, gemini, deepseek, or ollama-cloud.",
                 unknown
             )),
         }
@@ -119,6 +119,7 @@ impl Provider {
 
     pub fn as_settings_value(self) -> &'static str {
         match self {
+            Self::NativeText => "native_text",
             Self::BundledLocal => super::bundled_local::PROVIDER_SETTINGS_VALUE,
             Self::AppleLanguageModel => super::apple_language_model::PROVIDER_SETTINGS_VALUE,
             Self::Ollama => "ollama",
@@ -127,8 +128,7 @@ impl Provider {
             Self::Gemini => "gemini",
             Self::DeepSeek => "deepseek",
             Self::OllamaCloud => "ollama-cloud",
-            #[cfg(feature = "plainsong-plus")]
-            Self::PlainsongPlus => "plainsong-plus",
+            Self::ChatGptPlan => "chatgpt_plan",
         }
     }
 
@@ -142,7 +142,7 @@ impl Provider {
     pub fn is_remote(self) -> bool {
         !matches!(
             self,
-            Self::Ollama | Self::BundledLocal | Self::AppleLanguageModel
+            Self::Ollama | Self::NativeText | Self::BundledLocal | Self::AppleLanguageModel
         )
     }
 
@@ -154,41 +154,49 @@ impl Provider {
     /// summary. Both refuse at request time too; this is the check that keeps
     /// them out of the meetings picker in the first place.
     pub fn supports_meeting_analysis(self) -> bool {
+        self != Self::BundledLocal
+    }
+
+    /// Whether this adapter honors custom dictation instructions, including
+    /// rewrites and Voice Edit. The S1 and Apple cleanup adapters use fixed
+    /// prompts; NativeText honors the caller's system prompt.
+    pub fn supports_custom_dictation_transform(self) -> bool {
         !matches!(self, Self::BundledLocal | Self::AppleLanguageModel)
     }
 
     /// Runs entirely on this Mac with no server of any kind -- not even a
     /// localhost one. Ollama is local but still an installed service the user
-    /// has to run and keep running; these two are not.
+    /// has to run and keep running; these embedded providers do not.
     pub fn is_zero_setup_local(self) -> bool {
-        matches!(self, Self::BundledLocal | Self::AppleLanguageModel)
+        matches!(
+            self,
+            Self::NativeText | Self::BundledLocal | Self::AppleLanguageModel
+        )
     }
 
     pub fn provider_secret_name(self) -> Option<&'static str> {
         match self {
-            Self::BundledLocal | Self::AppleLanguageModel => None,
+            Self::NativeText | Self::BundledLocal | Self::AppleLanguageModel => None,
             Self::OpenAi => Some("openai"),
             Self::Anthropic => Some("anthropic"),
             Self::Gemini => Some("gemini"),
             Self::DeepSeek => Some("deepseek"),
             Self::OllamaCloud => Some("ollama-cloud"),
             Self::Ollama => None,
-            #[cfg(feature = "plainsong-plus")]
-            Self::PlainsongPlus => None,
+            Self::ChatGptPlan => None,
         }
     }
 
     pub fn environment_key_name(self) -> Option<&'static str> {
         match self {
-            Self::BundledLocal | Self::AppleLanguageModel => None,
+            Self::NativeText | Self::BundledLocal | Self::AppleLanguageModel => None,
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
             Self::Gemini => Some("GEMINI_API_KEY"),
             Self::DeepSeek => Some("DEEPSEEK_API_KEY"),
             Self::OllamaCloud => Some("OLLAMA_CLOUD_API_KEY"),
             Self::Ollama => None,
-            #[cfg(feature = "plainsong-plus")]
-            Self::PlainsongPlus => None,
+            Self::ChatGptPlan => None,
         }
     }
 
@@ -214,6 +222,7 @@ impl Provider {
     ///   successor (https://api-docs.deepseek.com/updates/).
     pub fn default_model(self) -> &'static str {
         match self {
+            Self::NativeText => super::native_text::recommended_model_id(),
             Self::BundledLocal => super::bundled_local::MODEL_ID,
             Self::AppleLanguageModel => super::apple_language_model::MODEL_ID,
             Self::Ollama => "qwen3.5:4b",
@@ -222,8 +231,9 @@ impl Provider {
             Self::Gemini => "gemini-3.7-flash",
             Self::DeepSeek => "deepseek-v4-flash",
             Self::OllamaCloud => "qwen3.5:4b",
-            #[cfg(feature = "plainsong-plus")]
-            Self::PlainsongPlus => crate::plus::PLUS_FAST_MODEL,
+            // Account model slugs come from the authenticated relay catalogue.
+            // An empty value forces the user to choose one instead of guessing.
+            Self::ChatGptPlan => "",
         }
     }
 
@@ -234,14 +244,12 @@ impl Provider {
             // weights advertise, because the honest number is the one they
             // produce good output inside. Over-reporting packs a prompt the
             // model then handles badly; under-reporting only wastes headroom.
+            Self::NativeText => native_text_spec(model).context_tokens,
             Self::BundledLocal => super::bundled_local::CONTEXT_WINDOW_TOKENS,
             Self::AppleLanguageModel => super::apple_language_model::CONTEXT_WINDOW_TOKENS,
             Self::Ollama => model_context_hint(&normalized).unwrap_or(4_096),
             Self::OllamaCloud => model_context_hint(&normalized).unwrap_or(32_768),
-            // Both aliases sit on 128K+ windows; the relay caps input at 400K
-            // characters, about 100K tokens.
-            #[cfg(feature = "plainsong-plus")]
-            Self::PlainsongPlus => 100_000,
+            Self::ChatGptPlan => 16_384,
             Self::OpenAi => {
                 // The gpt-5.x family (shipped under codenames -- gpt-5.6-sol,
                 // -terra, -luna, -cyber -- see
@@ -284,6 +292,20 @@ impl Provider {
         // Reserving 3,072 tokens of a 4,096-token window for output would
         // leave 512 tokens of input; reserving what the pass actually needs
         // leaves room for the dictation.
+        if self == Self::NativeText {
+            return ModelBudget {
+                context_window_tokens,
+                reserved_output_tokens: native_text_spec(model).max_output_tokens,
+                safety_margin_tokens: 512,
+            };
+        }
+        if self == Self::AppleLanguageModel && purpose != CompletionPurpose::Generic {
+            return ModelBudget {
+                context_window_tokens,
+                reserved_output_tokens: 1024,
+                safety_margin_tokens: 384,
+            };
+        }
         if self.is_zero_setup_local() {
             return ModelBudget {
                 context_window_tokens,
@@ -308,6 +330,13 @@ impl Provider {
             safety_margin_tokens: 512,
         }
     }
+}
+
+/// The built-in model size `model` names; the recommended one when it names
+/// none.
+fn native_text_spec(model: &str) -> &'static super::native_text::Spec {
+    super::native_text::resolve(model)
+        .unwrap_or_else(|| super::native_text::spec(super::native_text::NotesSize::Balanced))
 }
 
 /// Anthropic models that advertise a one-million-token context window.
@@ -457,6 +486,8 @@ pub enum ErrorKind {
     InvalidRequest,
     ContextLimit,
     RateLimit,
+    /// A plan/app allowance is exhausted; retry requires a user decision.
+    UsageLimit,
     Timeout,
     Transport,
     Upstream,
@@ -474,6 +505,29 @@ impl ErrorKind {
     }
 }
 
+/// What a model wrote before an [`ErrorKind::OutputLimit`]. It is meeting
+/// content, so it never appears in `Debug` output or logs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct UnfinishedOutput {
+    pub text: String,
+    /// The model that wrote it, as a finished response would report it.
+    pub model: String,
+    /// The model was stopped because it began repeating itself, rather than
+    /// because it ran out of room.
+    pub repeated: bool,
+}
+
+impl std::fmt::Debug for UnfinishedOutput {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            out,
+            "UnfinishedOutput {{ {} bytes, repeated: {} }}",
+            self.text.len(),
+            self.repeated
+        )
+    }
+}
+
 #[derive(Debug, Error, Clone)]
 #[error("{provider} {kind:?}: {message}")]
 pub struct LlmError {
@@ -481,6 +535,9 @@ pub struct LlmError {
     pub kind: ErrorKind,
     pub message: String,
     pub status: Option<u16>,
+    /// Set by providers that return the unfinished text with an output
+    /// limit, so callers can keep the parts that were complete.
+    pub unfinished: Option<UnfinishedOutput>,
 }
 
 impl LlmError {
@@ -490,7 +547,13 @@ impl LlmError {
             kind,
             message: message.into(),
             status: None,
+            unfinished: None,
         }
+    }
+
+    pub fn with_unfinished(mut self, unfinished: UnfinishedOutput) -> Self {
+        self.unfinished = Some(unfinished);
+        self
     }
 
     pub fn with_status(
@@ -504,6 +567,7 @@ impl LlmError {
             kind,
             message: message.into(),
             status: Some(status.as_u16()),
+            unfinished: None,
         }
     }
 
@@ -538,6 +602,17 @@ pub(crate) fn bounded_body_error_to_llm(
 
 pub fn classify_http_error(provider: Provider, status: StatusCode, body: String) -> LlmError {
     let lower = body.to_ascii_lowercase();
+    if provider == Provider::Ollama
+        && status == StatusCode::NOT_FOUND
+        && is_ollama_model_missing_response(&body)
+    {
+        return LlmError::with_status(
+            provider,
+            ErrorKind::Configuration,
+            status,
+            "The selected Ollama model is not installed. Open Settings > Models to install it or choose an installed model.",
+        );
+    }
     let kind = match status.as_u16() {
         _ if is_context_limit_message(&lower) => ErrorKind::ContextLimit,
         413 if provider == Provider::Ollama => ErrorKind::ContextLimit,
@@ -550,6 +625,20 @@ pub fn classify_http_error(provider: Provider, status: StatusCode, body: String)
         _ => ErrorKind::Upstream,
     };
     LlmError::with_status(provider, kind, status, body)
+}
+
+fn is_ollama_model_missing_response(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let Some(message) = value.get("error").and_then(Value::as_str) else {
+        return false;
+    };
+    let message = message.trim().to_ascii_lowercase();
+    message
+        .strip_prefix("model '")
+        .and_then(|model| model.strip_suffix("' not found"))
+        .is_some_and(|model| !model.is_empty() && !model.contains('\''))
 }
 
 fn is_context_limit_message(message: &str) -> bool {
@@ -584,11 +673,16 @@ pub trait CompletionTransport: Send + Sync {
         Ok(ModelContextMetadata::default())
     }
 
+    async fn supports_local_source_repair(&self, _model: &str) -> bool {
+        false
+    }
+
     async fn invalidate_model_context_metadata(&self, _model: &str) {}
 }
 
 #[derive(Clone)]
 pub enum ProviderTransport {
+    NativeText(super::native_text::NativeTextClient),
     BundledLocal(super::bundled_local::BundledLocalClient),
     AppleLanguageModel(super::apple_language_model::AppleLanguageModelClient),
     Ollama(OllamaClient),
@@ -597,6 +691,7 @@ pub enum ProviderTransport {
     Gemini(GeminiClient),
     DeepSeek(DeepSeekClient),
     OllamaCloud(OllamaCloudClient),
+    ChatGptPlan(ChatGptPlanClient),
 }
 
 impl ProviderTransport {
@@ -607,6 +702,9 @@ impl ProviderTransport {
         models_root: &std::path::Path,
     ) -> Self {
         match provider {
+            Provider::NativeText => Self::NativeText(super::native_text::NativeTextClient::new(
+                models_root.to_path_buf(),
+            )),
             Provider::BundledLocal => Self::BundledLocal(
                 super::bundled_local::BundledLocalClient::new(models_root.to_path_buf()),
             ),
@@ -619,18 +717,23 @@ impl ProviderTransport {
             Provider::Gemini => Self::Gemini(GeminiClient::with_api_key(api_key)),
             Provider::DeepSeek => Self::DeepSeek(DeepSeekClient::with_api_key(api_key)),
             Provider::OllamaCloud => Self::OllamaCloud(OllamaCloudClient::with_api_key(api_key)),
-            #[cfg(feature = "plainsong-plus")]
-            Provider::PlainsongPlus => {
-                Self::OllamaCloud(OllamaCloudClient::for_plainsong_plus(api_key))
-            }
+            Provider::ChatGptPlan => Self::ChatGptPlan(ChatGptPlanClient::from_startup_env()),
         }
     }
 }
 
 #[async_trait]
 impl CompletionTransport for ProviderTransport {
+    async fn supports_local_source_repair(&self, model: &str) -> bool {
+        match self {
+            Self::Ollama(client) => client.supports_local_source_repair(model).await,
+            _ => false,
+        }
+    }
+
     fn provider(&self) -> Provider {
         match self {
+            Self::NativeText(_) => Provider::NativeText,
             Self::BundledLocal(_) => Provider::BundledLocal,
             Self::AppleLanguageModel(_) => Provider::AppleLanguageModel,
             Self::Ollama(_) => Provider::Ollama,
@@ -638,13 +741,14 @@ impl CompletionTransport for ProviderTransport {
             Self::Anthropic(_) => Provider::Anthropic,
             Self::Gemini(_) => Provider::Gemini,
             Self::DeepSeek(_) => Provider::DeepSeek,
-            // Plainsong Plus shares this client; it knows which it is.
-            Self::OllamaCloud(client) => client.provider(),
+            Self::OllamaCloud(_) => Provider::OllamaCloud,
+            Self::ChatGptPlan(_) => Provider::ChatGptPlan,
         }
     }
 
     async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, LlmError> {
         match self {
+            Self::NativeText(client) => client.complete(request).await,
             Self::BundledLocal(client) => client.complete(request).await,
             Self::AppleLanguageModel(client) => client.complete(request).await,
             Self::Ollama(client) => client.complete(request).await,
@@ -653,6 +757,7 @@ impl CompletionTransport for ProviderTransport {
             Self::Gemini(client) => client.complete(request).await,
             Self::DeepSeek(client) => client.complete(request).await,
             Self::OllamaCloud(client) => client.complete(request).await,
+            Self::ChatGptPlan(client) => client.complete(request).await,
         }
     }
 
@@ -660,6 +765,7 @@ impl CompletionTransport for ProviderTransport {
         match self {
             Self::Ollama(client) => client.model_context_metadata(model).await,
             Self::Gemini(client) => client.model_context_metadata(model).await,
+            Self::AppleLanguageModel(client) => client.model_context_metadata(model).await,
             _ => Ok(ModelContextMetadata::default()),
         }
     }
@@ -699,12 +805,13 @@ impl ProviderRuntime {
                 selection.provider,
                 ErrorKind::Policy,
                 format!(
-                    "Remote provider '{}' is blocked by policy. Enable Settings > Security > Remote processing to continue.",
+                    "Remote provider '{}' is blocked by policy. Turn on Settings > Privacy & data > Allow cloud AI processing to continue.",
                     selection.provider.as_settings_value()
                 ),
             ));
         }
         if selection.provider.is_remote()
+            && selection.provider != Provider::ChatGptPlan
             && selection
                 .api_key
                 .as_deref()
@@ -716,18 +823,25 @@ impl ProviderRuntime {
                 selection.provider,
                 ErrorKind::Configuration,
                 format!(
-                    "Missing provider secret for '{}'. Add an API key in Settings > AI & Keys.",
+                    "Missing provider secret for '{}'. Add an API key in Settings > Search & AI > API keys.",
                     selection.provider.as_settings_value()
                 ),
             ));
         }
 
-        let transport = ProviderTransport::new(
+        let mut transport = ProviderTransport::new(
             selection.provider,
             selection.api_key.clone(),
             ollama,
             &selection.models_root,
         );
+        if selection.remote_processing_enabled {
+            if let ProviderTransport::Ollama(client) = &mut transport {
+                *client = client
+                    .clone()
+                    .with_remote_processing_gate(Arc::clone(&selection.remote_processing_gate));
+            }
+        }
         Ok(Self {
             selection,
             transport,
@@ -847,6 +961,14 @@ impl ProviderRuntime {
 
 #[async_trait]
 impl CompletionTransport for ProviderRuntime {
+    async fn supports_local_source_repair(&self, _model: &str) -> bool {
+        self.enforce_live_remote_policy().is_ok()
+            && self
+                .transport
+                .supports_local_source_repair(&self.selection.model)
+                .await
+    }
+
     fn provider(&self) -> Provider {
         self.selection.provider
     }
@@ -1046,7 +1168,8 @@ mod tests {
 
     /// Every provider the settings file can name, so a new variant cannot be
     /// added without deciding what it does at each of these five sites.
-    const EVERY_PROVIDER: [Provider; 8] = [
+    const EVERY_PROVIDER: [Provider; 10] = [
+        Provider::NativeText,
         Provider::BundledLocal,
         Provider::AppleLanguageModel,
         Provider::Ollama,
@@ -1055,6 +1178,7 @@ mod tests {
         Provider::Gemini,
         Provider::DeepSeek,
         Provider::OllamaCloud,
+        Provider::ChatGptPlan,
     ];
 
     #[test]
@@ -1098,7 +1222,11 @@ mod tests {
 
     #[test]
     fn the_on_device_providers_are_local_and_need_no_secret() {
-        for provider in [Provider::BundledLocal, Provider::AppleLanguageModel] {
+        for provider in [
+            Provider::NativeText,
+            Provider::BundledLocal,
+            Provider::AppleLanguageModel,
+        ] {
             assert!(!provider.is_remote(), "{provider:?} must not be remote");
             assert!(provider.is_zero_setup_local(), "{provider:?}");
             assert_eq!(provider.provider_secret_name(), None, "{provider:?}");
@@ -1114,6 +1242,7 @@ mod tests {
             Provider::Gemini,
             Provider::DeepSeek,
             Provider::OllamaCloud,
+            Provider::ChatGptPlan,
         ] {
             assert!(remote.is_remote(), "{remote:?}");
             assert!(!remote.is_zero_setup_local(), "{remote:?}");
@@ -1121,11 +1250,56 @@ mod tests {
     }
 
     #[test]
-    fn only_the_on_device_providers_are_barred_from_meeting_analysis() {
+    fn custom_dictation_capability_is_independent_of_external_server_setup() {
+        assert!(Provider::NativeText.is_zero_setup_local());
+        for provider in EVERY_PROVIDER {
+            assert_eq!(
+                provider.supports_custom_dictation_transform(),
+                !matches!(
+                    provider,
+                    Provider::BundledLocal | Provider::AppleLanguageModel
+                ),
+                "{provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chatgpt_plan_is_remote_without_an_api_key_or_guessed_model() {
+        assert!(Provider::ChatGptPlan.is_remote());
+        assert!(Provider::ChatGptPlan.supports_meeting_analysis());
+        assert_eq!(Provider::ChatGptPlan.provider_secret_name(), None);
+        assert_eq!(Provider::ChatGptPlan.environment_key_name(), None);
+        assert_eq!(Provider::ChatGptPlan.default_model(), "");
+        assert!(ProviderRuntime::new(
+            ProviderSelection {
+                provider: Provider::ChatGptPlan,
+                model: "account-model".to_string(),
+                remote_processing_enabled: true,
+                remote_processing_gate: Arc::new(
+                    crate::remote_processing::RemoteProcessingGate::new(true),
+                ),
+                api_key: None,
+                timeout: Duration::from_secs(1),
+                models_root: std::path::PathBuf::from("/tmp/plainsong-test-models"),
+            },
+            &OllamaClient::new(),
+        )
+        .is_ok());
+        assert!(
+            Provider::ChatGptPlan
+                .model_budget("account-model", CompletionPurpose::Summary)
+                .context_window_tokens
+                <= 16_384
+        );
+    }
+
+    #[test]
+    fn specialized_cleanup_providers_are_barred_from_meeting_analysis() {
         for provider in EVERY_PROVIDER {
             assert_eq!(
                 provider.supports_meeting_analysis(),
-                !provider.is_zero_setup_local(),
+                provider != Provider::BundledLocal,
                 "{provider:?}"
             );
         }
@@ -1276,5 +1450,37 @@ mod tests {
             .kind,
             ErrorKind::ContextLimit
         );
+    }
+
+    #[test]
+    fn missing_local_ollama_model_is_actionable_and_not_retryable() {
+        let raw = r#"{"error":"model 'qwen3.5:4b' not found"}"#;
+        let error = classify_http_error(Provider::Ollama, StatusCode::NOT_FOUND, raw.into());
+
+        assert_eq!(error.kind, ErrorKind::Configuration);
+        assert_eq!(error.status, Some(404));
+        assert!(!error.kind.retryable());
+        assert!(error.message.contains("Settings > Models"));
+        assert!(error.message.contains("install"));
+        assert!(error.message.contains("choose an installed model"));
+        assert!(!error.message.contains(raw));
+        assert!(!error.message.contains("qwen3.5:4b"));
+    }
+
+    #[test]
+    fn unrelated_404s_keep_their_existing_classification_and_body() {
+        for (provider, body) in [
+            (Provider::Ollama, r#"{"error":"route not found"}"#),
+            (Provider::Ollama, r#"{"error":"model registry not found"}"#),
+            (
+                Provider::OpenAi,
+                r#"{"error":"model 'qwen3.5:4b' not found"}"#,
+            ),
+        ] {
+            let error = classify_http_error(provider, StatusCode::NOT_FOUND, body.into());
+            assert_eq!(error.kind, ErrorKind::Upstream);
+            assert!(error.kind.retryable());
+            assert_eq!(error.message, body);
+        }
     }
 }

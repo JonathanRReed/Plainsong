@@ -1,0 +1,251 @@
+[
+  {
+    "id": "frozen-household-unclear-opening",
+    "source": "frozen-public-asr",
+    "appCategory": "email",
+    "provenance": {
+      "ledger": "artifacts/continuation-2026-10-14/household-output-investigation/frozen-results.json",
+      "ledgerSha256": "9434f2b9eaa2ce01fbb03d86a175d44761536bab277c141c178c1fa9281dc3e7",
+      "route": {
+        "provider": "transcribe_cpp",
+        "modelId": "nemotron-3.5-asr-streaming-0.6b-q8_0"
+      },
+      "audioSource": {
+        "path": "artifacts/continuation-2026-10-08/household-dictation/household.wav",
+        "sha256": "2c4346367a2bc225a90aa9950ec930021aabe6d7572e4a5c9aede4d5200acfa0"
+      },
+      "attribution": {
+        "dataset": "AMI Meeting Corpus",
+        "creator": "AMI Project",
+        "recording": "ES2004a",
+        "speaker": "B",
+        "sourceUrl": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2004a/audio/ES2004a.Headset-1.wav",
+        "license": "CC-BY-4.0",
+        "licenseUrl": "https://creativecommons.org/licenses/by/4.0/",
+        "licenseSource": "https://groups.inf.ed.ac.uk/ami/download/",
+        "changes": "Automatic recognition from an audio crop. Recognition errors are retained; this is not the corpus human transcript."
+      },
+      "rawTextSha256": "c13fe91dc6c75508b7cdba51829c014139b4cc39774b078287ba1d525fda770a"
+    },
+    "spokenText": "Water your experiences with remote controls I mean I've got we got um we had three videos a TV and a sort of amp thing all set up so we got one of the universal remote controls that you program each of your things into but that kept losing the signals so we'd have to reprogram it every now and again I think it was quite a cheapy as well so that might have had something to do with it but that was quite good the fact that you could didn't have six remote controls sitting in front of you",
+    "referenceOutput": "Water your experiences with remote controls I mean I've got we got um we had three videos a TV and a sort of amp thing all set up so we got one of the universal remote controls that you program each of your things into but that kept losing the signals so we'd have to reprogram it every now and again I think it was quite a cheapy as well so that might have had something to do with it but that was quite good the fact that you could didn't have six remote controls sitting in front of you",
+    "intendedFacts": [
+      "Keep the unclear opening words for review. The reference is recognizer-text identity, not a claim about the intended speech.",
+      "Keep the existing equipment, signal loss, repeated reprogramming, tentative cheapness explanation and fewer-remotes benefit."
+    ],
+    "criticalInvariants": [
+      {
+        "kind": "include",
+        "label": "unclear opening retained",
+        "anyOf": [
+          "Water your experiences with remote controls"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "existing equipment",
+        "anyOf": [
+          "we had three videos",
+          "we had 3 videos"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "signal loss",
+        "anyOf": [
+          "losing the signals",
+          "losing signals"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "reprogramming",
+        "anyOf": [
+          "reprogram it every now and again"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "tentative cheapness explanation",
+        "anyOf": [
+          "might have had something to do with it"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "fewer-remotes benefit",
+        "anyOf": [
+          "didn't have six remote controls",
+          "did not have six remote controls"
+        ]
+      }
+    ],
+    "regressionCandidates": [
+      {
+        "label": "saved omission",
+        "text": "We had three videos, a TV, and an amplifier all set up, so we got one universal remote control that you program for each device. However, it kept losing signals, so we'd have to reprogram it every now and again. I think it was quite cheap as well, so that might have had something to do with it. That said, it was quite good because you didn't have six remote controls sitting in front of you.",
+        "expectedStatus": "fail",
+        "expectedViolation": "Missing unclear opening retained"
+      },
+      {
+        "label": "unclear opening kept with readable body",
+        "text": "Water your experiences with remote controls. We had three videos, a TV, and an amplifier all set up. We got one universal remote control that you program for each device, but it kept losing signals, so we had to reprogram it every now and again. I think it was quite cheap, so that might have had something to do with it. It was good because you did not have six remote controls sitting in front of you.",
+        "expectedStatus": "needs_human_review"
+      }
+    ]
+  },
+  {
+    "id": "intact-opening-question-control",
+    "source": "synthetic",
+    "appCategory": "email",
+    "spokenText": "What are your experiences with remote controls? We had three videos.",
+    "referenceOutput": "What are your experiences with remote controls? We had three videos.",
+    "intendedFacts": [
+      "Ask about the listener's experience with remote controls.",
+      "We already had three videos."
+    ],
+    "criticalInvariants": [
+      {
+        "kind": "include",
+        "label": "listener experience",
+        "anyOf": [
+          "your experiences with remote controls",
+          "have you used remotes"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "existing equipment",
+        "anyOf": [
+          "we had three videos",
+          "we had 3 videos"
+        ]
+      }
+    ],
+    "regressionCandidates": [
+      {
+        "label": "opening dropped",
+        "text": "We had three videos.",
+        "expectedStatus": "fail",
+        "expectedViolation": "Missing listener experience"
+      },
+      {
+        "label": "question paraphrased",
+        "text": "Have you used remotes? We had 3 videos.",
+        "expectedStatus": "needs_human_review"
+      },
+      {
+        "label": "question turned into statement",
+        "text": "What are your experiences with remote controls. We had three videos.",
+        "expectedStatus": "needs_human_review"
+      },
+      {
+        "label": "question moved to equipment",
+        "text": "What are your experiences with remote controls. We had three videos?",
+        "expectedStatus": "needs_human_review"
+      }
+    ]
+  },
+  {
+    "id": "two-questions-combined-control",
+    "source": "synthetic",
+    "appCategory": "email",
+    "spokenText": "What are your experiences with remote controls? Which one would you recommend?",
+    "referenceOutput": "What are your experiences with remote controls? Which one would you recommend?",
+    "intendedFacts": [
+      "Ask about the listener's remote-control experience.",
+      "Ask for a recommendation."
+    ],
+    "criticalInvariants": [
+      {
+        "kind": "include",
+        "label": "experience request",
+        "anyOf": [
+          "your experiences with remote controls",
+          "your experience"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "recommendation request",
+        "anyOf": [
+          "recommend"
+        ]
+      }
+    ],
+    "regressionCandidates": [
+      {
+        "label": "experience question dropped",
+        "text": "Which one would you recommend?",
+        "expectedStatus": "fail",
+        "expectedViolation": "Missing experience request"
+      },
+      {
+        "label": "recommendation dropped",
+        "text": "What are your experiences with remote controls?",
+        "expectedStatus": "fail",
+        "expectedViolation": "Missing recommendation request"
+      },
+      {
+        "label": "questions combined faithfully",
+        "text": "Which remote would you recommend based on your experience?",
+        "expectedStatus": "needs_human_review"
+      }
+    ]
+  },
+  {
+    "id": "restart-and-paraphrase-control",
+    "source": "synthetic",
+    "appCategory": "email",
+    "spokenText": "I have, we have, we had two monitors and an amp thing set up, so we bought one switch.",
+    "referenceOutput": "We had two monitors and an amplifier set up, so we bought one switch.",
+    "intendedFacts": [
+      "The final restarted clause says we already had two monitors and an amplifier.",
+      "We bought one switch."
+    ],
+    "criticalInvariants": [
+      {
+        "kind": "include",
+        "label": "existing equipment",
+        "anyOf": [
+          "we had two monitors",
+          "we had 2 monitors"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "amplifier",
+        "anyOf": [
+          "amplifier",
+          "amp thing"
+        ]
+      },
+      {
+        "kind": "include",
+        "label": "switch purchase",
+        "anyOf": [
+          "bought one switch",
+          "purchased one switch"
+        ]
+      }
+    ],
+    "regressionCandidates": [
+      {
+        "label": "restart removed and amp clarified",
+        "text": "We had two monitors and an amplifier set up, so we bought one switch.",
+        "expectedStatus": "pass"
+      },
+      {
+        "label": "equipment purchase invented",
+        "text": "We bought two monitors, an amplifier, and one switch.",
+        "expectedStatus": "fail",
+        "expectedViolation": "Missing existing equipment"
+      },
+      {
+        "label": "valid sentence restructuring",
+        "text": "We bought one switch because we had 2 monitors and an amplifier set up.",
+        "expectedStatus": "needs_human_review"
+      }
+    ]
+  }
+]

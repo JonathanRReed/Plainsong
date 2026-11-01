@@ -30,6 +30,36 @@ export type MarkdownBlock =
   | { kind: "list"; ordered: boolean; items: MarkdownSpan[][] }
   | { kind: "quote"; spans: MarkdownSpan[] };
 
+/**
+ * One line of a quoted recap: a source sentence with who said it and when,
+ * as the sidecar writes it — `Priya (0:12): “…”`, `0:12: “…”` for an unnamed
+ * speaker, or `Your notes: “…”`.
+ */
+export interface RecapQuote {
+  speaker: string | null;
+  time: string | null;
+  quote: string;
+}
+
+const RECAP_QUOTE_PATTERN =
+  /^(?:(.+?) \((\d{1,2}:\d{2}(?::\d{2})?)\)|(\d{1,2}:\d{2}(?::\d{2})?)|(Your notes)): “(.+)”$/;
+
+/** The recap quote a list item states, or null for any other line. */
+export function parseRecapQuote(text: string): RecapQuote | null {
+  const match = RECAP_QUOTE_PATTERN.exec(text.trim());
+  if (!match) {
+    return null;
+  }
+  return {
+    speaker: match[1] ?? match[4] ?? null,
+    time: match[2] ?? match[3] ?? null,
+    quote: match[5],
+  };
+}
+
+/** First words of the optional topics line of a quoted recap. */
+export const RECAP_TOPICS_PREFIX = "Topics: ";
+
 const HEADING_PATTERN = /^(#{1,3})\s+(.*)$/;
 const BULLET_PATTERN = /^\s*[-*+]\s+(.*)$/;
 const ORDERED_PATTERN = /^\s*\d+[.)]\s+(.*)$/;

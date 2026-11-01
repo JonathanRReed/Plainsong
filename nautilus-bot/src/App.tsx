@@ -1,3 +1,4 @@
+import { mainViewCanSuspend, rememberMainView, restoredMainView } from "@/lib/main-window-idle";
 import {
   Component,
   Suspense,
@@ -33,7 +34,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
 import { FirstRunWizard } from "@/components/first-run-wizard";
 import { ToastProvider, useToast } from "@/components/toast";
-import { AppCommandPalette } from "@/components/app-command-palette";
+import { useParakeetUpgradeNotice } from "@/hooks/use-parakeet-upgrade-notice";
 import { matchNavShortcut } from "@/lib/nav-shortcuts";
 import {
   OPEN_ONBOARDING_EVENT,
@@ -42,9 +43,17 @@ import {
 import { useOnboardingGate } from "@/features/onboarding/use-onboarding-gate";
 import {
   OPEN_MAIN_VIEW_EVENT,
+  canLeaveMainView,
+  queueDictationHistoryRequest,
+  queueMeetingStartRequest,
+  consumePendingDictationHistoryRequest,
   OPEN_RECORDING_WORKSPACE_EVENT as OPEN_RECORDING_WORKSPACE_CUSTOM_EVENT,
   type MainViewId,
 } from "@/lib/navigation";
+
+const AppCommandPalette = lazy(async () => ({
+  default: (await import("@/components/app-command-palette")).AppCommandPalette,
+}));
 
 /**
  * A lazily loaded view that can also be fetched ahead of time. Both paths
@@ -96,27 +105,6 @@ const VIEWS: Record<ViewId, ReturnType<typeof lazyView>> = {
   ),
   setup: lazyView(async () => (await import("@/components/views/setup-view")).SetupView),
 };
-
-/**
- * Fetch every view once the first frame is up and the renderer is idle, so
- * the first visit to each is as quick as the second.
- */
-function preloadViewsWhenIdle(): void {
-  const preloadAll = () => {
-    for (const view of Object.values(VIEWS)) {
-      void view.preload().catch(() => {
-        // Loaded again, and reported, when the reader opens the view.
-      });
-    }
-  };
-  scheduleAfterPaint(() => {
-    if (typeof window.requestIdleCallback === "function") {
-      window.requestIdleCallback(preloadAll, { timeout: 2000 });
-    } else {
-      window.setTimeout(preloadAll, 500);
-    }
-  });
-}
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
@@ -175,6 +163,7 @@ interface MainViewRequestEvent {
 
 function AppRuntimeListeners() {
   const { toast } = useToast();
+  useParakeetUpgradeNotice(toast);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -248,15 +237,16 @@ function AppRuntimeListeners() {
   return null;
 }
 
-function LaunchInteractiveReporter({
+export function LaunchInteractiveReporter({
   marked,
 }: {
   marked: MutableRefObject<boolean>;
 }) {
   useEffect(() => {
     if (marked.current) return;
-    marked.current = true;
-    scheduleAfterPaint(() => {
+    return scheduleAfterPaint(() => {
+      if (marked.current) return;
+      marked.current = true;
       window.electronAPI?.reportLaunchMilestone(
         "workspace-or-wizard-interactive",
         performance.now(),
@@ -276,7 +266,7 @@ function LaunchInteractiveReporter({
  * "already onboarded" off months of dev runs and never showed the wizard.
  */
 function AppShell() {
-  const [activeView, setActiveView] = useState<ViewId>("dictation");
+  const [activeView, setActiveView] = useState<ViewId>(restoredMainView);
   const [pendingRecordingWorkspaceId, setPendingRecordingWorkspaceId] = useState<string | null>(
     null
   );
@@ -291,7 +281,36 @@ function AppShell() {
 
   // A transition keeps the current view on screen until the next one is
   // ready, instead of blanking the workspace to a loading line.
-  const showView = useCallback((view: ViewId, recordingId: string | null = null) => {
+  useEffect(() => {
+    const target = window as Window & { __plainsongPrepareQuit?: () => Promise<boolean> };
+    const prepare = () => canLeaveMainView(activeViewRef.current);
+    target.__plainsongPrepareQuit = prepare;
+    return () => { if (target.__plainsongPrepareQuit === prepare) delete target.__plainsongPrepareQuit; };
+  }, []);
+
+  // Input in a read view may own an uncommitted draft. Navigation resets this
+  // only after the existing leave guards have accepted it.
+  const idleInputChanged = useRef(false);
+  useEffect(() => {
+    idleInputChanged.current = false;
+    rememberMainView(activeView);
+    const changed = () => { idleInputChanged.current = true; };
+    document.addEventListener("input", changed, true);
+    document.addEventListener("change", changed, true);
+    return () => {
+      document.removeEventListener("input", changed, true);
+      document.removeEventListener("change", changed, true);
+    };
+  }, [activeView]);
+
+  const navigationRevisionRef = useRef(0);
+  const showView = useCallback(async (view: ViewId, recordingId: string | null = null) => {
+    const revision = ++navigationRevisionRef.current;
+    if (view !== activeViewRef.current && !(await canLeaveMainView(activeViewRef.current))) {
+      return;
+    }
+    if (revision !== navigationRevisionRef.current) return;
+    if (view !== "dictation") consumePendingDictationHistoryRequest();
     startTransition(() => {
       setActiveView(view);
       setPendingRecordingWorkspaceId(recordingId);
@@ -315,6 +334,35 @@ function AppShell() {
     (onboardingGate.action === "show" && !setupClosedThisSession
       ? onboardingGate.mode
       : null);
+  // Avoid loading a hidden route on first run. Once opened, keep it mounted
+  // when setup is reopened so editors retain their drafts.
+  const workspaceRevealedRef = useRef(false);
+  if (onboardingGate.action !== "wait" && !wizardMode) {
+    workspaceRevealedRef.current = true;
+  }
+  useEffect(() => {
+    const target = window as Window & { __plainsongCanSuspend?: () => boolean };
+    const canSuspend = () => !wizardMode && onboardingGate.action !== "wait" &&
+      !commandPaletteOpen && !idleInputChanged.current &&
+      mainViewCanSuspend(activeView, document) && rememberMainView(activeView);
+    target.__plainsongCanSuspend = canSuspend;
+    return () => { if (target.__plainsongCanSuspend === canSuspend) delete target.__plainsongCanSuspend; };
+  }, [activeView, wizardMode, onboardingGate.action, commandPaletteOpen]);
+
+  // Once the gate opens setup, it stays open until the reader closes it.
+  // Readiness refreshes whenever the window regains focus, and a practice
+  // dictation, a finished download or a permission granted mid-setup can
+  // flip the gate's live answer; following it unmounted the wizard and
+  // brought it back at step 1.
+  useEffect(() => {
+    if (
+      onboardingGate.action === "show" &&
+      !setupClosedThisSession &&
+      requestedWizardMode === null
+    ) {
+      setRequestedWizardMode(onboardingGate.mode);
+    }
+  }, [onboardingGate.action, onboardingGate.mode, requestedWizardMode, setupClosedThisSession]);
 
   useEffect(() => {
     if (!import.meta.env.DEV || typeof performance === "undefined") return;
@@ -332,10 +380,6 @@ function AppShell() {
     performance.mark(`view-change:${activeView}`);
     console.debug(`[perf] view-change:${activeView}`);
   }, [activeView]);
-
-  useEffect(() => {
-    preloadViewsWhenIdle();
-  }, []);
 
   useEffect(() => {
     if (!navigationFocusReadyRef.current) {
@@ -424,7 +468,7 @@ function AppShell() {
       ) {
         showView(
           requestedView,
-          requestedView === "recordings" ? requestedRecordingId : null
+          requestedView === "recordings" || requestedView === "dictation" ? requestedRecordingId : null
         );
       }
     }).then((fn) => {
@@ -434,6 +478,26 @@ function AppShell() {
       unlisten?.();
     };
   }, [showView]);
+
+  // Main sends this right after "main-view-requested", before a lazily loaded
+  // Meetings view can be listening, so App parks it for the view to take.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("meeting-start-requested", () => {
+      if (!disposed) queueMeetingStartRequest();
+    }).then((dispose) => {
+      if (disposed) {
+        dispose?.();
+        return;
+      }
+      unlisten = dispose;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     const handleOpenOnboarding = (event: Event) => {
@@ -447,7 +511,7 @@ function AppShell() {
     };
   }, []);
 
-  // A clicked "Zoom call started" notification: the main process focused the
+  // The Record action on a call notification: the main process focused the
   // window and sent the call. Go to Meetings and park the request for the
   // view, which opens the consent dialog with the call's name on it. Nothing
   // records until the reader says so there.
@@ -467,6 +531,7 @@ function AppShell() {
       unlisten?.();
     };
   }, [showView]);
+
 
   useEffect(() => {
     const handleOpenMainView = (event: Event) => {
@@ -531,9 +596,13 @@ function AppShell() {
   }, []);
 
   useEffect(() => {
-    if (activeView !== "recordings" || !pendingRecordingWorkspaceId) {
+    if (!pendingRecordingWorkspaceId) return;
+    if (activeView === "dictation") {
+      queueDictationHistoryRequest(pendingRecordingWorkspaceId);
+      setPendingRecordingWorkspaceId(null);
       return;
     }
+    if (activeView !== "recordings") return;
 
     window.dispatchEvent(
       new CustomEvent<{ recordingId: string }>(OPEN_RECORDING_WORKSPACE_CUSTOM_EVENT, {
@@ -569,16 +638,20 @@ function AppShell() {
   if (onboardingGate.action === "wait") {
     return (
       <div
-        className="flex h-screen items-center justify-center bg-background text-foreground"
+        className="flex h-screen bg-background text-foreground"
         role="status"
         aria-live="polite"
         aria-label="Checking first-run setup"
+        data-workspace-loading=""
       >
-        <div className="flex flex-col items-center gap-3 text-center">
-          <span className="neume" aria-hidden="true" />
-          <p className="font-serif text-sm text-muted-foreground">
-            Checking your setup...
-          </p>
+        <div aria-hidden="true" className="flex w-72 shrink-0 flex-col gap-5 border-r border-border/70 bg-card/80 px-6 pt-16">
+          <span className="neume mb-6" />
+          <span className="h-3 w-24 rounded-sm bg-muted" />
+          <span className="h-3 w-32 rounded-sm bg-muted" />
+          <span className="h-3 w-20 rounded-sm bg-muted" />
+        </div>
+        <div aria-hidden="true" className="flex flex-1 items-center justify-center">
+          <span className="neume" />
         </div>
       </div>
     );
@@ -589,8 +662,12 @@ function AppShell() {
 
   return (
     <>
-      <AppCommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} />
-      <div className="app-shell flex h-screen bg-background text-foreground">
+      {commandPaletteOpen && (
+        <Suspense fallback={null}>
+          <AppCommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} />
+        </Suspense>
+      )}
+      <div inert={Boolean(wizardMode)} className="app-shell flex h-screen bg-background text-foreground">
         <a
           href="#main-content"
           className="sr-only z-[100] rounded-md bg-background px-3 py-2 text-sm font-medium text-foreground shadow-lg focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
@@ -623,9 +700,11 @@ function AppShell() {
           >
             {/* Keyed so each arrival settles in; `.view-enter` sits still
                 under reduced motion. */}
-            <div key={activeView} className="view-enter h-full">
-              <ActiveView />
-            </div>
+            {workspaceRevealedRef.current && (
+              <div key={activeView} className="view-enter h-full">
+                <ActiveView />
+              </div>
+            )}
             {!wizardMode && (
               <LaunchInteractiveReporter marked={interactiveMarkedRef} />
             )}
@@ -654,7 +733,7 @@ function AppShell() {
 
 function App() {
   useEffect(() => {
-    scheduleAfterPaint(() => {
+    return scheduleAfterPaint(() => {
       window.electronAPI?.reportLaunchMilestone(
         "renderer-post-commit-frame",
         performance.now(),

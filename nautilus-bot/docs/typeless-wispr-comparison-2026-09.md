@@ -24,7 +24,7 @@ Better = clearly ahead, Level = same class, Behind = a real gap.
 | Area | Plainsong | Typeless | Wispr Flow | Verdict |
 | --- | --- | --- | --- | --- |
 | Works offline, audio stays on the Mac | Yes, by default | No (cloud, AWS) | No (cloud) | **Better** |
-| Price | Free; optional Plus planned at $10 | $30/mo or $12/mo yearly; 8k words/week free | $15/mo or $12/mo yearly; 2k words/week free | **Better** |
+| Price | Free | $30/mo or $12/mo yearly; 8k words/week free | $15/mo or $12/mo yearly; 2k words/week free | **Better** |
 | Accuracy, English | Local Parakeet; cloud BYOK routes up to Grok (2.3% AA-WER) | Cloud, strong | Cloud, strong | Level with a cloud route; local is a notch behind the best cloud models |
 | Languages | 25 local (Parakeet), ~100 via Whisper or cloud | 100+ with auto-detect and mixed-language speech | 100+ with auto-detect | **Behind** on local; level with cloud routes |
 | Filler removal, self-corrections, lists | On by default, on the Mac | Yes | Yes (Backtrack) | Level |
@@ -79,7 +79,6 @@ Better = clearly ahead, Level = same class, Behind = a real gap.
   - Performance: the recording clock no longer re-renders the whole app
     every second, and a transcript re-renders one or two rows per playback
     tick instead of all of them.
-- **Plus billing** now works with Stripe or Polar (`infra/plus-worker`).
 
 ## Still behind, in order of impact
 

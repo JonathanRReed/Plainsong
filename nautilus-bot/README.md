@@ -3,8 +3,8 @@
 **Free, open-source, local-first dictation and meeting capture for macOS.**
 
 - **Website:** https://plainsong.jonathanrreed.com
-- **Project repository:** https://github.com/JonathanRReed/Plainsong (currently private)
-- **Release target:** Private `0.9.0-beta.2` integration candidate. No public build is available yet.
+- **Project repository:** https://github.com/JonathanRReed/Plainsong
+- **Release target:** `0.9.0-beta.7` source candidate. Publication and package qualification need separate receipts.
 
 This directory contains the Plainsong desktop app: the Electron main process,
 the React/TypeScript renderer, and the Rust transcription sidecar.
@@ -15,23 +15,29 @@ For the product overview, privacy posture, and contribution guide, see the
 
 ## What it is
 
-Press a hotkey, speak, and your words appear at the cursor in any app,
+Press a hotkey, speak, and your words appear at the cursor in supported apps,
 transcribed on your own machine. Meetings are recorded, transcribed, and turned
 into searchable notes without sending a bot into the call.
 
-- **Local-first.** Speech recognition runs on-device by default. Parakeet TDT
-  0.6B v3 (640 MB) is the recommended default dictation model; whisper.cpp
-  `base.en` (142 MB) is offered as a smaller, less accurate download, and
-  installs that already had `base.en` configured keep it. No account and no
-  audio leaves your machine unless you opt in.
-- **Bring your own keys.** Optional cloud transcription and AI cleanup use your
-  own provider keys, stored in the OS keychain and sent directly to the
-  provider, never through a Plainsong server.
-- **Honest about the beta.** Three dictation activation modes ship: **toggle** (the
+- **Local-first.** Speech recognition runs on-device by default. New installs
+  on Apple Silicon dictate and record meetings with Parakeet TDT 0.6B v3,
+  one download for both: the Core ML build on macOS 14 or later (about
+  735 MB, 567 MB for English), otherwise the 739 MB GGUF through
+  transcribe.cpp; other Macs
+  use the ONNX build of the same model, about 670 MB. whisper.cpp `base.en`,
+  about 148 MB, is offered as a smaller download, and existing installs keep the model they
+  had configured. No account and no audio leaves your machine unless you
+  opt in.
+- **Optional cloud processing.** Cloud transcription and AI cleanup can use
+  your own provider keys, stored in the OS keychain. ChatGPT sign-in is a
+  separate, text-only preview that has not yet been qualified with a real
+  account in the installed app. Requests go to the selected provider, not
+  through a Plainsong server.
+- **Honest about the beta.** The candidate includes three dictation activation modes: **toggle** (the
   onboarding default), **hold-to-talk** (selectable in Settings; a native
   CGEventTap helper with automatic fallback to toggle if the helper isn't
   running), and **hands-free** (VAD auto start/stop, with an optional Silero
-  VAD model download for better accuracy). The beta requires **macOS 13 or later**
+  speech-detection model download). The beta requires **macOS 13 or later**
   and is **arm64-only**.
 - **Yours from the terminal, too.** An off-by-default `plainsong` command
   reads your meetings, transcripts and dictation history (`list`, `search`,
@@ -41,7 +47,7 @@ into searchable notes without sending a bot into the call.
   start/stop from Raycast or Shortcuts. No account, no history cap, no write
   path; transcript text reaches an assistant wrapped as untrusted content.
   See [docs/automation.md](docs/automation.md).
-- **MIT licensed**, no trial, no tiers, no nags.
+- **Free and MIT-licensed.** No paid tier, account or billing.
 
 ## Layout
 
@@ -59,7 +65,7 @@ nautilus-bot/
 The renderer talks to the sidecar through a sandboxed Electron preload that
 exposes only an explicit command allowlist (`electron/ipc-bridge.ts`); the
 allowlist is checked against the sidecar's actual command handlers in CI
-(`scripts/verify-ipc-contract.mjs`).
+(`scripts/verify-ipc-contract.ts`).
 
 ## Develop
 
@@ -98,17 +104,12 @@ clean-install, updater-journey, and soak evidence remain in the aggregate
 release audit. A missing credential or failed artifact trust check stops the
 workflow before any release asset reaches GitHub.
 
-The current release target is `0.9.0-beta.2`, with Dictation and Meetings both
-treated as supported pillars. A release is not ready merely because source
-tests pass. The exact DMG, update ZIP, `beta-mac.yml`, clean-install journey,
-real-device Dictation and Meetings journeys, signing, notarization, Gatekeeper,
-and beta updater flow must all pass against the same candidate. Historical
-`1.0.0` and `0.9.0-beta.1` receipts do not prove this revision. Fresh aggregate
-evidence will be generated after integration and packaging. The exact-candidate
-updater journey and public beta update feed remain distribution gates. The
-repository is private and no beta has been distributed. See
-[docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) and
-[docs/APPLE_DEVELOPER_SETUP.md](docs/APPLE_DEVELOPER_SETUP.md).
+The source version is `0.9.0-beta.7`, with dictation and meetings as its two
+product pillars. Source checks do not establish publication, installation,
+permissions, insertion, capture or updater behavior. Those require receipts
+for the exact delivered package. See [LAUNCH.md](../LAUNCH.md),
+[beta.7 evidence](docs/evals/beta7-evidence.md) and
+[docs/CODE_SIGNING.md](docs/CODE_SIGNING.md).
 
 ## Verify
 
@@ -124,6 +125,16 @@ bun run gate:release:macos:trust
 
 Use `bun run test` (Vitest), not `bun test`.
 
+With Bun 1.4.3 or newer, `bun run typecheck:bun` checks the renderer and
+Electron configurations with Bun's built-in TypeScript checker. It uses one
+thread for shared machines. The existing `bun run typecheck` remains the
+standard check, and TypeScript still compiles Electron.
+
+For a focused development check, run
+`bun check --threads 1 src/components/views/exports-view.tsx`. This checks the
+file and its imports using the project configuration. Run the full project
+check before treating a change as verified, since callers can break too.
+
 ## Measuring real dictation latency
 
 `benchmark:latency` runs a fixture WAV through the actual transcription path and
@@ -133,6 +144,7 @@ real-time speedup. It requires the selected model to be downloaded:
 ```bash
 bun run benchmark:latency -- --help
 bun run benchmark:latency -- --provider whisper --model base.en --runs 5
+# Example output only, not a beta.7 measurement:
 # {"transcriptionMsP50":593,"transcriptionMsP95":600,
 #  "realTimeFactor":0.01,"realtimeSpeedup":74.4,...}
 ```
@@ -144,8 +156,9 @@ SHA-256, byte count, audio duration, warm-up time, every timed measurement,
 p50, p95, run count, model, provider, and transcript sample.
 
 The default fixture is `scripts/fixtures/real-speech-44s.wav`, which contains
-44 seconds of real spoken speech. The numbers above were measured with
-whisper.cpp `base.en` using Metal on Apple Silicon. Earlier documentation cited
+44 seconds of real spoken speech. The example above shows the output fields.
+No candidate-bound receipt backs those numbers, so do not quote them as
+measured beta.7 latency. Earlier documentation cited
 about 137 ms p50 and about 218 times real-time on a pure sine-tone fixture.
 That is not representative of dictation and must not be quoted as a product
 result.
@@ -158,7 +171,8 @@ changing the requested benchmark.
 ## ASR providers
 
 Speech recognition runs locally by default: Parakeet TDT 0.6B v3 is the
-recommended default dictation model, with Whisper (via whisper.cpp),
+recommended default model for dictation and meetings (in GGUF through
+transcribe.cpp on Apple Silicon, ONNX elsewhere), with Whisper (via whisper.cpp),
 Distil-Whisper, Moonshine, and other native engines available as
 alternatives. Optional bring-your-own-key cloud providers (OpenAI,
 ElevenLabs, Groq, Cohere, Deepgram, Google Gemini, Mistral, xAI) are

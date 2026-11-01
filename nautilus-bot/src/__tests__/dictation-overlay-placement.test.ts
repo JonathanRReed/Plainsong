@@ -85,6 +85,17 @@ const FULL_ERROR_CONTENT_PX =
   (8 + 12 + 2 + 16); // button row mt-2 + py-1.5 x2 + border + text-xs
 
 describe("dictation popup sizing", () => {
+  it("uses the host height cap for a full done recovery card", () => {
+    expect(
+      getPopupSize(
+        "full",
+        "done",
+        sentenceOfLength(4000),
+        sentenceOfLength(4000),
+      ),
+    ).toEqual({ width: 432, height: 480 });
+  });
+
   it("clamps the height estimate to the lines the DOM actually shows", () => {
     // The live preview paragraph is `line-clamp-4`; before the clamp a long
     // partial computed height for every wrapped line it would never render, so

@@ -5,10 +5,16 @@ export function scheduleAfterPaint(
   callback: () => void,
   requestFrame: RequestFrame = window.requestAnimationFrame.bind(window),
   scheduleTask: ScheduleTask = (task) => window.setTimeout(task, 0),
-): void {
+): () => void {
+  let cancelled = false;
   requestFrame(() => {
+    if (cancelled) return;
     requestFrame(() => {
-      scheduleTask(callback);
+      if (cancelled) return;
+      scheduleTask(() => {
+        if (!cancelled) callback();
+      });
     });
   });
+  return () => { cancelled = true; };
 }

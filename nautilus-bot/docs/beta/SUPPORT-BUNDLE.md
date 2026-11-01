@@ -24,7 +24,7 @@ in the zip's own `README.txt`:
 | `summary.json` | app version, macOS version, chip, core count, memory |
 | `settings-redacted.json` | your settings, reduced to switches, numbers, and short names |
 | `readiness.json` | which macOS permissions Plainsong currently has |
-| `models.json` | which model files are on disk, their sizes, and their integrity-receipt status |
+| `models.json` | which model files are on disk, their sizes, and whether this session checked them against their pinned SHA-256 |
 | `audit-log-tail.json` | recent audit events, with details redacted |
 | `logs-redacted.txt` | the tail of this session's app and sidecar logs |
 | `build-identity.json` | app, Electron, Chrome, and Node versions, and whether the build is packaged |

@@ -23,10 +23,15 @@ function createEntry<T>(): CacheEntry<T> {
   };
 }
 
+type RecordingsCacheEntry = CacheEntry<Recording[]> & { revision: number; inFlightRevision: number | null };
+function createRecordingsEntry(): RecordingsCacheEntry {
+  return { ...createEntry<Recording[]>(), revision: 0, inFlightRevision: null };
+}
+
 class DataCacheStore {
   private readonly projects = createEntry<Project[]>();
 
-  private readonly recordings = new Map<string, CacheEntry<Recording[]>>();
+  private readonly recordings = new Map<string, RecordingsCacheEntry>();
 
   private resolveRecordingsKey(projectId?: string): string {
     return projectId ?? RECORDINGS_ALL_KEY;
@@ -83,7 +88,7 @@ class DataCacheStore {
     forceRefresh = false
   ): Promise<Recording[]> {
     const key = this.resolveRecordingsKey(projectId);
-    const existing = this.recordings.get(key) ?? createEntry<Recording[]>();
+    const existing = this.recordings.get(key) ?? createRecordingsEntry();
     this.recordings.set(key, existing);
 
     if (
@@ -94,24 +99,36 @@ class DataCacheStore {
       return existing.value;
     }
     if (existing.inFlight) {
+      if (forceRefresh && existing.inFlightRevision !== existing.revision) {
+        // An update arrived after this query began. Coalesce callers behind
+        // it, then fetch once for the current invalidation generation.
+        await existing.inFlight.catch(() => undefined);
+        return this.getRecordings(projectId, fetcher, true);
+      }
       return existing.inFlight;
     }
 
+    const revision = existing.revision;
+    existing.inFlightRevision = revision;
     existing.inFlight = fetcher()
       .then((data) => {
-        existing.value = data;
-        existing.fetchedAt = Date.now();
+        if (existing.revision === revision) {
+          existing.value = data;
+          existing.fetchedAt = Date.now();
+        }
         return data;
       })
       .finally(() => {
         existing.inFlight = null;
+        existing.inFlightRevision = null;
       });
     return existing.inFlight;
   }
 
   setRecordings(projectId: string | undefined, value: Recording[]): void {
     const key = this.resolveRecordingsKey(projectId);
-    const entry = this.recordings.get(key) ?? createEntry<Recording[]>();
+    const entry = this.recordings.get(key) ?? createRecordingsEntry();
+    ++entry.revision;
     entry.value = value;
     entry.fetchedAt = Date.now();
     this.recordings.set(key, entry);
@@ -120,6 +137,7 @@ class DataCacheStore {
   invalidateRecordings(projectId?: string): void {
     if (typeof projectId === "undefined") {
       for (const entry of this.recordings.values()) {
+        ++entry.revision;
         entry.fetchedAt = 0;
       }
       return;
@@ -128,6 +146,7 @@ class DataCacheStore {
     const key = this.resolveRecordingsKey(projectId);
     const entry = this.recordings.get(key);
     if (entry) {
+      ++entry.revision;
       entry.fetchedAt = 0;
     }
   }

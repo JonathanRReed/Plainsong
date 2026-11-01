@@ -2,12 +2,8 @@
 //!
 //! The context a command needs (the selected text, the clipboard, the focused
 //! app) captured at the moment dictation starts, and the execution of the
-//! resolved command action. A command that finds nothing to work on is a
-//! warning, not a failure: the caller falls back to the ordinary dictation
-//! pipeline on the raw transcript rather than costing the user their words.
-//!
-//! Everything here is `pub(crate)` and re-exported from `lib.rs`; the move did
-//! not rename or re-sign anything.
+//! resolved command action. Commands that cannot run retain the recognized
+//! words for recovery.
 
 use super::*;
 
@@ -15,10 +11,7 @@ use super::*;
 #[derive(Debug)]
 pub(crate) enum DictationCommandError {
     /// The command needed selected or clipboard text and there was none.
-    /// Non-fatal: the caller drops back to the ordinary dictation pipeline on
-    /// the raw transcript and reports this as a warning, so a selection-scoped
-    /// command spoken with nothing selected never costs the user their words
-    /// (and never fails the whole stop, which used to wedge the hotkey).
+    /// The caller preserves recovery text and ends the stop without insertion.
     MissingContext(String),
     /// Anything else — prompt lookup, a transform helper rejecting its input.
     /// Still terminal, but routed through the same cleanup as every other
@@ -71,6 +64,20 @@ pub(crate) async fn capture_sidecar_dictation_start_context(
     if options.context_app_bundle_id.is_none() {
         options.context_app_bundle_id = app_bundle_id.clone();
     }
+    #[cfg(target_os = "macos")]
+    {
+        options.focused_field_fingerprint = (options.delivery_mode
+            == models::DictationDeliveryMode::System
+            || settings_snapshot
+                .transcription
+                .dictation_command_mode_enabled
+            || matches!(
+                normalize_dictation_context_source(&options.context_source),
+                "selected_text" | "application_context"
+            ))
+        .then(crate::text_insert::capture_focused_field_fingerprint_without_activation)
+        .flatten();
+    }
 
     options.resolved_mode_preset = Some(
         settings_snapshot
@@ -107,6 +114,12 @@ pub(crate) async fn capture_sidecar_dictation_start_context(
 
     let context_source = normalize_dictation_context_source(&options.context_source);
     if context_source == "none" {
+        return;
+    }
+    // Field text is collected after capture opens, through a bounded,
+    // nonactivating Accessibility reader. Clipboard keeps its start-time snapshot.
+    #[cfg(target_os = "macos")]
+    if matches!(context_source, "selected_text" | "application_context") {
         return;
     }
 
@@ -146,15 +159,22 @@ pub(crate) async fn execute_dictation_command_action(
             prompt_preview: None,
             undo_previous_insert: false,
         },
-        DictationCommandAction::UndoLastInsert | DictationCommandAction::DeleteLastSentence => {
-            DictationCommandExecutionResult {
-                output_text: String::new(),
-                command_applied: command_key.to_string(),
-                prompt_source: None,
-                prompt_preview: None,
-                undo_previous_insert: true,
-            }
+        DictationCommandAction::DeleteLastSentence
+        | DictationCommandAction::DeleteThat
+        | DictationCommandAction::SelectPhrase(_)
+        | DictationCommandAction::MoveToStart
+        | DictationCommandAction::MoveToEnd => {
+            return Err(DictationCommandError::Failed(
+                "This command needs a verified editable field on macOS.".into(),
+            ));
         }
+        DictationCommandAction::UndoLastInsert => DictationCommandExecutionResult {
+            output_text: String::new(),
+            command_applied: command_key.to_string(),
+            prompt_source: None,
+            prompt_preview: None,
+            undo_previous_insert: true,
+        },
         DictationCommandAction::ReplaceEntireSelection(replacement) => {
             let contextual_input = resolve_contextual_command_input(
                 &replacement,
@@ -346,6 +366,10 @@ pub(crate) async fn execute_dictation_command_action(
                     ai_selection.1,
                 )
                 .await
+                .and_then(|result| {
+                    validate_dictation_command_rewrite(&contextual_input, &result.0, &prompt)
+                        .map(|()| result)
+                })
                 .map(|(output, _, _)| output)
                 .unwrap_or_else(|error| {
                     tracing::warn!(
@@ -363,6 +387,10 @@ pub(crate) async fn execute_dictation_command_action(
                     ai_selection.1,
                 )
                 .await
+                .and_then(|result| {
+                    validate_dictation_command_rewrite(&contextual_input, &result.0, &prompt)
+                        .map(|()| result)
+                })
                 .map(|(output, _, _)| output)
                 .unwrap_or_else(|error| {
                     tracing::warn!(
@@ -380,6 +408,10 @@ pub(crate) async fn execute_dictation_command_action(
                     ai_selection.1,
                 )
                 .await
+                .and_then(|result| {
+                    validate_dictation_command_rewrite(&contextual_input, &result.0, &prompt)
+                        .map(|()| result)
+                })
                 .map(|(output, _, _)| output)
                 .unwrap_or_else(|error| {
                     tracing::warn!("Bulletize command fell back to local transform: {}", error);

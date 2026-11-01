@@ -3,6 +3,12 @@
 //! Manages recordings, transcripts, projects, and audit logs
 //! with full CRUD operations.
 
+mod compression;
+mod meeting_asides;
+#[cfg(all(test, feature = "sqlcipher"))]
+mod migration_snapshot_tests;
+mod publishing;
+
 use crate::diarization::voiceprints::{self, ClusterVoiceSignature, StoredVoiceProfile};
 use crate::models::*;
 use crate::recording_audio::{
@@ -11,6 +17,10 @@ use crate::recording_audio::{
     RecordingAudioLifecycle, RecordingAudioOperation, RecordingAudioOperationItem,
     RecordingAudioProtection, RecordingAudioRole, RecordingAudioValidation, RecordingCapturePlan,
     ValidatedRecordingAudio,
+};
+use crate::semantic_search::{
+    EmbeddingScanPage, EmbeddingScanToken, EmbeddingSearchScope, RawEmbeddingRow, SemanticRanker,
+    EMBEDDING_PAGE_BYTES, EMBEDDING_PAGE_ROWS, MAX_EMBEDDING_DIMENSIONS,
 };
 use crate::store::{
     CaptureSessionRecord, ContextSnapshotRecord, DictationHistoryTextRecord,
@@ -27,6 +37,229 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub type SpeakerAlias = (Option<String>, Option<String>, i64);
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DictationDraft {
+    pub recording_id: String,
+    pub title: String,
+    pub text: String,
+    pub expected_saved_text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingFollowup {
+    pub recording_id: String,
+    pub meeting_title: String,
+    pub task: String,
+    pub completed: bool,
+    pub needs_review: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MeetingFollowupPage {
+    pub items: Vec<MeetingFollowup>,
+    pub next_offset: Option<usize>,
+}
+
+const SEMANTIC_REVISION_TABLE_SQL: &str = "CREATE TABLE semantic_recall_revision (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    revision INTEGER NOT NULL CHECK(typeof(revision) = 'integer' AND revision >= 0)
+)";
+
+fn semantic_revision_triggers() -> Vec<(String, String)> {
+    let bump = "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM semantic_recall_revision
+        WHERE id = 1 AND typeof(revision) = 'integer' AND revision >= 0
+        AND revision < 9223372036854775807)
+        THEN RAISE(ABORT, 'semantic recall revision unavailable or exhausted') END;
+        UPDATE semantic_recall_revision SET revision = revision + 1 WHERE id = 1;";
+    let mut definitions = vec![
+        ("semantic_revision_no_delete".to_string(), "CREATE TRIGGER semantic_revision_no_delete BEFORE DELETE ON semantic_recall_revision BEGIN SELECT RAISE(ABORT, 'semantic recall revision cannot be deleted'); END".to_string()),
+        ("semantic_revision_no_replace".to_string(), "CREATE TRIGGER semantic_revision_no_replace BEFORE INSERT ON semantic_recall_revision WHEN EXISTS (SELECT 1 FROM semantic_recall_revision) BEGIN SELECT RAISE(ABORT, 'semantic recall revision cannot be replaced'); END".to_string()),
+        ("semantic_revision_update_guard".to_string(), "CREATE TRIGGER semantic_revision_update_guard BEFORE UPDATE ON semantic_recall_revision WHEN NEW.id IS NOT OLD.id OR typeof(NEW.revision) != 'integer' OR OLD.revision >= 9223372036854775807 OR NEW.revision IS NOT OLD.revision + 1 BEGIN SELECT RAISE(ABORT, 'invalid semantic recall revision advance'); END".to_string()),
+    ];
+    for (table, fields) in [
+        (
+            "transcript_embeddings",
+            &[
+                "id",
+                "recording_id",
+                "segment_id",
+                "text",
+                "embedding",
+                "model",
+                "start_time",
+                "end_time",
+                "created_at",
+            ][..],
+        ),
+        ("recordings", &["id", "title", "source_type"][..]),
+        (
+            "transcripts",
+            &["id", "recording_id", "revision", "segments", "full_text"][..],
+        ),
+    ] {
+        for operation in ["INSERT", "DELETE", "UPDATE"] {
+            let mut conditions = Vec::new();
+            if operation == "UPDATE" {
+                conditions.push(format!(
+                    "({})",
+                    fields
+                        .iter()
+                        .map(|field| format!("NEW.{field} IS NOT OLD.{field}"))
+                        .collect::<Vec<_>>()
+                        .join(" OR ")
+                ));
+            }
+            if table != "transcript_embeddings" {
+                let key = if table == "recordings" {
+                    "id"
+                } else {
+                    "recording_id"
+                };
+                let owners = match operation {
+                    "INSERT" => format!("te.recording_id = NEW.{key}"),
+                    "DELETE" => format!("te.recording_id = OLD.{key}"),
+                    _ => format!("te.recording_id = OLD.{key} OR te.recording_id = NEW.{key}"),
+                };
+                conditions.push(format!(
+                    "EXISTS (SELECT 1 FROM transcript_embeddings te WHERE {owners})"
+                ));
+            }
+            let name = format!(
+                "semantic_revision_{table}_{}",
+                operation.to_ascii_lowercase()
+            );
+            let when = if conditions.is_empty() {
+                String::new()
+            } else {
+                format!(" WHEN {}", conditions.join(" AND "))
+            };
+            let sql = format!(
+                "CREATE TRIGGER {name} AFTER {operation} ON {table}{when} BEGIN {bump} END"
+            );
+            definitions.push((name, sql));
+        }
+    }
+    definitions
+}
+
+fn verify_semantic_revision(conn: &Connection) -> Result<i64> {
+    let table_sql: String = conn.query_row(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'semantic_recall_revision'",
+        [], |row| row.get(0),
+    ).context("Semantic recall revision table unavailable")?;
+    if table_sql != SEMANTIC_REVISION_TABLE_SQL {
+        anyhow::bail!("Semantic recall revision table is malformed");
+    }
+    for (name, expected) in semantic_revision_triggers() {
+        let actual: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND name = ?1",
+                [&name],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("Semantic recall trigger {name} unavailable"))?;
+        if actual != expected {
+            anyhow::bail!("Semantic recall trigger {name} is malformed");
+        }
+    }
+    let (count, revision): (i64, Option<i64>) = conn.query_row(
+        "SELECT COUNT(*), MAX(CASE WHEN id = 1 AND typeof(revision) = 'integer'
+         AND revision >= 0 THEN revision END) FROM semantic_recall_revision",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if count != 1 {
+        anyhow::bail!("Semantic recall revision singleton unavailable");
+    }
+    revision.context("Semantic recall revision is malformed")
+}
+
+fn initialize_semantic_revision(conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "semantic_recall_revision")? {
+        conn.execute_batch(SEMANTIC_REVISION_TABLE_SQL)?;
+    }
+    // Seed the singleton whenever it is missing, not only with a new table: a
+    // stop between CREATE and INSERT, or a schema-only copy, would otherwise
+    // leave an empty table that refuses every launch. No scan token outlives
+    // the process, so a fresh revision cannot validate a stale scan.
+    conn.execute(
+        "INSERT INTO semantic_recall_revision (id, revision)
+         SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM semantic_recall_revision)",
+        [],
+    )?;
+    for (name, sql) in semantic_revision_triggers() {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND name = ?1)",
+            [&name],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            conn.execute_batch(&sql)?;
+        }
+    }
+    verify_semantic_revision(conn)?;
+    Ok(())
+}
+
+fn embedding_scan_filter(scope: &EmbeddingSearchScope) -> Result<(String, Vec<Value>)> {
+    if scope.dimensions == 0 || scope.dimensions > MAX_EMBEDDING_DIMENSIONS {
+        anyhow::bail!("Invalid semantic embedding dimensions");
+    }
+    let bytes = scope
+        .dimensions
+        .checked_mul(4)
+        .context("Semantic embedding size overflow")?;
+    Ok((
+        "te.model = ?1 AND typeof(te.embedding) = 'blob' AND length(te.embedding) = ?2
+        AND (?3 IS NULL OR te.recording_id != ?3)
+        AND (?4 IS NULL OR r.source_type = ?4)"
+            .to_string(),
+        vec![
+            Value::from(scope.model.clone()),
+            Value::from(bytes as i64),
+            scope
+                .exclude_recording_id
+                .clone()
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+            scope
+                .source_type
+                .clone()
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        ],
+    ))
+}
+
+fn embedding_source_signature(conn: &Connection) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    let mut statement = conn.prepare(
+        "SELECT r.id,t.id,t.revision,t.segments,t.full_text
+        FROM recordings r JOIN transcripts t ON t.recording_id=r.id ORDER BY r.id,t.id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        hash.update(serde_json::to_vec(&row?)?);
+    }
+    Ok(hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
 
 const MAX_DICTIONARY_ENTRIES: i64 = 1_000;
 const MAX_DICTIONARY_SPOKEN_FORM_BYTES: usize = 256;
@@ -55,16 +288,27 @@ pub struct MeetingTranscriptCompletion {
     pub acknowledged_at: Option<String>,
 }
 
-const SENSITIVE_AUDIT_DETAIL_KEYS: [&str; 4] = [
+/// Detail fields the audit log never keeps. Removed on every write and, by the
+/// startup scrub, from rows written before a field was listed. The audit log
+/// is append-only and outlives a deleted meeting, so it records that something
+/// happened, not names, titles or where a file went: an export or a recording
+/// path is named after its meeting, and an imported file's name is the
+/// reader's own words.
+const SENSITIVE_AUDIT_DETAIL_KEYS: [&str; 9] = [
     "context_preview",
     "selected_text",
     "clipboard_text",
     "captured_context_text",
+    "export_path",
+    "target",
+    "audio_path",
+    "new_title",
+    "source_file_name",
 ];
 
 const LEGACY_DICTATION_BYTE_COUNT_FLOOR: i64 = 86_400;
 const MAX_REPAIRABLE_DICTATION_CAPTURE_MS: i64 = 12 * 60 * 60 * 1_000;
-pub(crate) const CURRENT_SCHEMA_VERSION: i64 = 1;
+pub(crate) const CURRENT_SCHEMA_VERSION: i64 = 4;
 
 const AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS audit_log_no_update
      BEFORE UPDATE ON audit_log
@@ -80,7 +324,7 @@ const AUDIT_LOG_APPEND_ONLY_TRIGGER_SQL: &str = "CREATE TRIGGER IF NOT EXISTS au
 /// Every application-owned table whose rows Reset Everything must remove.
 /// The delete SQL lives beside the classification so the schema-coverage test
 /// cannot classify a table as reset-scoped without also wiring it into purge.
-const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 27] = [
+const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 38] = [
     // Samples before profiles: the foreign key points that way.
     (
         "speaker_profile_samples",
@@ -95,8 +339,22 @@ const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 27] = [
         "DELETE FROM dictation_history_text",
     ),
     ("transcript_embeddings", "DELETE FROM transcript_embeddings"),
+    (
+        "embedding_rebuild_stage",
+        "DELETE FROM embedding_rebuild_stage",
+    ),
     ("transcript_artifacts", "DELETE FROM transcript_artifacts"),
     ("meeting_artifacts", "DELETE FROM meeting_artifacts"),
+    ("meeting_note_recovery", "DELETE FROM meeting_note_recovery"),
+    ("recording_asides", "DELETE FROM recording_asides"),
+    (
+        "meeting_enhanced_note_drafts",
+        "DELETE FROM meeting_enhanced_note_drafts",
+    ),
+    (
+        "summary_regeneration_undo",
+        "DELETE FROM summary_regeneration_undo",
+    ),
     // A cached brief is model-written text about the reader's meetings. It
     // has to go with them.
     ("meeting_briefs", "DELETE FROM meeting_briefs"),
@@ -111,9 +369,26 @@ const RESET_SCOPED_TABLE_DELETES: [(&str, &str); 27] = [
         "DELETE FROM recording_audio_operations",
     ),
     (
+        "audio_compression_jobs",
+        "DELETE FROM audio_compression_jobs",
+    ),
+    (
+        "audio_compression_totals",
+        "DELETE FROM audio_compression_totals",
+    ),
+    (
+        "meeting_audio_finalization",
+        "DELETE FROM meeting_audio_finalization",
+    ),
+    (
         "recording_audio_assets",
         "DELETE FROM recording_audio_assets",
     ),
+    // Reset forgets the notes folder and its queue. Files already saved
+    // there belong to the user and stay.
+    ("note_publish_outbox", "DELETE FROM note_publish_outbox"),
+    ("note_publish_receipts", "DELETE FROM note_publish_receipts"),
+    ("note_publish_config", "DELETE FROM note_publish_config"),
     ("recordings", "DELETE FROM recordings"),
     ("asr_benchmarks", "DELETE FROM asr_benchmarks"),
     ("runtime_events", "DELETE FROM runtime_events"),
@@ -303,6 +578,28 @@ fn normalize_category_scope(value: Option<&str>) -> Result<Option<String>> {
     ))
 }
 
+fn dictation_dictionary_entry_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DictationDictionaryEntry> {
+    Ok(DictationDictionaryEntry {
+        id: row.get(0)?,
+        spoken_form: row.get(1)?,
+        replacement: row.get(2)?,
+        app_scope: row.get(3)?,
+        case_sensitive: row.get::<_, i64>(4)? != 0,
+        enabled: row.get::<_, i64>(5)? != 0,
+        category_scope: row.get(6)?,
+        created_at: row
+            .get::<_, String>(7)?
+            .parse()
+            .unwrap_or_else(|_| Utc::now()),
+        updated_at: row
+            .get::<_, String>(8)?
+            .parse()
+            .unwrap_or_else(|_| Utc::now()),
+    })
+}
+
 /// The `pause_spans` column, parsed. Unreadable JSON is an empty list: a
 /// meeting whose pause record is corrupt is still a meeting, and a read must
 /// not fail over a marker the timeline can simply omit.
@@ -311,12 +608,33 @@ fn parse_pause_spans(raw: Option<String>) -> Vec<crate::recording_pause::PauseSp
         .unwrap_or_default()
 }
 
+fn capture_safe_completion(
+    complete: bool,
+    reason: Option<&str>,
+    capture_warning: Option<&str>,
+) -> (bool, Option<String>) {
+    let capture = capture_warning.map(str::trim).filter(|s| !s.is_empty());
+    let reason = reason.map(str::trim).filter(|s| !s.is_empty());
+    let merged = match (capture, reason) {
+        (Some(capture), Some(reason)) if reason.contains(capture) => Some(reason.to_string()),
+        (Some(capture), Some(reason)) if capture.contains(reason) => Some(capture.to_string()),
+        (Some(capture), Some(reason)) => Some(format!("{} {}", capture, reason)),
+        (Some(capture), None) => Some(capture.to_string()),
+        (None, reason) => reason.map(str::to_string),
+    };
+    (complete && capture.is_none(), merged)
+}
+
 fn validated_summary_provenance(
     raw: Option<String>,
     summary: Option<&str>,
 ) -> Option<AnalysisProvenance> {
-    let provenance: AnalysisProvenance = serde_json::from_str(raw.as_deref()?).ok()?;
+    let mut provenance: AnalysisProvenance = serde_json::from_str(raw.as_deref()?).ok()?;
     let summary = summary?;
+    // Keep historic citations and attribution, but do not present an older
+    // acceptance policy as verification under the current meaning checks.
+    provenance.grounded &= provenance.grounding_policy_version
+        == Some(crate::models::SUMMARY_GROUNDING_POLICY_VERSION);
     (provenance.version == ANALYSIS_PROVENANCE_VERSION
         && provenance.content_hash == analysis_content_hash(summary))
     .then_some(provenance)
@@ -341,24 +659,100 @@ fn validated_action_items_provenance(
         .then_some(provenance)
 }
 
+fn demote_incomplete_analysis(
+    incomplete: bool,
+    summary: &mut Option<AnalysisProvenance>,
+    actions: &mut Option<ActionItemsProvenance>,
+) {
+    if !incomplete {
+        return;
+    }
+    if let Some(summary) = summary {
+        summary.grounded = false;
+    }
+    if let Some(actions) = actions {
+        actions.grounded = false;
+        for item in &mut actions.items {
+            item.grounded = false;
+        }
+    }
+}
+
+fn action_item_review_status(
+    provenance: Option<&ActionItemsProvenance>,
+    action_items: &[String],
+) -> HashMap<String, bool> {
+    let mut review = HashMap::<String, bool>::new();
+    if let Some(provenance) = provenance {
+        let current_policy = provenance.grounding_policy_version
+            == Some(crate::models::SUMMARY_GROUNDING_POLICY_VERSION);
+        for (task, evidence) in action_items.iter().zip(&provenance.items) {
+            let needs_review = evidence.generated
+                && (!current_policy || !evidence.grounded || evidence.citations.is_empty());
+            // Equal-text occurrences share one task. Keep every occurrence's warning.
+            *review.entry(task.clone()).or_default() |= needs_review;
+        }
+    }
+    review
+}
+
 fn preserve_matching_action_item_provenance(
     previous: &ActionItemsProvenance,
     action_items: &[String],
+    preserve_positions: bool,
 ) -> Option<ActionItemsProvenance> {
-    let mut unmatched = previous.items.clone();
-    let items = action_items
+    let next_hashes = action_items
         .iter()
-        .map(|item| {
-            let content_hash = analysis_content_hash(item);
-            unmatched
-                .iter()
-                .position(|candidate| candidate.content_hash == content_hash)
-                .map(|index| unmatched.remove(index))
+        .map(|item| analysis_content_hash(item))
+        .collect::<Vec<_>>();
+    // A full-document save cannot identify which equal-text occurrence survived
+    // a structural edit. Indexed mutations supply known positional identity.
+    let aligned = previous.items.len() == next_hashes.len()
+        && previous
+            .items
+            .iter()
+            .zip(&next_hashes)
+            .all(|(item, hash)| item.content_hash == *hash);
+    let mut previous_occurrences: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, item) in previous.items.iter().enumerate() {
+        previous_occurrences
+            .entry(&item.content_hash)
+            .or_default()
+            .push(index);
+    }
+    let mut next_counts: HashMap<String, usize> = HashMap::new();
+    for hash in &next_hashes {
+        *next_counts.entry(hash.clone()).or_default() += 1;
+    }
+    let items = next_hashes
+        .into_iter()
+        .enumerate()
+        .map(|(index, content_hash)| {
+            let occurrence = if aligned
+                || (preserve_positions
+                    && previous
+                        .items
+                        .get(index)
+                        .is_some_and(|item| item.content_hash == content_hash))
+            {
+                Some(index)
+            } else {
+                previous_occurrences
+                    .get(content_hash.as_str())
+                    .and_then(|indices| {
+                        (indices.len() == 1 && next_counts[content_hash.as_str()] == 1)
+                            .then_some(indices[0])
+                    })
+            };
+            occurrence
+                .map(|index| previous.items[index].clone())
                 .unwrap_or(ActionItemProvenance {
                     content_hash,
                     citations: Vec::new(),
                     grounded: false,
                     generated: false,
+                    evidence: None,
+                    unclear: false,
                 })
         })
         .collect::<Vec<_>>();
@@ -485,36 +879,7 @@ pub(crate) fn encrypt_plaintext_database_file(db_path: &Path, key: &str) -> Resu
             row.get::<_, i64>(0)
         })
         .context("The database did not open as plaintext, so it was left alone")?;
-        let user_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-
-        conn.execute_batch(&format!(
-            "ATTACH DATABASE '{}' AS plainsong_vault KEY \"x'{}'\";",
-            sql_string_literal(&staging),
-            hex_key
-        ))
-        .context("Could not create the encrypted database beside the original")?;
-        // `sqlcipher_export` returns a row, so it has to be a query: rusqlite
-        // refuses any row-returning statement passed to `execute`.
-        let exported = conn
-            .query_row(
-                "SELECT sqlcipher_export('plainsong_vault');",
-                [],
-                |_| Ok(()),
-            )
-            .context("Could not copy the database into its encrypted replacement")
-            .and_then(|()| {
-                conn.execute_batch(&format!(
-                    "PRAGMA plainsong_vault.user_version = {user_version};"
-                ))
-                .context("Could not carry the schema version into the encrypted database")
-            });
-        // Detach whatever happened above, so the staging file is closed and
-        // removable on the failure path.
-        let detached = conn
-            .execute_batch("DETACH DATABASE plainsong_vault;")
-            .context("Could not detach the encrypted database");
-        exported?;
-        detached?;
+        let user_version = export_keyed_database(&conn, &staging, key)?;
         conn.close().map_err(|(_, error)| {
             anyhow::Error::new(error).context("Could not close the plaintext database")
         })?;
@@ -597,6 +962,109 @@ pub(crate) fn encrypt_plaintext_database_file(db_path: &Path, key: &str) -> Resu
     Ok(())
 }
 
+/// Export with an explicit destination key. SQLCipher does not copy user_version.
+#[cfg(feature = "sqlcipher")]
+fn export_keyed_database(conn: &Connection, destination: &Path, key: &str) -> Result<i64> {
+    let hex_key = hex_database_key(key)?;
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    conn.execute_batch(&format!(
+        "ATTACH DATABASE '{}' AS plainsong_vault KEY \"x'{}'\";",
+        sql_string_literal(destination),
+        hex_key
+    ))?;
+    let exported = conn
+        .query_row(
+            "SELECT sqlcipher_export('plainsong_vault');",
+            [],
+            |_| Ok(()),
+        )
+        .and_then(|()| {
+            conn.execute_batch(&format!("PRAGMA plainsong_vault.user_version = {version};"))
+        });
+    let detached = conn.execute_batch("DETACH DATABASE plainsong_vault;");
+    exported?;
+    detached?;
+    Ok(version)
+}
+
+#[cfg(feature = "sqlcipher")]
+fn snapshot_before_schema_upgrade(
+    conn: &Connection,
+    db_path: &Path,
+    key: &str,
+) -> Result<Option<PathBuf>> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let objects: i64 =
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))?;
+    if version >= CURRENT_SCHEMA_VERSION || objects == 0 {
+        return Ok(None);
+    }
+    let directory = db_path.with_file_name(format!(
+        "{}.migration-snapshots",
+        db_path
+            .file_name()
+            .context("Database has no filename")?
+            .to_string_lossy()
+    ));
+    fs::create_dir_all(&directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+    }
+    let name = format!(
+        "{}-schema-v{version}-before-v{}-{}.db",
+        Utc::now().format("%Y%m%dT%H%M%S%.9fZ"),
+        CURRENT_SCHEMA_VERSION,
+        uuid::Uuid::new_v4()
+    );
+    let destination = directory.join(name);
+    let staging = destination.with_extension("partial");
+    let result = (|| -> Result<()> {
+        export_keyed_database(conn, &staging, key)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o600))?;
+        }
+        fsync_path(&staging)?;
+        if database_reads_as_plaintext(&staging) {
+            anyhow::bail!("Migration snapshot is readable without its vault key");
+        }
+        let snapshot =
+            Connection::open_with_flags(&staging, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        snapshot.execute_batch(&format!("PRAGMA key = \"x'{}'\";", hex_database_key(key)?))?;
+        let integrity: String =
+            snapshot.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        let snapshot_version: i64 =
+            snapshot.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if integrity != "ok" || snapshot_version != version {
+            anyhow::bail!("Migration snapshot failed its integrity or schema-version check");
+        }
+        drop(snapshot);
+        fs::rename(&staging, &destination)?;
+        fsync_path(&directory)?;
+        let mut snapshots = fs::read_dir(&directory)?.collect::<std::io::Result<Vec<_>>>()?;
+        snapshots.retain(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.contains("-schema-v") && name.ends_with(".db"))
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+        });
+        snapshots.sort_by_key(|entry| entry.file_name());
+        for entry in snapshots.iter().take(snapshots.len().saturating_sub(2)) {
+            fs::remove_file(entry.path())?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        remove_database_file_set(&staging);
+        return Err(error).context("Could not preserve encrypted database before schema migration; migration was not started");
+    }
+    Ok(Some(destination))
+}
+
 /// fsync one path (file or directory).
 #[cfg(feature = "sqlcipher")]
 fn fsync_path(path: &Path) -> std::io::Result<()> {
@@ -605,20 +1073,104 @@ fn fsync_path(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()
 }
 
+const CORRECTION_APPROVAL_UNDO_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+const CORRECTION_APPROVAL_UNDO_CAP: usize = 32;
+
+#[derive(Clone)]
+struct CorrectionApprovalUndoReceipt {
+    entry_id: String,
+    expected_revision: i64,
+    previous_entry: Option<DictationDictionaryEntry>,
+    issued_at: std::time::Instant,
+}
+
 pub struct Database {
     conn: Connection,
     encrypted: bool,
+    correction_approval_undo: HashMap<String, CorrectionApprovalUndoReceipt>,
 }
 
 /// Recording id to (text preview, app target), for dictation history lists.
 pub type DictationListPreviews =
     std::collections::HashMap<String, (Option<String>, Option<String>)>;
 
+type MeetingActionCompletion = (String, Vec<String>, HashSet<String>);
+
+#[derive(Clone, Copy, Default)]
+struct TranscriptSearchFilters<'a> {
+    project_ids: Option<&'a [String]>,
+    recording_ids: Option<&'a [String]>,
+    exclude_recording_id: Option<&'a str>,
+    source_type: Option<&'a str>,
+    recording_status: Option<&'a str>,
+}
+
+fn load_meeting_action_completion(
+    conn: &Connection,
+    recording_id: &str,
+) -> Result<Option<MeetingActionCompletion>> {
+    let row = conn
+        .query_row(
+            "SELECT recordings.source_type,
+                    COALESCE(meeting_artifacts.action_items, recordings.action_items),
+                    recordings.meeting_action_completion
+             FROM recordings
+             LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
+             WHERE recordings.id = ?1",
+            [recording_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(
+        row.map(|(source_type, action_items_json, completed_hashes_json)| {
+            let action_items = action_items_json
+                .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+                .unwrap_or_default();
+            let completed_hashes = serde_json::from_str::<Vec<String>>(&completed_hashes_json)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            (source_type, action_items, completed_hashes)
+        }),
+    )
+}
+
+fn completed_meeting_action_tasks(
+    action_items: &[String],
+    completed_hashes: &HashSet<String>,
+) -> Vec<String> {
+    let mut emitted_hashes = HashSet::new();
+    action_items
+        .iter()
+        .filter_map(|task| {
+            let hash = analysis_content_hash(task);
+            (completed_hashes.contains(&hash) && emitted_hashes.insert(hash)).then(|| task.clone())
+        })
+        .collect()
+}
+
 #[expect(
     dead_code,
     reason = "database module keeps migration and evidence-table helpers beyond current command usage"
 )]
 impl Database {
+    pub(crate) fn close_for_restore(&mut self) -> Result<()> {
+        let placeholder = Connection::open_in_memory()?;
+        let original = std::mem::replace(&mut self.conn, placeholder);
+        if let Err((original, error)) = original.close() {
+            self.conn = original;
+            return Err(error).context("Could not close the database before restore");
+        }
+        self.correction_approval_undo.clear();
+        Ok(())
+    }
+
     /// Create new database connection with optional encryption
     pub fn new_with_key(key: Option<&str>) -> Result<Self> {
         let app_dir = crate::paths::data_dir()
@@ -655,8 +1207,16 @@ impl Database {
             false
         };
 
+        #[cfg(feature = "sqlcipher")]
+        if let Some(key) = key {
+            snapshot_before_schema_upgrade(&conn, db_path, key)?;
+        }
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        let mut db = Self { conn, encrypted };
+        let mut db = Self {
+            conn,
+            encrypted,
+            correction_approval_undo: HashMap::new(),
+        };
         db.init_tables()?;
 
         Ok(db)
@@ -743,7 +1303,11 @@ impl Database {
             );
         }
 
-        Ok(Self { conn, encrypted })
+        Ok(Self {
+            conn,
+            encrypted,
+            correction_approval_undo: HashMap::new(),
+        })
     }
 
     /// Open read-only, deciding whether the file is encrypted by trying, not
@@ -781,6 +1345,7 @@ impl Database {
         let mut db = Self {
             conn,
             encrypted: false,
+            correction_approval_undo: HashMap::new(),
         };
         db.init_tables()?;
         Ok(db)
@@ -1524,6 +2089,11 @@ impl Database {
              FROM meeting_artifacts
              WHERE recording_id = ?1",
         )?;
+        let incomplete = self.get_recording(recording_id)?.is_some_and(|r| {
+            !r.transcript_complete
+                || r.capture_degraded_summary
+                    .is_some_and(|s| !s.trim().is_empty())
+        });
         let result = stmt.query_row([recording_id], |row| {
             let action_items_json: String = row.get(4)?;
             let action_items: Vec<String> =
@@ -1534,15 +2104,21 @@ impl Database {
             let chat_messages_json: String = row.get(10)?;
             let created_at: String = row.get(11)?;
             let updated_at: String = row.get(12)?;
+            let mut summary_provenance =
+                validated_summary_provenance(row.get(5)?, summary.as_deref());
+            let mut action_items_provenance =
+                validated_action_items_provenance(row.get(6)?, &action_items);
+            demote_incomplete_analysis(
+                incomplete,
+                &mut summary_provenance,
+                &mut action_items_provenance,
+            );
             Ok(MeetingArtifactRecord {
                 id: row.get(0)?,
                 recording_id: row.get(1)?,
                 title: row.get(2)?,
-                summary_provenance: validated_summary_provenance(row.get(5)?, summary.as_deref()),
-                action_items_provenance: validated_action_items_provenance(
-                    row.get(6)?,
-                    &action_items,
-                ),
+                summary_provenance,
+                action_items_provenance,
                 summary,
                 action_items,
                 decisions: serde_json::from_str(&decisions_json).unwrap_or_default(),
@@ -1578,6 +2154,9 @@ impl Database {
 
         self.conn.execute_batch("BEGIN IMMEDIATE;")?;
         let migration_result = self.init_schema_v1().and_then(|_| {
+            publishing::init(&self.conn)?;
+            compression::init(&self.conn)?;
+            meeting_asides::init(&self.conn)?;
             if schema_version < CURRENT_SCHEMA_VERSION {
                 self.conn.execute_batch(&format!(
                     "PRAGMA user_version = {};",
@@ -1587,8 +2166,13 @@ impl Database {
             Ok(())
         });
         if let Err(error) = migration_result {
-            let _ = self.conn.execute_batch("ROLLBACK;");
-            return Err(error);
+            if let Err(rollback_error) = self.conn.execute_batch("ROLLBACK;") {
+                return Err(error).context(format!(
+                    "Schema migration failed and rollback failed ({rollback_error}); preserve the migration snapshot for recovery"
+                ));
+            }
+            return Err(error)
+                .context("Schema migration failed; the database transaction was rolled back");
         }
         if let Err(error) = self.conn.execute_batch("COMMIT;") {
             let _ = self.conn.execute_batch("ROLLBACK;");
@@ -1653,7 +2237,12 @@ impl Database {
                 consent_notice_surface TEXT,
                 consent_notice_message TEXT,
                 consent_notice_updated_at TEXT,
-                video_service TEXT
+                video_service TEXT,
+                dictation_corrected_text TEXT,
+                dictation_draft_text TEXT,
+                dictation_draft_base_edit TEXT,
+                dictation_draft_updated_at INTEGER,
+                meeting_action_completion TEXT NOT NULL DEFAULT '[]'
             )",
             [],
         )?;
@@ -1766,6 +2355,7 @@ impl Database {
                 model_id TEXT,
                 requested_provider TEXT,
                 actual_provider TEXT,
+                measured_word_timestamps INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 revision INTEGER NOT NULL DEFAULT 0
             )",
@@ -1778,6 +2368,11 @@ impl Database {
         self.ensure_table_column("transcripts", "model_id", "TEXT")?;
         self.ensure_table_column("transcripts", "requested_provider", "TEXT")?;
         self.ensure_table_column("transcripts", "actual_provider", "TEXT")?;
+        self.ensure_table_column(
+            "transcripts",
+            "measured_word_timestamps",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         self.ensure_table_column("transcripts", "revision", "INTEGER NOT NULL DEFAULT 0")?;
         // Which diarizer produced the speaker labels on this transcript, so the
         // meeting header can name it instead of inferring it from the ASR
@@ -1786,6 +2381,11 @@ impl Database {
         // run, which is not the same as "Plainsong ran and found one speaker".
         self.ensure_table_column("transcripts", "diarizer", "TEXT")?;
         self.migrate_transcripts_drop_fallback_columns()?;
+        // Microphone rows of a Me + Them meeting that were the far side heard
+        // through the speakers: a JSON array of segments kept out of
+        // `segments`, `full_text` and search, but not deleted. NULL means none.
+        // Added after the fallback-column rebuild, which lists its columns.
+        self.ensure_table_column("transcripts", "heard_through_speakers", "TEXT")?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS audit_log (
@@ -1887,6 +2487,21 @@ impl Database {
             );
         }
 
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meeting_enhanced_note_drafts (
+            recording_id TEXT PRIMARY KEY REFERENCES recordings(id) ON DELETE CASCADE,
+            draft_json TEXT NOT NULL
+        );",
+        )?;
+
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meeting_note_recovery (
+            id TEXT PRIMARY KEY, recording_id TEXT NOT NULL,
+            base_notes TEXT NOT NULL, notes TEXT NOT NULL, created_at TEXT NOT NULL,
+            FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+        );",
+        )?;
+
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS insertion_actions (
                 id TEXT PRIMARY KEY,
@@ -1943,6 +2558,20 @@ impl Database {
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_meeting_artifacts_updated_at
              ON meeting_artifacts(updated_at DESC)",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS summary_regeneration_undo (
+                recording_id TEXT PRIMARY KEY,
+                undo_token TEXT NOT NULL,
+                generated_summary TEXT NOT NULL,
+                generated_summary_revision INTEGER NOT NULL,
+                prior_summary TEXT,
+                prior_summary_provenance TEXT,
+                source_fingerprint TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+            )",
             [],
         )?;
 
@@ -2023,6 +2652,10 @@ impl Database {
              ON speaker_profile_samples(profile_id, created_at)",
             [],
         )?;
+        // Which speaker of the source meeting a confirmed sample came from, so
+        // correcting that speaker's identity can withdraw exactly that sample.
+        // NULL for samples written before this column existed.
+        self.ensure_table_column("speaker_profile_samples", "source_speaker_id", "TEXT")?;
 
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS asr_benchmarks (
@@ -2059,6 +2692,38 @@ impl Database {
             [],
         )?;
         self.ensure_table_column("dictation_dictionary_entries", "category_scope", "TEXT")?;
+        self.ensure_table_column(
+            "dictation_dictionary_entries",
+            "revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        // A global clock also detects delete/recreate and A -> B -> A edits.
+        // Triggers cover every writer, including older clients and SQL imports.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dictation_dictionary_revision_clock (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision >= 0)
+             );
+             INSERT OR IGNORE INTO dictation_dictionary_revision_clock (id, revision) VALUES (1, 0);
+             UPDATE dictation_dictionary_revision_clock
+             SET revision = MAX(revision, COALESCE((SELECT MAX(revision) FROM dictation_dictionary_entries), 0))
+             WHERE id = 1;
+             CREATE TRIGGER IF NOT EXISTS dictation_dictionary_revision_insert
+             AFTER INSERT ON dictation_dictionary_entries BEGIN
+                UPDATE dictation_dictionary_revision_clock SET revision = revision + 1 WHERE id = 1;
+                UPDATE dictation_dictionary_entries
+                SET revision = (SELECT revision FROM dictation_dictionary_revision_clock WHERE id = 1)
+                WHERE id = NEW.id;
+             END;
+             CREATE TRIGGER IF NOT EXISTS dictation_dictionary_revision_update
+             AFTER UPDATE OF id, spoken_form, replacement, app_scope, case_sensitive, enabled,
+                             category_scope, created_at, updated_at ON dictation_dictionary_entries BEGIN
+                UPDATE dictation_dictionary_revision_clock SET revision = revision + 1 WHERE id = 1;
+                UPDATE dictation_dictionary_entries
+                SET revision = (SELECT revision FROM dictation_dictionary_revision_clock WHERE id = 1)
+                WHERE id = NEW.id;
+             END;",
+        )?;
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_dictation_dictionary_entries_spoken_form
              ON dictation_dictionary_entries(spoken_form)",
@@ -2160,6 +2825,12 @@ impl Database {
             [],
         )?;
 
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_embeddings_model_id ON transcript_embeddings(model, id)",
+            [],
+        )?;
+        initialize_semantic_revision(&self.conn)?;
+
         // The searchable text of one dictation: what was delivered and what the
         // recognizer heard before the pipeline touched it. `transcripts` keeps
         // only the delivered text (or the raw text when nothing changed), so
@@ -2177,6 +2848,7 @@ impl Database {
             )",
             [],
         )?;
+        self.ensure_table_column("dictation_history_text", "recognition_review_words", "TEXT")?;
         // Same optional-index contract as transcript_fts above: kept in step
         // by the writers in the same transaction, backfilled at startup, and
         // its absence degrades history search to a LIKE scan.
@@ -2206,7 +2878,21 @@ impl Database {
         )?;
 
         self.ensure_table_column("recordings", "summary", "TEXT")?;
+        self.ensure_table_column("recordings", "dictation_corrected_text", "TEXT")?;
+        self.ensure_table_column("recordings", "dictation_draft_text", "TEXT")?;
+        self.ensure_table_column("recordings", "dictation_draft_base_edit", "TEXT")?;
+        self.ensure_table_column("recordings", "dictation_draft_updated_at", "INTEGER")?;
+        self.ensure_table_column(
+            "recordings",
+            "summary_revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         self.ensure_table_column("recordings", "action_items", "TEXT")?;
+        self.ensure_table_column(
+            "recordings",
+            "meeting_action_completion",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
         self.ensure_table_column("recordings", "meeting_notes", "TEXT")?;
         self.ensure_table_column("recordings", "meeting_template_id", "TEXT")?;
         self.ensure_table_column("recordings", "notes_updated_at", "TEXT")?;
@@ -2586,8 +3272,10 @@ impl Database {
                 model_id TEXT,
                 requested_provider TEXT,
                 actual_provider TEXT,
+                measured_word_timestamps INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
-                revision INTEGER NOT NULL DEFAULT 0
+                revision INTEGER NOT NULL DEFAULT 0,
+                diarizer TEXT
              );
              INSERT INTO transcripts (
                 id,
@@ -2600,8 +3288,10 @@ impl Database {
                 model_id,
                 requested_provider,
                 actual_provider,
+                measured_word_timestamps,
                 created_at,
-                revision
+                revision,
+                diarizer
              )
              SELECT
                 id,
@@ -2614,8 +3304,10 @@ impl Database {
                 model_id,
                 requested_provider,
                 actual_provider,
+                measured_word_timestamps,
                 created_at,
-                revision
+                revision,
+                diarizer
              FROM transcripts_legacy_fallback;
              DROP TABLE transcripts_legacy_fallback;",
         )?;
@@ -2667,7 +3359,7 @@ impl Database {
     }
 
     /// One-time migration for dictations saved before `dictation_history_text`
-    /// existed, plus the FTS rebuild that follows a fresh (or FTS-less) open.
+    /// existed, plus missing FTS rows after a fresh or partially indexed open.
     ///
     /// Older rows never stored the raw transcript, so the delivered text
     /// stands in for both sides: search over them still works, it just cannot
@@ -2688,17 +3380,13 @@ impl Database {
         if !table_exists(&self.conn, "dictation_history_fts")? {
             return Ok(());
         }
-        let fts_row_count: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM dictation_history_fts", [], |row| {
-                    row.get(0)
-                })?;
-        if fts_row_count > 0 {
-            return Ok(());
-        }
         self.conn.execute(
             "INSERT INTO dictation_history_fts (recording_id, final_text, raw_text)
-             SELECT recording_id, final_text, raw_text FROM dictation_history_text",
+             SELECT recording_id, final_text, raw_text FROM dictation_history_text
+             WHERE recording_id NOT IN (
+                 SELECT recording_id FROM dictation_history_fts
+                 WHERE recording_id IS NOT NULL
+             )",
             [],
         )?;
         Ok(())
@@ -2718,6 +3406,7 @@ impl Database {
              ON CONFLICT(recording_id) DO UPDATE SET
                 final_text = excluded.final_text,
                 raw_text = excluded.raw_text,
+                recognition_review_words = NULL,
                 reprocessed_from_id = excluded.reprocessed_from_id,
                 mode_preset = excluded.mode_preset",
             params![
@@ -2753,6 +3442,23 @@ impl Database {
         transcript: &Transcript,
         history_text: &DictationHistoryTextRecord,
         kept_audio: Option<&ValidatedRecordingAudio>,
+    ) -> Result<()> {
+        self.create_dictation_history_entry_with_recognition_review(
+            recording,
+            transcript,
+            history_text,
+            kept_audio,
+            None,
+        )
+    }
+
+    pub fn create_dictation_history_entry_with_recognition_review(
+        &mut self,
+        recording: &Recording,
+        transcript: &Transcript,
+        history_text: &DictationHistoryTextRecord,
+        kept_audio: Option<&ValidatedRecordingAudio>,
+        review_words: Option<&[RecognitionReviewWord]>,
     ) -> Result<()> {
         if recording.id != transcript.recording_id || recording.id != history_text.recording_id {
             anyhow::bail!(
@@ -2797,8 +3503,72 @@ impl Database {
         }
         Self::write_transcript_transaction(&tx, transcript)?;
         Self::write_dictation_history_text_transaction(&tx, history_text)?;
+        let review_json = review_words
+            .filter(|words| !words.is_empty())
+            .map(serde_json::to_string)
+            .transpose()?;
+        tx.execute(
+            "UPDATE dictation_history_text SET recognition_review_words = ?1 WHERE recording_id = ?2",
+            params![review_json, &recording.id],
+        )?;
         tx.commit()
             .context("Failed to commit dictation recording, transcript and history text")?;
+        Ok(())
+    }
+
+    /// Atomically persist captured dictation audio after ASR failed. Failed
+    /// recovery entries deliberately have no transcript or searchable history
+    /// text: the audio is the only result, and the error row exists so the
+    /// reader can process it again from History.
+    pub fn create_failed_dictation_recovery_entry(
+        &mut self,
+        recording: &Recording,
+        kept_audio: &ValidatedRecordingAudio,
+    ) -> Result<()> {
+        if recording.audio_path.trim().is_empty() {
+            anyhow::bail!(
+                "Failed dictation recording '{}' has no audio path",
+                recording.id
+            );
+        }
+        if recording.status != "error"
+            || recording.transcript_complete
+            || recording.transcript_degraded_reason.is_none()
+        {
+            anyhow::bail!(
+                "Recording '{}' is not a failed dictation recovery entry",
+                recording.id
+            );
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("Failed to start failed dictation recovery transaction")?;
+        insert_recording_row(&tx, recording, &recording.audio_path)?;
+        tx.execute(
+            "UPDATE recordings
+                SET transcript_complete = 0, transcript_degraded_reason = ?2
+              WHERE id = ?1",
+            params![&recording.id, &recording.transcript_degraded_reason],
+        )?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO recording_audio_assets (
+                recording_id, role, path, lifecycle, protection,
+                plaintext_bytes, plaintext_sha256, created_at, updated_at
+             ) VALUES (?1, 'primary', ?2, 'ready', 'plaintext', ?3, ?4, ?5, ?5)",
+            params![
+                &recording.id,
+                &recording.audio_path,
+                i64::try_from(kept_audio.plaintext_bytes)
+                    .context("Failed dictation audio is too large for SQLite metadata")?,
+                &kept_audio.plaintext_sha256,
+                &now,
+            ],
+        )?;
+        tx.commit()
+            .context("Failed to commit failed dictation recording and audio asset")?;
         Ok(())
     }
 
@@ -2809,7 +3579,10 @@ impl Database {
     pub fn get_dictation_list_previews(&self) -> Result<DictationListPreviews> {
         let mut stmt = self.conn.prepare(
             "SELECT r.id,
-                    SUBSTR(TRIM(h.final_text), 1, 240),
+                    CASE WHEN r.dictation_corrected_text IS NOT NULL
+                         THEN SUBSTR(r.dictation_corrected_text, 1, 240)
+                         ELSE SUBSTR(TRIM(h.final_text), 1, 240)
+                    END,
                     (SELECT NULLIF(TRIM(ia.app_target), '')
                        FROM insertion_actions ia
                       WHERE ia.recording_id = r.id
@@ -2823,8 +3596,7 @@ impl Database {
             Ok((
                 row.get::<_, String>(0)?,
                 (
-                    row.get::<_, Option<String>>(1)?
-                        .filter(|text| !text.is_empty()),
+                    row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                 ),
             ))
@@ -2859,6 +3631,40 @@ impl Database {
             .map_err(Into::into)
     }
 
+    pub fn get_dictation_recognition_review_words(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<Vec<RecognitionReviewWord>>> {
+        let stored: Option<(Option<String>, String, i64)> = self.conn.query_row(
+            "SELECT h.recognition_review_words, h.raw_text, r.duration FROM dictation_history_text h JOIN recordings r ON r.id = h.recording_id WHERE h.recording_id = ?1",
+            params![recording_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        let Some((Some(json), raw_text, duration)) = stored else {
+            return Ok(None);
+        };
+        // Review hints are optional. Damaged metadata must not hide saved text.
+        if json.len() > 128 * 1024 {
+            return Ok(None);
+        }
+        let Ok(mut words) = serde_json::from_str::<Vec<RecognitionReviewWord>>(&json) else {
+            return Ok(None);
+        };
+        words.retain(|entry| {
+            !entry.word.trim().is_empty()
+                && entry.word.chars().count() <= 128
+                && crate::models::recognition_word_occurs_in_source(&raw_text, &entry.word)
+                && entry.score.is_finite()
+                && (0.0..0.6).contains(&entry.score)
+                && entry.start_time.is_finite()
+                && entry.end_time.is_finite()
+                && entry.start_time >= 0.0
+                && entry.end_time > entry.start_time
+                && entry.end_time <= duration.max(0) as f64 + 0.5
+        });
+        words.truncate(128);
+        Ok((!words.is_empty()).then_some(words))
+    }
+
     /// Ranked full-text search over saved dictations, newest-first among
     /// equal scores. Falls back to a LIKE scan when FTS5 is unavailable.
     pub fn search_dictation_history(
@@ -2871,8 +3677,9 @@ impl Database {
         if fts_query.is_empty() {
             return Ok(Vec::new());
         }
-        let limit = limit.clamp(1, 200) as i64;
-        let offset = offset.min(10_000) as i64;
+        let limit = limit.clamp(1, 200);
+        let offset = offset.min(10_000);
+        let fetch_limit = offset.saturating_add(limit).min(10_200) as i64;
 
         // `snippet()` column -1 picks whichever indexed column matched best;
         // the CASE beside it reports which one that was so the row can say
@@ -2896,7 +3703,7 @@ impl Database {
              JOIN recordings r ON r.id = f.recording_id
              WHERE dictation_history_fts MATCH ?1 AND r.source_type = 'dictation'
              ORDER BY bm25(dictation_history_fts) ASC, r.created_at DESC
-             LIMIT ?2 OFFSET ?3";
+             LIMIT ?2";
         let mut stmt = match self.conn.prepare(sql) {
             Ok(statement) => statement,
             Err(error) => {
@@ -2907,7 +3714,7 @@ impl Database {
                 return self.search_dictation_history_without_fts(query, limit, offset);
             }
         };
-        let rows = stmt.query_map(params![fts_query, limit, offset], |row| {
+        let rows = stmt.query_map(params![fts_query, fetch_limit], |row| {
             Ok(DictationHistorySearchHit {
                 recording_id: row.get(0)?,
                 recording_title: row.get(1)?,
@@ -2920,23 +3727,70 @@ impl Database {
                 score: row.get(5)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut hits = rows.collect::<Result<Vec<_>, _>>()?;
+        self.merge_corrected_dictation_search_hits(&mut hits, query)?;
+        hits.sort_by(|left, right| {
+            left.score
+                .total_cmp(&right.score)
+                .then_with(|| right.created_at.cmp(&left.created_at))
+        });
+        Ok(hits.into_iter().skip(offset).take(limit).collect())
+    }
+
+    fn merge_corrected_dictation_search_hits(
+        &self,
+        hits: &mut Vec<DictationHistorySearchHit>,
+        query: &str,
+    ) -> Result<()> {
+        let terms = search_terms(query);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, COALESCE(title, ''), created_at, dictation_corrected_text
+             FROM recordings
+             WHERE source_type = 'dictation' AND dictation_corrected_text IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (recording_id, recording_title, created_at, corrected_text) = row?;
+            if !terms_match(&corrected_text, &terms) {
+                continue;
+            }
+            hits.retain(|hit| hit.recording_id != recording_id);
+            hits.push(DictationHistorySearchHit {
+                recording_id,
+                recording_title,
+                created_at: created_at.parse().unwrap_or_else(|_| Utc::now()),
+                snippet: like_snippet(&corrected_text, &terms, 14),
+                matched_field: "corrected".to_string(),
+                // Saved edits are the text the reader sees, so display their
+                // match before evidence from the immutable original text.
+                score: f64::MIN,
+            });
+        }
+        Ok(())
     }
 
     fn search_dictation_history_without_fts(
         &self,
         query: &str,
-        limit: i64,
-        offset: i64,
+        limit: usize,
+        offset: usize,
     ) -> Result<Vec<DictationHistorySearchHit>> {
         let terms = search_terms(query);
         if terms.is_empty() {
             return Ok(Vec::new());
         }
         let mut stmt = self.conn.prepare(
-            "SELECT h.recording_id, COALESCE(r.title, ''), r.created_at, h.final_text, h.raw_text
-             FROM dictation_history_text h
-             JOIN recordings r ON r.id = h.recording_id
+            "SELECT r.id, COALESCE(r.title, ''), r.created_at,
+                    h.final_text, h.raw_text, r.dictation_corrected_text
+             FROM recordings r
+             LEFT JOIN dictation_history_text h ON h.recording_id = r.id
              WHERE r.source_type = 'dictation'
              ORDER BY r.created_at DESC",
         )?;
@@ -2945,15 +3799,21 @@ impl Database {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                row.get::<_, Option<String>>(5)?,
             ))
         })?;
 
         let mut hits = Vec::new();
         for row in rows {
-            let (recording_id, title, created_at, final_text, raw_text) = row?;
-            let (text, matched_field) = if terms_match(&final_text, &terms) {
+            let (recording_id, title, created_at, final_text, raw_text, corrected_text) = row?;
+            let (text, matched_field) = if corrected_text
+                .as_deref()
+                .is_some_and(|text| terms_match(text, &terms))
+            {
+                (corrected_text.as_deref().unwrap_or_default(), "corrected")
+            } else if terms_match(&final_text, &terms) {
                 (final_text.as_str(), "final")
             } else if terms_match(&raw_text, &terms) {
                 (raw_text.as_str(), "raw")
@@ -2971,11 +3831,7 @@ impl Database {
                 score: 0.0,
             });
         }
-        Ok(hits
-            .into_iter()
-            .skip(offset.max(0) as usize)
-            .take(limit.max(0) as usize)
-            .collect())
+        Ok(hits.into_iter().skip(offset).take(limit).collect())
     }
 
     pub fn create_project(&mut self, project: &CreateProjectRequest) -> Result<Project> {
@@ -3040,7 +3896,17 @@ impl Database {
 
     /// Every recording, newest first (optionally in one project).
     pub fn get_recordings(&self, project_id: Option<&str>) -> Result<Vec<Recording>> {
-        self.query_recordings(project_id, None)
+        self.query_recordings(project_id, None, None)
+    }
+
+    /// IDs of notes jobs that were waiting when the sidecar stopped.
+    pub(crate) fn recording_ids_waiting_for_notes(&self) -> Result<Vec<String>> {
+        let mut query = self.conn.prepare(
+            "SELECT id FROM recordings WHERE analysis_failure = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = query.query_map([crate::analysis::MEMORY_WAIT_NOTICE], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(Into::into)
     }
 
     /// The `limit` newest recordings, across every project.
@@ -3051,13 +3917,58 @@ impl Database {
     /// pause spans -- to throw all but `n` away. On a Mac with years of
     /// meetings that is the whole library read for a handful of rows.
     pub fn get_recent_recordings(&self, limit: usize) -> Result<Vec<Recording>> {
-        self.query_recordings(None, Some(limit))
+        self.query_recordings(None, Some(limit), None)
+    }
+
+    /// Brief retrieval is bounded to the newest meetings, regardless of dictation volume.
+    pub(crate) fn meeting_brief_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::meeting_brief::BriefCandidate>> {
+        self.query_recordings(None, Some(limit), Some("meeting"))?
+            .into_iter()
+            .map(|recording| {
+                let artifact = self.get_meeting_artifact(&recording.id)?;
+                let decisions = artifact.map(|value| value.decisions).unwrap_or_default();
+                let completed: HashSet<String> = self
+                    .get_meeting_action_completion(&recording.id)?
+                    .into_iter()
+                    .collect();
+                let actions = recording.action_items.as_deref().unwrap_or_default();
+                let task_review = action_item_review_status(
+                    recording.action_items_provenance.as_ref(), actions,
+                );
+                let mut seen = HashSet::new();
+                let action_items: Vec<String> = actions.iter()
+                    .filter(|task| !task.trim().is_empty() && !completed.contains(*task)
+                        && seen.insert((*task).clone()))
+                    .cloned().collect();
+                let summary_review = recording.summary.as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .is_some_and(|_| recording.summary_provenance.as_ref()
+                        .is_none_or(|value| !value.grounded || value.citations.is_empty()));
+                let needs_review = !recording.transcript_complete || summary_review
+                    || action_items.iter().any(|task| task_review.get(task).copied().unwrap_or(true))
+                    // Artifact decisions have no claim-level verification metadata.
+                    || decisions.iter().any(|value| !value.trim().is_empty());
+                Ok(crate::meeting_brief::BriefCandidate {
+                    recording_id: recording.id,
+                    title: recording.title,
+                    created_at: recording.created_at,
+                    summary: recording.summary,
+                    action_items,
+                    decisions,
+                    attendees: recording.attendees,
+                    needs_review,
+                })
+            }).collect()
     }
 
     fn query_recordings(
         &self,
         project_id: Option<&str>,
         limit: Option<usize>,
+        source_type: Option<&str>,
     ) -> Result<Vec<Recording>> {
         let mut stmt = self.conn.prepare(
             "SELECT recordings.id,
@@ -3100,6 +4011,7 @@ impl Database {
              FROM recordings
              LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
              WHERE (?1 IS NULL OR recordings.project_id = ?1)
+               AND (?3 IS NULL OR recordings.source_type = ?3)
              ORDER BY recordings.created_at DESC
              LIMIT ?2",
         )?;
@@ -3112,15 +4024,24 @@ impl Database {
             None => -1,
         };
 
-        let recordings = stmt.query_map(params![pid_param, limit_param], |row| {
+        let recordings = stmt.query_map(params![pid_param, limit_param, source_type], |row| {
             let summary: Option<String> = row.get(9)?;
             let action_items_json: Option<String> = row.get(10)?;
             let action_items: Option<Vec<String>> =
                 action_items_json.and_then(|s| serde_json::from_str(&s).ok());
-            let summary_provenance = validated_summary_provenance(row.get(20)?, summary.as_deref());
-            let action_items_provenance = validated_action_items_provenance(
+            let mut summary_provenance =
+                validated_summary_provenance(row.get(20)?, summary.as_deref());
+            let mut action_items_provenance = validated_action_items_provenance(
                 row.get(21)?,
                 action_items.as_deref().unwrap_or_default(),
+            );
+            demote_incomplete_analysis(
+                row.get::<_, i64>(27)? == 0
+                    || row
+                        .get::<_, Option<String>>(30)?
+                        .is_some_and(|s| !s.trim().is_empty()),
+                &mut summary_provenance,
+                &mut action_items_provenance,
             );
             let notes_updated_at = row
                 .get::<_, Option<String>>(14)?
@@ -3238,10 +4159,19 @@ impl Database {
             let action_items_json: Option<String> = row.get(10)?;
             let action_items: Option<Vec<String>> =
                 action_items_json.and_then(|s| serde_json::from_str(&s).ok());
-            let summary_provenance = validated_summary_provenance(row.get(20)?, summary.as_deref());
-            let action_items_provenance = validated_action_items_provenance(
+            let mut summary_provenance =
+                validated_summary_provenance(row.get(20)?, summary.as_deref());
+            let mut action_items_provenance = validated_action_items_provenance(
                 row.get(21)?,
                 action_items.as_deref().unwrap_or_default(),
+            );
+            demote_incomplete_analysis(
+                row.get::<_, i64>(27)? == 0
+                    || row
+                        .get::<_, Option<String>>(30)?
+                        .is_some_and(|s| !s.trim().is_empty()),
+                &mut summary_provenance,
+                &mut action_items_provenance,
             );
             let notes_updated_at = row
                 .get::<_, Option<String>>(14)?
@@ -3312,6 +4242,340 @@ impl Database {
         }
     }
 
+    pub fn get_meeting_action_completion(&self, recording_id: &str) -> Result<Vec<String>> {
+        let (source_type, action_items, completed_hashes) =
+            load_meeting_action_completion(&self.conn, recording_id)?
+                .context("Recording not found")?;
+        if source_type != "meeting" {
+            anyhow::bail!("Action completion is only available for meetings");
+        }
+        Ok(completed_meeting_action_tasks(
+            &action_items,
+            &completed_hashes,
+        ))
+    }
+
+    pub(crate) fn list_meeting_followups(
+        &self,
+        query: Option<&str>,
+        offset: usize,
+        limit: usize,
+        include_completed: bool,
+    ) -> Result<MeetingFollowupPage> {
+        let query_terms = query
+            .map(|query| {
+                query
+                    .split_whitespace()
+                    .map(str::to_lowercase)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|terms| !terms.is_empty());
+        let mut statement = self.conn.prepare(
+            "SELECT recordings.id,
+                    COALESCE(meeting_artifacts.title, recordings.title),
+                    COALESCE(meeting_artifacts.action_items, recordings.action_items),
+                    recordings.meeting_action_completion,
+                    meeting_artifacts.action_items_provenance,
+                    recordings.transcript_complete, recordings.capture_degraded_summary
+             FROM recordings
+             LEFT JOIN meeting_artifacts ON meeting_artifacts.recording_id = recordings.id
+             WHERE recordings.source_type = 'meeting'
+             ORDER BY recordings.created_at DESC, recordings.id DESC",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut matching_task_index = 0usize;
+        let mut items = Vec::with_capacity(limit.saturating_add(1));
+
+        while let Some(row) = rows.next()? {
+            let recording_id: String = row.get(0)?;
+            let meeting_title: String = row.get(1)?;
+            let action_items_json: Option<String> = row.get(2)?;
+            let completed_hashes_json: String = row.get(3)?;
+            let action_items = action_items_json
+                .and_then(|json| serde_json::from_str::<Vec<String>>(&json).ok())
+                .unwrap_or_default();
+            let mut provenance = validated_action_items_provenance(row.get(4)?, &action_items);
+            demote_incomplete_analysis(
+                row.get::<_, i64>(5)? == 0
+                    || row
+                        .get::<_, Option<String>>(6)?
+                        .is_some_and(|s| !s.trim().is_empty()),
+                &mut None,
+                &mut provenance,
+            );
+            let task_review = action_item_review_status(provenance.as_ref(), &action_items);
+            let completed_hashes = serde_json::from_str::<Vec<String>>(&completed_hashes_json)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<HashSet<_>>();
+            let normalized_title = meeting_title.to_lowercase();
+            let mut seen_tasks = HashSet::new();
+
+            for task in action_items {
+                if task.trim().is_empty() || !seen_tasks.insert(task.clone()) {
+                    continue;
+                }
+                let completed = completed_hashes.contains(&analysis_content_hash(&task));
+                let normalized_task = task.to_lowercase();
+                if (!include_completed && completed)
+                    || query_terms.as_ref().is_some_and(|terms| {
+                        !terms.iter().all(|term| {
+                            normalized_title.contains(term) || normalized_task.contains(term)
+                        })
+                    })
+                {
+                    continue;
+                }
+                if matching_task_index < offset {
+                    matching_task_index += 1;
+                    continue;
+                }
+                items.push(MeetingFollowup {
+                    recording_id: recording_id.clone(),
+                    meeting_title: meeting_title.clone(),
+                    needs_review: task_review.get(&task).copied().unwrap_or(false),
+                    task,
+                    completed,
+                });
+                matching_task_index += 1;
+                if items.len() > limit {
+                    break;
+                }
+            }
+            if items.len() > limit {
+                break;
+            }
+        }
+
+        let has_more = items.len() > limit;
+        if has_more {
+            items.pop();
+        }
+        Ok(MeetingFollowupPage {
+            next_offset: has_more.then(|| offset + items.len()),
+            items,
+        })
+    }
+
+    /// Replace one existing line and move its completion hash in one guarded write.
+    pub fn edit_meeting_action(
+        &mut self,
+        recording_id: &str,
+        expected_items: &[String],
+        index: usize,
+        replacement: &str,
+    ) -> Result<(Recording, Vec<String>)> {
+        let replacement = replacement.trim();
+        if replacement.is_empty() || replacement.contains('\n') || replacement.contains('\r') {
+            anyhow::bail!("Enter one non-empty task line");
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (source_type, mut items, mut hashes) =
+            load_meeting_action_completion(&tx, recording_id)?.context("Recording not found")?;
+        if source_type != "meeting" {
+            anyhow::bail!("Task editing is only available for meetings");
+        }
+        if items != expected_items {
+            anyhow::bail!(
+                "Tasks changed. Review the latest task list before retrying. Your draft was kept."
+            );
+        }
+        let old = items.get(index).context("Action item not found")?.clone();
+        let old_hash = analysis_content_hash(&old);
+        let new_hash = analysis_content_hash(replacement);
+        if replacement != old
+            && items.iter().enumerate().any(|(i, item)| {
+                i != index
+                    && (analysis_content_hash(item) == old_hash
+                        || analysis_content_hash(item) == new_hash)
+            })
+        {
+            anyhow::bail!("This edit overlaps an identical task. Use the full task editor to resolve duplicates first.");
+        }
+        let previous_json: Option<String> = tx
+            .query_row(
+                "SELECT action_items_provenance FROM meeting_artifacts WHERE recording_id = ?1",
+                [recording_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let previous = validated_action_items_provenance(previous_json, &items);
+        items[index] = replacement.to_string();
+        let provenance = previous
+            .as_ref()
+            .and_then(|previous| preserve_matching_action_item_provenance(previous, &items, true));
+        if hashes.remove(&old_hash) {
+            hashes.insert(new_hash);
+        }
+        let current_hashes: HashSet<String> = items
+            .iter()
+            .map(|item| analysis_content_hash(item))
+            .collect();
+        hashes.retain(|hash| current_hashes.contains(hash));
+        let completed = completed_meeting_action_tasks(&items, &hashes);
+        let items_json = serde_json::to_string(&items)?;
+        let provenance_json = provenance.as_ref().map(serde_json::to_string).transpose()?;
+        let hashes_json = serde_json::to_string(&hashes.iter().collect::<Vec<_>>())?;
+        tx.execute("UPDATE recordings SET action_items = ?1, meeting_action_completion = ?2, updated_at = ?3 WHERE id = ?4",
+            params![items_json, hashes_json, Utc::now().to_rfc3339(), recording_id])?;
+        tx.execute("UPDATE meeting_artifacts SET action_items = ?1, action_items_provenance = ?2, updated_at = ?3 WHERE recording_id = ?4",
+            params![items_json, provenance_json, Utc::now().to_rfc3339(), recording_id])?;
+        tx.commit()?;
+        let recording = self
+            .get_recording(recording_id)?
+            .context("Recording not found")?;
+        Ok((recording, completed))
+    }
+
+    pub fn add_meeting_action(
+        &mut self,
+        recording_id: &str,
+        expected_items: &[String],
+        replacement: &str,
+    ) -> Result<(Recording, Vec<String>)> {
+        let replacement = replacement.trim();
+        if replacement.is_empty() || replacement.contains('\n') || replacement.contains('\r') {
+            anyhow::bail!("Enter one non-empty task line");
+        }
+        self.mutate_meeting_action_membership(recording_id, expected_items, None, |items| {
+            let hash = analysis_content_hash(replacement);
+            if items.iter().any(|item| analysis_content_hash(item) == hash) {
+                anyhow::bail!("This task already exists. Edit the existing task instead.");
+            }
+            items.push(replacement.to_string());
+            Ok(())
+        })
+    }
+
+    pub fn delete_meeting_action(
+        &mut self,
+        recording_id: &str,
+        expected_items: &[String],
+        index: usize,
+    ) -> Result<(Recording, Vec<String>)> {
+        self.mutate_meeting_action_membership(recording_id, expected_items, Some(index), |items| {
+            if index >= items.len() {
+                anyhow::bail!("Action item not found");
+            }
+            items.remove(index);
+            Ok(())
+        })
+    }
+
+    /// Add or remove one line without overwriting a newer task list.
+    fn mutate_meeting_action_membership(
+        &mut self,
+        recording_id: &str,
+        expected_items: &[String],
+        removed_index: Option<usize>,
+        mutate: impl FnOnce(&mut Vec<String>) -> Result<()>,
+    ) -> Result<(Recording, Vec<String>)> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (source_type, mut items, mut hashes) =
+            load_meeting_action_completion(&tx, recording_id)?.context("Recording not found")?;
+        if source_type != "meeting" {
+            anyhow::bail!("Task editing is only available for meetings");
+        }
+        if items != expected_items {
+            anyhow::bail!(
+                "Tasks changed. Review the latest task list before retrying. Your draft was kept."
+            );
+        }
+        let previous_json: Option<String> = tx
+            .query_row(
+                "SELECT action_items_provenance FROM meeting_artifacts WHERE recording_id = ?1",
+                [recording_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let mut previous = validated_action_items_provenance(previous_json, &items);
+        mutate(&mut items)?;
+        // Remove the exact occurrence before matching survivors. Equal task text
+        // can carry different source citations on each row.
+        if let (Some(index), Some(previous)) = (removed_index, previous.as_mut()) {
+            previous.items.remove(index);
+        }
+        let provenance = previous
+            .as_ref()
+            .and_then(|previous| preserve_matching_action_item_provenance(previous, &items, true));
+        let current_hashes: HashSet<String> = items
+            .iter()
+            .map(|item| analysis_content_hash(item))
+            .collect();
+        hashes.retain(|hash| current_hashes.contains(hash));
+        let completed = completed_meeting_action_tasks(&items, &hashes);
+        let items_json = serde_json::to_string(&items)?;
+        let provenance_json = provenance.as_ref().map(serde_json::to_string).transpose()?;
+        let hashes_json = serde_json::to_string(&hashes.iter().collect::<Vec<_>>())?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute("UPDATE recordings SET action_items = ?1, meeting_action_completion = ?2, updated_at = ?3 WHERE id = ?4",
+            params![items_json, hashes_json, now, recording_id])?;
+        tx.execute("UPDATE meeting_artifacts SET action_items = ?1, action_items_provenance = ?2, updated_at = ?3 WHERE recording_id = ?4",
+            params![items_json, provenance_json, now, recording_id])?;
+        tx.commit()?;
+        let recording = self
+            .get_recording(recording_id)?
+            .context("Recording not found")?;
+        Ok((recording, completed))
+    }
+
+    pub fn set_meeting_action_completed(
+        &mut self,
+        recording_id: &str,
+        task: &str,
+        completed: bool,
+    ) -> Result<Vec<String>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (source_type, action_items, stored_hashes) =
+            load_meeting_action_completion(&tx, recording_id)?.context("Recording not found")?;
+        if source_type != "meeting" {
+            anyhow::bail!("Action completion is only available for meetings");
+        }
+        if !action_items.iter().any(|action_item| action_item == task) {
+            anyhow::bail!("Action item not found");
+        }
+
+        let current_hashes = action_items
+            .iter()
+            .map(|action_item| analysis_content_hash(action_item))
+            .collect::<HashSet<_>>();
+        let task_hash = analysis_content_hash(task);
+        let mut completed_hashes = stored_hashes
+            .intersection(&current_hashes)
+            .cloned()
+            .collect::<HashSet<_>>();
+        if completed {
+            completed_hashes.insert(task_hash);
+        } else {
+            completed_hashes.remove(&task_hash);
+        }
+
+        let mut emitted_hashes = HashSet::new();
+        let ordered_hashes = action_items
+            .iter()
+            .map(|action_item| analysis_content_hash(action_item))
+            .filter(|hash| completed_hashes.contains(hash) && emitted_hashes.insert(hash.clone()))
+            .collect::<Vec<_>>();
+        tx.execute(
+            "UPDATE recordings SET meeting_action_completion = ?1 WHERE id = ?2",
+            params![serde_json::to_string(&ordered_hashes)?, recording_id],
+        )?;
+        tx.commit()?;
+
+        Ok(completed_meeting_action_tasks(
+            &action_items,
+            &completed_hashes,
+        ))
+    }
+
     /// Count ready owned audio assets and how many are protected ciphertext, as
     /// `(encrypted, stored)`. The field name remains renderer-compatible even
     /// though the unit is now files rather than recording rows.
@@ -3370,6 +4634,14 @@ impl Database {
         Ok(rows)
     }
 
+    pub(crate) fn recording_has_transcript(&self, recording_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transcripts WHERE recording_id=?1)",
+            [recording_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn get_transcript(&self, recording_id: &str) -> Result<Option<Transcript>> {
         Ok(self
             .get_transcript_with_revision(recording_id)?
@@ -3420,7 +4692,7 @@ impl Database {
         recording_id: &str,
     ) -> Result<Option<(Transcript, i64)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, created_at, revision
+            "SELECT id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, measured_word_timestamps, created_at, revision, heard_through_speakers
              FROM transcripts WHERE recording_id = ?1",
         )?;
 
@@ -3429,8 +4701,10 @@ impl Database {
             let mut segments: Vec<TranscriptSegment> =
                 serde_json::from_str(&segments_json).unwrap_or_default();
             let full_text: String = row.get(3)?;
+            let mut measured_word_timestamps = row.get::<_, i64>(10)? != 0;
 
             if segments.is_empty() && !full_text.trim().is_empty() {
+                measured_word_timestamps = false;
                 let duration_seconds: i64 = self
                     .conn
                     .query_row(
@@ -3460,12 +4734,17 @@ impl Database {
                 model_id: row.get(7)?,
                 requested_provider: row.get(8)?,
                 actual_provider: row.get(9)?,
+                measured_word_timestamps,
                 created_at: row
-                    .get::<_, String>(10)?
+                    .get::<_, String>(11)?
                     .parse()
                     .unwrap_or_else(|_| Utc::now()),
+                heard_through_speakers: row
+                    .get::<_, Option<String>>(13)?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
             };
-            Ok((transcript, row.get(11)?))
+            Ok((transcript, row.get(12)?))
         });
 
         match result {
@@ -3882,6 +5161,7 @@ impl Database {
         roles: &[RecordingAudioRole],
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        self.clear_idle_audio_compression(recording_id)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -3891,12 +5171,19 @@ impl Database {
                 params![recording_id, role.as_str()],
             )?;
         }
-        if roles.contains(&RecordingAudioRole::Primary) {
+        if roles.contains(&RecordingAudioRole::Primary)
+            || !tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM recording_audio_assets WHERE recording_id=?1)",
+                [recording_id],
+                |r| r.get::<_, bool>(0),
+            )?
+        {
             tx.execute(
                 "UPDATE recordings SET audio_path = '', updated_at = ?1 WHERE id = ?2",
                 params![&now, recording_id],
             )?;
         }
+        tx.execute("UPDATE recordings SET audio_path=COALESCE((SELECT path FROM recording_audio_assets WHERE recording_id=?1 ORDER BY CASE role WHEN 'system' THEN 0 ELSE 1 END LIMIT 1),'') WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM recording_audio_assets WHERE recording_id=?1 AND role='primary')",[recording_id])?;
         tx.commit()?;
         Ok(())
     }
@@ -3944,6 +5231,7 @@ impl Database {
                 params![primary_path.to_string_lossy().as_ref(), &now, recording_id],
             )?;
         }
+        tx.execute("UPDATE recordings SET audio_path=(SELECT path FROM recording_audio_assets WHERE recording_id=?1 ORDER BY CASE role WHEN 'system' THEN 0 ELSE 1 END LIMIT 1) WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM recording_audio_assets WHERE recording_id=?1 AND role='primary')",[recording_id])?;
         tx.commit()?;
         Ok(())
     }
@@ -4067,6 +5355,11 @@ impl Database {
         &mut self,
         recording_id: &str,
     ) -> Result<Option<RecordingAudioOperation>> {
+        anyhow::ensure!(
+            !self.has_pending_audio_compression(recording_id)?,
+            "Audio compression is pending; vault encryption will retry after it finishes"
+        );
+        self.clear_idle_audio_compression(recording_id)?;
         if let Some(operation) = self.load_open_recording_audio_operation(recording_id)? {
             return Ok(Some(operation));
         }
@@ -4267,6 +5560,7 @@ impl Database {
                 ],
             )?;
         }
+        tx.execute("UPDATE recordings SET audio_path=(SELECT path FROM recording_audio_assets WHERE recording_id=?1 ORDER BY CASE role WHEN 'system' THEN 0 ELSE 1 END LIMIT 1) WHERE id=?1 AND NOT EXISTS(SELECT 1 FROM recording_audio_assets WHERE recording_id=?1 AND role='primary')",[&operation.recording_id])?;
         tx.execute(
             "UPDATE recording_audio_operations
              SET state = 'db_switched', last_error = NULL, updated_at = ?1
@@ -4378,7 +5672,7 @@ impl Database {
             let primary_exists: bool = tx.query_row(
                 "SELECT EXISTS(
                      SELECT 1 FROM recording_audio_assets
-                     WHERE recording_id = ?1 AND role = 'primary'
+                     WHERE recording_id = ?1
                  )",
                 params![&recording_id],
                 |row| row.get(0),
@@ -4490,13 +5784,241 @@ impl Database {
         Ok(())
     }
 
+    pub fn queue_meeting_note_recovery(
+        &mut self,
+        id: &str,
+        recording_id: &str,
+        base_notes: &str,
+        notes: &str,
+    ) -> Result<()> {
+        if id.is_empty()
+            || id.len() > 128
+            || notes.len() > 2_000_000
+            || base_notes.len() > 2_000_000
+        {
+            anyhow::bail!("Invalid meeting note recovery draft");
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM recordings WHERE id=?1)",
+            [recording_id],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            anyhow::bail!("Recording not found");
+        }
+        tx.execute("INSERT OR IGNORE INTO meeting_note_recovery (id,recording_id,base_notes,notes,created_at) VALUES (?1,?2,?3,?4,?5)", params![id,recording_id,base_notes,notes,Utc::now().to_rfc3339()])?;
+        let stored: (String, String, String) = tx.query_row(
+            "SELECT recording_id,base_notes,notes FROM meeting_note_recovery WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        if stored
+            != (
+                recording_id.to_string(),
+                base_notes.to_string(),
+                notes.to_string(),
+            )
+        {
+            anyhow::bail!("Recovery draft ID already has different content");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_meeting_note_recovery(&self) -> Result<Vec<MeetingNoteRecoveryDraft>> {
+        let mut statement = self.conn.prepare("SELECT id,recording_id,base_notes,notes FROM meeting_note_recovery ORDER BY created_at,id")?;
+        let drafts = statement
+            .query_map([], |r| {
+                Ok(MeetingNoteRecoveryDraft {
+                    id: r.get(0)?,
+                    recording_id: r.get(1)?,
+                    base_notes: r.get(2)?,
+                    notes: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(drafts)
+    }
+
+    fn validate_enhanced_note_draft(
+        recording_id: &str,
+        draft: &MeetingEnhancedNoteDraft,
+    ) -> Result<()> {
+        if recording_id.is_empty()
+            || recording_id.len() > 256
+            || draft.text.trim().is_empty()
+            || draft.text.len() > 200_000
+            || draft.raw_notes_snapshot.len() > 200_000
+            || draft.summary_citations.len() > 256
+            || draft.action_item_citations.len() > 256
+            || draft.generated_at.timestamp() < 946684800
+            || draft.generated_at > Utc::now() + chrono::Duration::minutes(5)
+            || serde_json::to_vec(draft)?.len() > 1_000_000
+        {
+            anyhow::bail!("Invalid enhanced meeting note draft");
+        }
+        for item in &draft.action_item_citations {
+            if item.label.trim().is_empty()
+                || item.label.len() > 10_000
+                || item.citations.len() > 256
+            {
+                anyhow::bail!("Invalid enhanced meeting note action");
+            }
+        }
+        for citation in draft.summary_citations.iter().chain(
+            draft
+                .action_item_citations
+                .iter()
+                .flat_map(|item| &item.citations),
+        ) {
+            if citation.text.trim().is_empty()
+                || citation.text.len() > 20_000
+                || citation
+                    .recording_id
+                    .as_deref()
+                    .is_some_and(|id| id != recording_id)
+                || citation
+                    .source_kind
+                    .as_deref()
+                    .is_some_and(|kind| !matches!(kind, "transcript" | "meeting_note"))
+                || [&citation.line_id, &citation.segment_id].iter().any(|id| {
+                    id.as_ref()
+                        .is_some_and(|id| id.is_empty() || id.len() > 256)
+                })
+                || [citation.start_time, citation.end_time]
+                    .into_iter()
+                    .flatten()
+                    .any(|time| !time.is_finite() || time < 0.0)
+                || citation.certainty.is_some_and(|certainty| {
+                    !certainty.is_finite() || !(0.0..=1.0).contains(&certainty)
+                })
+                || matches!((citation.start_time, citation.end_time), (Some(start), Some(end)) if end < start)
+            {
+                anyhow::bail!("Invalid enhanced meeting note citation");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_meeting_enhanced_note_draft(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<MeetingEnhancedNoteDraft>> {
+        let raw: Option<String> = self.conn.query_row("SELECT d.draft_json FROM meeting_enhanced_note_drafts d JOIN recordings r ON r.id=d.recording_id WHERE d.recording_id=?1 AND r.source_type='meeting'", [recording_id], |row| row.get(0)).optional()?;
+        raw.map(|raw| {
+            if raw.len() > 1_000_000 {
+                anyhow::bail!("Invalid enhanced meeting note draft");
+            }
+            let draft = serde_json::from_str(&raw)?;
+            Self::validate_enhanced_note_draft(recording_id, &draft)?;
+            Ok(draft)
+        })
+        .transpose()
+    }
+
+    pub fn save_meeting_enhanced_note_draft(
+        &mut self,
+        recording_id: &str,
+        draft: &MeetingEnhancedNoteDraft,
+    ) -> Result<MeetingEnhancedNoteDraft> {
+        Self::validate_enhanced_note_draft(recording_id, draft)?;
+        let tx = self.conn.transaction()?;
+        let source: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT source_type,meeting_notes FROM recordings WHERE id=?1",
+                [recording_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((source_type, notes)) = source else {
+            anyhow::bail!("Recording not found");
+        };
+        if source_type != "meeting" {
+            anyhow::bail!("Enhanced notes require a meeting recording");
+        }
+        if notes.as_deref().unwrap_or("") != draft.raw_notes_snapshot {
+            anyhow::bail!("Meeting notes changed. Build the draft again from the saved notes.");
+        }
+        tx.execute("INSERT INTO meeting_enhanced_note_drafts (recording_id,draft_json) VALUES (?1,?2) ON CONFLICT(recording_id) DO UPDATE SET draft_json=excluded.draft_json", params![recording_id,serde_json::to_string(draft)?])?;
+        tx.commit()?;
+        Ok(draft.clone())
+    }
+
+    pub fn delete_meeting_enhanced_note_draft(&mut self, recording_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM meeting_enhanced_note_drafts WHERE recording_id=?1",
+            [recording_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_recording_notes(
         &mut self,
         recording_id: &str,
         meeting_notes: Option<&str>,
     ) -> Result<()> {
+        self.update_recording_notes_recovering(recording_id, meeting_notes, None)
+    }
+
+    pub fn update_recording_notes_recovering(
+        &mut self,
+        recording_id: &str,
+        meeting_notes: Option<&str>,
+        recovery_id: Option<&str>,
+    ) -> Result<()> {
+        self.update_recording_notes_recovering_guarded(
+            recording_id,
+            meeting_notes,
+            recovery_id,
+            None,
+        )
+    }
+
+    pub fn update_recording_notes_recovering_guarded(
+        &mut self,
+        recording_id: &str,
+        meeting_notes: Option<&str>,
+        recovery_id: Option<&str>,
+        expected_notes: Option<&str>,
+    ) -> Result<()> {
         let now = Utc::now();
         let tx = self.conn.transaction()?;
+        if let Some(id) = recovery_id {
+            let owner: Option<String> = tx
+                .query_row(
+                    "SELECT recording_id FROM meeting_note_recovery WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if owner.is_some_and(|owner| owner != recording_id) {
+                anyhow::bail!("Recovery draft belongs to another recording");
+            }
+        }
+        let existing: Option<Option<String>> = tx
+            .query_row(
+                "SELECT meeting_notes FROM recordings WHERE id = ?1",
+                [recording_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            anyhow::bail!("Recording not found: {}", recording_id);
+        };
+        if expected_notes.is_some_and(|expected| existing.as_deref().unwrap_or("") != expected) {
+            anyhow::bail!("Meeting notes changed while saving. Retry to merge the latest notes.");
+        }
+        if existing.as_deref() == meeting_notes {
+            if let Some(id) = recovery_id {
+                tx.execute("DELETE FROM meeting_note_recovery WHERE id=?1", [id])?;
+            }
+            tx.commit()?;
+            return Ok(());
+        }
+
         let updated = tx.execute(
             "UPDATE recordings
              SET meeting_notes = ?1, notes_updated_at = ?2, updated_at = ?2
@@ -4506,7 +6028,31 @@ impl Database {
         if updated != 1 {
             anyhow::bail!("Recording not found: {}", recording_id);
         }
-        Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
+        // Keep the previous summary's source history for comparison, while
+        // making it clear that changed notes have not been checked against it.
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT summary_provenance FROM meeting_artifacts WHERE recording_id = ?1",
+                [recording_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let stale = raw.and_then(|raw| {
+            let mut value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+            value
+                .as_object_mut()?
+                .insert("grounded".to_string(), serde_json::Value::Bool(false));
+            serde_json::to_string(&value).ok()
+        });
+        tx.execute(
+            "UPDATE meeting_artifacts SET summary_provenance = ?1,
+             action_items_provenance = NULL, updated_at = ?2 WHERE recording_id = ?3",
+            params![stale, now.to_rfc3339(), recording_id],
+        )?;
+        if let Some(id) = recovery_id {
+            tx.execute("DELETE FROM meeting_note_recovery WHERE id=?1", [id])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -4580,6 +6126,16 @@ impl Database {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let capture_warning: Option<String> = tx.query_row(
+            "SELECT capture_degraded_summary FROM recordings WHERE id = ?1",
+            params![recording_id],
+            |row| row.get(0),
+        )?;
+        let (transcript_complete, degraded_reason) = capture_safe_completion(
+            transcript_complete,
+            degraded_reason,
+            capture_warning.as_deref(),
+        );
         let updated = tx.execute(
             "UPDATE recordings
              SET status = ?1,
@@ -4631,7 +6187,8 @@ impl Database {
     /// has not agreed to lose.
     ///
     /// This is the set every audio-deleting storage sweep has to skip: for these
-    /// recordings the saved audio is the only complete record of the meeting.
+    /// recordings retained audio may help recover ASR failures. Known capture
+    /// loss remains irrecoverable even when the retained audio is reprocessed.
     pub fn recording_ids_with_unacknowledged_incomplete_transcripts(&self) -> Result<Vec<String>> {
         let mut statement = self.conn.prepare(
             "SELECT id FROM recordings
@@ -4723,6 +6280,43 @@ impl Database {
         summary_provenance: Option<&AnalysisProvenance>,
         action_items_provenance: Option<&ActionItemsProvenance>,
     ) -> Result<Recording> {
+        self.patch_recording_analysis_inner(
+            recording_id,
+            summary,
+            action_items,
+            summary_provenance,
+            action_items_provenance,
+            None,
+        )
+    }
+
+    pub fn replace_generated_summary_with_undo(
+        &mut self,
+        recording_id: &str,
+        expected_summary: Option<&str>,
+        summary: &str,
+        provenance: &AnalysisProvenance,
+        source_fingerprint: &str,
+    ) -> Result<Recording> {
+        self.patch_recording_analysis_inner(
+            recording_id,
+            Some(Some(summary)),
+            None,
+            Some(provenance),
+            None,
+            Some((expected_summary, source_fingerprint)),
+        )
+    }
+
+    fn patch_recording_analysis_inner(
+        &mut self,
+        recording_id: &str,
+        summary: Option<Option<&str>>,
+        action_items: Option<&[String]>,
+        summary_provenance: Option<&AnalysisProvenance>,
+        action_items_provenance: Option<&ActionItemsProvenance>,
+        undo_snapshot: Option<(Option<&str>, &str)>,
+    ) -> Result<Recording> {
         let recording = self
             .get_recording(recording_id)?
             .ok_or_else(|| anyhow::anyhow!("Recording not found: {}", recording_id))?;
@@ -4733,6 +6327,14 @@ impl Database {
         let now = Utc::now();
         let existing_artifact = self.get_meeting_artifact(recording_id)?;
         let previous_summary = recording.summary.clone();
+        if undo_snapshot.is_some()
+            && summary_provenance.is_some_and(|provenance| !provenance.grounded)
+            && previous_summary
+                .as_deref()
+                .is_some_and(|summary| !summary.trim().is_empty())
+        {
+            anyhow::bail!("The new recap failed its source checks. Your saved summary was kept. Retry or choose another text model.");
+        }
         let previous_action_items = recording.action_items.clone().unwrap_or_default();
         let next_summary = summary
             .map(|value| value.map(str::to_string))
@@ -4787,7 +6389,11 @@ impl Database {
                         .action_items_provenance
                         .as_ref()
                         .and_then(|previous| {
-                            preserve_matching_action_item_provenance(previous, &next_action_items)
+                            preserve_matching_action_item_provenance(
+                                previous,
+                                &next_action_items,
+                                false,
+                            )
                         })
                 } else {
                     recording.action_items_provenance.clone()
@@ -4833,10 +6439,50 @@ impl Database {
         let deadlines_json = serde_json::to_string(&artifact.deadlines)?;
         let chat_messages_json = serde_json::to_string(&artifact.chat_messages)?;
         let tx = self.conn.transaction()?;
-        tx.execute(
+        if let Some((expected_summary, source_fingerprint)) = undo_snapshot {
+            if recording.summary.as_deref() != expected_summary {
+                anyhow::bail!("The summary changed while analysis was running; the stale result was not saved.");
+            }
+            let prior_provenance_json = recording
+                .summary_provenance
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?;
+            let prior_summary_revision: i64 = tx.query_row(
+                "SELECT summary_revision FROM recordings WHERE id = ?1",
+                params![recording_id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO summary_regeneration_undo (
+                    recording_id, undo_token, generated_summary, generated_summary_revision,
+                    prior_summary, prior_summary_provenance, source_fingerprint, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(recording_id) DO UPDATE SET
+                    undo_token = excluded.undo_token,
+                    generated_summary = excluded.generated_summary,
+                    generated_summary_revision = excluded.generated_summary_revision,
+                    prior_summary = excluded.prior_summary,
+                    prior_summary_provenance = excluded.prior_summary_provenance,
+                    source_fingerprint = excluded.source_fingerprint,
+                    created_at = excluded.created_at",
+                params![
+                    recording_id,
+                    uuid::Uuid::new_v4().to_string(),
+                    &next_summary,
+                    prior_summary_revision + 1,
+                    &recording.summary,
+                    prior_provenance_json,
+                    source_fingerprint,
+                    now.to_rfc3339(),
+                ],
+            )?;
+        }
+        let updated = tx.execute(
             "UPDATE recordings
              SET summary = ?1,
                  action_items = CASE WHEN ?3 = 1 THEN ?2 ELSE action_items END,
+                 summary_revision = summary_revision + CASE WHEN ?6 = 1 THEN 1 ELSE 0 END,
                  updated_at = ?4
              WHERE id = ?5",
             params![
@@ -4844,9 +6490,13 @@ impl Database {
                 &action_items_json,
                 if action_items.is_some() { 1 } else { 0 },
                 now.to_rfc3339(),
-                recording_id
+                recording_id,
+                if summary_changed { 1 } else { 0 },
             ],
         )?;
+        if updated != 1 {
+            anyhow::bail!("Recording not found: {}", recording_id);
+        }
         tx.execute(
             "INSERT INTO meeting_artifacts (
                 id, recording_id, title, summary, action_items, summary_provenance,
@@ -4900,6 +6550,107 @@ impl Database {
             None,
         )?;
         Ok(())
+    }
+
+    pub fn can_undo_summary_regeneration(&self, recording_id: &str) -> Result<bool> {
+        Ok(self
+            .summary_regeneration_undo_token(recording_id)?
+            .is_some())
+    }
+
+    pub fn summary_regeneration_undo_token(&self, recording_id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT undo.undo_token
+                 FROM summary_regeneration_undo undo
+                 JOIN recordings recording ON recording.id = undo.recording_id
+                 WHERE undo.recording_id = ?1
+                   AND recording.summary = undo.generated_summary
+                   AND recording.summary_revision = undo.generated_summary_revision",
+                params![recording_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn summary_regeneration_undo_source_fingerprint(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT undo.source_fingerprint
+                 FROM summary_regeneration_undo undo
+                 JOIN recordings recording ON recording.id = undo.recording_id
+                 WHERE undo.recording_id = ?1
+                   AND recording.summary = undo.generated_summary
+                   AND recording.summary_revision = undo.generated_summary_revision",
+                params![recording_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn undo_summary_regeneration(
+        &mut self,
+        recording_id: &str,
+        undo_token: &str,
+        current_source_fingerprint: Option<&str>,
+    ) -> Result<Recording> {
+        let now = Utc::now().to_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let snapshot = tx
+            .query_row(
+                "SELECT generated_summary, generated_summary_revision, prior_summary,
+                        prior_summary_provenance
+                 FROM summary_regeneration_undo
+                 WHERE recording_id = ?1 AND undo_token = ?2",
+                params![recording_id, undo_token],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("There is no summary regeneration to undo."))?;
+        let restored_provenance = snapshot.3.and_then(|raw| {
+            let provenance: AnalysisProvenance = serde_json::from_str(&raw).ok()?;
+            let prior_fingerprint = provenance
+                .prompt_source
+                .rsplit_once(":input=")
+                .map(|(_, fingerprint)| fingerprint)?;
+            (Some(prior_fingerprint) == current_source_fingerprint).then_some(raw)
+        });
+        let updated = tx.execute(
+            "UPDATE recordings
+             SET summary = ?1, summary_revision = summary_revision + 1, updated_at = ?2
+             WHERE id = ?3 AND summary = ?4 AND summary_revision = ?5",
+            params![&snapshot.2, &now, recording_id, &snapshot.0, snapshot.1],
+        )?;
+        if updated != 1 {
+            anyhow::bail!("The summary changed after regeneration, so it cannot be undone.");
+        }
+        tx.execute(
+            "UPDATE meeting_artifacts
+             SET summary = ?1, summary_provenance = ?2, updated_at = ?3
+             WHERE recording_id = ?4",
+            params![&snapshot.2, restored_provenance, &now, recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM summary_regeneration_undo WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.commit()?;
+        self.get_recording(recording_id)?
+            .ok_or_else(|| anyhow::anyhow!("Recording not found after summary undo"))
     }
 
     pub fn update_recording_meeting_template(
@@ -5020,13 +6771,18 @@ impl Database {
         transcript: &Transcript,
     ) -> Result<()> {
         let segments_json = serde_json::to_string(&transcript.segments)?;
+        let heard_through_speakers_json = if transcript.heard_through_speakers.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&transcript.heard_through_speakers)?)
+        };
         tx.execute(
             "DELETE FROM transcripts WHERE recording_id = ?1",
             params![&transcript.recording_id],
         )?;
         tx.execute(
-            "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, created_at, revision)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0)",
+            "INSERT INTO transcripts (id, recording_id, segments, full_text, language, confidence, model, model_id, requested_provider, actual_provider, measured_word_timestamps, created_at, revision, heard_through_speakers)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13)",
             params![
                 &transcript.id,
                 &transcript.recording_id,
@@ -5038,7 +6794,9 @@ impl Database {
                 &transcript.model_id,
                 &transcript.requested_provider,
                 &transcript.actual_provider,
-                transcript.created_at.to_rfc3339()
+                if transcript.measured_word_timestamps { 1 } else { 0 },
+                transcript.created_at.to_rfc3339(),
+                heard_through_speakers_json
             ],
         )?;
         Self::invalidate_analysis_provenance_transaction(tx, &transcript.recording_id)?;
@@ -5087,29 +6845,70 @@ impl Database {
         recording_id: &str,
         segments: &[TranscriptSegment],
     ) -> Result<()> {
-        tx.execute(
-            "DELETE FROM transcript_fts WHERE recording_id = ?1",
-            params![recording_id],
-        )?;
-        for segment in segments {
-            tx.execute(
-                "INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    recording_id,
-                    &segment.id,
-                    &segment.text,
-                    segment.start_time,
-                    segment.end_time
-                ],
-            )?;
+        if !table_exists(tx, "transcript_fts")? {
+            return Ok(());
         }
+        tx.execute_batch("SAVEPOINT plainsong_transcript_fts_write;")?;
+        let result = (|| -> rusqlite::Result<()> {
+            tx.execute(
+                "DELETE FROM transcript_fts WHERE recording_id = ?1",
+                params![recording_id],
+            )?;
+            for segment in segments {
+                tx.execute(
+                    "INSERT INTO transcript_fts (recording_id, segment_id, text, start_time, end_time)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        recording_id,
+                        &segment.id,
+                        &segment.text,
+                        segment.start_time,
+                        segment.end_time
+                    ],
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tx.execute_batch(
+                "ROLLBACK TO plainsong_transcript_fts_write; RELEASE plainsong_transcript_fts_write;",
+            )?;
+            // Only discard a corrupt virtual index. Disk-full and primary
+            // database faults must still roll back the transcript transaction.
+            if matches!(&error, rusqlite::Error::SqliteFailure(code, _)
+                if code.extended_code == rusqlite::ffi::SQLITE_CORRUPT_VTAB)
+            {
+                tx.execute("DROP TABLE transcript_fts", [])?;
+                tracing::warn!("Removed corrupt transcript search index; using fallback search until startup rebuilds it");
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+        tx.execute_batch("RELEASE plainsong_transcript_fts_write;")?;
         Ok(())
     }
 
     pub fn save_transcript(&mut self, transcript: &Transcript) -> Result<()> {
         let tx = self.conn.transaction()?;
         Self::write_transcript_transaction(&tx, transcript)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Save a meeting's freshly transcribed transcript, replacing any earlier
+    /// one. Speaker numbers from the earlier run (S1, S2, …) may now belong to
+    /// different people, so their names and voice links go with it; the two
+    /// capture sides (Me, Them) are the same people every run and keep theirs.
+    /// Without this, re-transcribing showed the old names on whoever the new
+    /// run numbered the same, and remembered those voices under them.
+    pub fn save_meeting_transcript(&mut self, transcript: &Transcript) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        Self::write_transcript_transaction(&tx, transcript)?;
+        tx.execute(
+            "DELETE FROM speaker_aliases
+             WHERE recording_id = ?1 AND lower(speaker_id) NOT IN ('me', 'them')",
+            params![&transcript.recording_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -5166,7 +6965,8 @@ impl Database {
         let tx = self.conn.transaction()?;
         tx.execute(
             "UPDATE transcripts
-             SET segments = ?1, full_text = ?2, revision = revision + 1
+             SET segments = ?1, full_text = ?2, measured_word_timestamps = 0,
+                 revision = revision + 1
              WHERE recording_id = ?3",
             params![segments_json, transcript.full_text, recording_id],
         )?;
@@ -5185,6 +6985,7 @@ impl Database {
         recording_id: &str,
         segment_ids: &[String],
         new_text: &str,
+        expected_segments: &[TranscriptSegmentExpectation],
     ) -> Result<()> {
         if new_text.trim().is_empty() {
             anyhow::bail!("Transcript text cannot be blank");
@@ -5206,7 +7007,18 @@ impl Database {
             }
         }
 
-        let tx = self.conn.transaction()?;
+        const CHANGED: &str =
+            "Transcript changed. Review the current turn before saving your correction.";
+        let expected_ids = expected_segments
+            .iter()
+            .map(|segment| segment.id.as_str())
+            .collect::<HashSet<_>>();
+        if expected_ids.len() != expected_segments.len() || expected_ids != requested_ids {
+            anyhow::bail!(CHANGED);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let stored = tx.query_row(
             "SELECT t.segments, t.full_text, t.confidence, r.duration
              FROM transcripts t
@@ -5273,15 +7085,43 @@ impl Database {
             }
         }
 
+        for expectation in expected_segments {
+            let current = segments
+                .iter()
+                .find(|segment| segment.id == expectation.id)
+                .unwrap();
+            if current.text != expectation.text
+                || current.start_time != expectation.start_time
+                || current.end_time != expectation.end_time
+                || current.speaker_id != expectation.speaker_id
+            {
+                anyhow::bail!(CHANGED);
+            }
+        }
+
         let first_segment_id = segment_ids[0].as_str();
         let removed_segment_ids = segment_ids[1..]
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
+        // The kept segment now carries the whole turn's words, so it has to
+        // span the whole turn: playback highlighting, jump-to-time and
+        // subtitle cues all read these bounds.
+        let (turn_start, turn_end) = segments
+            .iter()
+            .filter(|segment| requested_ids.contains(segment.id.as_str()))
+            .fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(start, end), segment| (start.min(segment.start_time), end.max(segment.end_time)),
+            );
         let mut edited_segments = Vec::with_capacity(segments.len() - removed_segment_ids.len());
         for mut segment in segments {
             if segment.id == first_segment_id {
                 segment.text = new_text.to_string();
+                if turn_start.is_finite() && turn_end.is_finite() {
+                    segment.start_time = turn_start;
+                    segment.end_time = turn_end;
+                }
                 edited_segments.push(segment);
             } else if !removed_segment_ids.contains(segment.id.as_str()) {
                 edited_segments.push(segment);
@@ -5297,7 +7137,8 @@ impl Database {
         let segments_json = serde_json::to_string(&edited_segments)?;
         let updated = tx.execute(
             "UPDATE transcripts
-             SET segments = ?1, full_text = ?2, revision = revision + 1
+             SET segments = ?1, full_text = ?2, measured_word_timestamps = 0,
+                 revision = revision + 1
              WHERE recording_id = ?3",
             params![segments_json, full_text, recording_id],
         )?;
@@ -5316,44 +7157,143 @@ impl Database {
         recording_id: &str,
         segment_ids: &[String],
     ) -> Result<usize> {
-        let Some(mut transcript) = self.get_transcript(recording_id)? else {
+        self.delete_transcript_segments_transaction(recording_id, segment_ids, None)
+    }
+
+    pub fn delete_transcript_segments_guarded(
+        &mut self,
+        recording_id: &str,
+        segment_ids: &[String],
+        expected_segments: &[TranscriptSegmentExpectation],
+    ) -> Result<usize> {
+        self.delete_transcript_segments_transaction(
+            recording_id,
+            segment_ids,
+            Some(expected_segments),
+        )
+    }
+
+    fn delete_transcript_segments_transaction(
+        &mut self,
+        recording_id: &str,
+        segment_ids: &[String],
+        expected_segments: Option<&[TranscriptSegmentExpectation]>,
+    ) -> Result<usize> {
+        const CHANGED: &str = "Transcript changed. Review the current turn before deleting it.";
+        if segment_ids.is_empty() {
+            if expected_segments.is_some() {
+                anyhow::bail!(CHANGED);
+            }
+            return Ok(0);
+        }
+        if let Some(expected) = expected_segments {
+            let selected = segment_ids.iter().collect::<HashSet<_>>();
+            let expected_ids = expected
+                .iter()
+                .map(|segment| &segment.id)
+                .collect::<HashSet<_>>();
+            if selected.len() != segment_ids.len()
+                || expected_ids.len() != expected.len()
+                || selected != expected_ids
+            {
+                anyhow::bail!(CHANGED);
+            }
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored = tx
+            .query_row(
+                "SELECT t.segments, t.full_text, t.confidence, r.duration
+                 FROM transcripts t
+                 JOIN recordings r ON r.id = t.recording_id
+                 WHERE t.recording_id = ?1",
+                params![recording_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, f64>(2)?,
+                        row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((segments_json, stored_full_text, confidence, duration)) = stored else {
+            if expected_segments.is_some() {
+                anyhow::bail!(CHANGED);
+            }
             return Ok(0);
         };
-
-        if segment_ids.is_empty() {
-            return Ok(0);
+        let mut segments: Vec<TranscriptSegment> = serde_json::from_str(&segments_json)
+            .with_context(|| {
+                format!("Invalid transcript segments for recording: {recording_id}")
+            })?;
+        if segments.is_empty() && !stored_full_text.trim().is_empty() {
+            segments.push(TranscriptSegment {
+                id: format!("{recording_id}-full-text"),
+                start_time: 0.0,
+                end_time: duration.max(0) as f64,
+                text: stored_full_text,
+                speaker_id: None,
+                confidence,
+            });
         }
 
-        let original_len = transcript.segments.len();
-        transcript.segments.retain(|segment| {
-            !segment_ids
-                .iter()
-                .any(|segment_id| segment_id == &segment.id)
-        });
-        let removed = original_len.saturating_sub(transcript.segments.len());
+        if let Some(expected) = expected_segments {
+            for expectation in expected {
+                let mut matching = segments
+                    .iter()
+                    .filter(|segment| segment.id == expectation.id);
+                let Some(current) = matching.next() else {
+                    anyhow::bail!(CHANGED);
+                };
+                if matching.next().is_some()
+                    || current.text != expectation.text
+                    || current.start_time != expectation.start_time
+                    || current.end_time != expectation.end_time
+                    || current.speaker_id != expectation.speaker_id
+                {
+                    anyhow::bail!(CHANGED);
+                }
+            }
+        }
+
+        let selected = segment_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let original_len = segments.len();
+        segments.retain(|segment| !selected.contains(segment.id.as_str()));
+        let removed = original_len.saturating_sub(segments.len());
         if removed == 0 {
+            if expected_segments.is_some() {
+                anyhow::bail!(CHANGED);
+            }
             return Ok(0);
         }
 
-        transcript.full_text = transcript
-            .segments
+        let full_text = segments
             .iter()
             .map(|segment| segment.text.trim())
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-
-        let segments_json = serde_json::to_string(&transcript.segments)?;
-        let tx = self.conn.transaction()?;
-        tx.execute(
+        let segments_json = serde_json::to_string(&segments)?;
+        let updated = tx.execute(
             "UPDATE transcripts
-             SET segments = ?1, full_text = ?2, revision = revision + 1
+             SET segments = ?1, full_text = ?2, measured_word_timestamps = 0,
+                 revision = revision + 1
              WHERE recording_id = ?3",
-            params![segments_json, transcript.full_text, recording_id],
+            params![segments_json, full_text, recording_id],
         )?;
+        if updated != 1 {
+            anyhow::bail!(CHANGED);
+        }
         Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
         Self::invalidate_transcript_embeddings_transaction(&tx, recording_id)?;
-        Self::rebuild_transcript_fts_transaction(&tx, recording_id, &transcript.segments)?;
+        Self::rebuild_transcript_fts_transaction(&tx, recording_id, &segments)?;
         tx.commit()?;
         Ok(removed)
     }
@@ -5452,25 +7392,7 @@ impl Database {
                 MAX_DICTIONARY_REPLACEMENT_BYTES as i64,
                 MAX_DICTIONARY_ENTRIES
             ],
-            |row| {
-                Ok(DictationDictionaryEntry {
-                    id: row.get(0)?,
-                    spoken_form: row.get(1)?,
-                    replacement: row.get(2)?,
-                    app_scope: row.get(3)?,
-                    case_sensitive: row.get::<_, i64>(4)? != 0,
-                    enabled: row.get::<_, i64>(5)? != 0,
-                    category_scope: row.get(6)?,
-                    created_at: row
-                        .get::<_, String>(7)?
-                        .parse()
-                        .unwrap_or_else(|_| Utc::now()),
-                    updated_at: row
-                        .get::<_, String>(8)?
-                        .parse()
-                        .unwrap_or_else(|_| Utc::now()),
-                })
-            },
+            dictation_dictionary_entry_from_row,
         )?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
@@ -5494,7 +7416,42 @@ impl Database {
         if replacement.len() > MAX_DICTIONARY_REPLACEMENT_BYTES {
             anyhow::bail!("Dictionary replacement is too long");
         }
-        let entry_count: i64 = self.conn.query_row(
+        let app_scope = request
+            .app_scope
+            .as_ref()
+            .map(|scope| scope.trim().to_string())
+            .filter(|scope| !scope.is_empty());
+        let category_scope = normalize_category_scope(request.category_scope.as_deref())?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = tx
+            .query_row(
+                "SELECT id, spoken_form, replacement, app_scope, case_sensitive, enabled,
+                        category_scope, created_at, updated_at
+                 FROM dictation_dictionary_entries
+                 WHERE spoken_form = ?1 AND replacement = ?2
+                   AND app_scope IS ?3 AND case_sensitive = ?4 AND enabled = ?5
+                   AND category_scope IS ?6
+                 ORDER BY created_at ASC, id ASC
+                 LIMIT 1",
+                params![
+                    spoken_form,
+                    replacement,
+                    &app_scope,
+                    if request.case_sensitive { 1 } else { 0 },
+                    if request.enabled { 1 } else { 0 },
+                    &category_scope,
+                ],
+                dictation_dictionary_entry_from_row,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            tx.commit()?;
+            return Ok(existing);
+        }
+
+        let entry_count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM dictation_dictionary_entries",
             [],
             |row| row.get(0),
@@ -5508,19 +7465,15 @@ impl Database {
             id: uuid::Uuid::new_v4().to_string(),
             spoken_form: spoken_form.to_string(),
             replacement: replacement.to_string(),
-            app_scope: request
-                .app_scope
-                .as_ref()
-                .map(|scope| scope.trim().to_string())
-                .filter(|scope| !scope.is_empty()),
+            app_scope,
             case_sensitive: request.case_sensitive,
             enabled: request.enabled,
-            category_scope: normalize_category_scope(request.category_scope.as_deref())?,
+            category_scope,
             created_at: now,
             updated_at: now,
         };
 
-        self.conn.execute(
+        tx.execute(
             "INSERT INTO dictation_dictionary_entries (
                 id, spoken_form, replacement, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -5536,6 +7489,7 @@ impl Database {
                 entry.updated_at.to_rfc3339(),
             ],
         )?;
+        tx.commit()?;
 
         Ok(entry)
     }
@@ -5632,6 +7586,325 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn learn_dictation_correction(
+        &mut self,
+        spoken_form: &str,
+        replacement: &str,
+    ) -> Result<LearnDictationCorrectionResult> {
+        let spoken_form = spoken_form.trim().to_string();
+        let replacement = replacement.trim().to_string();
+        if spoken_form.is_empty()
+            || replacement.is_empty()
+            || spoken_form.len() > MAX_DICTIONARY_SPOKEN_FORM_BYTES
+            || replacement.len() > MAX_DICTIONARY_REPLACEMENT_BYTES
+        {
+            anyhow::bail!("Correction exceeds the dictionary field limits");
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let previous_entry =
+            Self::correction_dictionary_target(&tx, &spoken_form)?.map(|(entry, _)| entry);
+        let now = Utc::now();
+        let (action, entry_id) = if let Some(previous) = &previous_entry {
+            tx.execute(
+                "UPDATE dictation_dictionary_entries
+                 SET replacement = ?1, updated_at = ?2
+                 WHERE id = ?3",
+                params![&replacement, now.to_rfc3339(), &previous.id],
+            )?;
+            ("updated", previous.id.clone())
+        } else {
+            let count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM dictation_dictionary_entries",
+                [],
+                |row| row.get(0),
+            )?;
+            if count >= MAX_DICTIONARY_ENTRIES {
+                anyhow::bail!("Dictionary entry limit reached");
+            }
+            let entry_id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO dictation_dictionary_entries
+                 (id, spoken_form, replacement, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, NULL, 0, 1, NULL, ?4, ?4)",
+                params![&entry_id, &spoken_form, &replacement, now.to_rfc3339()],
+            )?;
+            ("created", entry_id)
+        };
+        let (entry, expected_revision) = tx.query_row(
+            "SELECT id, spoken_form, replacement, app_scope, case_sensitive, enabled,
+                    category_scope, created_at, updated_at, revision
+             FROM dictation_dictionary_entries WHERE id = ?1",
+            [&entry_id],
+            |row| {
+                Ok((
+                    dictation_dictionary_entry_from_row(row)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            },
+        )?;
+        tx.execute(
+            "DELETE FROM dictation_correction_suggestions
+             WHERE spoken_form = ?1 COLLATE NOCASE AND replacement = ?2 COLLATE BINARY",
+            params![&spoken_form, &replacement],
+        )?;
+        tx.commit()?;
+        let token =
+            self.record_correction_approval_undo(entry_id, expected_revision, previous_entry);
+        Ok(LearnDictationCorrectionResult {
+            learned: true,
+            action: Some(action.to_string()),
+            reason: None,
+            spoken_form: Some(spoken_form),
+            replacement: Some(replacement),
+            entry: Some(entry),
+            undo_token: Some(token),
+        })
+    }
+
+    fn correction_dictionary_target(
+        conn: &Connection,
+        spoken_form: &str,
+    ) -> Result<Option<(DictationDictionaryEntry, i64)>> {
+        Ok(conn
+            .query_row(
+                "SELECT id, spoken_form, replacement, app_scope, case_sensitive, enabled,
+                    category_scope, created_at, updated_at, revision
+             FROM dictation_dictionary_entries
+             WHERE app_scope IS NULL AND category_scope IS NULL AND enabled = 1
+               AND spoken_form = ?1 COLLATE NOCASE
+               AND length(CAST(spoken_form AS BLOB)) <= ?2
+               AND length(CAST(replacement AS BLOB)) <= ?3
+             ORDER BY spoken_form ASC, created_at ASC, id ASC LIMIT 1",
+                params![
+                    spoken_form,
+                    MAX_DICTIONARY_SPOKEN_FORM_BYTES as i64,
+                    MAX_DICTIONARY_REPLACEMENT_BYTES as i64
+                ],
+                |row| Ok((dictation_dictionary_entry_from_row(row)?, row.get(9)?)),
+            )
+            .optional()?)
+    }
+
+    fn correction_dictionary_snapshot(
+        conn: &Connection,
+        spoken_form: &str,
+    ) -> Result<CorrectionApprovalDictionarySnapshot> {
+        Ok(
+            match Self::correction_dictionary_target(conn, spoken_form)? {
+                Some((entry, revision)) => CorrectionApprovalDictionarySnapshot::Entry {
+                    entry_id: entry.id,
+                    revision,
+                    spoken_form: entry.spoken_form,
+                    replacement: entry.replacement,
+                },
+                None => CorrectionApprovalDictionarySnapshot::Missing,
+            },
+        )
+    }
+
+    fn prune_correction_approval_undo(&mut self) {
+        let now = std::time::Instant::now();
+        self.correction_approval_undo.retain(|_, receipt| {
+            now.saturating_duration_since(receipt.issued_at) < CORRECTION_APPROVAL_UNDO_TTL
+        });
+    }
+
+    fn record_correction_approval_undo(
+        &mut self,
+        entry_id: String,
+        expected_revision: i64,
+        previous_entry: Option<DictationDictionaryEntry>,
+    ) -> String {
+        self.prune_correction_approval_undo();
+        while self.correction_approval_undo.len() >= CORRECTION_APPROVAL_UNDO_CAP {
+            let oldest = self
+                .correction_approval_undo
+                .iter()
+                .min_by_key(|(_, receipt)| receipt.issued_at)
+                .map(|(token, _)| token.clone());
+            if let Some(token) = oldest {
+                self.correction_approval_undo.remove(&token);
+            } else {
+                break;
+            }
+        }
+        let token = uuid::Uuid::new_v4().to_string();
+        self.correction_approval_undo.insert(
+            token.clone(),
+            CorrectionApprovalUndoReceipt {
+                entry_id,
+                expected_revision,
+                previous_entry,
+                issued_at: std::time::Instant::now(),
+            },
+        );
+        token
+    }
+
+    pub(crate) fn approve_dictation_correction_suggestion(
+        &mut self,
+        suggestion_id: &str,
+        expected_dictionary: &CorrectionApprovalDictionarySnapshot,
+    ) -> Result<LearnDictationCorrectionResult> {
+        self.prune_correction_approval_undo();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (spoken_form, replacement, updated_at): (String, String, String) = tx.query_row(
+            "SELECT spoken_form, replacement, updated_at FROM dictation_correction_suggestions WHERE id = ?1",
+            [suggestion_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?.ok_or_else(|| anyhow::anyhow!("Correction suggestion is no longer available"))?;
+        let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "This suggestion has an invalid date. Dismiss it and review a new suggestion."
+                )
+            })?
+            .with_timezone(&Utc);
+        let age = Utc::now().signed_duration_since(updated_at);
+        if age < chrono::Duration::zero()
+            || age
+                >= chrono::Duration::days(
+                    crate::dictation_correction_capture::CORRECTION_SUGGESTION_MAX_AGE_DAYS,
+                )
+        {
+            anyhow::bail!("This suggestion expired or has an invalid date. Dismiss it and review a new suggestion. Your dictionary is unchanged.");
+        }
+        let spoken_form = spoken_form.trim().to_string();
+        let replacement = replacement.trim().to_string();
+        if spoken_form.is_empty()
+            || replacement.is_empty()
+            || spoken_form.len() > MAX_DICTIONARY_SPOKEN_FORM_BYTES
+            || replacement.len() > MAX_DICTIONARY_REPLACEMENT_BYTES
+        {
+            anyhow::bail!("Correction exceeds the dictionary field limits");
+        }
+        let actual = Self::correction_dictionary_snapshot(&tx, &spoken_form)?;
+        if &actual != expected_dictionary {
+            anyhow::bail!("Your dictionary changed after this suggestion was shown. Refresh the suggestions and review it again. Your dictionary is unchanged.");
+        }
+        let previous_entry =
+            Self::correction_dictionary_target(&tx, &spoken_form)?.map(|(entry, _)| entry);
+        let now = Utc::now();
+        let (action, entry_id) = if let Some(previous) = &previous_entry {
+            tx.execute(
+                "UPDATE dictation_dictionary_entries
+                 SET replacement = ?1, updated_at = ?2
+                 WHERE id = ?3",
+                params![&replacement, now.to_rfc3339(), &previous.id],
+            )?;
+            ("updated", previous.id.clone())
+        } else {
+            let count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM dictation_dictionary_entries",
+                [],
+                |row| row.get(0),
+            )?;
+            if count >= MAX_DICTIONARY_ENTRIES {
+                anyhow::bail!("Dictionary entry limit reached");
+            }
+            let entry_id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO dictation_dictionary_entries
+                 (id, spoken_form, replacement, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, NULL, 0, 1, NULL, ?4, ?4)",
+                params![&entry_id, &spoken_form, &replacement, now.to_rfc3339()],
+            )?;
+            ("created", entry_id)
+        };
+        let (entry, expected_revision) = tx.query_row(
+            "SELECT id, spoken_form, replacement, app_scope, case_sensitive, enabled,
+                    category_scope, created_at, updated_at, revision
+             FROM dictation_dictionary_entries WHERE id = ?1",
+            [&entry_id],
+            |row| {
+                Ok((
+                    dictation_dictionary_entry_from_row(row)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            },
+        )?;
+        let deleted = tx.execute(
+            "DELETE FROM dictation_correction_suggestions WHERE id = ?1",
+            [suggestion_id],
+        )?;
+        if deleted != 1 {
+            anyhow::bail!("Correction suggestion is no longer available");
+        }
+        tx.commit()?;
+
+        let token =
+            self.record_correction_approval_undo(entry_id, expected_revision, previous_entry);
+        Ok(LearnDictationCorrectionResult {
+            learned: true,
+            action: Some(action.to_string()),
+            reason: None,
+            spoken_form: Some(spoken_form),
+            replacement: Some(replacement),
+            entry: Some(entry),
+            undo_token: Some(token),
+        })
+    }
+
+    pub(crate) fn undo_dictation_correction_approval(
+        &mut self,
+        undo_token: &str,
+    ) -> Result<UndoDictationCorrectionApprovalResult> {
+        self.prune_correction_approval_undo();
+        let receipt = self
+            .correction_approval_undo
+            .get(undo_token)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Undo expired or was already used. Your dictionary is unchanged.")
+            })?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (changed, restored) = if let Some(previous) = &receipt.previous_entry {
+            let now = Utc::now();
+            let changed = tx.execute(
+                "UPDATE dictation_dictionary_entries
+                 SET spoken_form = ?1, replacement = ?2, app_scope = ?3, case_sensitive = ?4,
+                     enabled = ?5, category_scope = ?6, created_at = ?7, updated_at = ?8
+                 WHERE id = ?9 AND revision = ?10",
+                params![
+                    &previous.spoken_form,
+                    &previous.replacement,
+                    &previous.app_scope,
+                    if previous.case_sensitive { 1 } else { 0 },
+                    if previous.enabled { 1 } else { 0 },
+                    &previous.category_scope,
+                    previous.created_at.to_rfc3339(),
+                    now.to_rfc3339(),
+                    &receipt.entry_id,
+                    receipt.expected_revision
+                ],
+            )?;
+            let mut restored = previous.clone();
+            restored.updated_at = now;
+            (changed, Some(restored))
+        } else {
+            let changed = tx.execute(
+                "DELETE FROM dictation_dictionary_entries WHERE id = ?1 AND revision = ?2",
+                params![&receipt.entry_id, receipt.expected_revision],
+            )?;
+            (changed, None)
+        };
+        if changed != 1 {
+            anyhow::bail!("This dictionary entry changed after approval. Undo left it unchanged.");
+        }
+        tx.commit()?;
+        // Failed transactions keep their receipt; a confirmed undo consumes it once.
+        self.correction_approval_undo.remove(undo_token);
+        Ok(UndoDictationCorrectionApprovalResult {
+            entry_id: receipt.entry_id,
+            entry: restored,
+        })
+    }
+
     pub fn list_dictation_correction_suggestions(
         &self,
     ) -> Result<Vec<DictationCorrectionSuggestion>> {
@@ -5643,6 +7916,7 @@ impl Database {
 
         let rows = stmt.query_map([], |row| {
             Ok(DictationCorrectionSuggestion {
+                approval_dictionary: None,
                 id: row.get(0)?,
                 original_text: row.get(1)?,
                 corrected_text: row.get(2)?,
@@ -5661,7 +7935,14 @@ impl Database {
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+        let mut suggestions = rows.collect::<Result<Vec<_>, _>>()?;
+        for suggestion in &mut suggestions {
+            suggestion.approval_dictionary = Some(Self::correction_dictionary_snapshot(
+                &self.conn,
+                &suggestion.spoken_form,
+            )?);
+        }
+        Ok(suggestions)
     }
 
     pub fn upsert_dictation_correction_suggestion(
@@ -5695,6 +7976,7 @@ impl Database {
                     .spoken_form
                     .eq_ignore_ascii_case(normalized_spoken_form)
                     && suggestion.replacement == normalized_replacement
+                    && suggestion.source.as_deref() == normalized_source.as_deref()
                     && match (
                         suggestion.app_target.as_deref(),
                         normalized_app_target.as_deref(),
@@ -5726,6 +8008,10 @@ impl Database {
             Ok((
                 "updated".to_string(),
                 DictationCorrectionSuggestion {
+                    approval_dictionary: Some(Self::correction_dictionary_snapshot(
+                        &self.conn,
+                        normalized_spoken_form,
+                    )?),
                     id: existing.id,
                     original_text: original_text.trim().to_string(),
                     corrected_text: corrected_text.trim().to_string(),
@@ -5739,6 +8025,10 @@ impl Database {
             ))
         } else {
             let suggestion = DictationCorrectionSuggestion {
+                approval_dictionary: Some(Self::correction_dictionary_snapshot(
+                    &self.conn,
+                    normalized_spoken_form,
+                )?),
                 id: uuid::Uuid::new_v4().to_string(),
                 original_text: original_text.trim().to_string(),
                 corrected_text: corrected_text.trim().to_string(),
@@ -5814,6 +8104,38 @@ impl Database {
             .list_dictation_correction_suggestions()?
             .into_iter()
             .find(|suggestion| suggestion.id == suggestion_id))
+    }
+
+    pub fn has_learned_global_dictation_correction(
+        &self,
+        spoken_form: &str,
+        replacement: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .list_dictation_dictionary_entries()?
+            .iter()
+            .any(|entry| {
+                entry.enabled
+                    && !entry.case_sensitive
+                    && entry.app_scope.is_none()
+                    && entry.category_scope.is_none()
+                    && entry.spoken_form.eq_ignore_ascii_case(spoken_form)
+                    && entry.replacement == replacement
+            }))
+    }
+
+    /// A globally learned rule already resolves matching suggestions from any app.
+    /// Keep alternative replacements, including differences in capitalization.
+    pub fn clear_learned_dictation_correction_suggestions(
+        &mut self,
+        spoken_form: &str,
+        replacement: &str,
+    ) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM dictation_correction_suggestions
+             WHERE spoken_form = ?1 COLLATE NOCASE AND replacement = ?2 COLLATE BINARY",
+            params![spoken_form, replacement],
+        )?)
     }
 
     pub fn delete_dictation_correction_suggestion(&mut self, suggestion_id: &str) -> Result<()> {
@@ -6062,7 +8384,70 @@ impl Database {
         limit: usize,
         project_ids: Option<&[String]>,
     ) -> Result<Vec<SearchHit>> {
-        self.search_transcripts_filtered(query, limit, project_ids, None)
+        self.search_transcripts_filtered(
+            query,
+            limit,
+            TranscriptSearchFilters {
+                project_ids,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn search_transcripts_with_project_scope(
+        &self,
+        query: &str,
+        limit: usize,
+        project_ids: Option<&[String]>,
+        source_type: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_transcripts_filtered(
+            query,
+            limit,
+            TranscriptSearchFilters {
+                project_ids,
+                source_type,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn search_transcripts_with_filters(
+        &self,
+        query: &str,
+        limit: usize,
+        project_ids: Option<&[String]>,
+        source_type: Option<&str>,
+        recording_status: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_transcripts_filtered(
+            query,
+            limit,
+            TranscriptSearchFilters {
+                project_ids,
+                source_type,
+                recording_status,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn search_transcripts_with_scope(
+        &self,
+        query: &str,
+        limit: usize,
+        exclude_recording_id: Option<&str>,
+        source_type: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_transcripts_filtered(
+            query,
+            limit,
+            TranscriptSearchFilters {
+                exclude_recording_id,
+                source_type,
+                ..Default::default()
+            },
+        )
     }
 
     pub fn search_transcripts_in_recordings(
@@ -6071,16 +8456,29 @@ impl Database {
         limit: usize,
         recording_ids: &[String],
     ) -> Result<Vec<SearchHit>> {
-        self.search_transcripts_filtered(query, limit, None, Some(recording_ids))
+        self.search_transcripts_filtered(
+            query,
+            limit,
+            TranscriptSearchFilters {
+                recording_ids: Some(recording_ids),
+                ..Default::default()
+            },
+        )
     }
 
     fn search_transcripts_filtered(
         &self,
         query: &str,
         limit: usize,
-        project_ids: Option<&[String]>,
-        recording_ids: Option<&[String]>,
+        filters: TranscriptSearchFilters<'_>,
     ) -> Result<Vec<SearchHit>> {
+        let TranscriptSearchFilters {
+            project_ids,
+            recording_ids,
+            exclude_recording_id,
+            source_type,
+            recording_status,
+        } = filters;
         let fts_query = build_fts_query(query);
         if fts_query.is_empty() {
             return Ok(Vec::new());
@@ -6136,6 +8534,27 @@ impl Database {
             }
         }
 
+        if let Some(recording_id) = exclude_recording_id {
+            sql.push_str(" AND f.recording_id != ?");
+            sql.push_str(&placeholder.to_string());
+            values.push(Value::from(recording_id.to_string()));
+            placeholder += 1;
+        }
+
+        if let Some(source_type) = source_type {
+            sql.push_str(" AND r.source_type = ?");
+            sql.push_str(&placeholder.to_string());
+            values.push(Value::from(source_type.to_string()));
+            placeholder += 1;
+        }
+
+        if let Some(recording_status) = recording_status {
+            sql.push_str(" AND r.status = ?");
+            sql.push_str(&placeholder.to_string());
+            values.push(Value::from(recording_status.to_string()));
+            placeholder += 1;
+        }
+
         sql.push_str(" ORDER BY bm25(transcript_fts) ASC LIMIT ?");
         sql.push_str(&placeholder.to_string());
         values.push(Value::from(limit as i64));
@@ -6147,12 +8566,7 @@ impl Database {
                     "FTS query unavailable ({}); using LIKE fallback search",
                     error
                 );
-                return self.search_transcripts_without_fts(
-                    query,
-                    limit,
-                    project_ids,
-                    recording_ids,
-                );
+                return self.search_transcripts_without_fts(query, limit, filters);
             }
         };
         let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
@@ -6184,16 +8598,31 @@ impl Database {
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+        match rows.collect::<Result<Vec<_>, _>>() {
+            Ok(hits) => Ok(hits),
+            Err(rusqlite::Error::SqliteFailure(code, _))
+                if code.extended_code == rusqlite::ffi::SQLITE_CORRUPT_VTAB =>
+            {
+                tracing::warn!("Corrupt transcript search index; using fallback search");
+                self.search_transcripts_without_fts(query, limit, filters)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn search_transcripts_without_fts(
         &self,
         query: &str,
         limit: usize,
-        project_ids: Option<&[String]>,
-        recording_ids: Option<&[String]>,
+        filters: TranscriptSearchFilters<'_>,
     ) -> Result<Vec<SearchHit>> {
+        let TranscriptSearchFilters {
+            project_ids,
+            recording_ids,
+            exclude_recording_id,
+            source_type,
+            recording_status,
+        } = filters;
         let normalized_query = query.trim().to_lowercase();
         if normalized_query.is_empty() {
             return Ok(Vec::new());
@@ -6238,6 +8667,26 @@ impl Database {
                 }
                 sql.push(')');
             }
+        }
+
+        if let Some(recording_id) = exclude_recording_id {
+            sql.push_str(" AND t.recording_id != ?");
+            sql.push_str(&placeholder.to_string());
+            values.push(Value::from(recording_id.to_string()));
+            placeholder += 1;
+        }
+
+        if let Some(source_type) = source_type {
+            sql.push_str(" AND r.source_type = ?");
+            sql.push_str(&placeholder.to_string());
+            values.push(Value::from(source_type.to_string()));
+            placeholder += 1;
+        }
+
+        if let Some(recording_status) = recording_status {
+            sql.push_str(" AND r.status = ?");
+            sql.push_str(&placeholder.to_string());
+            values.push(Value::from(recording_status.to_string()));
         }
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -6293,7 +8742,8 @@ impl Database {
         let tx = self.conn.transaction()?;
         let updated = tx.execute(
             "UPDATE transcripts
-             SET segments = ?1, full_text = ?2, revision = revision + 1
+             SET segments = ?1, full_text = ?2, measured_word_timestamps = 0,
+                 revision = revision + 1
              WHERE recording_id = ?3",
             params![segments_json, full_text, recording_id],
         )?;
@@ -6330,6 +8780,62 @@ impl Database {
         diarizer: Option<&str>,
         audit_details: Option<serde_json::Value>,
     ) -> Result<bool> {
+        self.apply_diarization(
+            recording_id,
+            expected_revision,
+            segments,
+            aliases,
+            None,
+            diarizer,
+            audit_details,
+        )
+    }
+
+    /// The explicit Relabel action: store a re-run's segments and replace the
+    /// recording's speaker names with exactly the ones the caller decided.
+    ///
+    /// A re-run can renumber speakers, so keeping whatever name an id held
+    /// before (as [`Self::apply_diarization_enrichment`] does) would leave
+    /// "Carol" on the new S2 even when the matcher found that S2 is Ben's
+    /// voice. Here every alias row of the recording is rewritten in the same
+    /// transaction: `aliases` carry the final names, and `carried_from` maps
+    /// each new speaker id to the earlier id whose voice it is. That earlier
+    /// row's remembered-voice link, signature and "Not them" list move with
+    /// the name; a speaker with no earlier match starts with none of them, and
+    /// rows for ids the re-run no longer uses are removed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_relabelled_diarization(
+        &mut self,
+        recording_id: &str,
+        expected_revision: i64,
+        segments: &[TranscriptSegment],
+        aliases: &[SpeakerAliasUpsert],
+        carried_from: &HashMap<String, String>,
+        diarizer: Option<&str>,
+        audit_details: Option<serde_json::Value>,
+    ) -> Result<bool> {
+        self.apply_diarization(
+            recording_id,
+            expected_revision,
+            segments,
+            aliases,
+            Some(carried_from),
+            diarizer,
+            audit_details,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_diarization(
+        &mut self,
+        recording_id: &str,
+        expected_revision: i64,
+        segments: &[TranscriptSegment],
+        aliases: &[SpeakerAliasUpsert],
+        relabel_carried_from: Option<&HashMap<String, String>>,
+        diarizer: Option<&str>,
+        audit_details: Option<serde_json::Value>,
+    ) -> Result<bool> {
         let segments_json = serde_json::to_string(segments)?;
         let full_text = segments
             .iter()
@@ -6338,16 +8844,47 @@ impl Database {
             .collect::<Vec<_>>()
             .join(" ");
         let tx = self.conn.transaction()?;
+        let preserve_measured_word_timestamps = tx
+            .query_row(
+                "SELECT segments, measured_word_timestamps
+                 FROM transcripts
+                 WHERE recording_id = ?1 AND revision = ?2",
+                params![recording_id, expected_revision],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
+            )
+            .optional()?
+            .is_some_and(|(stored_json, measured)| {
+                if !measured {
+                    return false;
+                }
+                let Ok(stored) = serde_json::from_str::<Vec<TranscriptSegment>>(&stored_json)
+                else {
+                    return false;
+                };
+                stored.len() == segments.len()
+                    && stored.iter().zip(segments).all(|(before, after)| {
+                        before.id == after.id
+                            && before.text == after.text
+                            && before.start_time == after.start_time
+                            && before.end_time == after.end_time
+                    })
+            });
         let updated = tx.execute(
             "UPDATE transcripts
-             SET segments = ?1, full_text = ?2, revision = revision + 1, diarizer = ?5
+             SET segments = ?1, full_text = ?2, revision = revision + 1, diarizer = ?5,
+                 measured_word_timestamps = ?6
              WHERE recording_id = ?3 AND revision = ?4",
             params![
                 segments_json,
                 full_text,
                 recording_id,
                 expected_revision,
-                diarizer
+                diarizer,
+                if preserve_measured_word_timestamps {
+                    1
+                } else {
+                    0
+                }
             ],
         )?;
         if updated == 0 {
@@ -6356,16 +8893,23 @@ impl Database {
         Self::invalidate_analysis_provenance_transaction(&tx, recording_id)?;
         Self::invalidate_transcript_embeddings_transaction(&tx, recording_id)?;
         Self::rebuild_transcript_fts_transaction(&tx, recording_id, segments)?;
-        for alias in aliases {
-            Self::upsert_speaker_alias_transaction(
-                &tx,
-                recording_id,
-                &alias.speaker_id,
-                alias.name.as_deref(),
-                alias.color.as_deref(),
-                alias.sample_count,
-                true,
-            )?;
+        match relabel_carried_from {
+            None => {
+                for alias in aliases {
+                    Self::upsert_speaker_alias_transaction(
+                        &tx,
+                        recording_id,
+                        &alias.speaker_id,
+                        alias.name.as_deref(),
+                        alias.color.as_deref(),
+                        alias.sample_count,
+                        true,
+                    )?;
+                }
+            }
+            Some(carried_from) => {
+                Self::replace_speaker_aliases_transaction(&tx, recording_id, aliases, carried_from)?
+            }
         }
         if let Some(details) = audit_details {
             Self::log_audit_event_on(&tx, "meeting_diarization_applied", Some(details), "info")?;
@@ -6389,6 +8933,90 @@ impl Database {
                 .filter(|value| !value.trim().is_empty())),
             None => Ok(None),
         }
+    }
+
+    /// Rewrite every alias row of one recording after a relabel. See
+    /// [`Self::apply_relabelled_diarization`].
+    fn replace_speaker_aliases_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        recording_id: &str,
+        aliases: &[SpeakerAliasUpsert],
+        carried_from: &HashMap<String, String>,
+    ) -> Result<()> {
+        type VoiceColumns = (
+            Option<Vec<u8>>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let mut before: HashMap<String, VoiceColumns> = HashMap::new();
+        {
+            let mut statement = tx.prepare(
+                "SELECT speaker_id, voice_centroid, voice_centroid_model_id,
+                        voice_profile_id, voice_match_state, voice_rejected_profiles
+                 FROM speaker_aliases WHERE recording_id = ?1",
+            )?;
+            let rows = statement.query_map(params![recording_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ),
+                ))
+            })?;
+            for row in rows {
+                let (speaker_id, voice) = row?;
+                before.insert(speaker_id, voice);
+            }
+        }
+        tx.execute(
+            "DELETE FROM speaker_aliases WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        let now = Utc::now().to_rfc3339();
+        for alias in aliases {
+            let (centroid, centroid_model, profile, match_state, rejected) = carried_from
+                .get(&alias.speaker_id)
+                .and_then(|old_id| before.get(old_id))
+                .cloned()
+                .unwrap_or_default();
+            tx.execute(
+                "INSERT INTO speaker_aliases (
+                     recording_id, speaker_id, name, color, sample_count, updated_at,
+                     voice_centroid, voice_centroid_model_id, voice_profile_id,
+                     voice_match_state, voice_rejected_profiles
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(recording_id, speaker_id) DO UPDATE SET
+                     name = excluded.name,
+                     color = excluded.color,
+                     sample_count = excluded.sample_count,
+                     updated_at = excluded.updated_at,
+                     voice_centroid = excluded.voice_centroid,
+                     voice_centroid_model_id = excluded.voice_centroid_model_id,
+                     voice_profile_id = excluded.voice_profile_id,
+                     voice_match_state = excluded.voice_match_state,
+                     voice_rejected_profiles = excluded.voice_rejected_profiles",
+                params![
+                    recording_id,
+                    alias.speaker_id,
+                    alias.name,
+                    alias.color,
+                    alias.sample_count,
+                    now,
+                    centroid,
+                    centroid_model,
+                    profile,
+                    match_state,
+                    rejected
+                ],
+            )?;
+        }
+        Ok(())
     }
 
     fn upsert_speaker_alias_transaction(
@@ -6482,19 +9110,29 @@ impl Database {
             );
         }
 
-        self.upsert_speaker_alias(recording_id, speaker_id, Some(new_name), None, 0)?;
+        let tx = self.conn.transaction()?;
+        Self::upsert_speaker_alias_transaction(
+            &tx,
+            recording_id,
+            speaker_id,
+            Some(new_name),
+            None,
+            0,
+            false,
+        )?;
         // A hand-typed name settles the question the voice link was asking.
         // Leaving `voice_profile_id` and `voice_match_state` behind would keep
         // the transcript saying "auto" over a name a human just chose, and
         // would keep the cluster pointed at a remembered voice the rename was
         // most likely correcting. `remember_speaker_voice` renames first and
         // writes `confirmed` after, so the confirm path is unaffected.
-        self.conn.execute(
+        tx.execute(
             "UPDATE speaker_aliases
              SET voice_profile_id = NULL, voice_match_state = NULL
              WHERE recording_id = ?1 AND speaker_id = ?2",
             params![recording_id, speaker_id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -6559,6 +9197,23 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// Clear every stored voice signature of one recording. Called on any
+    /// re-diarization, whichever model ran: the new run's speaker ids may
+    /// cover other stretches of audio than the old ones, so even a signature
+    /// from the same model no longer describes the speaker it sits under, and
+    /// left in place it could outrank the new run's centroid when matching.
+    /// Names, the remembered-voice link and the "Not them" list stay; the
+    /// caller writes the new run's signatures afterwards. Returns how many
+    /// were cleared.
+    pub fn clear_cluster_voice_signatures(&mut self, recording_id: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE speaker_aliases
+             SET voice_centroid = NULL, voice_centroid_model_id = NULL, updated_at = ?2
+             WHERE recording_id = ?1 AND voice_centroid IS NOT NULL",
+            params![recording_id, Utc::now().to_rfc3339()],
+        )?)
     }
 
     /// Persist one cluster's voice signature, at the moment that cluster is
@@ -6817,6 +9472,45 @@ impl Database {
         source_recording_id: Option<&str>,
         linked_identity_hash: Option<&str>,
     ) -> Result<String> {
+        self.remember_voice_from(
+            display_name,
+            embedding_model_id,
+            centroid,
+            source_recording_id,
+            None,
+            linked_identity_hash,
+        )
+    }
+
+    /// [`Self::remember_speaker_voice`] for a sample that one speaker of one
+    /// meeting contributed, recorded so a later correction can withdraw it.
+    pub fn remember_cluster_voice(
+        &mut self,
+        display_name: &str,
+        embedding_model_id: &str,
+        centroid: &[f32],
+        recording_id: &str,
+        speaker_id: &str,
+    ) -> Result<String> {
+        self.remember_voice_from(
+            display_name,
+            embedding_model_id,
+            centroid,
+            Some(recording_id),
+            Some(speaker_id),
+            None,
+        )
+    }
+
+    fn remember_voice_from(
+        &mut self,
+        display_name: &str,
+        embedding_model_id: &str,
+        centroid: &[f32],
+        source_recording_id: Option<&str>,
+        source_speaker_id: Option<&str>,
+        linked_identity_hash: Option<&str>,
+    ) -> Result<String> {
         let display_name = display_name.trim();
         if display_name.is_empty() {
             anyhow::bail!("A remembered voice needs a name");
@@ -6857,7 +9551,12 @@ impl Database {
             }
         };
 
-        self.add_speaker_profile_sample(&profile_id, centroid, source_recording_id)?;
+        self.insert_speaker_profile_sample(
+            &profile_id,
+            centroid,
+            source_recording_id,
+            source_speaker_id,
+        )?;
         Ok(profile_id)
     }
 
@@ -6868,6 +9567,33 @@ impl Database {
         profile_id: &str,
         embedding: &[f32],
         source_recording_id: Option<&str>,
+    ) -> Result<()> {
+        self.insert_speaker_profile_sample(profile_id, embedding, source_recording_id, None)
+    }
+
+    /// [`Self::add_speaker_profile_sample`] for a sample that one speaker of
+    /// one meeting contributed by being confirmed as this voice.
+    pub fn add_cluster_voice_sample(
+        &mut self,
+        profile_id: &str,
+        embedding: &[f32],
+        recording_id: &str,
+        speaker_id: &str,
+    ) -> Result<()> {
+        self.insert_speaker_profile_sample(
+            profile_id,
+            embedding,
+            Some(recording_id),
+            Some(speaker_id),
+        )
+    }
+
+    fn insert_speaker_profile_sample(
+        &mut self,
+        profile_id: &str,
+        embedding: &[f32],
+        source_recording_id: Option<&str>,
+        source_speaker_id: Option<&str>,
     ) -> Result<()> {
         if !voiceprints::is_usable_embedding(embedding) {
             anyhow::bail!("Refusing to store an unusable voice sample");
@@ -6883,13 +9609,14 @@ impl Database {
         }
         tx.execute(
             "INSERT INTO speaker_profile_samples (
-                 id, profile_id, embedding, source_recording_id, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 id, profile_id, embedding, source_recording_id, source_speaker_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 uuid::Uuid::new_v4().to_string(),
                 profile_id,
                 f32_slice_to_blob(embedding),
                 source_recording_id,
+                source_speaker_id,
                 Utc::now().to_rfc3339()
             ],
         )?;
@@ -7024,10 +9751,7 @@ impl Database {
             "DELETE FROM transcripts WHERE recording_id = ?1",
             params![recording_id],
         )?;
-        tx.execute(
-            "DELETE FROM transcript_fts WHERE recording_id = ?1",
-            params![recording_id],
-        )?;
+        Self::rebuild_transcript_fts_transaction(&tx, recording_id, &[])?;
         tx.execute(
             "DELETE FROM dictation_history_text WHERE recording_id = ?1",
             params![recording_id],
@@ -7040,6 +9764,10 @@ impl Database {
         }
         tx.execute(
             "DELETE FROM meeting_artifacts WHERE recording_id = ?1",
+            params![recording_id],
+        )?;
+        tx.execute(
+            "DELETE FROM summary_regeneration_undo WHERE recording_id = ?1",
             params![recording_id],
         )?;
         tx.execute(
@@ -7058,6 +9786,7 @@ impl Database {
             "DELETE FROM recording_audio_assets WHERE recording_id = ?1",
             params![recording_id],
         )?;
+        Self::remove_recording_voice_samples_transaction(&tx, recording_id)?;
         tx.execute(
             "DELETE FROM recordings WHERE id = ?1",
             params![recording_id],
@@ -7067,13 +9796,230 @@ impl Database {
         Ok(audio_path)
     }
 
+    /// Remembered voices learned from a deleted meeting: drop the samples it
+    /// contributed and recompute each affected voice from what is left. A
+    /// voice that only this meeting taught is forgotten with it, so deleting
+    /// a meeting leaves no voice data behind.
+    fn remove_recording_voice_samples_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        recording_id: &str,
+    ) -> Result<()> {
+        let affected: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT profile_id FROM speaker_profile_samples
+                 WHERE source_recording_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![recording_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        if affected.is_empty() {
+            return Ok(());
+        }
+        tx.execute(
+            "DELETE FROM speaker_profile_samples WHERE source_recording_id = ?1",
+            params![recording_id],
+        )?;
+        Self::recompute_speaker_profiles_transaction(tx, affected)
+    }
+
+    /// Recompute each listed voice from the samples it has left, and forget a
+    /// voice that has none: a voice taught only by withdrawn samples leaves no
+    /// voice data behind.
+    fn recompute_speaker_profiles_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        profile_ids: Vec<String>,
+    ) -> Result<()> {
+        for profile_id in profile_ids {
+            let samples: Vec<Vec<f32>> = {
+                let mut stmt = tx.prepare(
+                    "SELECT embedding FROM speaker_profile_samples WHERE profile_id = ?1",
+                )?;
+                let rows = stmt.query_map(params![&profile_id], |row| {
+                    Ok(blob_to_f32_vec(&row.get::<_, Vec<u8>>(0)?))
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            match voiceprints::centroid_of(&samples) {
+                Some(centroid) => {
+                    tx.execute(
+                        "UPDATE speaker_profiles
+                         SET centroid = ?2, sample_count = ?3, updated_at = ?4
+                         WHERE id = ?1",
+                        params![
+                            &profile_id,
+                            f32_slice_to_blob(&centroid),
+                            samples.len() as i64,
+                            Utc::now().to_rfc3339()
+                        ],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "DELETE FROM speaker_profile_samples WHERE profile_id = ?1",
+                        params![&profile_id],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM speaker_profiles WHERE id = ?1",
+                        params![&profile_id],
+                    )?;
+                    tx.execute(
+                        "UPDATE speaker_aliases
+                         SET voice_profile_id = NULL, voice_match_state = NULL
+                         WHERE voice_profile_id = ?1",
+                        params![&profile_id],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Withdraw the remembered-voice samples that one speaker of one meeting
+    /// contributed by being confirmed as a voice, and recompute each voice they
+    /// were part of. Called when that speaker's identity is corrected: the
+    /// confirmation was wrong, so the sample it added describes someone else
+    /// and would keep pulling that voice toward them.
+    ///
+    /// `keep_name` keeps samples of a voice with that name (case-insensitive),
+    /// so a rename that keeps the confirmed name is not treated as a
+    /// correction. `only_profile` limits the withdrawal to one voice, as "Not
+    /// them" does.
+    ///
+    /// Samples from before samples recorded their speaker are matched through
+    /// the speaker's alias row instead: the confirmed voice it points at, from
+    /// this meeting, with exactly the signature stored for that speaker.
+    ///
+    /// Returns how many samples were withdrawn.
+    pub fn retract_cluster_voice_samples(
+        &mut self,
+        recording_id: &str,
+        speaker_id: &str,
+        keep_name: Option<&str>,
+        only_profile: Option<&str>,
+    ) -> Result<usize> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // The confirmed voice and stored signature on the alias row, if any.
+        let legacy_match: Option<(String, Vec<u8>)> = tx
+            .query_row(
+                "SELECT voice_profile_id, voice_centroid
+                 FROM speaker_aliases
+                 WHERE recording_id = ?1 AND speaker_id = ?2 AND voice_match_state = ?3",
+                params![recording_id, speaker_id, voiceprints::MATCH_STATE_CONFIRMED],
+                |row| {
+                    Ok(row
+                        .get::<_, Option<String>>(0)?
+                        .zip(row.get::<_, Option<Vec<u8>>>(1)?))
+                },
+            )
+            .optional()?
+            .flatten();
+        let keep_name = keep_name.map(str::trim).map(str::to_lowercase);
+
+        struct Candidate {
+            sample_id: String,
+            profile_id: String,
+            display_name: String,
+            source_speaker_id: Option<String>,
+            embedding: Vec<u8>,
+        }
+        let candidates: Vec<Candidate> = {
+            let mut stmt = tx.prepare(
+                "SELECT s.id, s.profile_id, p.display_name, s.source_speaker_id, s.embedding
+                 FROM speaker_profile_samples s
+                 JOIN speaker_profiles p ON p.id = s.profile_id
+                 WHERE s.source_recording_id = ?1
+                   AND (s.source_speaker_id = ?2 OR s.source_speaker_id IS NULL)",
+            )?;
+            let rows = stmt.query_map(params![recording_id, speaker_id], |row| {
+                Ok(Candidate {
+                    sample_id: row.get(0)?,
+                    profile_id: row.get(1)?,
+                    display_name: row.get(2)?,
+                    source_speaker_id: row.get(3)?,
+                    embedding: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut withdrawn = Vec::new();
+        let mut affected = Vec::new();
+        for Candidate {
+            sample_id,
+            profile_id,
+            display_name,
+            source_speaker_id,
+            embedding,
+        } in candidates
+        {
+            let from_this_speaker = match source_speaker_id {
+                Some(_) => true,
+                None => legacy_match.as_ref().is_some_and(|(confirmed, centroid)| {
+                    *confirmed == profile_id && *centroid == embedding
+                }),
+            };
+            if !from_this_speaker
+                || only_profile.is_some_and(|only| only != profile_id)
+                || keep_name
+                    .as_deref()
+                    .is_some_and(|keep| display_name.trim().to_lowercase() == keep)
+            {
+                continue;
+            }
+            withdrawn.push(sample_id);
+            if !affected.contains(&profile_id) {
+                affected.push(profile_id);
+            }
+        }
+        for sample_id in &withdrawn {
+            tx.execute(
+                "DELETE FROM speaker_profile_samples WHERE id = ?1",
+                params![sample_id],
+            )?;
+        }
+        Self::recompute_speaker_profiles_transaction(&tx, affected)?;
+        tx.commit()?;
+        Ok(withdrawn.len())
+    }
+
     /// Rename a recording
     pub fn rename_recording(&mut self, recording_id: &str, new_title: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        let updated_at = Utc::now().to_rfc3339();
+        tx.execute(
             "UPDATE recordings SET title = ?1, updated_at = ?2 WHERE id = ?3",
-            params![new_title, Utc::now().to_rfc3339(), recording_id],
+            params![new_title, updated_at, recording_id],
         )?;
+        tx.execute(
+            "UPDATE meeting_artifacts SET title = ?1, updated_at = ?2 WHERE recording_id = ?3",
+            params![new_title, updated_at, recording_id],
+        )?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn rename_recording_if_title_matches(
+        &mut self,
+        recording_id: &str,
+        expected_title: &str,
+        new_title: &str,
+    ) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let updated_at = Utc::now().to_rfc3339();
+        let changed = tx.execute(
+            "UPDATE recordings SET title = ?1, updated_at = ?2 WHERE id = ?3 AND title = ?4",
+            params![new_title, updated_at, recording_id, expected_title],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE meeting_artifacts SET title = ?1, updated_at = ?2 WHERE recording_id = ?3",
+            params![new_title, updated_at, recording_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Update recording source type (meeting|dictation)
@@ -7092,6 +10038,176 @@ impl Database {
         Ok(())
     }
 
+    pub fn get_dictation_edit(&self, recording_id: &str) -> Result<Option<String>> {
+        let recording = self.conn.query_row(
+            "SELECT source_type, dictation_corrected_text FROM recordings WHERE id = ?1",
+            params![recording_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        );
+        let (source_type, corrected_text) = match recording {
+            Ok(recording) => recording,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                anyhow::bail!("Recording '{}' was not found", recording_id)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if source_type != "dictation" {
+            anyhow::bail!("Recording '{}' is not a dictation", recording_id);
+        }
+        Ok(corrected_text)
+    }
+
+    pub fn save_dictation_edit(
+        &mut self,
+        recording_id: &str,
+        text: Option<&str>,
+        expected_text: Option<&str>,
+    ) -> Result<Option<String>> {
+        const MAX_DICTATION_EDIT_BYTES: usize = 1024 * 1024;
+        if text.is_some_and(|text| text.len() > MAX_DICTATION_EDIT_BYTES) {
+            anyhow::bail!("Dictation edit exceeds the 1 MiB limit");
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let recording = tx.query_row(
+            "SELECT source_type, dictation_corrected_text FROM recordings WHERE id = ?1",
+            params![recording_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        );
+        let (source_type, stored_text) = match recording {
+            Ok(recording) => recording,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                anyhow::bail!("Recording '{}' was not found", recording_id)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if source_type != "dictation" {
+            anyhow::bail!("Recording '{}' is not a dictation", recording_id);
+        }
+        if stored_text.as_deref() == text {
+            tx.commit()?;
+            return Ok(stored_text);
+        }
+        if stored_text.as_deref() != expected_text {
+            anyhow::bail!(
+                "Dictation edit conflict for recording '{}': the saved text changed",
+                recording_id
+            );
+        }
+
+        tx.execute(
+            "UPDATE recordings SET dictation_corrected_text = ?2 WHERE id = ?1",
+            params![recording_id, text],
+        )?;
+        tx.commit()?;
+        Ok(text.map(str::to_owned))
+    }
+
+    pub fn list_dictation_drafts(&self) -> Result<Vec<DictationDraft>> {
+        let mut statement = self.conn.prepare(
+            "SELECT id, title, dictation_draft_text, dictation_draft_base_edit
+             FROM recordings
+             WHERE source_type = 'dictation' AND dictation_draft_text IS NOT NULL
+             ORDER BY dictation_draft_updated_at DESC, updated_at DESC, id DESC
+             LIMIT 50",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(DictationDraft {
+                recording_id: row.get(0)?,
+                title: row.get(1)?,
+                text: row.get(2)?,
+                expected_saved_text: row.get(3)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn save_dictation_draft(
+        &mut self,
+        recording_id: &str,
+        text: Option<&str>,
+        expected_saved_text: Option<&str>,
+    ) -> Result<()> {
+        const MAX_DICTATION_DRAFT_BYTES: usize = 1024 * 1024;
+        if text.is_some_and(|text| text.len() > MAX_DICTATION_DRAFT_BYTES) {
+            anyhow::bail!("Dictation draft exceeds the 1 MiB limit");
+        }
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source_type = tx
+            .query_row(
+                "SELECT source_type FROM recordings WHERE id = ?1",
+                params![recording_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(source_type) = source_type else {
+            anyhow::bail!("Recording '{}' was not found", recording_id);
+        };
+        if source_type != "dictation" {
+            anyhow::bail!("Recording '{}' is not a dictation", recording_id);
+        }
+
+        tx.execute(
+            "UPDATE recordings
+             SET dictation_draft_text = ?2,
+                 dictation_draft_base_edit = ?3,
+                 dictation_draft_updated_at = ?4
+             WHERE id = ?1",
+            params![
+                recording_id,
+                text,
+                if text.is_some() {
+                    expected_saved_text
+                } else {
+                    None
+                },
+                text.map(|_| Utc::now().timestamp_millis()),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_dictation_draft(
+        &mut self,
+        recording_id: &str,
+        expected_draft_text: &str,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source_type = tx
+            .query_row(
+                "SELECT source_type FROM recordings WHERE id = ?1",
+                params![recording_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(source_type) = source_type else {
+            anyhow::bail!("Recording '{}' was not found", recording_id);
+        };
+        if source_type != "dictation" {
+            anyhow::bail!("Recording '{}' is not a dictation", recording_id);
+        }
+
+        let cleared = tx.execute(
+            "UPDATE recordings
+             SET dictation_draft_text = NULL,
+                 dictation_draft_base_edit = NULL,
+                 dictation_draft_updated_at = NULL
+             WHERE id = ?1 AND dictation_draft_text = ?2",
+            params![recording_id, expected_draft_text],
+        )? > 0;
+        tx.commit()?;
+        Ok(cleared)
+    }
+
     /// Delete a project, reassigning its recordings to the Inbox project
     pub fn delete_project(&mut self, project_id: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -7107,7 +10223,7 @@ impl Database {
 
     pub fn get_audit_log(&self) -> Result<Vec<AuditLogEntry>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, timestamp, event, details, severity 
+            "SELECT id, timestamp, event, details, severity
              FROM audit_log ORDER BY timestamp DESC LIMIT 100",
         )?;
 
@@ -7179,6 +10295,41 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn delete_embeddings_with_model(&self, model: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM transcript_embeddings WHERE model = ?1",
+            [model],
+        )?;
+        Ok(())
+    }
+
+    /// Whether any recording is still being transcribed or labelled.
+    pub(crate) fn any_recording_processing(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM recordings WHERE status = 'processing')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recording_has_embeddings_with_model(
+        &self,
+        recording_id: &str,
+        model: &str,
+    ) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM transcript_embeddings
+                 WHERE recording_id = ?1 AND model = ?2)",
+                params![recording_id, model],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn has_embeddings(&self, recording_id: &str) -> bool {
         self.conn
             .query_row(
@@ -7198,9 +10349,233 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete_all_embeddings(&self) -> Result<usize> {
-        let count = self.conn.execute("DELETE FROM transcript_embeddings", [])?;
-        Ok(count)
+    /// Recordings that have a transcript and no meaning-search rows under
+    /// `model_key`, newest first. Recordings still being captured or
+    /// transcribed are left for later.
+    pub(crate) fn recordings_missing_semantic_index(
+        &self,
+        model_key: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT r.id FROM recordings r JOIN transcripts t ON t.recording_id = r.id
+             WHERE r.status NOT IN ('recording', 'processing')
+             AND NOT EXISTS (SELECT 1 FROM transcript_embeddings te
+                 WHERE te.recording_id = r.id AND te.model = ?1)
+             ORDER BY r.created_at DESC, r.id ASC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![model_key, limit as i64], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<String>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// How many recordings with a transcript have meaning-search rows under
+    /// `model_key`, and how many recordings with a transcript there are.
+    pub(crate) fn semantic_index_coverage(&self, model_key: &str) -> Result<(i64, i64)> {
+        self.conn
+            .query_row(
+                "SELECT
+                    COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM transcript_embeddings te
+                        WHERE te.recording_id = r.id AND te.model = ?1) THEN r.id END),
+                    COUNT(DISTINCT r.id)
+                 FROM recordings r JOIN transcripts t ON t.recording_id = r.id",
+                [model_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(Into::into)
+    }
+
+    /// A hash of a recording's stored transcript text, rows and timings.
+    /// Unlike the revision, which a re-transcription resets to 0, it changes
+    /// whenever the words, rows, speakers or times do.
+    fn transcript_fingerprint_with(
+        conn: &rusqlite::Connection,
+        recording_id: &str,
+    ) -> Result<Option<String>> {
+        use sha2::{Digest, Sha256};
+        let row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT t.segments, t.full_text FROM transcripts t
+                 JOIN recordings r ON r.id = t.recording_id WHERE t.recording_id = ?1",
+                [recording_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(segments, full_text)| {
+            let mut hash = Sha256::new();
+            hash.update(segments.as_bytes());
+            hash.update([0u8]);
+            hash.update(full_text.as_bytes());
+            hex::encode(hash.finalize())
+        }))
+    }
+
+    pub(crate) fn transcript_fingerprint(&self, recording_id: &str) -> Result<Option<String>> {
+        Self::transcript_fingerprint_with(&self.conn, recording_id)
+    }
+
+    /// The windows stored under `model_key` for one recording, in transcript
+    /// order.
+    pub(crate) fn semantic_index_windows(
+        &self,
+        recording_id: &str,
+        model_key: &str,
+    ) -> Result<Vec<crate::llm::GroundedSegment>> {
+        let mut statement = self.conn.prepare(
+            "SELECT segment_id, text, start_time, end_time FROM transcript_embeddings
+             WHERE recording_id = ?1 AND model = ?2 ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(params![recording_id, model_key], |row| {
+            Ok(crate::llm::GroundedSegment {
+                recording_id: recording_id.to_string(),
+                segment_id: row.get(0)?,
+                text: row.get(1)?,
+                start_time: row.get::<_, Option<f64>>(2)?.unwrap_or(f64::NAN),
+                end_time: row.get::<_, Option<f64>>(3)?.unwrap_or(f64::NAN),
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Replace one recording's meaning-search rows, but only while its
+    /// transcript still hashes to `expected_fingerprint`. Returns false,
+    /// changing nothing, when the transcript changed or the recording is gone:
+    /// the vectors describe text that no longer exists.
+    pub(crate) fn replace_recording_embeddings(
+        &mut self,
+        recording_id: &str,
+        expected_fingerprint: &str,
+        model_key: &str,
+        rows: &[(crate::llm::GroundedSegment, Vec<f32>)],
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let fingerprint = Self::transcript_fingerprint_with(&tx, recording_id)?;
+        if fingerprint.as_deref() != Some(expected_fingerprint) {
+            return Ok(false);
+        }
+        let dimensions = rows.first().map(|(_, vector)| vector.len());
+        for (window, vector) in rows {
+            if window.recording_id != recording_id
+                || vector.is_empty()
+                || Some(vector.len()) != dimensions
+                || vector.len() > MAX_EMBEDDING_DIMENSIONS
+                || vector.iter().any(|value| !value.is_finite())
+            {
+                anyhow::bail!("Invalid embedding vector");
+            }
+        }
+        tx.execute(
+            "DELETE FROM transcript_embeddings WHERE recording_id = ?1",
+            [recording_id],
+        )?;
+        let now = Utc::now().to_rfc3339();
+        {
+            let mut insert = tx.prepare(
+                "INSERT INTO transcript_embeddings
+                 (recording_id, segment_id, text, embedding, model, start_time, end_time, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for (window, vector) in rows {
+                let blob: Vec<u8> = vector
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect();
+                insert.execute(params![
+                    recording_id,
+                    window.segment_id,
+                    window.text,
+                    blob,
+                    model_key,
+                    window.start_time,
+                    window.end_time,
+                    now
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn begin_embedding_rebuild(&self) -> Result<String> {
+        self.conn.execute_batch("CREATE TABLE IF NOT EXISTS embedding_rebuild_stage (
+            run_id TEXT NOT NULL, recording_id TEXT NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+            segment_id TEXT NOT NULL, text TEXT NOT NULL, embedding BLOB NOT NULL,
+            model TEXT NOT NULL, start_time REAL NOT NULL, end_time REAL NOT NULL,
+            created_at TEXT NOT NULL);
+            DELETE FROM embedding_rebuild_stage;")?;
+        embedding_source_signature(&self.conn)
+    }
+
+    pub fn embedding_sources_unchanged(&self, signature: &str) -> Result<bool> {
+        Ok(embedding_source_signature(&self.conn)? == signature)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn stage_embedding(
+        &self,
+        run_id: &str,
+        recording_id: &str,
+        segment_id: &str,
+        text: &str,
+        embedding: &[f32],
+        model: &str,
+        start_time: f64,
+        end_time: f64,
+    ) -> Result<()> {
+        if embedding.is_empty() || embedding.iter().any(|value| !value.is_finite()) {
+            anyhow::bail!("Invalid embedding vector");
+        }
+        let blob: Vec<u8> = embedding
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        self.conn.execute("INSERT INTO embedding_rebuild_stage
+            (run_id, recording_id, segment_id, text, embedding, model, start_time, end_time, created_at)
+            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![run_id,recording_id,segment_id,text,blob,model,start_time,end_time,Utc::now().to_rfc3339()])?;
+        Ok(())
+    }
+
+    pub fn discard_embedding_rebuild(&self, run_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM embedding_rebuild_stage WHERE run_id=?1",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn commit_embedding_rebuild(
+        &mut self,
+        run_id: &str,
+        expected_source: &str,
+        expected_count: usize,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if embedding_source_signature(&tx)? != expected_source {
+            anyhow::bail!(
+                "Meetings changed during indexing. The existing search index was kept. Try again."
+            );
+        }
+        let (count, dimensions): (i64,i64) = tx.query_row(
+            "SELECT COUNT(*),COUNT(DISTINCT length(embedding)) FROM embedding_rebuild_stage WHERE run_id=?1", [run_id], |row|Ok((row.get(0)?,row.get(1)?)))?;
+        if usize::try_from(count).ok() != Some(expected_count) || dimensions > 1 {
+            anyhow::bail!("Replacement embeddings are incomplete or inconsistent. The existing search index was kept.");
+        }
+        tx.execute("DELETE FROM transcript_embeddings", [])?;
+        tx.execute("INSERT INTO transcript_embeddings (recording_id,segment_id,text,embedding,model,start_time,end_time,created_at)
+            SELECT recording_id,segment_id,text,embedding,model,start_time,end_time,created_at
+            FROM embedding_rebuild_stage WHERE run_id=?1", [run_id])?;
+        tx.execute(
+            "DELETE FROM embedding_rebuild_stage WHERE run_id=?1",
+            [run_id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn purge_user_content(&mut self) -> Result<()> {
@@ -7241,67 +10616,262 @@ impl Database {
         &self,
         query_embedding: &[f32],
         limit: usize,
+        model: &str,
     ) -> Result<Vec<SearchHit>> {
-        // Bound the in-memory cosine-similarity scan so a multi-year meeting
-        // library cannot balloon a single Ask into deserializing hundreds of
-        // thousands of embedding blobs; the most recent rows win.
-        const EMBEDDING_SCAN_LIMIT: usize = 50_000;
+        self.search_embeddings_with_scope(query_embedding, limit, model, None, None)
+    }
 
-        // Join against recordings so segments from deleted meetings can never
-        // surface in cross-meeting recall, and titles come back in one pass.
-        let mut stmt = self.conn.prepare(
-            "SELECT te.recording_id, te.segment_id, te.text, te.embedding,
-                    te.start_time, te.end_time, r.title
-             FROM transcript_embeddings te
-             JOIN recordings r ON r.id = te.recording_id
-             ORDER BY te.created_at DESC
-             LIMIT ?1",
-        )?;
+    pub fn has_embeddings_with_scope(
+        &self,
+        model: &str,
+        exclude_recording_id: Option<&str>,
+        source_type: Option<&str>,
+    ) -> Result<bool> {
+        let mut sql = String::from(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM transcript_embeddings te
+                JOIN recordings r ON r.id = te.recording_id
+                WHERE te.model = ?1",
+        );
+        let mut values: Vec<Value> = vec![Value::from(model.to_string())];
+        let mut placeholder = 2;
 
-        let rows = stmt.query_map(params![EMBEDDING_SCAN_LIMIT as i64], |row| {
-            let recording_id: String = row.get(0)?;
-            let segment_id: String = row.get(1)?;
-            let text: String = row.get(2)?;
-            let blob: Vec<u8> = row.get(3)?;
-            let start_time: f64 = row.get(4)?;
-            let end_time: f64 = row.get(5)?;
-            let recording_title: String = row.get(6)?;
-            Ok((
-                recording_id,
-                segment_id,
-                text,
-                blob,
-                start_time,
-                end_time,
-                recording_title,
-            ))
-        })?;
-
-        let mut scored: Vec<(f64, SearchHit)> = Vec::new();
-        for row in rows {
-            let (recording_id, segment_id, text, blob, start_time, end_time, recording_title) =
-                row?;
-            let embedding = blob_to_f32_vec(&blob);
-            let score = crate::llm::cosine_similarity(query_embedding, &embedding) as f64;
-            scored.push((
-                score,
-                SearchHit {
-                    recording_id,
-                    recording_title,
-                    project_id: String::new(),
-                    segment_id,
-                    text,
-                    start_time,
-                    end_time,
-                    score,
-                },
-            ));
+        if let Some(recording_id) = exclude_recording_id {
+            sql.push_str(" AND te.recording_id != ?");
+            sql.push_str(&placeholder.to_string());
+            values.push(Value::from(recording_id.to_string()));
+            placeholder += 1;
         }
 
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        scored.truncate(limit);
+        if let Some(source_type) = source_type {
+            sql.push_str(" AND r.source_type = ?");
+            sql.push_str(&placeholder.to_string());
+            values.push(Value::from(source_type.to_string()));
+        }
 
-        Ok(scored.into_iter().map(|(_, hit)| hit).collect())
+        sql.push(')');
+        self.conn
+            .query_row(&sql, params_from_iter(values.iter()), |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    pub fn search_embeddings_with_scope(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        model: &str,
+        exclude_recording_id: Option<&str>,
+        source_type: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        let mut ranker = SemanticRanker::new(query_embedding, limit)?;
+        let scope = EmbeddingSearchScope {
+            model: model.to_string(),
+            dimensions: query_embedding.len(),
+            exclude_recording_id: exclude_recording_id.map(str::to_string),
+            source_type: source_type.map(str::to_string),
+        };
+        let token = self.begin_embedding_scan(&scope)?;
+        let mut cursor = None;
+        loop {
+            let page = self.read_embedding_scan_page(&scope, &token, cursor)?;
+            cursor = page.next_cursor;
+            for row in page.rows {
+                ranker.push(row);
+            }
+            if page.exhausted {
+                break;
+            }
+        }
+        self.validate_embedding_scan(&token)?;
+        Ok(ranker.finish())
+    }
+
+    pub(crate) fn begin_embedding_scan(
+        &self,
+        scope: &EmbeddingSearchScope,
+    ) -> Result<EmbeddingScanToken> {
+        embedding_scan_filter(scope)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let revision = verify_semantic_revision(&tx)?;
+        let upper_id = tx.query_row(
+            "SELECT MAX(id) FROM transcript_embeddings INDEXED BY idx_embeddings_model_id WHERE model = ?1",
+            [&scope.model],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(EmbeddingScanToken { revision, upper_id })
+    }
+
+    pub(crate) fn read_embedding_scan_page(
+        &self,
+        scope: &EmbeddingSearchScope,
+        token: &EmbeddingScanToken,
+        after: Option<i64>,
+    ) -> Result<EmbeddingScanPage> {
+        let (filter, mut values) = embedding_scan_filter(scope)?;
+        let tx = self.conn.unchecked_transaction()?;
+        if verify_semantic_revision(&tx)? != token.revision {
+            anyhow::bail!("Semantic recall generation changed");
+        }
+        let candidates = {
+            let lower_bound = if after.is_some() { " AND id > ?2" } else { "" };
+            let mut statement = tx.prepare(&format!(
+                "SELECT id FROM transcript_embeddings INDEXED BY idx_embeddings_model_id
+                 WHERE model = ?1 AND id <= ?3{lower_bound}
+                 ORDER BY id ASC LIMIT ?4"
+            ))?;
+            let rows = statement.query_map(
+                params![
+                    scope.model,
+                    after,
+                    token.upper_id,
+                    (EMBEDDING_PAGE_ROWS + 1) as i64
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut exhausted = candidates.len() <= EMBEDDING_PAGE_ROWS;
+        let window = &candidates[..candidates.len().min(EMBEDDING_PAGE_ROWS)];
+        let mut next_cursor = window.last().copied().or(after);
+        values.push(
+            window
+                .first()
+                .copied()
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        );
+        values.push(
+            window
+                .last()
+                .copied()
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        );
+        let sql = format!(
+            "SELECT te.id, r.rowid
+            FROM transcript_embeddings te INDEXED BY idx_embeddings_model_id
+            JOIN recordings r ON r.id = te.recording_id
+            WHERE {filter} AND te.id >= ?5 AND te.id <= ?6
+            ORDER BY te.id ASC"
+        );
+        let mut ids = Vec::new();
+        let mut bytes = 0usize;
+        let encoding: String = tx.query_row("PRAGMA encoding", [], |row| row.get(0))?;
+        let text_expansion = match encoding.as_str() {
+            "UTF-8" => 1usize,
+            "UTF-16le" | "UTF-16be" => 2,
+            _ => anyhow::bail!("Unsupported semantic search text encoding"),
+        };
+        {
+            let mut statement = tx.prepare(&sql)?;
+            let mut rows = statement.query(params_from_iter(values.iter()))?;
+            while let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                let recording_rowid: i64 = row.get(1)?;
+                let mut row_bytes = 24usize;
+                for column in [
+                    "recording_id",
+                    "segment_id",
+                    "text",
+                    "embedding",
+                    "created_at",
+                ] {
+                    let stored_length = tx
+                        .blob_open(
+                            rusqlite::DatabaseName::Main,
+                            "transcript_embeddings",
+                            column,
+                            id,
+                            true,
+                        )?
+                        .len();
+                    let length = stored_length
+                        .checked_mul(if column == "embedding" {
+                            1
+                        } else {
+                            text_expansion
+                        })
+                        .context("Semantic payload size overflow")?;
+                    row_bytes = row_bytes
+                        .checked_add(length)
+                        .context("Semantic payload size overflow")?;
+                }
+                let title_bytes = tx
+                    .blob_open(
+                        rusqlite::DatabaseName::Main,
+                        "recordings",
+                        "title",
+                        recording_rowid,
+                        true,
+                    )?
+                    .len()
+                    .checked_mul(text_expansion)
+                    .context("Semantic payload size overflow")?;
+                row_bytes = row_bytes
+                    .checked_add(title_bytes)
+                    .context("Semantic payload size overflow")?;
+                if row_bytes > EMBEDDING_PAGE_BYTES {
+                    anyhow::bail!(
+                        "Semantic recall resource limit: eligible row exceeds page byte budget"
+                    );
+                }
+                if bytes + row_bytes > EMBEDDING_PAGE_BYTES {
+                    exhausted = false;
+                    next_cursor = ids.last().copied().or(after);
+                    break;
+                }
+                bytes += row_bytes;
+                ids.push(id);
+            }
+        }
+        let mut rows = Vec::with_capacity(ids.len());
+        {
+            let mut statement = tx.prepare(
+                "SELECT te.id, te.created_at, te.embedding,
+                te.recording_id, r.title, te.segment_id, te.text, te.start_time, te.end_time
+                FROM transcript_embeddings te JOIN recordings r ON r.id = te.recording_id
+                WHERE te.id = ?1",
+            )?;
+            for id in &ids {
+                rows.push(statement.query_row([id], |row| {
+                    Ok(RawEmbeddingRow {
+                        id: row.get(0)?,
+                        created_at: row.get(1)?,
+                        embedding: row.get(2)?,
+                        hit: SearchHit {
+                            recording_id: row.get(3)?,
+                            recording_title: row.get(4)?,
+                            project_id: String::new(),
+                            segment_id: row.get(5)?,
+                            text: row.get(6)?,
+                            start_time: row.get::<_, Option<f64>>(7)?.unwrap_or(f64::NAN),
+                            end_time: row.get::<_, Option<f64>>(8)?.unwrap_or(f64::NAN),
+                            score: 0.0,
+                        },
+                    })
+                })?);
+            }
+        }
+        if verify_semantic_revision(&tx)? != token.revision {
+            anyhow::bail!("Semantic recall generation changed");
+        }
+        tx.commit()?;
+        Ok(EmbeddingScanPage {
+            rows,
+            next_cursor,
+            exhausted,
+        })
+    }
+
+    pub(crate) fn validate_embedding_scan(&self, token: &EmbeddingScanToken) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if verify_semantic_revision(&tx)? != token.revision {
+            anyhow::bail!("Semantic recall generation changed");
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn embedding_count(&self) -> Result<i64> {
@@ -7431,6 +11001,7 @@ fn build_fts_query(query: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    include!("db_meeting_durability_tests.rs");
     use super::*;
     use crate::store::{
         CaptureSessionRecord, ContextSnapshotRecord, InsertionActionRecord, MeetingArtifactRecord,
@@ -7444,9 +11015,20 @@ mod tests {
         let mut db = Database {
             conn,
             encrypted: false,
+            correction_approval_undo: HashMap::new(),
         };
         db.init_tables().expect("init tables");
         db
+    }
+
+    fn refuse_transcript_index_writes(db: &Database) {
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER refuse_transcript_index_write
+             BEFORE INSERT ON transcript_fts_content
+             BEGIN SELECT RAISE(ABORT, 'injected index write failure'); END;",
+            )
+            .unwrap();
     }
 
     fn dictation_fixture(
@@ -7489,6 +11071,7 @@ mod tests {
             capture_degraded_summary: None,
         };
         let transcript = Transcript {
+            heard_through_speakers: Vec::new(),
             id: format!("{id}-transcript"),
             recording_id: id.to_string(),
             segments: vec![TranscriptSegment {
@@ -7506,6 +11089,7 @@ mod tests {
             model_id: Some("test".to_string()),
             requested_provider: Some("parakeet".to_string()),
             actual_provider: Some("parakeet".to_string()),
+            measured_word_timestamps: false,
             created_at,
         };
         let history = DictationHistoryTextRecord {
@@ -7646,6 +11230,87 @@ mod tests {
     }
 
     #[test]
+    fn corrected_dictation_text_overrides_preview_and_joins_search_without_rewriting_original() {
+        let mut db = in_memory_db();
+        seed_dictation_history(&mut db);
+        db.save_dictation_edit(
+            "dictation-old",
+            Some("Send the revised forecast to operations."),
+            None,
+        )
+        .unwrap();
+
+        let previews = db.get_dictation_list_previews().unwrap();
+        assert_eq!(
+            previews.get("dictation-old").unwrap().0.as_deref(),
+            Some("Send the revised forecast to operations.")
+        );
+        let corrected_hits = db.search_dictation_history("forecast", 10, 0).unwrap();
+        assert_eq!(corrected_hits.len(), 1);
+        assert_eq!(corrected_hits[0].recording_id, "dictation-old");
+        assert!(corrected_hits[0].snippet.contains("[[forecast]]"));
+        assert_eq!(corrected_hits[0].matched_field, "corrected");
+
+        let original_hits = db.search_dictation_history("quarterly", 10, 0).unwrap();
+        assert_eq!(original_hits.len(), 1, "original text stays searchable");
+        assert_eq!(original_hits[0].recording_id, "dictation-old");
+        assert_eq!(original_hits[0].matched_field, "final");
+        assert_eq!(
+            db.get_transcript("dictation-old")
+                .unwrap()
+                .unwrap()
+                .full_text,
+            "Ship the quarterly budget summary to finance."
+        );
+
+        db.save_dictation_edit(
+            "dictation-old",
+            Some(""),
+            Some("Send the revised forecast to operations."),
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_dictation_list_previews()
+                .unwrap()
+                .get("dictation-old")
+                .unwrap()
+                .0
+                .as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn dictation_history_backfill_repairs_a_partially_populated_index() {
+        let mut db = in_memory_db();
+        seed_dictation_history(&mut db);
+        db.conn
+            .execute(
+                "DELETE FROM dictation_history_fts WHERE recording_id = 'dictation-old'",
+                [],
+            )
+            .unwrap();
+        assert!(db
+            .search_dictation_history("quarterly", 10, 0)
+            .unwrap()
+            .is_empty());
+        db.backfill_dictation_history_text_if_needed().unwrap();
+        let hits = db.search_dictation_history("quarterly", 10, 0).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].recording_id, "dictation-old");
+        db.backfill_dictation_history_text_if_needed().unwrap();
+        assert_eq!(
+            db.conn
+                .query_row("SELECT COUNT(*) FROM dictation_history_fts", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
     fn dictation_history_search_falls_back_to_like_without_fts() {
         let mut db = in_memory_db();
         seed_dictation_history(&mut db);
@@ -7679,6 +11344,60 @@ mod tests {
             .search_dictation_history("budget", 10, 0)
             .expect("search");
         assert_eq!(budget.len(), 2);
+    }
+
+    #[test]
+    fn corrected_dictation_search_fallback_marks_correction_and_preserves_original_search() {
+        let mut db = in_memory_db();
+        seed_dictation_history(&mut db);
+        db.save_dictation_edit(
+            "dictation-old",
+            Some("Send the revised newword forecast to operations."),
+            None,
+        )
+        .unwrap();
+        db.conn
+            .execute("DROP TABLE dictation_history_fts", [])
+            .unwrap();
+
+        let corrected_hits = db.search_dictation_history("newword", 10, 0).unwrap();
+        assert_eq!(corrected_hits.len(), 1);
+        assert_eq!(corrected_hits[0].recording_id, "dictation-old");
+        assert_eq!(corrected_hits[0].matched_field, "corrected");
+
+        let final_hits = db.search_dictation_history("quarterly", 10, 0).unwrap();
+        assert_eq!(final_hits.len(), 1);
+        assert_eq!(final_hits[0].recording_id, "dictation-old");
+        assert_eq!(final_hits[0].matched_field, "final");
+
+        let raw_hits = db.search_dictation_history("email", 10, 0).unwrap();
+        assert_eq!(raw_hits.len(), 1);
+        assert_eq!(raw_hits[0].recording_id, "dictation-new");
+        assert_eq!(raw_hits[0].matched_field, "raw");
+
+        let original = db
+            .get_dictation_history_text("dictation-old")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            original.final_text,
+            "Ship the quarterly budget summary to finance."
+        );
+        assert_eq!(
+            original.raw_text,
+            "ship the quarterly budget summary to finance"
+        );
+
+        db.save_dictation_edit(
+            "dictation-old",
+            None,
+            Some("Send the revised newword forecast to operations."),
+        )
+        .unwrap();
+        assert!(db
+            .search_dictation_history("newword", 10, 0)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -8262,7 +11981,9 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        conn.execute_batch(&format!("PRAGMA user_version = {future_version};"))
+            .unwrap();
         drop(conn);
 
         let error = Database::open_at_path(&path, None)
@@ -8276,7 +11997,10 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2, "rejection must not mutate the future database");
+        assert_eq!(
+            version, future_version,
+            "rejection must not mutate the future database"
+        );
         drop(conn);
         let _ = std::fs::remove_file(path);
     }
@@ -8289,6 +12013,7 @@ mod tests {
         let mut db = Database {
             conn,
             encrypted: false,
+            correction_approval_undo: HashMap::new(),
         };
 
         db.init_tables()
@@ -8596,6 +12321,7 @@ mod tests {
 
     fn sample_transcript(recording_id: &str) -> Transcript {
         Transcript {
+            heard_through_speakers: Vec::new(),
             id: format!("t-{}", recording_id),
             recording_id: recording_id.to_string(),
             segments: vec![TranscriptSegment {
@@ -8613,12 +12339,32 @@ mod tests {
             model_id: Some("base.en".to_string()),
             requested_provider: Some("whisper".to_string()),
             actual_provider: Some("whisper".to_string()),
+            measured_word_timestamps: false,
             created_at: Utc::now(),
         }
     }
 
+    fn transcript_with_texts(recording_id: &str, texts: &[&str]) -> Transcript {
+        let mut transcript = sample_transcript(recording_id);
+        transcript.segments = texts
+            .iter()
+            .enumerate()
+            .map(|(index, text)| TranscriptSegment {
+                id: format!("{recording_id}-s{index}"),
+                start_time: index as f64,
+                end_time: index as f64 + 1.0,
+                text: (*text).to_string(),
+                speaker_id: Some("speaker_0".to_string()),
+                confidence: 0.95,
+            })
+            .collect();
+        transcript.full_text = texts.join(" ");
+        transcript
+    }
+
     fn sample_multi_segment_transcript(recording_id: &str) -> Transcript {
         Transcript {
+            heard_through_speakers: Vec::new(),
             id: format!("t-{}", recording_id),
             recording_id: recording_id.to_string(),
             segments: vec![
@@ -8662,7 +12408,18 @@ mod tests {
             model_id: Some("base.en".to_string()),
             requested_provider: Some("whisper".to_string()),
             actual_provider: Some("whisper".to_string()),
+            measured_word_timestamps: false,
             created_at: Utc::now(),
+        }
+    }
+
+    fn deletion_expectation(segment: &TranscriptSegment) -> TranscriptSegmentExpectation {
+        TranscriptSegmentExpectation {
+            id: segment.id.clone(),
+            text: segment.text.clone(),
+            start_time: segment.start_time,
+            end_time: segment.end_time,
+            speaker_id: segment.speaker_id.clone(),
         }
     }
 
@@ -8763,6 +12520,7 @@ mod tests {
     fn sample_summary_provenance(summary: &str) -> AnalysisProvenance {
         AnalysisProvenance {
             version: ANALYSIS_PROVENANCE_VERSION,
+            grounding_policy_version: Some(crate::models::SUMMARY_GROUNDING_POLICY_VERSION),
             content_hash: analysis_content_hash(summary),
             actual_provider: "ollama".to_string(),
             actual_model: "llama3.2".to_string(),
@@ -8770,6 +12528,7 @@ mod tests {
             completed_at: Utc::now(),
             citations: vec![AnalysisCitation {
                 text: "Canonical transcript evidence".to_string(),
+                source_kind: None,
                 line_id: Some("L1".to_string()),
                 segment_id: Some("s1".to_string()),
                 start_time: Some(10.0),
@@ -8778,6 +12537,8 @@ mod tests {
                 certainty: Some(1.0),
             }],
             grounded: true,
+            unverified_statements: Vec::new(),
+            summary_diagnostics: None,
         }
     }
 
@@ -8785,6 +12546,7 @@ mod tests {
         let citations = sample_summary_provenance("unused").citations;
         ActionItemsProvenance {
             version: ANALYSIS_PROVENANCE_VERSION,
+            grounding_policy_version: Some(crate::models::SUMMARY_GROUNDING_POLICY_VERSION),
             content_hash: action_items_content_hash(items),
             actual_provider: "ollama".to_string(),
             actual_model: "llama3.2".to_string(),
@@ -8799,6 +12561,8 @@ mod tests {
                     citations: citations.clone(),
                     grounded: true,
                     generated: true,
+                    evidence: None,
+                    unclear: false,
                 })
                 .collect(),
         }
@@ -8881,7 +12645,7 @@ mod tests {
     #[test]
     fn dictation_result_persistence_rolls_back_recording_when_transcript_write_fails() {
         let mut db = in_memory_db();
-        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+        refuse_transcript_index_writes(&db);
         let mut recording = sample_recording("dictation-rollback", "inbox");
         recording.source_type = "dictation".to_string();
         recording.audio_path.clear();
@@ -8892,9 +12656,97 @@ mod tests {
             .create_recording_with_transcript(&recording, &transcript)
             .expect_err("recording and transcript must share one transaction");
 
-        assert!(error.to_string().contains("transcript_fts"));
+        assert!(matches!(error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::ConstraintViolation));
         assert!(db.get_recording(&recording.id).unwrap().is_none());
         assert!(db.get_transcript(&recording.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn failed_dictation_recovery_commits_audio_without_transcript_or_history_text() {
+        let mut db = in_memory_db();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-failed-dictation-db-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let audio_path = root.join("capture.wav");
+        write_test_wav(&audio_path);
+        let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(&audio_path) else {
+            panic!("valid wav fixture");
+        };
+        let mut recording = sample_recording("failed-dictation", "inbox");
+        recording.source_type = "dictation".to_string();
+        recording.audio_path = audio_path.to_string_lossy().to_string();
+        recording.status = "error".to_string();
+        recording.transcript_complete = false;
+        recording.transcript_degraded_reason = Some("decoder stopped".to_string());
+
+        db.create_failed_dictation_recovery_entry(&recording, &metadata)
+            .unwrap();
+
+        let stored = db.get_recording(&recording.id).unwrap().unwrap();
+        assert_eq!(stored.status, "error");
+        assert!(!stored.transcript_complete);
+        assert_eq!(
+            stored.transcript_degraded_reason.as_deref(),
+            Some("decoder stopped")
+        );
+        assert!(db.get_transcript(&recording.id).unwrap().is_none());
+        assert!(db
+            .get_dictation_history_text(&recording.id)
+            .unwrap()
+            .is_none());
+        let bundle = db.load_recording_audio_bundle(&recording.id).unwrap();
+        let primary = bundle.primary.expect("ready primary audio asset");
+        assert_eq!(primary.lifecycle, RecordingAudioLifecycle::Ready);
+        assert_eq!(primary.path, audio_path);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_dictation_recovery_rolls_back_recording_when_asset_write_fails() {
+        let mut db = in_memory_db();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_failed_dictation_asset
+                 BEFORE INSERT ON recording_audio_assets
+                 BEGIN SELECT RAISE(ABORT, 'controlled asset failure'); END;",
+            )
+            .unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-failed-dictation-rollback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let audio_path = root.join("capture.wav");
+        write_test_wav(&audio_path);
+        let RecordingAudioValidation::Ready(metadata) = validate_plaintext_wav(&audio_path) else {
+            panic!("valid wav fixture");
+        };
+        let mut recording = sample_recording("failed-dictation-rollback", "inbox");
+        recording.source_type = "dictation".to_string();
+        recording.audio_path = audio_path.to_string_lossy().to_string();
+        recording.status = "error".to_string();
+        recording.transcript_complete = false;
+        recording.transcript_degraded_reason = Some("decoder stopped".to_string());
+
+        db.create_failed_dictation_recovery_entry(&recording, &metadata)
+            .expect_err("asset failure must roll back recording row");
+
+        assert!(db.get_recording(&recording.id).unwrap().is_none());
+        let asset_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM recording_audio_assets WHERE recording_id = ?1",
+                [&recording.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(asset_count, 0);
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -9480,7 +13332,8 @@ mod tests {
         db.create_recording(&sample_recording("r1", "inbox"))
             .unwrap();
 
-        let transcript = sample_transcript("r1");
+        let mut transcript = sample_transcript("r1");
+        transcript.measured_word_timestamps = true;
         db.save_transcript(&transcript).unwrap();
 
         let fetched = db.get_transcript("r1").unwrap();
@@ -9488,6 +13341,81 @@ mod tests {
         let t = fetched.unwrap();
         assert_eq!(t.full_text, "Hello world");
         assert_eq!(t.segments.len(), 1);
+        assert!(t.measured_word_timestamps);
+    }
+
+    #[test]
+    fn heard_through_speakers_rows_are_kept_but_stay_out_of_text_and_search() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut transcript = sample_transcript("r1");
+        transcript.heard_through_speakers = vec![TranscriptSegment {
+            id: "echo".to_string(),
+            start_time: 0.2,
+            end_time: 1.0,
+            text: "zebracorn launch".to_string(),
+            speaker_id: Some("me".to_string()),
+            confidence: 0.8,
+        }];
+        db.save_transcript(&transcript).unwrap();
+
+        let stored = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(stored.heard_through_speakers.len(), 1);
+        assert_eq!(stored.heard_through_speakers[0].text, "zebracorn launch");
+        assert_eq!(stored.full_text, "Hello world");
+        assert!(db
+            .search_transcripts("zebracorn", 10, None)
+            .unwrap()
+            .is_empty());
+
+        // An edit to the transcript rows leaves the set-aside rows alone.
+        db.update_transcript_segments("r1", &stored.segments)
+            .unwrap();
+        let edited = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(edited.heard_through_speakers.len(), 1);
+
+        // A transcript without any serialises without the field.
+        let plain = sample_transcript("r2");
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("heardThroughSpeakers").is_none());
+    }
+
+    #[test]
+    fn transcript_timing_provenance_migration_defaults_legacy_rows_to_false() {
+        let dir = crate::test_fs::TempDir::new("transcript-timing-migration");
+        let path = dir.path().join("plainsong.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"CREATE TABLE transcripts (
+                    id TEXT PRIMARY KEY,
+                    recording_id TEXT NOT NULL,
+                    segments TEXT,
+                    full_text TEXT,
+                    language TEXT,
+                    confidence REAL,
+                    model TEXT,
+                    model_id TEXT,
+                    requested_provider TEXT,
+                    actual_provider TEXT,
+                    created_at TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO transcripts (
+                    id, recording_id, segments, full_text, language, confidence, model, created_at
+                 ) VALUES (
+                    'legacy-t', 'legacy-r',
+                    '[{"id":"s1","startTime":0.0,"endTime":1.0,"text":"legacy","speakerId":null,"confidence":0.9}]',
+                    'legacy', 'en', 0.9, 'legacy-model', '2026-01-01T00:00:00Z'
+                 );"#,
+            )
+            .unwrap();
+        }
+
+        let db = Database::open_at_path(&path, None).unwrap();
+        let transcript = db.get_transcript("legacy-r").unwrap().unwrap();
+        assert!(!transcript.measured_word_timestamps);
     }
 
     #[test]
@@ -9530,12 +13458,13 @@ mod tests {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("r1", "inbox"))
             .unwrap();
-        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+        refuse_transcript_index_writes(&db);
 
         let error = db
             .save_completed_transcript(&sample_transcript("r1"))
-            .expect_err("missing FTS table must fail the completion transaction");
-        assert!(error.to_string().contains("transcript_fts"));
+            .expect_err("an index write failure must roll back completion");
+        assert!(matches!(error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::ConstraintViolation));
         assert!(db.get_transcript("r1").unwrap().is_none());
         assert_eq!(db.get_recording("r1").unwrap().unwrap().status, "recording");
     }
@@ -9574,7 +13503,7 @@ mod tests {
             .unwrap();
         db.save_completed_transcript(&sample_transcript("r1"))
             .unwrap();
-        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+        refuse_transcript_index_writes(&db);
 
         let enriched = vec![TranscriptSegment {
             id: "enriched-1".to_string(),
@@ -9586,12 +13515,18 @@ mod tests {
         }];
         let error = db
             .update_transcript_segments("r1", &enriched)
-            .expect_err("missing FTS table must roll back segment replacement");
-        assert!(error.to_string().contains("transcript_fts"));
+            .expect_err("an index write failure must roll back segment replacement");
+        assert!(matches!(error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::ConstraintViolation));
 
         let transcript = db.get_transcript("r1").unwrap().unwrap();
         assert_eq!(transcript.full_text, "Hello world");
         assert_eq!(transcript.segments[0].id, "s1");
+        assert_eq!(db.search_transcripts("hello", 10, None).unwrap().len(), 1);
+        assert!(db
+            .search_transcripts("diarized", 10, None)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -9784,6 +13719,185 @@ mod tests {
     }
 
     #[test]
+    fn fractional_measured_times_survive_save_and_automatic_speaker_enrichment() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut transcript = sample_transcript("r1");
+        transcript.measured_word_timestamps = true;
+        transcript.segments[0].start_time = 93.16;
+        transcript.segments[0].end_time = 93.24000000000001;
+        db.save_transcript(&transcript).unwrap();
+        let stored = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(
+            stored.segments[0].end_time.to_bits(),
+            transcript.segments[0].end_time.to_bits()
+        );
+        let mut enriched = transcript.segments.clone();
+        enriched[0].speaker_id = Some("S1".to_owned());
+        assert!(db
+            .apply_diarization_enrichment("r1", 0, &enriched, &[], Some("test"), None)
+            .unwrap());
+        assert!(
+            db.get_transcript("r1")
+                .unwrap()
+                .unwrap()
+                .measured_word_timestamps
+        );
+        let (stored, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        let mut changed = stored.segments;
+        changed[0].end_time += 0.000_000_001;
+        assert!(db
+            .apply_diarization_enrichment("r1", revision, &changed, &[], Some("test"), None)
+            .unwrap());
+        assert!(
+            !db.get_transcript("r1")
+                .unwrap()
+                .unwrap()
+                .measured_word_timestamps
+        );
+    }
+
+    #[test]
+    fn speaker_only_enrichment_preserves_measured_word_timestamps() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut transcript = sample_transcript("r1");
+        transcript.measured_word_timestamps = true;
+        db.save_transcript(&transcript).unwrap();
+
+        let (stored, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        let mut enriched = stored.segments;
+        enriched[0].speaker_id = Some("S1".to_string());
+        assert!(db
+            .apply_diarization_enrichment("r1", revision, &enriched, &[], Some("test"), None)
+            .unwrap());
+
+        assert!(
+            db.get_transcript("r1")
+                .unwrap()
+                .unwrap()
+                .measured_word_timestamps
+        );
+    }
+
+    #[test]
+    fn relabel_moves_user_names_and_voice_links_to_the_matched_voice() {
+        use crate::speakers::{
+            is_generic_speaker_name, match_rerun_speakers, resolve_speaker_name,
+        };
+        let segment = |id: &str, start: f64, end: f64, speaker: &str| TranscriptSegment {
+            id: id.to_string(),
+            start_time: start,
+            end_time: end,
+            text: format!("words {id}"),
+            speaker_id: Some(speaker.to_string()),
+            confidence: 0.9,
+        };
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut transcript = sample_transcript("r1");
+        transcript.segments = vec![
+            segment("a", 0.0, 10.0, "S1"),
+            segment("b", 10.0, 20.0, "S2"),
+            segment("c", 20.0, 30.0, "S3"),
+        ];
+        db.save_transcript(&transcript).unwrap();
+        db.rename_speaker("r1", "S2", "Carol").unwrap();
+        db.rename_speaker("r1", "S3", "Ben").unwrap();
+        db.set_cluster_voice_match("r1", "S3", "profile-ben", "confirmed")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "S2", "profile-carol", "auto")
+            .unwrap();
+
+        // The re-run folds Carol's short stretch into S1 and renumbers, so
+        // Ben's voice is now S2, and a new voice the earlier run never had
+        // appears as S3.
+        let (stored, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        let before: Vec<(f64, f64, Option<String>)> = stored
+            .segments
+            .iter()
+            .map(|s| (s.start_time, s.end_time, s.speaker_id.clone()))
+            .collect();
+        let rerun = vec![
+            segment("a", 0.0, 10.0, "S1"),
+            segment("b", 10.0, 20.0, "S1"),
+            segment("c", 20.0, 28.0, "S2"),
+            segment("d", 28.0, 30.0, "S3"),
+        ];
+        let same_voice = match_rerun_speakers(&before, &rerun);
+        assert_eq!(same_voice.get("S2").map(String::as_str), Some("S3"));
+        let existing = db.get_speaker_aliases("r1").unwrap();
+        let aliases = ["S1", "S2", "S3"]
+            .iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let carried = same_voice
+                    .get(*id)
+                    .and_then(|old| existing.get(old))
+                    .and_then(|(name, _, _)| name.as_deref())
+                    .filter(|name| !is_generic_speaker_name(name));
+                SpeakerAliasUpsert {
+                    speaker_id: id.to_string(),
+                    name: resolve_speaker_name(id, carried, None, None, index),
+                    color: Some(format!("#00000{index}")),
+                    sample_count: 1,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert!(db
+            .apply_relabelled_diarization(
+                "r1",
+                revision,
+                &rerun,
+                &aliases,
+                &same_voice,
+                Some("plainsong:test"),
+                None,
+            )
+            .unwrap());
+
+        let names = db.get_speaker_aliases("r1").unwrap();
+        let name = |id: &str| names.get(id).and_then(|(name, _, _)| name.clone());
+        assert_eq!(
+            name("S2").as_deref(),
+            Some("Ben"),
+            "Ben's name follows Ben's voice"
+        );
+        assert_ne!(name("S3").as_deref(), Some("Ben"), "S3 is someone new");
+        assert!(
+            ["S1", "S2", "S3"]
+                .iter()
+                .all(|id| name(id).as_deref() != Some("Carol")),
+            "Carol's voice folded away, so no speaker keeps her name"
+        );
+        let links: HashMap<String, (Option<String>, Option<String>)> = db
+            .conn
+            .prepare(
+                "SELECT speaker_id, voice_profile_id, voice_match_state
+                 FROM speaker_aliases WHERE recording_id = 'r1'",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?))))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            links.get("S2"),
+            Some(&(
+                Some("profile-ben".to_string()),
+                Some("confirmed".to_string())
+            ))
+        );
+        assert_eq!(links.get("S1"), Some(&(None, None)));
+        assert_eq!(links.get("S3"), Some(&(None, None)));
+        assert_eq!(links.len(), 3);
+    }
+
+    #[test]
     fn test_get_transcript_synthesizes_segment_from_full_text_when_segments_missing() {
         let mut db = in_memory_db();
         let mut recording = sample_recording("r1", "inbox");
@@ -9791,6 +13905,7 @@ mod tests {
         db.create_recording(&recording).unwrap();
 
         let transcript = Transcript {
+            heard_through_speakers: Vec::new(),
             id: "t1".to_string(),
             recording_id: "r1".to_string(),
             segments: Vec::new(),
@@ -9801,6 +13916,7 @@ mod tests {
             model_id: Some("macos_apple_speech".to_string()),
             requested_provider: Some("macos_apple_speech".to_string()),
             actual_provider: Some("macos_apple_speech".to_string()),
+            measured_word_timestamps: false,
             created_at: Utc::now(),
         };
         db.save_transcript(&transcript).unwrap();
@@ -9825,6 +13941,981 @@ mod tests {
     }
 
     #[test]
+    fn rename_recording_updates_artifact_and_visible_meeting_title() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+        let artifact_before = db.get_meeting_artifact("r1").unwrap().unwrap();
+        db.rename_recording("r1", "Design review").unwrap();
+        assert_eq!(
+            db.get_recording("r1").unwrap().unwrap().title,
+            "Design review"
+        );
+        assert_eq!(db.get_recordings(None).unwrap()[0].title, "Design review");
+        let artifact_after = db.get_meeting_artifact("r1").unwrap().unwrap();
+        assert_eq!(artifact_after.title.as_deref(), Some("Design review"));
+        assert_eq!(artifact_after.summary, artifact_before.summary);
+        assert_eq!(artifact_after.action_items, artifact_before.action_items);
+        assert_eq!(
+            artifact_after.summary_provenance,
+            artifact_before.summary_provenance
+        );
+        assert_eq!(
+            artifact_after.action_items_provenance,
+            artifact_before.action_items_provenance
+        );
+    }
+
+    #[test]
+    fn conditional_recording_rename_preserves_a_manual_rename() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+        db.rename_recording("r1", "Meeting recording").unwrap();
+        let observed_title = db.get_recording("r1").unwrap().unwrap().title;
+        db.rename_recording("r1", "My meeting title").unwrap();
+
+        assert!(!db
+            .rename_recording_if_title_matches("r1", &observed_title, "Generated title")
+            .unwrap());
+        assert_eq!(
+            db.get_recording("r1").unwrap().unwrap().title,
+            "My meeting title"
+        );
+        assert_eq!(
+            db.get_meeting_artifact("r1")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("My meeting title")
+        );
+    }
+
+    #[test]
+    fn conditional_recording_rename_updates_matching_title_and_artifact() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+        db.rename_recording("r1", "Meeting recording").unwrap();
+        let artifact_before = db.get_meeting_artifact("r1").unwrap().unwrap();
+        db.conn
+            .execute(
+                "UPDATE recordings SET meeting_notes = 'New notes' WHERE id = 'r1'",
+                [],
+            )
+            .unwrap();
+
+        assert!(db
+            .rename_recording_if_title_matches("r1", "Meeting recording", "Generated title")
+            .unwrap());
+        let raw_title: String = db
+            .conn
+            .query_row("SELECT title FROM recordings WHERE id = 'r1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(raw_title, "Generated title");
+        assert_eq!(
+            db.get_recording("r1").unwrap().unwrap().title,
+            "Generated title"
+        );
+        let artifact_after = db.get_meeting_artifact("r1").unwrap().unwrap();
+        assert_eq!(artifact_after.title.as_deref(), Some("Generated title"));
+        assert_eq!(artifact_after.summary, artifact_before.summary);
+        assert_eq!(artifact_after.action_items, artifact_before.action_items);
+    }
+
+    #[test]
+    fn conditional_recording_rename_returns_false_for_missing_recording() {
+        let mut db = in_memory_db();
+        assert!(!db
+            .rename_recording_if_title_matches("missing", "Meeting recording", "Generated title")
+            .unwrap());
+    }
+
+    #[test]
+    fn conditional_recording_rename_rolls_back_when_artifact_update_fails() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+        db.rename_recording("r1", "Meeting recording").unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_auto_title BEFORE UPDATE OF title ON meeting_artifacts
+             BEGIN SELECT RAISE(ABORT, 'QA rejects artifact rename'); END;",
+            )
+            .unwrap();
+
+        assert!(db
+            .rename_recording_if_title_matches("r1", "Meeting recording", "Generated title")
+            .is_err());
+        let raw_title: String = db
+            .conn
+            .query_row("SELECT title FROM recordings WHERE id = 'r1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(raw_title, "Meeting recording");
+        assert_eq!(
+            db.get_meeting_artifact("r1")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Meeting recording")
+        );
+    }
+
+    #[test]
+    fn meeting_action_membership_preserves_untouched_completion_and_citations() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.action_items = vec!["Send deck".into(), "Book room".into()];
+        artifact.action_items_provenance =
+            Some(sample_action_items_provenance(&artifact.action_items));
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.set_meeting_action_completed("r1", "Send deck", true)
+            .unwrap();
+        let (added, completed) = db
+            .add_meeting_action(
+                "r1",
+                &artifact.action_items,
+                "  Confirm date (Owner: Sam)  ",
+            )
+            .unwrap();
+        assert_eq!(completed, vec!["Send deck"]);
+        let added_items = added.action_items.unwrap();
+        assert_eq!(added_items[2], "Confirm date (Owner: Sam)");
+        let added_provenance = added.action_items_provenance.unwrap();
+        assert_eq!(
+            added_provenance.items[0],
+            artifact.action_items_provenance.as_ref().unwrap().items[0]
+        );
+        assert!(!added_provenance.items[2].generated);
+        assert!(added_provenance.items[2].citations.is_empty());
+        let (removed, completed) = db.delete_meeting_action("r1", &added_items, 1).unwrap();
+        assert_eq!(completed, vec!["Send deck"]);
+        let removed_items = removed.action_items.unwrap();
+        assert_eq!(
+            removed_items,
+            vec!["Send deck", "Confirm date (Owner: Sam)"]
+        );
+        assert_eq!(
+            db.get_meeting_artifact("r1").unwrap().unwrap().action_items,
+            removed_items
+        );
+        assert_eq!(
+            removed.action_items_provenance.unwrap().items[0],
+            added_provenance.items[0]
+        );
+        let (_, completed) = db.delete_meeting_action("r1", &removed_items, 0).unwrap();
+        assert!(completed.is_empty());
+        assert!(db.get_meeting_action_completion("r1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn meeting_action_membership_deletion_preserves_the_surviving_duplicate_citation() {
+        for removed_index in [0, 1] {
+            let mut db = in_memory_db();
+            db.create_recording(&sample_recording("r1", "inbox"))
+                .unwrap();
+            let mut artifact = sample_meeting_artifact();
+            artifact.action_items = vec!["Same".into(), "Same".into()];
+            let mut provenance = sample_action_items_provenance(&artifact.action_items);
+            provenance.items[0].citations[0].segment_id = Some("first-source".into());
+            provenance.items[1].citations[0].segment_id = Some("second-source".into());
+            let survivor = provenance.items[1 - removed_index].clone();
+            artifact.action_items_provenance = Some(provenance);
+            db.save_meeting_artifact(&artifact).unwrap();
+            let (recording, _) = db
+                .delete_meeting_action("r1", &artifact.action_items, removed_index)
+                .unwrap();
+            assert_eq!(
+                recording.action_items_provenance.unwrap().items,
+                vec![survivor]
+            );
+        }
+    }
+
+    #[test]
+    fn full_action_save_withholds_ambiguous_duplicate_provenance() {
+        for manual_index in [0, 1] {
+            for next_items in [
+                vec!["Same".into(), "Unique".into()],
+                vec!["Unique".into(), "Same".into(), "Same".into()],
+            ] {
+                let mut db = in_memory_db();
+                db.create_recording(&sample_recording("r1", "inbox"))
+                    .unwrap();
+                let mut artifact = sample_meeting_artifact();
+                artifact.action_items = vec!["Same".into(), "Same".into(), "Unique".into()];
+                let mut provenance = sample_action_items_provenance(&artifact.action_items);
+                provenance.items[manual_index].generated = false;
+                provenance.items[manual_index].grounded = false;
+                provenance.items[manual_index].citations.clear();
+                let unique = provenance.items[2].clone();
+                artifact.action_items_provenance = Some(provenance);
+                db.save_meeting_artifact(&artifact).unwrap();
+                db.patch_recording_analysis("r1", None, Some(&next_items))
+                    .unwrap();
+                let saved = db
+                    .get_recording("r1")
+                    .unwrap()
+                    .unwrap()
+                    .action_items_provenance
+                    .unwrap();
+                for (text, item) in next_items.iter().zip(&saved.items) {
+                    if text == "Same" {
+                        assert!(!item.generated);
+                        assert!(!item.grounded);
+                        assert!(item.citations.is_empty());
+                    } else {
+                        assert_eq!(item, &unique);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_action_edit_and_add_preserve_unaffected_duplicate_slots() {
+        for manual_index in [0, 1] {
+            let mut db = in_memory_db();
+            db.create_recording(&sample_recording("r1", "inbox"))
+                .unwrap();
+            let mut artifact = sample_meeting_artifact();
+            artifact.action_items = vec!["Same".into(), "Same".into(), "Unique".into()];
+            let mut provenance = sample_action_items_provenance(&artifact.action_items);
+            provenance.items[manual_index].generated = false;
+            provenance.items[manual_index].grounded = false;
+            provenance.items[manual_index].citations.clear();
+            provenance.items[1 - manual_index].citations[0].segment_id =
+                Some("exact-source".into());
+            let expected = provenance.items[..2].to_vec();
+            artifact.action_items_provenance = Some(provenance);
+            db.save_meeting_artifact(&artifact).unwrap();
+            let (edited, _) = db
+                .edit_meeting_action("r1", &artifact.action_items, 2, "Changed")
+                .unwrap();
+            assert_eq!(edited.action_items_provenance.unwrap().items[..2], expected);
+            let (added, _) = db
+                .add_meeting_action("r1", &edited.action_items.unwrap(), "Added")
+                .unwrap();
+            assert_eq!(added.action_items_provenance.unwrap().items[..2], expected);
+        }
+    }
+
+    #[test]
+    fn indexed_action_deletion_preserves_mixed_duplicate_identity_and_completion() {
+        for manual_index in [0, 1] {
+            for removed_index in [0, 1] {
+                let mut db = in_memory_db();
+                db.create_recording(&sample_recording("r1", "inbox"))
+                    .unwrap();
+                let mut artifact = sample_meeting_artifact();
+                artifact.action_items = vec!["Same".into(), "Same".into(), "Unique".into()];
+                let mut provenance = sample_action_items_provenance(&artifact.action_items);
+                provenance.items[manual_index].generated = false;
+                provenance.items[manual_index].grounded = false;
+                provenance.items[manual_index].citations.clear();
+                provenance.items[1 - manual_index].citations[0].segment_id =
+                    Some("exact-source".into());
+                let expected = vec![
+                    provenance.items[1 - removed_index].clone(),
+                    provenance.items[2].clone(),
+                ];
+                artifact.action_items_provenance = Some(provenance);
+                db.save_meeting_artifact(&artifact).unwrap();
+                db.set_meeting_action_completed("r1", "Same", true).unwrap();
+                let (recording, completed) = db
+                    .delete_meeting_action("r1", &artifact.action_items, removed_index)
+                    .unwrap();
+                assert_eq!(recording.action_items_provenance.unwrap().items, expected);
+                assert_eq!(completed, vec!["Same"]);
+            }
+        }
+    }
+
+    #[test]
+    fn meeting_action_membership_rejects_stale_invalid_and_duplicate_changes() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let artifact = sample_meeting_artifact();
+        db.save_meeting_artifact(&artifact).unwrap();
+        for task in ["", "  ", "First\nSecond", artifact.action_items[0].as_str()] {
+            assert!(db
+                .add_meeting_action("r1", &artifact.action_items, task)
+                .is_err());
+        }
+        assert!(db.add_meeting_action("r1", &[], "New task").is_err());
+        assert!(db.delete_meeting_action("r1", &[], 0).is_err());
+        assert!(db
+            .delete_meeting_action("r1", &artifact.action_items, artifact.action_items.len())
+            .is_err());
+        assert_eq!(
+            db.get_recording("r1")
+                .unwrap()
+                .unwrap()
+                .action_items
+                .unwrap(),
+            artifact.action_items
+        );
+        assert!(db.add_meeting_action("missing", &[], "New task").is_err());
+        let mut dictation = sample_recording("dictation", "inbox");
+        dictation.source_type = "dictation".into();
+        db.create_recording(&dictation).unwrap();
+        assert!(db.add_meeting_action("dictation", &[], "New task").is_err());
+        assert!(db.delete_meeting_action("dictation", &[], 0).is_err());
+    }
+
+    #[test]
+    fn meeting_action_membership_rolls_back_both_add_and_delete() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let artifact = sample_meeting_artifact();
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.set_meeting_action_completed("r1", &artifact.action_items[0], true)
+            .unwrap();
+        db.conn.execute_batch("CREATE TRIGGER reject_task_membership BEFORE UPDATE OF action_items ON meeting_artifacts BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        assert!(db
+            .add_meeting_action("r1", &artifact.action_items, "New task")
+            .is_err());
+        assert!(db
+            .delete_meeting_action("r1", &artifact.action_items, 0)
+            .is_err());
+        assert_eq!(
+            db.get_recording("r1")
+                .unwrap()
+                .unwrap()
+                .action_items
+                .unwrap(),
+            artifact.action_items
+        );
+        assert_eq!(
+            db.get_meeting_action_completion("r1").unwrap(),
+            vec![artifact.action_items[0].clone()]
+        );
+    }
+
+    #[test]
+    fn meeting_action_membership_can_remove_last_task_and_preserve_duplicate_completion() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.action_items = vec!["Same".into(), "Same".into()];
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.set_meeting_action_completed("r1", "Same", true).unwrap();
+        let (recording, completed) = db
+            .delete_meeting_action("r1", &artifact.action_items, 0)
+            .unwrap();
+        assert_eq!(completed, vec!["Same"]);
+        let (recording, completed) = db
+            .delete_meeting_action("r1", &recording.action_items.unwrap(), 0)
+            .unwrap();
+        assert!(recording.action_items.unwrap().is_empty());
+        assert!(completed.is_empty());
+    }
+
+    #[test]
+    fn meeting_action_edit_preserves_completion_and_matching_provenance() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.action_items = vec![
+            "Send deck (Owner: Jane · Due: Friday)".into(),
+            "Book room".into(),
+        ];
+        artifact.action_items_provenance =
+            Some(sample_action_items_provenance(&artifact.action_items));
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.set_meeting_action_completed("r1", &artifact.action_items[0], true)
+            .unwrap();
+        let (recording, completed) = db
+            .edit_meeting_action(
+                "r1",
+                &artifact.action_items,
+                0,
+                "Send deck (Owner: Sam · Due: Monday)",
+            )
+            .unwrap();
+        assert_eq!(completed, vec!["Send deck (Owner: Sam · Due: Monday)"]);
+        assert_eq!(db.get_meeting_action_completion("r1").unwrap(), completed);
+        let provenance = recording.action_items_provenance.unwrap();
+        assert!(!provenance.items[0].generated);
+        assert!(provenance.items[0].citations.is_empty());
+        assert_eq!(
+            provenance.items[1],
+            artifact.action_items_provenance.unwrap().items[1]
+        );
+        assert_eq!(
+            db.get_meeting_artifact("r1").unwrap().unwrap().action_items,
+            recording.action_items.unwrap()
+        );
+    }
+
+    #[test]
+    fn meeting_action_edit_rejects_conflicts_and_duplicate_identity() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.action_items = vec!["First task".into(), "Second task".into()];
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.set_meeting_action_completed("r1", "Second task", true)
+            .unwrap();
+        assert!(db
+            .edit_meeting_action("r1", &["stale".into()], 0, "New task")
+            .is_err());
+        assert!(db
+            .edit_meeting_action("r1", &artifact.action_items, 0, "Second task")
+            .is_err());
+        assert_eq!(
+            db.get_meeting_action_completion("r1").unwrap(),
+            vec!["Second task"]
+        );
+        assert_eq!(
+            db.get_meeting_artifact("r1").unwrap().unwrap().action_items,
+            artifact.action_items
+        );
+        artifact.action_items = vec!["Same".into(), "Same".into()];
+        db.save_meeting_artifact(&artifact).unwrap();
+        assert!(db
+            .edit_meeting_action("r1", &artifact.action_items, 0, "Different")
+            .is_err());
+    }
+
+    #[test]
+    fn meeting_action_edit_rolls_back_if_artifact_write_fails() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let artifact = sample_meeting_artifact();
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.set_meeting_action_completed("r1", &artifact.action_items[0], true)
+            .unwrap();
+        db.conn.execute_batch("CREATE TRIGGER reject_task_edit BEFORE UPDATE OF action_items ON meeting_artifacts BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+        assert!(db
+            .edit_meeting_action("r1", &artifact.action_items, 0, "Replacement")
+            .is_err());
+        assert_eq!(
+            db.get_recording("r1")
+                .unwrap()
+                .unwrap()
+                .action_items
+                .unwrap(),
+            artifact.action_items
+        );
+        assert_eq!(
+            db.get_meeting_action_completion("r1").unwrap(),
+            vec![artifact.action_items[0].clone()]
+        );
+    }
+
+    fn brief_test_target() -> crate::meeting_brief::BriefTarget {
+        crate::meeting_brief::BriefTarget {
+            event_id: "event".into(),
+            title: "Weekly Sync".into(),
+            attendees: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn meeting_brief_candidates_completion_deduplicates_and_invalidates_cache() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.action_items = vec!["Done".into(), "Done".into(), "Open".into()];
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.set_meeting_action_completed("r1", "Done", true).unwrap();
+        let target = brief_test_target();
+        let related = crate::meeting_brief::related_meetings(
+            &target,
+            &db.meeting_brief_candidates(200).unwrap(),
+        );
+        assert_eq!(related[0].open_items, vec!["Open"]);
+        let key = crate::meeting_brief::brief_cache_key(
+            &target,
+            &[],
+            &crate::meeting_brief::brief_evidence_lines(&related),
+        );
+        db.set_meeting_action_completed("r1", "Done", false)
+            .unwrap();
+        let related = crate::meeting_brief::related_meetings(
+            &target,
+            &db.meeting_brief_candidates(200).unwrap(),
+        );
+        assert_eq!(related[0].open_items, vec!["Done", "Open"]);
+        assert_ne!(
+            key,
+            crate::meeting_brief::brief_cache_key(
+                &target,
+                &[],
+                &crate::meeting_brief::brief_evidence_lines(&related)
+            )
+        );
+    }
+
+    #[test]
+    fn meeting_brief_candidates_retain_decision_only_source() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.summary = None;
+        artifact.action_items.clear();
+        db.save_meeting_artifact(&artifact).unwrap();
+        let related = crate::meeting_brief::related_meetings(
+            &brief_test_target(),
+            &db.meeting_brief_candidates(200).unwrap(),
+        );
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].decisions, artifact.decisions);
+        assert!(related[0].needs_review);
+    }
+
+    #[test]
+    fn meeting_brief_candidates_filter_dictation_before_recent_cap() {
+        let mut db = in_memory_db();
+        let mut meeting = sample_recording("r1", "inbox");
+        meeting.created_at = Utc::now() - chrono::Duration::days(1);
+        db.create_recording(&meeting).unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+        for index in 0..201 {
+            let mut dictation = sample_recording(&format!("dictation-{index}"), "inbox");
+            dictation.source_type = "dictation".into();
+            db.create_recording(&dictation).unwrap();
+        }
+        let related = crate::meeting_brief::related_meetings(
+            &brief_test_target(),
+            &db.meeting_brief_candidates(200).unwrap(),
+        );
+        assert_eq!(related[0].recording_id, "r1");
+        assert_eq!(db.meeting_brief_candidates(1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn meeting_brief_candidates_inherit_validated_source_review_and_cache_policy() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.decisions.clear();
+        artifact.summary_provenance = Some(sample_summary_provenance(
+            artifact.summary.as_deref().unwrap(),
+        ));
+        artifact.action_items_provenance =
+            Some(sample_action_items_provenance(&artifact.action_items));
+        db.save_meeting_artifact(&artifact).unwrap();
+        let target = brief_test_target();
+        let related = crate::meeting_brief::related_meetings(
+            &target,
+            &db.meeting_brief_candidates(200).unwrap(),
+        );
+        assert!(!related[0].needs_review);
+        assert!(crate::meeting_brief::brief_is_grounded(true, &related));
+        let key = crate::meeting_brief::brief_cache_key(
+            &target,
+            &[],
+            &crate::meeting_brief::brief_evidence_lines(&related),
+        );
+        // Current-policy labels alone do not suffice without citations or valid content identity.
+        for variant in 0..4 {
+            let mut provenance = sample_summary_provenance(artifact.summary.as_deref().unwrap());
+            match variant {
+                0 => provenance.citations.clear(),
+                1 => provenance.grounding_policy_version = None,
+                2 => provenance.version += 1,
+                _ => provenance.content_hash = "stale".into(),
+            }
+            artifact.summary_provenance = Some(provenance);
+            db.save_meeting_artifact(&artifact).unwrap();
+            assert!(db.meeting_brief_candidates(200).unwrap()[0].needs_review);
+        }
+        artifact.summary_provenance = Some(sample_summary_provenance(
+            artifact.summary.as_deref().unwrap(),
+        ));
+        artifact.summary_provenance.as_mut().unwrap().grounded = false;
+        db.save_meeting_artifact(&artifact).unwrap();
+        let related = crate::meeting_brief::related_meetings(
+            &target,
+            &db.meeting_brief_candidates(200).unwrap(),
+        );
+        assert!(related[0].needs_review);
+        assert!(!crate::meeting_brief::brief_is_grounded(true, &related));
+        assert_ne!(
+            key,
+            crate::meeting_brief::brief_cache_key(
+                &target,
+                &[],
+                &crate::meeting_brief::brief_evidence_lines(&related)
+            )
+        );
+
+        // Proven manual action occurrences need no generated-claim citations.
+        artifact.summary = None;
+        artifact.summary_provenance = None;
+        let provenance = artifact.action_items_provenance.as_mut().unwrap();
+        for item in &mut provenance.items {
+            item.generated = false;
+            item.citations.clear();
+        }
+        db.save_meeting_artifact(&artifact).unwrap();
+        assert!(!db.meeting_brief_candidates(200).unwrap()[0].needs_review);
+        // Missing legacy metadata cannot establish the same authority.
+        artifact.action_items_provenance = None;
+        db.save_meeting_artifact(&artifact).unwrap();
+        assert!(db.meeting_brief_candidates(200).unwrap()[0].needs_review);
+
+        artifact.action_items_provenance =
+            Some(sample_action_items_provenance(&artifact.action_items));
+        artifact
+            .action_items_provenance
+            .as_mut()
+            .unwrap()
+            .grounding_policy_version = None;
+        db.save_meeting_artifact(&artifact).unwrap();
+        assert!(db.meeting_brief_candidates(200).unwrap()[0].needs_review);
+        artifact.action_items_provenance =
+            Some(sample_action_items_provenance(&artifact.action_items));
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.conn
+            .execute(
+                "UPDATE recordings SET transcript_complete = 0 WHERE id = 'r1'",
+                [],
+            )
+            .unwrap();
+        assert!(db.meeting_brief_candidates(200).unwrap()[0].needs_review);
+    }
+
+    #[test]
+    fn meeting_action_completion_round_trips_hashes_without_changing_meeting_content() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+        let artifact_before = db.get_meeting_artifact("r1").unwrap().unwrap();
+
+        assert_eq!(
+            db.set_meeting_action_completed("r1", "Ship onboarding polish", true)
+                .unwrap(),
+            vec!["Ship onboarding polish"]
+        );
+        assert_eq!(
+            db.get_meeting_action_completion("r1").unwrap(),
+            vec!["Ship onboarding polish"]
+        );
+        let stored: String = db
+            .conn
+            .query_row(
+                "SELECT meeting_action_completion FROM recordings WHERE id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains("Ship onboarding polish"));
+        assert_eq!(
+            serde_json::to_value(db.get_meeting_artifact("r1").unwrap().unwrap()).unwrap(),
+            serde_json::to_value(artifact_before).unwrap()
+        );
+        assert_eq!(
+            db.get_recording("r1").unwrap().unwrap().source_type,
+            "meeting"
+        );
+    }
+
+    #[test]
+    fn meeting_action_completion_rejects_unknown_tasks_and_prunes_replaced_items() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        db.save_meeting_artifact(&artifact).unwrap();
+        db.set_meeting_action_completed("r1", "Ship onboarding polish", true)
+            .unwrap();
+
+        artifact.action_items = vec!["Confirm launch checklist".to_string()];
+        db.save_meeting_artifact(&artifact).unwrap();
+        assert!(db
+            .set_meeting_action_completed("r1", "Ship onboarding polish", false)
+            .unwrap_err()
+            .to_string()
+            .contains("not found"));
+        assert_eq!(
+            db.set_meeting_action_completed("r1", "Confirm launch checklist", true)
+                .unwrap(),
+            vec!["Confirm launch checklist"]
+        );
+        let stored: String = db
+            .conn
+            .query_row(
+                "SELECT meeting_action_completion FROM recordings WHERE id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!stored.contains(&analysis_content_hash("Ship onboarding polish")));
+    }
+
+    #[test]
+    fn meeting_followups_review_only_matching_generated_items() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.action_items = vec![
+            "Supported".into(),
+            "Needs review".into(),
+            "No citations".into(),
+            "Manual edit".into(),
+        ];
+        let mut provenance = sample_action_items_provenance(&artifact.action_items);
+        provenance.grounded = false;
+        provenance.items[1].grounded = false;
+        provenance.items[2].citations.clear();
+        provenance.items[3].generated = false;
+        provenance.items[3].grounded = false;
+        provenance.items[3].citations.clear();
+        artifact.action_items_provenance = Some(provenance.clone());
+        db.save_meeting_artifact(&artifact).unwrap();
+        // Artifact content is authoritative even if the recording copy is stale.
+        db.conn
+            .execute(
+                "UPDATE recordings SET action_items = ?1 WHERE id = 'r1'",
+                params!["[\"Stale recording task\"]"],
+            )
+            .unwrap();
+        let page = db.list_meeting_followups(None, 0, 25, true).unwrap();
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.needs_review)
+                .collect::<Vec<_>>(),
+            vec![false, true, true, false]
+        );
+        assert_eq!(page.items[0].task, "Supported");
+
+        for policy in [
+            None,
+            Some(crate::models::SUMMARY_GROUNDING_POLICY_VERSION - 1),
+        ] {
+            provenance.grounding_policy_version = policy;
+            artifact.action_items_provenance = Some(provenance.clone());
+            db.save_meeting_artifact(&artifact).unwrap();
+            let page = db.list_meeting_followups(None, 0, 25, true).unwrap();
+            assert_eq!(
+                page.items
+                    .iter()
+                    .map(|item| item.needs_review)
+                    .collect::<Vec<_>>(),
+                vec![true, true, true, false]
+            );
+        }
+    }
+
+    #[test]
+    fn meeting_followups_combine_duplicate_occurrence_review_before_paging() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.action_items = vec!["Same task".into(), "Same task".into(), "Other task".into()];
+        let mut provenance = sample_action_items_provenance(&artifact.action_items);
+        provenance.items[1].grounded = false;
+        artifact.action_items_provenance = Some(provenance);
+        db.save_meeting_artifact(&artifact).unwrap();
+        let first = db.list_meeting_followups(Some("same"), 0, 1, true).unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].task, "Same task");
+        assert!(first.items[0].needs_review);
+        let second = db.list_meeting_followups(None, 1, 1, true).unwrap();
+        assert_eq!(second.items[0].task, "Other task");
+        assert!(!second.items[0].needs_review);
+    }
+
+    #[test]
+    fn meeting_followups_do_not_attribute_invalid_or_absent_provenance() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut artifact = sample_meeting_artifact();
+        artifact.action_items = vec!["Legacy or edited task".into()];
+        let mut valid = sample_action_items_provenance(&artifact.action_items);
+        valid.items[0].grounded = false;
+        let mut wrong_list = valid.clone();
+        wrong_list.content_hash = "wrong".into();
+        let mut wrong_item = valid.clone();
+        wrong_item.items[0].content_hash = "wrong".into();
+        let mut wrong_version = valid;
+        wrong_version.version += 1;
+        db.save_meeting_artifact(&artifact).unwrap();
+        for raw in [
+            None,
+            Some("malformed".to_string()),
+            Some(serde_json::to_string(&wrong_list).unwrap()),
+            Some(serde_json::to_string(&wrong_item).unwrap()),
+            Some(serde_json::to_string(&wrong_version).unwrap()),
+        ] {
+            db.conn.execute("UPDATE meeting_artifacts SET action_items_provenance = ?1 WHERE recording_id = 'r1'", params![raw]).unwrap();
+            let page = db.list_meeting_followups(None, 0, 25, true).unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert!(!page.items[0].needs_review);
+        }
+        db.conn
+            .execute(
+                "DELETE FROM meeting_artifacts WHERE recording_id = 'r1'",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE recordings SET action_items = ?1 WHERE id = 'r1'",
+                params![serde_json::to_string(&artifact.action_items).unwrap()],
+            )
+            .unwrap();
+        let legacy = db.list_meeting_followups(None, 0, 25, true).unwrap();
+        assert_eq!(legacy.items.len(), 1);
+        assert!(!legacy.items[0].needs_review);
+    }
+
+    #[test]
+    fn meeting_followups_page_across_old_meetings_and_preserve_stored_tasks() {
+        let mut db = in_memory_db();
+        let base_time = Utc::now();
+
+        for index in 0..32 {
+            let recording_id = format!("meeting-{index:02}");
+            let mut recording = sample_recording(&recording_id, "inbox");
+            recording.title = format!("Planning {index:02}");
+            recording.created_at = base_time - chrono::Duration::minutes(index);
+            recording.updated_at = recording.created_at;
+            db.create_recording(&recording).unwrap();
+
+            let mut artifact = sample_meeting_artifact();
+            artifact.id = format!("artifact-{index:02}");
+            artifact.recording_id = recording_id;
+            artifact.title = Some(recording.title.clone());
+            artifact.action_items = vec![format!("Follow up {index:02}")];
+            artifact.created_at = recording.created_at;
+            artifact.updated_at = recording.updated_at;
+            db.save_meeting_artifact(&artifact).unwrap();
+        }
+
+        let mut oldest = sample_meeting_artifact();
+        oldest.id = "artifact-31".to_string();
+        oldest.recording_id = "meeting-31".to_string();
+        oldest.title = Some("Older customer review".to_string());
+        oldest.action_items = vec![
+            "Maya owns renewal by 2026-11-04".to_string(),
+            "Maya owns renewal by 2026-11-04".to_string(),
+            "  Preserve this stored task exactly  ".to_string(),
+            "  ".to_string(),
+        ];
+        db.save_meeting_artifact(&oldest).unwrap();
+        db.conn
+            .execute(
+                "UPDATE recordings SET action_items = ?1 WHERE id = ?2",
+                params!["[\"Stale recording copy\"]", "meeting-31"],
+            )
+            .unwrap();
+        db.set_meeting_action_completed("meeting-31", "Maya owns renewal by 2026-11-04", true)
+            .unwrap();
+
+        let mut dictation = sample_recording("dictation", "inbox");
+        dictation.source_type = "dictation".to_string();
+        dictation.created_at = base_time + chrono::Duration::minutes(1);
+        db.create_recording(&dictation).unwrap();
+        db.conn
+            .execute(
+                "UPDATE recordings SET action_items = ?1 WHERE id = ?2",
+                params!["[\"Do not return this\"]", "dictation"],
+            )
+            .unwrap();
+
+        let first = db.list_meeting_followups(None, 0, 30, false).unwrap();
+        assert_eq!(first.items.len(), 30);
+        assert_eq!(first.next_offset, Some(30));
+
+        let second = db.list_meeting_followups(None, 30, 30, false).unwrap();
+        assert_eq!(second.next_offset, None);
+        assert_eq!(second.items.len(), 2);
+        assert_eq!(second.items[0].recording_id, "meeting-30");
+        assert_eq!(second.items[1].recording_id, "meeting-31");
+        assert_eq!(
+            second.items[1].task,
+            "  Preserve this stored task exactly  "
+        );
+        assert!(!second
+            .items
+            .iter()
+            .any(|item| item.task == "Stale recording copy"));
+        assert!(!second
+            .items
+            .iter()
+            .any(|item| item.recording_id == "dictation"));
+
+        let completed = db
+            .list_meeting_followups(Some("MAYA 2026"), 0, 30, true)
+            .unwrap();
+        assert_eq!(completed.items.len(), 1);
+        assert!(completed.items[0].completed);
+        assert_eq!(completed.items[0].meeting_title, "Older customer review");
+
+        let hidden_completed = db
+            .list_meeting_followups(Some("older CUSTOMER"), 0, 30, false)
+            .unwrap();
+        assert_eq!(hidden_completed.items.len(), 1);
+        assert_eq!(
+            hidden_completed.items[0].task,
+            "  Preserve this stored task exactly  "
+        );
+    }
+
+    #[test]
+    fn rename_recording_rolls_back_when_artifact_title_update_fails() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_meeting_artifact(&sample_meeting_artifact())
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_title BEFORE UPDATE OF title ON meeting_artifacts
+             BEGIN SELECT RAISE(ABORT, 'QA rejects artifact rename'); END;",
+            )
+            .unwrap();
+        assert!(db.rename_recording("r1", "Design review").is_err());
+        let raw_title: String = db
+            .conn
+            .query_row("SELECT title FROM recordings WHERE id = 'r1'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(raw_title, "Recording r1");
+        assert_eq!(
+            db.get_recording("r1").unwrap().unwrap().title,
+            "Weekly Sync"
+        );
+    }
+
+    #[test]
     fn test_update_recording_source_type() {
         let mut db = in_memory_db();
         db.create_recording(&sample_recording("r1", "inbox"))
@@ -9840,6 +14931,298 @@ mod tests {
         let mut db = in_memory_db();
         let result = db.update_recording_source_type("missing-id", "dictation");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn optional_recognition_metadata_rejects_corrupt_or_unbound_hints() {
+        let mut db = in_memory_db();
+        let recording = sample_recording("invalid-review", "inbox");
+        let history = DictationHistoryTextRecord {
+            recording_id: recording.id.clone(),
+            final_text: "Hello world".into(),
+            raw_text: "Hello world".into(),
+            reprocessed_from_id: None,
+            mode_preset: None,
+            created_at: Utc::now(),
+        };
+        db.create_dictation_history_entry(
+            &recording,
+            &sample_transcript(&recording.id),
+            &history,
+            None,
+        )
+        .unwrap();
+        for value in [
+            "bad json",
+            r#"[{"word":"absent","score":0.5,"startTime":0,"endTime":1}]"#,
+            r#"[{"word":"Hello","score":1.5,"startTime":0,"endTime":1}]"#,
+        ] {
+            db.conn.execute("UPDATE dictation_history_text SET recognition_review_words = ?1 WHERE recording_id = ?2",
+                params![value, &recording.id]).unwrap();
+            assert_eq!(
+                db.get_dictation_recognition_review_words(&recording.id)
+                    .unwrap(),
+                None
+            );
+            assert!(db
+                .get_dictation_history_text(&recording.id)
+                .unwrap()
+                .is_some());
+        }
+    }
+
+    #[test]
+    fn recognition_review_survives_formatted_storage_and_edits_but_not_source_replacement() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("recognition-review", "inbox");
+        recording.source_type = "dictation".into();
+        let mut transcript = sample_transcript(&recording.id);
+        transcript.full_text = "Tailie text.".into();
+        let history = DictationHistoryTextRecord {
+            recording_id: recording.id.clone(),
+            final_text: transcript.full_text.clone(),
+            raw_text: "tailie text".into(),
+            reprocessed_from_id: None,
+            mode_preset: None,
+            created_at: Utc::now(),
+        };
+        let words = vec![RecognitionReviewWord {
+            word: "tailie".into(),
+            score: 0.533,
+            start_time: 1.0,
+            end_time: 1.2,
+        }];
+        db.create_dictation_history_entry_with_recognition_review(
+            &recording,
+            &transcript,
+            &history,
+            None,
+            Some(&words),
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_dictation_recognition_review_words(&recording.id)
+                .unwrap(),
+            Some(words.clone())
+        );
+        db.save_dictation_edit(&recording.id, Some("Teletext."), None)
+            .unwrap();
+        assert_eq!(
+            db.get_dictation_recognition_review_words(&recording.id)
+                .unwrap(),
+            Some(words)
+        );
+        assert_eq!(
+            db.get_dictation_history_text(&recording.id)
+                .unwrap()
+                .unwrap()
+                .raw_text,
+            "tailie text"
+        );
+        let tx = db.conn.transaction().unwrap();
+        let replacement = DictationHistoryTextRecord {
+            raw_text: "teletext".into(),
+            ..history
+        };
+        Database::write_dictation_history_text_transaction(&tx, &replacement).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            db.get_dictation_recognition_review_words(&recording.id)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn dictation_edit_round_trip_preserves_text_and_can_reset() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("dictation-edit", "inbox");
+        recording.source_type = "dictation".to_string();
+        db.create_recording(&recording).unwrap();
+        db.save_transcript(&sample_transcript("dictation-edit"))
+            .unwrap();
+
+        let corrected = "  Keep exact spacing.\n\nAnd paragraphs.  ";
+        assert_eq!(
+            db.save_dictation_edit("dictation-edit", Some(corrected), None)
+                .unwrap()
+                .as_deref(),
+            Some(corrected)
+        );
+        assert_eq!(
+            db.get_dictation_edit("dictation-edit").unwrap().as_deref(),
+            Some(corrected)
+        );
+        assert_eq!(
+            db.save_dictation_edit("dictation-edit", None, Some(corrected))
+                .unwrap(),
+            None
+        );
+        assert_eq!(db.get_dictation_edit("dictation-edit").unwrap(), None);
+        assert_eq!(
+            db.get_transcript("dictation-edit")
+                .unwrap()
+                .unwrap()
+                .full_text,
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn dictation_edit_compare_and_swap_preserves_the_saved_text_on_conflict() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("dictation-conflict", "inbox");
+        recording.source_type = "dictation".to_string();
+        db.create_recording(&recording).unwrap();
+        db.save_dictation_edit("dictation-conflict", Some("first edit"), None)
+            .unwrap();
+        assert_eq!(
+            db.save_dictation_edit("dictation-conflict", Some("first edit"), None)
+                .unwrap(),
+            Some("first edit".to_string()),
+            "retrying an unknown save outcome is idempotent"
+        );
+
+        let error = db
+            .save_dictation_edit(
+                "dictation-conflict",
+                Some("stale replacement"),
+                Some("older edit"),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("conflict"));
+        assert_eq!(
+            db.get_dictation_edit("dictation-conflict").unwrap(),
+            Some("first edit".to_string())
+        );
+    }
+
+    #[test]
+    fn dictation_edits_reject_wrong_recording_type_and_oversized_text() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("meeting-edit", "inbox"))
+            .unwrap();
+        assert!(db
+            .save_dictation_edit("meeting-edit", Some("text"), None)
+            .unwrap_err()
+            .to_string()
+            .contains("not a dictation"));
+
+        let mut dictation = sample_recording("large-edit", "inbox");
+        dictation.source_type = "dictation".to_string();
+        db.create_recording(&dictation).unwrap();
+        let oversized = "x".repeat(1024 * 1024 + 1);
+        assert!(db
+            .save_dictation_edit("large-edit", Some(&oversized), None)
+            .unwrap_err()
+            .to_string()
+            .contains("1 MiB"));
+        assert_eq!(db.get_dictation_edit("large-edit").unwrap(), None);
+    }
+
+    #[test]
+    fn dictation_drafts_preserve_exact_text_and_clear_only_the_expected_revision() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("dictation-draft", "inbox");
+        recording.source_type = "dictation".to_string();
+        recording.title = "Draft title".to_string();
+        db.create_recording(&recording).unwrap();
+
+        let draft = "  Keep exact spacing.\n\nAnd paragraphs.  ";
+        db.save_dictation_draft("dictation-draft", Some(draft), Some("saved base"))
+            .unwrap();
+        let first_draft_updated_at: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT dictation_draft_updated_at FROM recordings
+                 WHERE id = 'dictation-draft'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(first_draft_updated_at.is_some());
+        assert_eq!(
+            db.list_dictation_drafts().unwrap(),
+            vec![DictationDraft {
+                recording_id: "dictation-draft".to_string(),
+                title: "Draft title".to_string(),
+                text: draft.to_string(),
+                expected_saved_text: Some("saved base".to_string()),
+            }]
+        );
+
+        db.save_dictation_draft("dictation-draft", Some(""), None)
+            .unwrap();
+        assert!(!db.clear_dictation_draft("dictation-draft", draft).unwrap());
+        assert_eq!(db.list_dictation_drafts().unwrap()[0].text, "");
+        let current_draft_updated_at: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT dictation_draft_updated_at FROM recordings
+                 WHERE id = 'dictation-draft'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(current_draft_updated_at.is_some());
+        assert!(current_draft_updated_at >= first_draft_updated_at);
+        assert!(db.clear_dictation_draft("dictation-draft", "").unwrap());
+        assert!(db.list_dictation_drafts().unwrap().is_empty());
+
+        db.save_dictation_draft("dictation-draft", Some("temporary"), Some("base"))
+            .unwrap();
+        db.save_dictation_draft("dictation-draft", None, Some("ignored"))
+            .unwrap();
+        let stored: (Option<String>, Option<String>, Option<i64>) = db
+            .conn
+            .query_row(
+                "SELECT dictation_draft_text, dictation_draft_base_edit,
+                        dictation_draft_updated_at
+                 FROM recordings WHERE id = 'dictation-draft'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (None, None, None));
+    }
+
+    fn speaker_turn_expectations(ids: &[&str]) -> Vec<TranscriptSegmentExpectation> {
+        sample_multi_segment_transcript("r1")
+            .segments
+            .iter()
+            .filter(|segment| ids.contains(&segment.id.as_str()))
+            .map(deletion_expectation)
+            .collect()
+    }
+
+    #[test]
+    fn atomic_speaker_turn_edit_rejects_stale_and_mismatched_expectations() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+        let expected = speaker_turn_expectations(&["s1"]);
+        db.edit_transcript_speaker_turn(
+            "r1",
+            &["s2".into()],
+            "Unrelated edit",
+            &speaker_turn_expectations(&["s2"]),
+        )
+        .unwrap();
+        db.edit_transcript_speaker_turn("r1", &["s1".into()], "First correction", &expected)
+            .unwrap();
+        let (before, revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+        for invalid in [expected, vec![], speaker_turn_expectations(&["s2"])] {
+            let error = db
+                .edit_transcript_speaker_turn("r1", &["s1".into()], "Stale correction", &invalid)
+                .unwrap_err();
+            assert!(error.to_string().contains("Transcript changed"));
+            let (after, after_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
+            assert_eq!(after.full_text, before.full_text);
+            assert_eq!(after_revision, revision);
+        }
+        assert_eq!(before.segments[1].text, "Unrelated edit");
     }
 
     #[test]
@@ -9867,6 +15250,7 @@ mod tests {
             "r1",
             &["s2".to_string(), "s3".to_string()],
             "corrected speaker turn",
+            &speaker_turn_expectations(&["s2", "s3"]),
         )
         .unwrap();
 
@@ -9882,6 +15266,8 @@ mod tests {
         );
         assert_eq!(updated.segments[1].text, "corrected speaker turn");
         assert_eq!(updated.segments[1].start_time, 1.0);
+        // The edited turn still covers s3's audio, not just s2's.
+        assert_eq!(updated.segments[1].end_time, 3.0);
         assert_eq!(
             updated.full_text,
             "first segment corrected speaker turn fourth segment"
@@ -9909,18 +15295,29 @@ mod tests {
         let (_, before_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
 
         let blank = db
-            .edit_transcript_speaker_turn("r1", &["s1".to_string()], "   \n")
+            .edit_transcript_speaker_turn(
+                "r1",
+                &["s1".to_string()],
+                "   \n",
+                &speaker_turn_expectations(&["s1"]),
+            )
             .expect_err("blank speaker-turn text must fail");
         assert!(blank.to_string().contains("cannot be blank"));
         let missing = db
-            .edit_transcript_speaker_turn("r1", &["missing".to_string()], "replacement")
+            .edit_transcript_speaker_turn(
+                "r1",
+                &["missing".to_string()],
+                "replacement",
+                &speaker_turn_expectations(&["missing"]),
+            )
             .expect_err("missing segment IDs must fail");
-        assert!(missing.to_string().contains("was not found"));
+        assert!(missing.to_string().contains("Transcript changed"));
         let duplicate_request = db
             .edit_transcript_speaker_turn(
                 "r1",
                 &["s1".to_string(), "s1".to_string()],
                 "replacement",
+                &speaker_turn_expectations(&["s1"]),
             )
             .expect_err("duplicate requested IDs must fail");
         assert!(duplicate_request
@@ -9935,7 +15332,12 @@ mod tests {
         duplicate_segments.segments[1].id = "s1".to_string();
         db.save_transcript(&duplicate_segments).unwrap();
         let duplicate_stored = db
-            .edit_transcript_speaker_turn("r1", &["s1".to_string()], "replacement")
+            .edit_transcript_speaker_turn(
+                "r1",
+                &["s1".to_string()],
+                "replacement",
+                &speaker_turn_expectations(&["s1"]),
+            )
             .expect_err("stored duplicate segment IDs must fail");
         assert!(duplicate_stored.to_string().contains("appears 2 times"));
     }
@@ -9960,16 +15362,18 @@ mod tests {
         db.save_embedding("r1", "s2", "second segment", &[0.1, 0.2], "m", 1.0, 2.0)
             .unwrap();
         let (_, before_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
-        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+        refuse_transcript_index_writes(&db);
 
         let error = db
             .edit_transcript_speaker_turn(
                 "r1",
                 &["s2".to_string(), "s3".to_string()],
                 "corrected speaker turn",
+                &speaker_turn_expectations(&["s2", "s3"]),
             )
             .expect_err("FTS failure must roll back the speaker-turn edit");
-        assert!(error.to_string().contains("transcript_fts"));
+        assert!(matches!(error.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(code, _)) if code.code == rusqlite::ErrorCode::ConstraintViolation));
 
         let (transcript, after_revision) = db.get_transcript_with_revision("r1").unwrap().unwrap();
         assert_eq!(after_revision, before_revision);
@@ -10053,6 +15457,7 @@ mod tests {
             .unwrap();
 
         let transcript = Transcript {
+            heard_through_speakers: Vec::new(),
             id: "t1".to_string(),
             recording_id: "r1".to_string(),
             segments: vec![
@@ -10080,6 +15485,7 @@ mod tests {
             model_id: None,
             requested_provider: None,
             actual_provider: None,
+            measured_word_timestamps: false,
             created_at: Utc::now(),
         };
         db.save_transcript(&transcript).unwrap();
@@ -10096,6 +15502,171 @@ mod tests {
 
         let hits = db.search_transcripts("first", 10, None).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn guarded_transcript_delete_succeeds_and_rebuilds_fts() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let transcript = sample_multi_segment_transcript("r1");
+        let expected = vec![deletion_expectation(&transcript.segments[0])];
+        db.save_transcript(&transcript).unwrap();
+        db.conn
+            .execute("UPDATE recordings SET duration = NULL WHERE id = 'r1'", [])
+            .unwrap();
+
+        let removed = db
+            .delete_transcript_segments_guarded("r1", &["s1".to_string()], &expected)
+            .unwrap();
+
+        assert_eq!(removed, 1);
+        let stored = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(stored.segments.len(), 3);
+        assert!(stored.segments.iter().all(|segment| segment.id != "s1"));
+        assert!(db.search_transcripts("first", 10, None).unwrap().is_empty());
+        assert_eq!(db.search_transcripts("second", 10, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn guarded_transcript_delete_supports_full_text_only_legacy_rows() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut transcript = sample_multi_segment_transcript("r1");
+        transcript.segments.clear();
+        transcript.full_text = "legacy full text".to_string();
+        db.save_transcript(&transcript).unwrap();
+        db.conn
+            .execute("UPDATE recordings SET duration = NULL WHERE id = 'r1'", [])
+            .unwrap();
+        let synthesized = db.get_transcript("r1").unwrap().unwrap().segments;
+        assert_eq!(synthesized.len(), 1);
+        assert_eq!(synthesized[0].end_time, 0.0);
+        let expected = vec![deletion_expectation(&synthesized[0])];
+
+        assert_eq!(
+            db.delete_transcript_segments_guarded("r1", &["r1-full-text".to_string()], &expected,)
+                .unwrap(),
+            1
+        );
+        let stored = db.get_transcript("r1").unwrap().unwrap();
+        assert!(stored.segments.is_empty());
+        assert!(stored.full_text.is_empty());
+        assert!(db
+            .search_transcripts("legacy", 10, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn guarded_transcript_delete_rejects_changed_quoted_text() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let transcript = sample_multi_segment_transcript("r1");
+        let expected = vec![deletion_expectation(&transcript.segments[0])];
+        db.save_transcript(&transcript).unwrap();
+        db.update_transcript_segment("r1", "s1", "changed first segment")
+            .unwrap();
+
+        let error = db
+            .delete_transcript_segments_guarded("r1", &["s1".to_string()], &expected)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Transcript changed. Review the current turn before deleting it."
+        );
+        let stored = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(stored.segments.len(), 4);
+        assert_eq!(stored.segments[0].text, "changed first segment");
+    }
+
+    #[test]
+    fn guarded_transcript_delete_is_all_or_nothing_when_a_row_is_missing() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let transcript = sample_multi_segment_transcript("r1");
+        let expected = vec![
+            deletion_expectation(&transcript.segments[0]),
+            deletion_expectation(&transcript.segments[1]),
+        ];
+        db.save_transcript(&transcript).unwrap();
+        db.delete_transcript_segments("r1", &["s2".to_string()])
+            .unwrap();
+
+        assert!(db
+            .delete_transcript_segments_guarded(
+                "r1",
+                &["s1".to_string(), "s2".to_string()],
+                &expected,
+            )
+            .is_err());
+        let stored = db.get_transcript("r1").unwrap().unwrap();
+        assert!(stored.segments.iter().any(|segment| segment.id == "s1"));
+        assert!(stored.segments.iter().all(|segment| segment.id != "s2"));
+    }
+
+    #[test]
+    fn guarded_transcript_delete_rejects_changed_timing_or_speaker() {
+        for mutation in ["timing", "speaker"] {
+            let mut db = in_memory_db();
+            db.create_recording(&sample_recording("r1", "inbox"))
+                .unwrap();
+            let transcript = sample_multi_segment_transcript("r1");
+            let expected = vec![deletion_expectation(&transcript.segments[0])];
+            db.save_transcript(&transcript).unwrap();
+            let mut changed = transcript.segments.clone();
+            if mutation == "timing" {
+                changed[0].end_time += 0.25;
+            } else {
+                changed[0].speaker_id = Some("speaker_9".to_string());
+            }
+            db.update_transcript_segments("r1", &changed).unwrap();
+
+            assert!(db
+                .delete_transcript_segments_guarded("r1", &["s1".to_string()], &expected)
+                .is_err());
+            assert_eq!(db.get_transcript("r1").unwrap().unwrap().segments.len(), 4);
+        }
+    }
+
+    #[test]
+    fn guarded_transcript_delete_allows_unrelated_edits_and_rejects_bad_expectation_sets() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let transcript = sample_multi_segment_transcript("r1");
+        let expected = vec![deletion_expectation(&transcript.segments[0])];
+        db.save_transcript(&transcript).unwrap();
+        db.update_transcript_segment("r1", "s4", "unrelated edit retained")
+            .unwrap();
+
+        assert!(db
+            .delete_transcript_segments_guarded("r1", &[], &[])
+            .is_err());
+        assert!(db
+            .delete_transcript_segments_guarded(
+                "r1",
+                &["s1".to_string(), "s1".to_string()],
+                &expected,
+            )
+            .is_err());
+        assert!(db
+            .delete_transcript_segments_guarded("r1", &["s1".to_string()], &[])
+            .is_err());
+
+        assert_eq!(
+            db.delete_transcript_segments_guarded("r1", &["s1".to_string()], &expected)
+                .unwrap(),
+            1
+        );
+        let stored = db.get_transcript("r1").unwrap().unwrap();
+        assert_eq!(
+            stored.segments.last().unwrap().text,
+            "unrelated edit retained"
+        );
     }
 
     #[test]
@@ -10141,6 +15712,14 @@ mod tests {
         db.save_transcript(&sample_transcript("r1")).unwrap();
         db.save_meeting_artifact(&sample_meeting_artifact())
             .unwrap();
+        db.replace_generated_summary_with_undo(
+            "r1",
+            Some("Reviewed roadmap and launch blockers."),
+            "Generated",
+            &sample_summary_provenance("Generated"),
+            "input-1",
+        )
+        .unwrap();
         db.save_embedding("r1", "s1", "hello world", &[0.1, 0.2, 0.3], "m", 0.0, 1.0)
             .unwrap();
         db.conn
@@ -10159,7 +15738,11 @@ mod tests {
 
         assert!(db.get_meeting_artifact("r1").unwrap().is_none());
         assert!(!db.has_embeddings("r1"));
-        for table in ["transcript_artifacts", "insertion_actions"] {
+        for table in [
+            "transcript_artifacts",
+            "insertion_actions",
+            "summary_regeneration_undo",
+        ] {
             let count: i64 = db
                 .conn
                 .query_row(
@@ -10286,6 +15869,20 @@ mod tests {
             )
             .unwrap();
 
+        // This table is created lazily by a rebuild, so seed it before reset.
+        db.begin_embedding_rebuild().unwrap();
+        db.stage_embedding(
+            "reset-fixture",
+            "recording-1",
+            "segment-1",
+            "private staged text",
+            &[0.0],
+            "test",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+
         db.purge_user_content().unwrap();
 
         for (table_name, _) in RESET_SCOPED_TABLE_DELETES {
@@ -10326,7 +15923,10 @@ mod tests {
 
     #[test]
     fn reset_schema_coverage_requires_every_application_table_to_be_classified() {
-        const INTENTIONALLY_PRESERVED_APPLICATION_TABLES: [&str; 0] = [];
+        const INTENTIONALLY_PRESERVED_APPLICATION_TABLES: [&str; 2] = [
+            "semantic_recall_revision",
+            "dictation_dictionary_revision_clock",
+        ];
         const FTS5_IMPLEMENTATION_TABLES: [&str; 10] = [
             "dictation_history_fts_config",
             "dictation_history_fts_content",
@@ -10341,6 +15941,7 @@ mod tests {
         ];
 
         let db = in_memory_db();
+        db.begin_embedding_rebuild().unwrap();
         let actual_tables: BTreeSet<String> = db
             .conn
             .prepare(
@@ -10449,10 +16050,1084 @@ mod tests {
             .execute("DELETE FROM recordings WHERE id = 'r2'", [])
             .unwrap();
 
-        let hits = db.search_embeddings(&[1.0, 0.0], 10).unwrap();
+        let hits = db.search_embeddings(&[1.0, 0.0], 10, "m").unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].recording_id, "r1");
         assert_eq!(hits[0].recording_title, "Recording r1");
+    }
+
+    #[test]
+    fn scoped_transcript_search_filters_before_limit_and_keeps_unscoped_behavior() {
+        let mut db = in_memory_db();
+        let current_texts = vec!["launch current"; 40];
+        db.create_recording(&sample_recording("current", "inbox"))
+            .unwrap();
+        db.save_transcript(&transcript_with_texts("current", &current_texts))
+            .unwrap();
+
+        db.create_recording(&sample_recording("prior-meeting", "inbox"))
+            .unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "prior-meeting",
+            &["launch decision from last week"],
+        ))
+        .unwrap();
+
+        let mut dictation = sample_recording("prior-dictation", "inbox");
+        dictation.source_type = "dictation".to_string();
+        db.create_recording(&dictation).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "prior-dictation",
+            &["launch reminder dictated earlier"],
+        ))
+        .unwrap();
+
+        let scoped = db
+            .search_transcripts_with_scope("launch", 1, Some("current"), Some("meeting"))
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].recording_id, "prior-meeting");
+
+        let unscoped = db.search_transcripts("launch", 100, None).unwrap();
+        assert_eq!(unscoped.len(), 42);
+        assert!(unscoped
+            .iter()
+            .any(|hit| hit.recording_id == "prior-dictation"));
+    }
+
+    #[test]
+    fn scoped_transcript_like_fallback_applies_filters_before_truncation() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("current", "inbox"))
+            .unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "current",
+            &vec!["roadmap current"; 40],
+        ))
+        .unwrap();
+        db.create_recording(&sample_recording("prior-meeting", "inbox"))
+            .unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "prior-meeting",
+            &["roadmap from last week"],
+        ))
+        .unwrap();
+        let mut dictation = sample_recording("prior-dictation", "inbox");
+        dictation.source_type = "dictation".to_string();
+        db.create_recording(&dictation).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "prior-dictation",
+            &["roadmap dictated note"],
+        ))
+        .unwrap();
+        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+
+        let scoped = db
+            .search_transcripts_with_scope("roadmap", 1, Some("current"), Some("meeting"))
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].recording_id, "prior-meeting");
+    }
+
+    #[test]
+    fn project_source_transcript_search_filters_before_limit_and_none_is_global() {
+        let mut db = in_memory_db();
+        for index in 0..30 {
+            let id = format!("dictation-{index:02}");
+            let mut recording = sample_recording(&id, "inbox");
+            recording.source_type = "dictation".to_string();
+            db.create_recording(&recording).unwrap();
+            db.save_transcript(&transcript_with_texts(
+                &id,
+                &["scopeword scopeword scopeword"],
+            ))
+            .unwrap();
+        }
+        db.create_recording(&sample_recording("only-meeting", "inbox"))
+            .unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "only-meeting",
+            &["scopeword meeting decision"],
+        ))
+        .unwrap();
+
+        let meetings = db
+            .search_transcripts_with_project_scope("scopeword", 1, None, Some("meeting"))
+            .unwrap();
+        assert_eq!(meetings.len(), 1);
+        assert_eq!(meetings[0].recording_id, "only-meeting");
+
+        let global = db
+            .search_transcripts_with_project_scope("scopeword", 25, None, None)
+            .unwrap();
+        assert_eq!(global.len(), 25);
+        assert!(global
+            .iter()
+            .any(|hit| hit.recording_id.starts_with("dictation-")));
+    }
+
+    #[test]
+    fn project_source_transcript_search_preserves_project_scope() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("allowed-meeting", "allowed"))
+            .unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "allowed-meeting",
+            &["projectscope decision"],
+        ))
+        .unwrap();
+        db.create_recording(&sample_recording("other-meeting", "other"))
+            .unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "other-meeting",
+            &["projectscope decision"],
+        ))
+        .unwrap();
+        let mut dictation = sample_recording("allowed-dictation", "allowed");
+        dictation.source_type = "dictation".to_string();
+        db.create_recording(&dictation).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "allowed-dictation",
+            &["projectscope dictated"],
+        ))
+        .unwrap();
+
+        let projects = vec!["allowed".to_string()];
+        let hits = db
+            .search_transcripts_with_project_scope(
+                "projectscope",
+                25,
+                Some(&projects),
+                Some("meeting"),
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].recording_id, "allowed-meeting");
+    }
+
+    #[test]
+    fn project_source_transcript_like_fallback_filters_before_limit() {
+        let mut db = in_memory_db();
+        for index in 0..30 {
+            let id = format!("fallback-dictation-{index:02}");
+            let mut recording = sample_recording(&id, "inbox");
+            recording.source_type = "dictation".to_string();
+            db.create_recording(&recording).unwrap();
+            db.save_transcript(&transcript_with_texts(
+                &id,
+                &["fallbackscope fallbackscope"],
+            ))
+            .unwrap();
+        }
+        db.create_recording(&sample_recording("fallback-meeting", "inbox"))
+            .unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "fallback-meeting",
+            &["fallbackscope meeting"],
+        ))
+        .unwrap();
+        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+
+        let hits = db
+            .search_transcripts_with_project_scope("fallbackscope", 1, None, Some("meeting"))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].recording_id, "fallback-meeting");
+    }
+
+    #[test]
+    fn status_scoped_transcript_search_filters_before_limit_and_none_is_global() {
+        let mut db = in_memory_db();
+        for index in 0..30 {
+            let id = format!("failed-meeting-{index:02}");
+            let mut recording = sample_recording(&id, "inbox");
+            recording.status = "error".to_string();
+            db.create_recording(&recording).unwrap();
+            db.save_transcript(&transcript_with_texts(
+                &id,
+                &["statusscope statusscope statusscope"],
+            ))
+            .unwrap();
+        }
+        let mut ready_meeting = sample_recording("ready-meeting", "inbox");
+        ready_meeting.status = "completed".to_string();
+        db.create_recording(&ready_meeting).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "ready-meeting",
+            &["statusscope ready decision"],
+        ))
+        .unwrap();
+
+        let ready = db
+            .search_transcripts_with_filters(
+                "statusscope",
+                1,
+                None,
+                Some("meeting"),
+                Some("completed"),
+            )
+            .unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].recording_id, "ready-meeting");
+
+        let global = db
+            .search_transcripts_with_filters("statusscope", 25, None, None, None)
+            .unwrap();
+        assert_eq!(global.len(), 25);
+        assert!(global
+            .iter()
+            .any(|hit| hit.recording_id.starts_with("failed-meeting-")));
+    }
+
+    #[test]
+    fn status_scoped_transcript_search_combines_project_source_and_status() {
+        let mut db = in_memory_db();
+        let mut allowed_ready = sample_recording("allowed-ready", "allowed");
+        allowed_ready.status = "completed".to_string();
+        db.create_recording(&allowed_ready).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "allowed-ready",
+            &["combinedscope decision"],
+        ))
+        .unwrap();
+        let mut other_ready = sample_recording("other-ready", "other");
+        other_ready.status = "completed".to_string();
+        db.create_recording(&other_ready).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "other-ready",
+            &["combinedscope decision"],
+        ))
+        .unwrap();
+        let mut failed = sample_recording("allowed-failed", "allowed");
+        failed.status = "error".to_string();
+        db.create_recording(&failed).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "allowed-failed",
+            &["combinedscope failed"],
+        ))
+        .unwrap();
+        let mut dictation = sample_recording("allowed-dictation", "allowed");
+        dictation.source_type = "dictation".to_string();
+        db.create_recording(&dictation).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "allowed-dictation",
+            &["combinedscope dictated"],
+        ))
+        .unwrap();
+
+        let projects = vec!["allowed".to_string()];
+        let hits = db
+            .search_transcripts_with_filters(
+                "combinedscope",
+                25,
+                Some(&projects),
+                Some("meeting"),
+                Some("completed"),
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].recording_id, "allowed-ready");
+    }
+
+    #[test]
+    fn status_scoped_transcript_like_fallback_filters_before_limit() {
+        let mut db = in_memory_db();
+        for index in 0..30 {
+            let id = format!("fallback-failed-{index:02}");
+            let mut recording = sample_recording(&id, "inbox");
+            recording.status = "error".to_string();
+            db.create_recording(&recording).unwrap();
+            db.save_transcript(&transcript_with_texts(
+                &id,
+                &["statusfallback statusfallback"],
+            ))
+            .unwrap();
+        }
+        let mut fallback_ready = sample_recording("fallback-ready", "inbox");
+        fallback_ready.status = "completed".to_string();
+        db.create_recording(&fallback_ready).unwrap();
+        db.save_transcript(&transcript_with_texts(
+            "fallback-ready",
+            &["statusfallback ready"],
+        ))
+        .unwrap();
+        db.conn.execute("DROP TABLE transcript_fts", []).unwrap();
+
+        let hits = db
+            .search_transcripts_with_filters(
+                "statusfallback",
+                1,
+                None,
+                Some("meeting"),
+                Some("completed"),
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].recording_id, "fallback-ready");
+    }
+
+    #[test]
+    fn scoped_embedding_search_filters_candidates_before_scoring_and_limit() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("current", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("prior-meeting", "inbox"))
+            .unwrap();
+        let mut dictation = sample_recording("prior-dictation", "inbox");
+        dictation.source_type = "dictation".to_string();
+        db.create_recording(&dictation).unwrap();
+
+        db.save_embedding("current", "s1", "current best", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.save_embedding(
+            "prior-dictation",
+            "s2",
+            "dictation second",
+            &[0.99, 0.01],
+            "m",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        db.save_embedding(
+            "prior-meeting",
+            "s3",
+            "meeting answer",
+            &[0.8, 0.2],
+            "m",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+
+        let scoped = db
+            .search_embeddings_with_scope(&[1.0, 0.0], 1, "m", Some("current"), Some("meeting"))
+            .unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].recording_id, "prior-meeting");
+
+        let unscoped = db.search_embeddings(&[1.0, 0.0], 3, "m").unwrap();
+        assert_eq!(unscoped.len(), 3);
+        assert_eq!(unscoped[0].recording_id, "current");
+    }
+
+    #[test]
+    fn scoped_embedding_availability_ignores_ineligible_vectors() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("current", "inbox"))
+            .unwrap();
+        db.save_embedding(
+            "current",
+            "s1",
+            "current meeting",
+            &[1.0, 0.0],
+            "m",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+
+        assert!(db.has_embeddings_with_scope("m", None, None).unwrap());
+        assert!(!db
+            .has_embeddings_with_scope("m", Some("current"), Some("meeting"))
+            .unwrap());
+
+        let mut dictation = sample_recording("prior-dictation", "inbox");
+        dictation.source_type = "dictation".to_string();
+        db.create_recording(&dictation).unwrap();
+        db.save_embedding(
+            "prior-dictation",
+            "s2",
+            "dictated note",
+            &[1.0, 0.0],
+            "m",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+
+        assert!(!db
+            .has_embeddings_with_scope("m", Some("current"), Some("meeting"))
+            .unwrap());
+        assert!(db.has_embeddings_with_scope("m", None, None).unwrap());
+
+        db.create_recording(&sample_recording("prior-meeting", "inbox"))
+            .unwrap();
+        db.save_embedding(
+            "prior-meeting",
+            "s3",
+            "earlier meeting",
+            &[0.8, 0.2],
+            "m",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+
+        assert!(db
+            .has_embeddings_with_scope("m", Some("current"), Some("meeting"))
+            .unwrap());
+        assert!(!db
+            .has_embeddings_with_scope("other-model", None, None)
+            .unwrap());
+    }
+
+    fn semantic_scan_scope() -> EmbeddingSearchScope {
+        EmbeddingSearchScope {
+            model: "m".to_string(),
+            dimensions: 2,
+            exclude_recording_id: None,
+            source_type: None,
+        }
+    }
+
+    fn semantic_scan_fixture() -> Database {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_embedding("r1", "s1", "best", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db
+    }
+
+    #[test]
+    fn semantic_revision_reseeds_an_empty_singleton_at_startup() {
+        let db = in_memory_db();
+        db.conn
+            .execute_batch(
+                "DROP TRIGGER semantic_revision_no_delete;
+                 DELETE FROM semantic_recall_revision;",
+            )
+            .unwrap();
+        assert!(verify_semantic_revision(&db.conn).is_err());
+        initialize_semantic_revision(&db.conn).unwrap();
+        assert_eq!(verify_semantic_revision(&db.conn).unwrap(), 0);
+        initialize_semantic_revision(&db.conn).unwrap();
+        assert_eq!(verify_semantic_revision(&db.conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn semantic_scan_finds_best_before_old_50000_cutoff() {
+        let db = semantic_scan_fixture();
+        db.conn
+            .execute_batch(
+                "WITH RECURSIVE n(x) AS (
+            VALUES(1) UNION ALL SELECT x + 1 FROM n WHERE x < 50000
+        ) INSERT INTO transcript_embeddings
+            (recording_id, segment_id, text, embedding, model, start_time, end_time, created_at)
+            SELECT 'r1', 'duplicate', 'newer', x'000000000000803f', 'm', 0, 1,
+                   '9999-01-01' FROM n;",
+            )
+            .unwrap();
+        let hits = db.search_embeddings(&[1.0, 0.0], 1, "m").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "best");
+        assert_eq!(hits[0].score, 1.0);
+    }
+
+    #[test]
+    fn semantic_scan_pages_negative_ids_and_deterministic_duplicate_ties() {
+        let db = semantic_scan_fixture();
+        db.conn
+            .execute("DELETE FROM transcript_embeddings", [])
+            .unwrap();
+        for id in -2..=(EMBEDDING_PAGE_ROWS as i64 + 2) {
+            db.conn.execute("INSERT INTO transcript_embeddings
+                (id, recording_id, segment_id, text, embedding, model, start_time, end_time, created_at)
+                VALUES (?1, 'r1', 'duplicate', ?2, ?3, 'm', 0, 1, 'same')",
+                params![id, id.to_string(), f32_slice_to_blob(&[1.0, 0.0])]).unwrap();
+        }
+        let scope = semantic_scan_scope();
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        let first = db.read_embedding_scan_page(&scope, &token, None).unwrap();
+        assert_eq!(first.rows.len(), EMBEDDING_PAGE_ROWS);
+        assert_eq!(first.rows[0].id, -2);
+        assert!(!first.exhausted);
+        let second = db
+            .read_embedding_scan_page(&scope, &token, first.next_cursor)
+            .unwrap();
+        assert!(second.exhausted);
+        assert_eq!(second.rows.len(), 5);
+        assert_eq!(second.rows[0].id, first.next_cursor.unwrap() + 1);
+        db.validate_embedding_scan(&token).unwrap();
+        let hits = db.search_embeddings(&[1.0, 0.0], 2, "m").unwrap();
+        assert_eq!(hits[0].text, (EMBEDDING_PAGE_ROWS + 2).to_string());
+        assert_eq!(hits[1].text, (EMBEDDING_PAGE_ROWS + 1).to_string());
+    }
+
+    #[test]
+    fn semantic_scan_filters_model_dimensions_scope_and_deleted_before_paging() {
+        let mut db = semantic_scan_fixture();
+        db.create_recording(&sample_recording("r2", "inbox"))
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE recordings SET source_type = 'meeting' WHERE id = 'r2'",
+                [],
+            )
+            .unwrap();
+        db.save_embedding("r2", "s2", "eligible", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.save_embedding("r2", "s2", "wrong model", &[1.0, 0.0], "other", 0.0, 1.0)
+            .unwrap();
+        db.save_embedding("r2", "s2", "wrong dimensions", &[1.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.save_embedding("orphan", "s3", "deleted", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO transcript_embeddings
+            (recording_id, segment_id, text, embedding, model, created_at)
+            VALUES ('r2', 'bad', 'trailing bytes', x'0000803f0000000000', 'm', 'same')",
+                [],
+            )
+            .unwrap();
+        let mut scope = semantic_scan_scope();
+        scope.exclude_recording_id = Some("r1".to_string());
+        scope.source_type = Some("meeting".to_string());
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        let page = db.read_embedding_scan_page(&scope, &token, None).unwrap();
+        assert!(page.exhausted);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].hit.text, "eligible");
+    }
+
+    #[test]
+    fn semantic_scan_byte_budget_returns_partial_page_and_rejects_oversized_candidate() {
+        let db = semantic_scan_fixture();
+        let text = "x".repeat(EMBEDDING_PAGE_BYTES / 2);
+        for _ in 0..2 {
+            db.save_embedding("r1", "large", &text, &[1.0, 0.0], "m", 0.0, 1.0)
+                .unwrap();
+        }
+        let scope = semantic_scan_scope();
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        let page = db.read_embedding_scan_page(&scope, &token, None).unwrap();
+        assert_eq!(page.rows.len(), 2);
+        assert!(!page.exhausted);
+        let page = db
+            .read_embedding_scan_page(&scope, &token, page.next_cursor)
+            .unwrap();
+        assert_eq!(page.rows.len(), 1);
+        assert!(page.exhausted);
+        db.conn
+            .execute(
+                "UPDATE transcript_embeddings SET text = CAST(zeroblob(?1) AS TEXT)
+            WHERE segment_id = 's1'",
+                [EMBEDDING_PAGE_BYTES as i64 + 1],
+            )
+            .unwrap();
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        let error = db
+            .read_embedding_scan_page(&scope, &token, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("resource limit"));
+        // Even a malicious huge wrong-size blob is filtered without loading it.
+        db.conn
+            .execute(
+                "UPDATE transcript_embeddings SET embedding = zeroblob(?1)
+            WHERE segment_id = 's1'",
+                [EMBEDDING_PAGE_BYTES as i64 * 2],
+            )
+            .unwrap();
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        assert!(db.read_embedding_scan_page(&scope, &token, None).is_ok());
+    }
+
+    #[test]
+    fn semantic_scan_invalid_floats_and_times_cannot_reach_hits() {
+        let db = semantic_scan_fixture();
+        db.save_embedding("r1", "nan", "nan", &[f32::NAN, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.save_embedding("r1", "inf", "inf", &[f32::INFINITY, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.save_embedding("r1", "time", "time", &[1.0, 0.0], "m", f64::INFINITY, 1.0)
+            .unwrap();
+        db.save_embedding("r1", "reversed", "reversed", &[1.0, 0.0], "m", 2.0, 1.0)
+            .unwrap();
+        db.save_embedding("r1", "negative", "negative", &[1.0, 0.0], "m", -1.0, 1.0)
+            .unwrap();
+        let hits = db.search_embeddings(&[1.0, 0.0], 10, "m").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "best");
+        assert!(db.search_embeddings(&[f32::NAN, 0.0], 10, "m").is_err());
+        assert!(db.search_embeddings(&[], 10, "m").is_err());
+    }
+
+    #[test]
+    fn semantic_scan_relevant_direct_mutations_invalidate_tokens() {
+        for sql in [
+            "UPDATE transcript_embeddings SET id = -9",
+            "UPDATE transcript_embeddings SET text = 'changed'",
+            "UPDATE transcript_embeddings SET segment_id = 'changed'",
+            "UPDATE transcript_embeddings SET embedding = x'000000000000803f'",
+            "UPDATE transcript_embeddings SET model = 'changed'",
+            "UPDATE transcript_embeddings SET recording_id = 'changed'",
+            "UPDATE transcript_embeddings SET start_time = 0.5",
+            "UPDATE transcript_embeddings SET end_time = 2",
+            "UPDATE transcript_embeddings SET created_at = 'changed'",
+            "DELETE FROM transcript_embeddings",
+            "UPDATE recordings SET title = 'changed' WHERE id = 'r1'",
+            "UPDATE recordings SET source_type = 'changed' WHERE id = 'r1'",
+            "UPDATE recordings SET id = 'changed' WHERE id = 'r1'",
+            "DELETE FROM recordings WHERE id = 'r1'",
+            "UPDATE transcripts SET id = 'changed'",
+            "UPDATE transcripts SET recording_id = 'changed'",
+            "UPDATE transcripts SET revision = revision + 1",
+            "UPDATE transcripts SET segments = '[1]'",
+            "UPDATE transcripts SET full_text = 'changed'",
+            "DELETE FROM transcripts",
+            "INSERT INTO transcripts (id, recording_id, created_at) VALUES ('new', 'r1', 'same')",
+        ] {
+            let db = semantic_scan_fixture();
+            db.conn
+                .execute(
+                    "INSERT INTO transcripts (id, recording_id, segments, full_text, created_at)
+                VALUES ('t1', 'r1', '[]', 'original', 'same')",
+                    [],
+                )
+                .unwrap();
+            let scope = semantic_scan_scope();
+            let token = db.begin_embedding_scan(&scope).unwrap();
+            db.conn.execute_batch(sql).unwrap();
+            assert!(db.validate_embedding_scan(&token).is_err(), "{sql}");
+            assert!(
+                db.read_embedding_scan_page(&scope, &token, None).is_err(),
+                "{sql}"
+            );
+        }
+        let mut db = semantic_scan_fixture();
+        let token = db.begin_embedding_scan(&semantic_scan_scope()).unwrap();
+        db.save_embedding("r1", "new", "new", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        assert!(db.validate_embedding_scan(&token).is_err());
+        // An orphan becomes eligible when its recording appears.
+        db.save_embedding("r2", "new", "new", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        let token = db.begin_embedding_scan(&semantic_scan_scope()).unwrap();
+        db.create_recording(&sample_recording("r2", "inbox"))
+            .unwrap();
+        assert!(db.validate_embedding_scan(&token).is_err());
+    }
+
+    #[test]
+    fn semantic_scan_notes_status_staging_noops_and_rollback_preserve_revision() {
+        let db = semantic_scan_fixture();
+        let scope = semantic_scan_scope();
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        db.conn
+            .execute_batch(
+                "UPDATE recordings SET meeting_notes = 'notes', status = 'completed', updated_at = 'later';
+            UPDATE transcript_embeddings SET text = text;",
+            )
+            .unwrap();
+        let source = db.begin_embedding_rebuild().unwrap();
+        db.stage_embedding("run", "r1", "s1", "staged", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.discard_embedding_rebuild("run").unwrap();
+        assert!(db.embedding_sources_unchanged(&source).unwrap());
+        db.validate_embedding_scan(&token).unwrap();
+        let tx = db.conn.unchecked_transaction().unwrap();
+        tx.execute("DELETE FROM transcript_embeddings", []).unwrap();
+        tx.rollback().unwrap();
+        db.validate_embedding_scan(&token).unwrap();
+        initialize_semantic_revision(&db.conn).unwrap();
+        assert_eq!(
+            db.begin_embedding_scan(&scope).unwrap().revision,
+            token.revision
+        );
+    }
+
+    #[test]
+    fn semantic_scan_rebuild_rollback_and_reset_keep_monotonic_revision() {
+        let mut db = semantic_scan_fixture();
+        let scope = semantic_scan_scope();
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        let source = db.begin_embedding_rebuild().unwrap();
+        db.stage_embedding("run", "r1", "s1", "staged", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_semantic_swap BEFORE INSERT ON transcript_embeddings
+            BEGIN SELECT RAISE(ABORT, 'forced rollback'); END;",
+            )
+            .unwrap();
+        assert!(db.commit_embedding_rebuild("run", &source, 1).is_err());
+        db.validate_embedding_scan(&token).unwrap();
+        db.conn
+            .execute_batch("DROP TRIGGER fail_semantic_swap;")
+            .unwrap();
+        db.commit_embedding_rebuild("run", &source, 1).unwrap();
+        assert!(db.validate_embedding_scan(&token).is_err());
+        let swapped = db.begin_embedding_scan(&scope).unwrap();
+        db.purge_user_content().unwrap();
+        let reset = db.begin_embedding_scan(&scope).unwrap();
+        assert!(reset.revision > swapped.revision);
+        assert_eq!(reset.upper_id, None);
+        assert!(db.validate_embedding_scan(&swapped).is_err());
+        initialize_semantic_revision(&db.conn).unwrap();
+        assert_eq!(verify_semantic_revision(&db.conn).unwrap(), reset.revision);
+    }
+
+    #[test]
+    fn semantic_scan_revision_infrastructure_fails_closed_and_overflow_stays_integer() {
+        for replacement in [
+            "DROP TRIGGER semantic_revision_transcript_embeddings_insert",
+            "DROP TRIGGER semantic_revision_transcript_embeddings_insert;
+             CREATE TRIGGER semantic_revision_transcript_embeddings_insert AFTER INSERT
+             ON transcript_embeddings BEGIN SELECT 1; END",
+            "DROP TRIGGER semantic_revision_no_delete; DELETE FROM semantic_recall_revision",
+        ] {
+            let db = semantic_scan_fixture();
+            let scope = semantic_scan_scope();
+            let token = db.begin_embedding_scan(&scope).unwrap();
+            db.conn.execute_batch(replacement).unwrap();
+            assert!(db.begin_embedding_scan(&scope).is_err());
+            assert!(db.read_embedding_scan_page(&scope, &token, None).is_err());
+            assert!(db.validate_embedding_scan(&token).is_err());
+        }
+        let db = semantic_scan_fixture();
+        assert!(db
+            .conn
+            .execute("DELETE FROM semantic_recall_revision", [])
+            .is_err());
+        assert!(db
+            .conn
+            .execute("UPDATE semantic_recall_revision SET revision = 0", [])
+            .is_err());
+        db.conn
+            .execute_batch(
+                "DROP TRIGGER semantic_revision_update_guard;
+            UPDATE semantic_recall_revision SET revision = 9223372036854775807;",
+            )
+            .unwrap();
+        let definition = semantic_revision_triggers()
+            .into_iter()
+            .find(|(name, _)| name == "semantic_revision_update_guard")
+            .unwrap()
+            .1;
+        db.conn.execute_batch(&definition).unwrap();
+        assert!(db
+            .save_embedding("r1", "overflow", "overflow", &[1.0, 0.0], "m", 0.0, 1.0)
+            .is_err());
+        let kind: String = db
+            .conn
+            .query_row(
+                "SELECT typeof(revision) FROM semantic_recall_revision",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "integer");
+        assert_eq!(db.embedding_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn semantic_scan_second_connection_mutations_participate() {
+        let path =
+            std::env::temp_dir().join(format!("semantic-recall-{}.sqlite", uuid::Uuid::new_v4()));
+        {
+            let conn = Connection::open(&path).unwrap();
+            let mut db = Database {
+                conn,
+                encrypted: false,
+                correction_approval_undo: HashMap::new(),
+            };
+            db.init_tables().unwrap();
+            db.create_recording(&sample_recording("r1", "inbox"))
+                .unwrap();
+            db.save_embedding("r1", "s1", "best", &[1.0, 0.0], "m", 0.0, 1.0)
+                .unwrap();
+            let other = Connection::open(&path).unwrap();
+            let scope = semantic_scan_scope();
+            let token = db.begin_embedding_scan(&scope).unwrap();
+            other
+                .execute_batch("PRAGMA recursive_triggers = OFF")
+                .unwrap();
+            assert!(other
+                .execute(
+                    "INSERT OR REPLACE INTO semantic_recall_revision (id, revision) VALUES (1, 0)",
+                    []
+                )
+                .is_err());
+            db.validate_embedding_scan(&token).unwrap();
+            other
+                .execute("UPDATE recordings SET meeting_notes = 'unrelated'", [])
+                .unwrap();
+            db.validate_embedding_scan(&token).unwrap();
+            other
+                .execute("UPDATE recordings SET title = 'changed'", [])
+                .unwrap();
+            assert!(db.validate_embedding_scan(&token).is_err());
+            let token = db.begin_embedding_scan(&scope).unwrap();
+            other
+                .execute("DELETE FROM transcript_embeddings", [])
+                .unwrap();
+            assert!(db.validate_embedding_scan(&token).is_err());
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn semantic_scan_invalid_dimensions_fail_before_sql() {
+        let db = semantic_scan_fixture();
+        let mut scope = semantic_scan_scope();
+        for dimensions in [0, MAX_EMBEDDING_DIMENSIONS + 1, usize::MAX] {
+            scope.dimensions = dimensions;
+            assert!(db.begin_embedding_scan(&scope).is_err());
+        }
+    }
+
+    #[test]
+    fn semantic_scan_utf16_sizes_cover_decoded_utf8_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA encoding = 'UTF-16le'").unwrap();
+        let mut db = Database {
+            conn,
+            encrypted: false,
+            correction_approval_undo: HashMap::new(),
+        };
+        db.init_tables().unwrap();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let scope = semantic_scan_scope();
+        let text = "漢".repeat(400_000);
+        assert!(text.len() > EMBEDDING_PAGE_BYTES);
+        db.save_embedding("r1", "large", &text, &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        assert!(db
+            .read_embedding_scan_page(&scope, &token, None)
+            .unwrap_err()
+            .to_string()
+            .contains("resource limit"));
+        db.delete_embeddings("r1").unwrap();
+        db.save_embedding("r1", "small", "漢 budget", &[1.0, 0.0], "m", 0.0, 1.0)
+            .unwrap();
+        assert_eq!(
+            db.search_embeddings(&[1.0, 0.0], 1, "m").unwrap()[0].text,
+            "漢 budget"
+        );
+    }
+
+    #[test]
+    fn semantic_scan_ineligible_windows_advance_without_scanning_for_a_full_page() {
+        let db = semantic_scan_fixture();
+        for index in 0..(EMBEDDING_PAGE_ROWS * 2) {
+            db.save_embedding(
+                "r1",
+                &index.to_string(),
+                "Wrong dimension",
+                &[1.0, 0.0, 0.0],
+                "m",
+                0.0,
+                1.0,
+            )
+            .unwrap();
+        }
+        db.save_embedding(
+            "r1",
+            "older-range-match",
+            "Eligible after sparse windows",
+            &[1.0, 0.0],
+            "m",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        let scope = semantic_scan_scope();
+        let token = db.begin_embedding_scan(&scope).unwrap();
+        let first = db.read_embedding_scan_page(&scope, &token, None).unwrap();
+        assert_eq!(first.rows.len(), 1);
+        assert!(!first.exhausted);
+        let next = db
+            .read_embedding_scan_page(&scope, &token, first.next_cursor)
+            .unwrap();
+        assert!(next.rows.is_empty());
+        assert!(!next.exhausted);
+        assert!(next.next_cursor > first.next_cursor);
+        assert_eq!(db.search_embeddings(&[1.0, 0.0], 10, "m").unwrap().len(), 2);
+    }
+
+    fn embedding_rebuild_fixture() -> Database {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+        db.save_embedding(
+            "r1",
+            "old",
+            "old searchable fact",
+            &[1.0, 0.0],
+            "model",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn embedding_rebuild_keeps_live_vectors_until_atomic_commit() {
+        let mut db = embedding_rebuild_fixture();
+        let signature = db.begin_embedding_rebuild().unwrap();
+        db.stage_embedding(
+            "run",
+            "r1",
+            "new",
+            "replacement fact",
+            &[1.0, 0.0],
+            "model",
+            1.0,
+            2.0,
+        )
+        .unwrap();
+        assert_eq!(
+            db.search_embeddings(&[1.0, 0.0], 10, "model").unwrap()[0].text,
+            "old searchable fact"
+        );
+        db.commit_embedding_rebuild("run", &signature, 1).unwrap();
+        let hits = db.search_embeddings(&[1.0, 0.0], 10, "model").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "replacement fact");
+    }
+
+    #[test]
+    fn embedding_rebuild_discard_and_missing_rows_preserve_old_index() {
+        let mut db = embedding_rebuild_fixture();
+        let signature = db.begin_embedding_rebuild().unwrap();
+        db.stage_embedding(
+            "run",
+            "r1",
+            "new",
+            "candidate",
+            &[1.0, 0.0],
+            "model",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        db.discard_embedding_rebuild("run").unwrap();
+        assert!(db.commit_embedding_rebuild("run", &signature, 1).is_err());
+        assert_eq!(
+            db.search_embeddings(&[1.0, 0.0], 10, "model").unwrap()[0].text,
+            "old searchable fact"
+        );
+    }
+
+    #[test]
+    fn embedding_rebuild_changed_transcript_cannot_replace_index() {
+        let mut db = embedding_rebuild_fixture();
+        let signature = db.begin_embedding_rebuild().unwrap();
+        db.stage_embedding(
+            "run",
+            "r1",
+            "new",
+            "candidate",
+            &[1.0, 0.0],
+            "model",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        let mut transcript = sample_multi_segment_transcript("r1");
+        transcript.segments[0].text = "corrected fact".into();
+        db.conn
+            .execute(
+                "UPDATE transcripts SET segments=?1,revision=revision+1 WHERE recording_id='r1'",
+                [serde_json::to_string(&transcript.segments).unwrap()],
+            )
+            .unwrap();
+        assert!(db.commit_embedding_rebuild("run", &signature, 1).is_err());
+        assert_eq!(
+            db.search_embeddings(&[1.0, 0.0], 10, "model").unwrap()[0].text,
+            "old searchable fact"
+        );
+    }
+
+    #[test]
+    fn embedding_rebuild_insert_failure_rolls_back_live_deletion() {
+        let mut db = embedding_rebuild_fixture();
+        let signature = db.begin_embedding_rebuild().unwrap();
+        db.stage_embedding(
+            "run",
+            "r1",
+            "new",
+            "candidate",
+            &[1.0, 0.0],
+            "model",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        db.conn.execute_batch("CREATE TRIGGER fail_embedding_swap BEFORE INSERT ON transcript_embeddings BEGIN SELECT RAISE(ABORT,'forced swap failure'); END;").unwrap();
+        assert!(db.commit_embedding_rebuild("run", &signature, 1).is_err());
+        assert_eq!(
+            db.search_embeddings(&[1.0, 0.0], 10, "model").unwrap()[0].text,
+            "old searchable fact"
+        );
+    }
+
+    #[test]
+    fn embedding_rebuild_preserved_vectors_only_match_their_model_and_dimensions() {
+        let db = embedding_rebuild_fixture();
+        assert!(db
+            .search_embeddings(&[1.0, 0.0], 10, "different-model")
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .search_embeddings(&[1.0, 0.0, 0.0], 10, "model")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.search_embeddings(&[1.0, 0.0], 10, "model")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn embedding_rebuild_rejects_mixed_dimensions_and_reset_clears_staging() {
+        let mut db = embedding_rebuild_fixture();
+        let signature = db.begin_embedding_rebuild().unwrap();
+        db.stage_embedding(
+            "run",
+            "r1",
+            "a",
+            "candidate",
+            &[1.0, 0.0],
+            "model",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        db.stage_embedding(
+            "run",
+            "r1",
+            "b",
+            "candidate",
+            &[1.0, 0.0, 0.0],
+            "model",
+            0.0,
+            1.0,
+        )
+        .unwrap();
+        assert!(db.commit_embedding_rebuild("run", &signature, 2).is_err());
+        assert_eq!(
+            db.search_embeddings(&[1.0, 0.0], 10, "model").unwrap()[0].text,
+            "old searchable fact"
+        );
+        db.purge_user_content().unwrap();
+        assert_eq!(
+            db.conn
+                .query_row("SELECT COUNT(*) FROM embedding_rebuild_stage", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -10988,6 +17663,277 @@ mod tests {
     }
 
     #[test]
+    fn ungrounded_regeneration_cannot_replace_an_existing_summary_or_undo() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.summary = Some("Original useful recap".into());
+        recording.action_items = Some(vec!["Keep this task".into()]);
+        db.create_recording(&recording).unwrap();
+        db.update_recording_analysis(
+            "r1",
+            Some("Original useful recap"),
+            &["Keep this task".into()],
+        )
+        .unwrap();
+        db.replace_generated_summary_with_undo(
+            "r1",
+            Some("Original useful recap"),
+            "Verified new recap",
+            &sample_summary_provenance("Verified new recap"),
+            "input-1",
+        )
+        .unwrap();
+        let before = db.get_recording("r1").unwrap().unwrap();
+        let token = db.summary_regeneration_undo_token("r1").unwrap();
+        let mut provenance = sample_summary_provenance("Unverified firm promise");
+        provenance.grounded = false;
+        assert!(db
+            .replace_generated_summary_with_undo(
+                "r1",
+                Some("Verified new recap"),
+                "Unverified firm promise",
+                &provenance,
+                "input-1"
+            )
+            .is_err());
+        let after = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(after.summary, before.summary);
+        assert_eq!(after.summary_provenance, before.summary_provenance);
+        assert_eq!(after.action_items, before.action_items);
+        assert_eq!(db.summary_regeneration_undo_token("r1").unwrap(), token);
+    }
+
+    #[test]
+    fn first_ungrounded_summary_can_be_saved_for_review() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.summary = None;
+        db.create_recording(&recording).unwrap();
+        let mut provenance = sample_summary_provenance("First review draft");
+        provenance.grounded = false;
+        db.replace_generated_summary_with_undo(
+            "r1",
+            None,
+            "First review draft",
+            &provenance,
+            "input-1",
+        )
+        .unwrap();
+        let saved = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(saved.summary.as_deref(), Some("First review draft"));
+        assert!(!saved.summary_provenance.unwrap().grounded);
+    }
+
+    #[test]
+    fn summary_regeneration_undo_restores_null_summary_and_preserves_other_analysis() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.summary = None;
+        recording.action_items = Some(vec!["Original action".to_string()]);
+        db.create_recording(&recording).unwrap();
+        let generated = "Generated summary";
+        db.replace_generated_summary_with_undo(
+            "r1",
+            None,
+            generated,
+            &sample_summary_provenance(generated),
+            "input-1",
+        )
+        .unwrap();
+        db.patch_recording_analysis("r1", None, Some(&["Updated action".to_string()]))
+            .unwrap();
+
+        assert!(db.can_undo_summary_regeneration("r1").unwrap());
+        let token = db.summary_regeneration_undo_token("r1").unwrap().unwrap();
+        let restored = db
+            .undo_summary_regeneration("r1", &token, Some("input-1"))
+            .unwrap();
+        assert_eq!(restored.summary, None);
+        assert_eq!(
+            restored.action_items,
+            Some(vec!["Updated action".to_string()])
+        );
+        assert!(restored.summary_provenance.is_none());
+        assert!(!db.can_undo_summary_regeneration("r1").unwrap());
+    }
+
+    #[test]
+    fn summary_regeneration_undo_restores_exact_prior_provenance_or_clears_it_for_changed_input() {
+        for (recording_id, restore_provenance) in [("valid", true), ("changed", false)] {
+            let mut db = in_memory_db();
+            let prior = "Prior summary";
+            let mut prior_provenance = sample_summary_provenance(prior);
+            prior_provenance.prompt_source = "meeting_playbook:auto:input=input-1".to_string();
+            let generated = "Generated summary";
+            let mut recording = sample_recording(recording_id, "inbox");
+            recording.summary = Some(prior.to_string());
+            db.create_recording(&recording).unwrap();
+            db.patch_recording_analysis_with_provenance(
+                recording_id,
+                Some(Some(prior)),
+                None,
+                Some(&prior_provenance),
+                None,
+            )
+            .unwrap();
+            db.replace_generated_summary_with_undo(
+                recording_id,
+                Some(prior),
+                generated,
+                &sample_summary_provenance(generated),
+                "input-1",
+            )
+            .unwrap();
+
+            let token = db
+                .summary_regeneration_undo_token(recording_id)
+                .unwrap()
+                .unwrap();
+            let restored = db
+                .undo_summary_regeneration(
+                    recording_id,
+                    &token,
+                    restore_provenance.then_some("input-1"),
+                )
+                .unwrap();
+            assert_eq!(restored.summary.as_deref(), Some(prior));
+            assert_eq!(
+                restored.summary_provenance,
+                restore_provenance.then_some(prior_provenance)
+            );
+        }
+    }
+
+    #[test]
+    fn summary_regeneration_undo_clears_prior_provenance_from_an_older_input() {
+        let mut db = in_memory_db();
+        let prior = "Prior summary";
+        let mut prior_provenance = sample_summary_provenance(prior);
+        prior_provenance.prompt_source = "meeting_playbook:auto:input=old-input".to_string();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(prior)),
+            None,
+            Some(&prior_provenance),
+            None,
+        )
+        .unwrap();
+        db.replace_generated_summary_with_undo(
+            "r1",
+            Some(prior),
+            "Generated",
+            &sample_summary_provenance("Generated"),
+            "current-input",
+        )
+        .unwrap();
+        let token = db.summary_regeneration_undo_token("r1").unwrap().unwrap();
+
+        let restored = db
+            .undo_summary_regeneration("r1", &token, Some("current-input"))
+            .unwrap();
+        assert_eq!(restored.summary.as_deref(), Some(prior));
+        assert!(restored.summary_provenance.is_none());
+    }
+
+    #[test]
+    fn summary_regeneration_undo_refuses_a_later_manual_summary_edit() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.summary = Some("Prior".to_string());
+        db.create_recording(&recording).unwrap();
+        db.patch_recording_analysis("r1", Some("Prior"), None)
+            .unwrap();
+        db.replace_generated_summary_with_undo(
+            "r1",
+            Some("Prior"),
+            "Generated",
+            &sample_summary_provenance("Generated"),
+            "input-1",
+        )
+        .unwrap();
+        db.patch_recording_analysis("r1", Some("Manual edit"), None)
+            .unwrap();
+
+        assert!(!db.can_undo_summary_regeneration("r1").unwrap());
+        assert!(db
+            .undo_summary_regeneration("r1", "stale-token", Some("input-1"))
+            .is_err());
+        assert_eq!(
+            db.get_recording("r1").unwrap().unwrap().summary.as_deref(),
+            Some("Manual edit")
+        );
+    }
+
+    #[test]
+    fn failed_undo_snapshot_write_rolls_back_generated_summary() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.summary = Some("Prior".to_string());
+        db.create_recording(&recording).unwrap();
+        db.patch_recording_analysis("r1", Some("Prior"), None)
+            .unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TRIGGER reject_summary_undo BEFORE INSERT ON summary_regeneration_undo
+                 BEGIN SELECT RAISE(ABORT, 'snapshot failure'); END;",
+            )
+            .unwrap();
+
+        assert!(db
+            .replace_generated_summary_with_undo(
+                "r1",
+                Some("Prior"),
+                "Generated",
+                &sample_summary_provenance("Generated"),
+                "input-1",
+            )
+            .is_err());
+        assert_eq!(
+            db.get_recording("r1").unwrap().unwrap().summary.as_deref(),
+            Some("Prior")
+        );
+    }
+
+    #[test]
+    fn repeated_summary_generation_keeps_only_the_latest_undo_level() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.summary = Some("Original".to_string());
+        db.create_recording(&recording).unwrap();
+        db.patch_recording_analysis("r1", Some("Original"), None)
+            .unwrap();
+        db.replace_generated_summary_with_undo(
+            "r1",
+            Some("Original"),
+            "First",
+            &sample_summary_provenance("First"),
+            "input-1",
+        )
+        .unwrap();
+        let stale_token = db.summary_regeneration_undo_token("r1").unwrap().unwrap();
+        db.replace_generated_summary_with_undo(
+            "r1",
+            Some("First"),
+            "Second",
+            &sample_summary_provenance("Second"),
+            "input-1",
+        )
+        .unwrap();
+
+        assert!(db
+            .undo_summary_regeneration("r1", &stale_token, Some("input-1"))
+            .is_err());
+        let current_token = db.summary_regeneration_undo_token("r1").unwrap().unwrap();
+        let restored = db
+            .undo_summary_regeneration("r1", &current_token, Some("input-1"))
+            .unwrap();
+        assert_eq!(restored.summary.as_deref(), Some("First"));
+        assert!(!db.can_undo_summary_regeneration("r1").unwrap());
+    }
+
+    #[test]
     fn meeting_artifact_migration_adds_provenance_without_losing_legacy_content() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -11017,6 +17963,7 @@ mod tests {
         let mut db = Database {
             conn,
             encrypted: false,
+            correction_approval_undo: HashMap::new(),
         };
         db.init_tables().unwrap();
 
@@ -11077,6 +18024,109 @@ mod tests {
             actions_reloaded.items[0].citations[0].text,
             "Canonical transcript evidence"
         );
+    }
+
+    #[test]
+    fn older_summary_checks_keep_history_without_current_verification() {
+        for policy in [
+            None,
+            Some(0),
+            Some(crate::models::SUMMARY_GROUNDING_POLICY_VERSION - 1),
+            Some(crate::models::SUMMARY_GROUNDING_POLICY_VERSION + 1),
+        ] {
+            let mut db = in_memory_db();
+            db.create_recording(&sample_recording("r1", "inbox"))
+                .unwrap();
+            let summary = "Older source-checked summary";
+            let mut provenance = sample_summary_provenance(summary);
+            provenance.grounding_policy_version = policy;
+            db.patch_recording_analysis_with_provenance(
+                "r1",
+                Some(Some(summary)),
+                None,
+                Some(&provenance),
+                None,
+            )
+            .unwrap();
+            let raw_before: String = db
+                .conn
+                .query_row(
+                    "SELECT summary_provenance FROM meeting_artifacts WHERE recording_id = 'r1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if policy.is_none() {
+                assert!(!raw_before.contains("groundingPolicyVersion"));
+            }
+            let recording = db.get_recording("r1").unwrap().unwrap();
+            assert_eq!(recording.summary.as_deref(), Some(summary));
+            let reloaded = recording.summary_provenance.unwrap();
+            assert!(!reloaded.grounded);
+            assert_eq!(reloaded.grounding_policy_version, policy);
+            assert_eq!(reloaded.citations, provenance.citations);
+            assert_eq!(reloaded.actual_model, provenance.actual_model);
+            assert_eq!(reloaded.completed_at, provenance.completed_at);
+            let raw_after: String = db
+                .conn
+                .query_row(
+                    "SELECT summary_provenance FROM meeting_artifacts WHERE recording_id = 'r1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                raw_before, raw_after,
+                "Reading must not rewrite historic evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn current_summary_checks_do_not_upgrade_an_unverified_result() {
+        let mut provenance = sample_summary_provenance("Needs review");
+        provenance.grounded = false;
+        let reloaded = validated_summary_provenance(
+            Some(serde_json::to_string(&provenance).unwrap()),
+            Some("Needs review"),
+        )
+        .unwrap();
+        assert!(!reloaded.grounded);
+    }
+
+    #[test]
+    fn undo_restores_older_summary_text_without_upgrading_its_checks() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        let mut old = sample_summary_provenance("Prior summary");
+        old.grounding_policy_version = None;
+        old.prompt_source = "meeting_playbook:auto:input=input-1".into();
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some("Prior summary")),
+            None,
+            Some(&old),
+            None,
+        )
+        .unwrap();
+        db.replace_generated_summary_with_undo(
+            "r1",
+            Some("Prior summary"),
+            "New summary",
+            &sample_summary_provenance("New summary"),
+            "input-1",
+        )
+        .unwrap();
+        let token = db.summary_regeneration_undo_token("r1").unwrap().unwrap();
+        let restored = db
+            .undo_summary_regeneration("r1", &token, Some("input-1"))
+            .unwrap();
+        assert_eq!(restored.summary.as_deref(), Some("Prior summary"));
+        let provenance = restored.summary_provenance.unwrap();
+        assert!(!provenance.grounded);
+        assert_eq!(provenance.citations, old.citations);
+        assert_eq!(provenance.grounding_policy_version, None);
     }
 
     #[test]
@@ -11171,10 +18221,373 @@ mod tests {
         db.update_recording_notes("r1", Some("New saved notes"))
             .unwrap();
         let after_notes = db.get_recording("r1").unwrap().unwrap();
-        assert!(after_notes.summary_provenance.is_none());
+        let stale = after_notes.summary_provenance.unwrap();
+        let original = sample_summary_provenance(summary);
+        assert!(!stale.grounded);
+        assert_eq!(stale.citations, original.citations);
+        assert_eq!(stale.actual_model, original.actual_model);
         assert!(after_notes.action_items_provenance.is_none());
         assert_eq!(after_notes.summary.as_deref(), Some(summary));
         assert_eq!(after_notes.action_items, Some(action_items));
+    }
+
+    fn sample_enhanced_note_draft() -> MeetingEnhancedNoteDraft {
+        MeetingEnhancedNoteDraft {
+            text: "Draft decision".into(),
+            generated_at: Utc::now(),
+            raw_notes_snapshot: "Original notes".into(),
+            summary_citations: vec![],
+            action_item_citations: vec![],
+        }
+    }
+
+    #[test]
+    fn enhanced_note_draft_preserves_raw_notes_and_recap_and_rejects_stale_source() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("draft-meeting", "inbox"))
+            .unwrap();
+        db.update_recording_notes("draft-meeting", Some("Original notes"))
+            .unwrap();
+        db.patch_recording_analysis_with_provenance(
+            "draft-meeting",
+            Some(Some("Recap")),
+            None,
+            Some(&sample_summary_provenance("Recap")),
+            None,
+        )
+        .unwrap();
+        let before = db.get_recording("draft-meeting").unwrap().unwrap();
+        let draft = sample_enhanced_note_draft();
+        assert_eq!(
+            db.save_meeting_enhanced_note_draft("draft-meeting", &draft)
+                .unwrap(),
+            draft
+        );
+        assert_eq!(
+            db.get_meeting_enhanced_note_draft("draft-meeting").unwrap(),
+            Some(draft.clone())
+        );
+        let after = db.get_recording("draft-meeting").unwrap().unwrap();
+        assert_eq!(before.meeting_notes, after.meeting_notes);
+        assert_eq!(before.notes_updated_at, after.notes_updated_at);
+        assert_eq!(before.summary, after.summary);
+        assert_eq!(before.summary_provenance, after.summary_provenance);
+        db.update_recording_notes("draft-meeting", Some("New notes"))
+            .unwrap();
+        assert!(db
+            .save_meeting_enhanced_note_draft("draft-meeting", &draft)
+            .is_err());
+        assert_eq!(
+            db.get_meeting_enhanced_note_draft("draft-meeting").unwrap(),
+            Some(draft)
+        );
+    }
+
+    #[test]
+    fn enhanced_note_draft_validates_source_boundaries_and_cascades_deletion() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("draft-dictation", "inbox");
+        recording.source_type = "dictation".into();
+        recording.meeting_notes = Some("Original notes".into());
+        db.create_recording(&recording).unwrap();
+        let mut draft = sample_enhanced_note_draft();
+        assert!(db
+            .save_meeting_enhanced_note_draft("missing", &draft)
+            .is_err());
+        assert!(db
+            .save_meeting_enhanced_note_draft("draft-dictation", &draft)
+            .is_err());
+        recording.id = "draft-meeting".into();
+        recording.source_type = "meeting".into();
+        db.create_recording(&recording).unwrap();
+        draft.text = " ".into();
+        assert!(db
+            .save_meeting_enhanced_note_draft("draft-meeting", &draft)
+            .is_err());
+        draft = sample_enhanced_note_draft();
+        draft.generated_at = Utc::now() + chrono::Duration::hours(1);
+        assert!(db
+            .save_meeting_enhanced_note_draft("draft-meeting", &draft)
+            .is_err());
+        draft = sample_enhanced_note_draft();
+        draft.summary_citations = vec![AnalysisCitation {
+            text: "Quote".into(),
+            source_kind: None,
+            line_id: None,
+            segment_id: None,
+            start_time: Some(10.0),
+            end_time: Some(9.0),
+            recording_id: Some("other".into()),
+            certainty: None,
+        }];
+        assert!(db
+            .save_meeting_enhanced_note_draft("draft-meeting", &draft)
+            .is_err());
+        draft = sample_enhanced_note_draft();
+        db.save_meeting_enhanced_note_draft("draft-meeting", &draft)
+            .unwrap();
+        db.delete_meeting_enhanced_note_draft("draft-dictation")
+            .unwrap();
+        assert!(db
+            .get_meeting_enhanced_note_draft("draft-meeting")
+            .unwrap()
+            .is_some());
+        db.conn
+            .execute("DELETE FROM recordings WHERE id='draft-meeting'", [])
+            .unwrap();
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM meeting_enhanced_note_drafts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn enhanced_note_draft_delete_and_reset_remove_private_content() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("draft-meeting", "inbox");
+        recording.meeting_notes = Some("Original notes".into());
+        db.create_recording(&recording).unwrap();
+        let draft = sample_enhanced_note_draft();
+        db.save_meeting_enhanced_note_draft("draft-meeting", &draft)
+            .unwrap();
+        db.delete_meeting_enhanced_note_draft("draft-meeting")
+            .unwrap();
+        assert!(db
+            .get_meeting_enhanced_note_draft("draft-meeting")
+            .unwrap()
+            .is_none());
+        db.save_meeting_enhanced_note_draft("draft-meeting", &draft)
+            .unwrap();
+        db.purge_user_content().unwrap();
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM meeting_enhanced_note_drafts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn enhanced_note_draft_survives_database_reopen() {
+        let root =
+            std::env::temp_dir().join(format!("plainsong-enhanced-draft-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("draft.db");
+        let draft = sample_enhanced_note_draft();
+        {
+            let mut db = Database {
+                conn: Connection::open(&path).unwrap(),
+                encrypted: false,
+                correction_approval_undo: HashMap::new(),
+            };
+            db.conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+            db.init_tables().unwrap();
+            let mut recording = sample_recording("draft-meeting", "inbox");
+            recording.meeting_notes = Some("Original notes".into());
+            db.create_recording(&recording).unwrap();
+            db.save_meeting_enhanced_note_draft("draft-meeting", &draft)
+                .unwrap();
+        }
+        let db = Database {
+            conn: Connection::open(&path).unwrap(),
+            encrypted: false,
+            correction_approval_undo: HashMap::new(),
+        };
+        assert_eq!(
+            db.get_meeting_enhanced_note_draft("draft-meeting").unwrap(),
+            Some(draft)
+        );
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_journal_survives_database_reopen() {
+        let root =
+            std::env::temp_dir().join(format!("plainsong-recovery-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("recovery.db");
+        {
+            let mut db = Database {
+                conn: Connection::open(&path).unwrap(),
+                encrypted: false,
+                correction_approval_undo: HashMap::new(),
+            };
+            db.conn.execute_batch("PRAGMA foreign_keys=ON").unwrap();
+            db.init_tables().unwrap();
+            db.create_recording(&sample_recording("r1", "inbox"))
+                .unwrap();
+            db.queue_meeting_note_recovery("d1", "r1", "Original", "Final condition.")
+                .unwrap();
+        }
+        let db = Database {
+            conn: Connection::open(&path).unwrap(),
+            encrypted: false,
+            correction_approval_undo: HashMap::new(),
+        };
+        let drafts = db.list_meeting_note_recovery().unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].base_notes, "Original");
+        assert_eq!(drafts[0].notes, "Final condition.");
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_note_update_preserves_recovery_journal_atomically() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.queue_meeting_note_recovery("d1", "r1", "", "Keep final notes")
+            .unwrap();
+        db.conn.execute_batch("CREATE TRIGGER reject_notes BEFORE UPDATE OF meeting_notes ON recordings BEGIN SELECT RAISE(ABORT, 'controlled note failure'); END;").unwrap();
+        assert!(db
+            .update_recording_notes_recovering("r1", Some("Keep final notes"), Some("d1"))
+            .is_err());
+        assert_eq!(db.list_meeting_note_recovery().unwrap().len(), 1);
+        assert!(db
+            .get_recording("r1")
+            .unwrap()
+            .unwrap()
+            .meeting_notes
+            .is_none());
+    }
+
+    #[test]
+    fn stale_recovery_write_keeps_newer_notes_and_its_journal() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.update_recording_notes("r1", Some("Newer saved decision"))
+            .unwrap();
+        db.queue_meeting_note_recovery("d1", "r1", "Old decision", "Recovered condition")
+            .unwrap();
+        assert!(db
+            .update_recording_notes_recovering_guarded(
+                "r1",
+                Some("Recovered condition"),
+                Some("d1"),
+                Some("Old decision")
+            )
+            .is_err());
+        assert_eq!(
+            db.get_recording("r1")
+                .unwrap()
+                .unwrap()
+                .meeting_notes
+                .as_deref(),
+            Some("Newer saved decision")
+        );
+        assert_eq!(db.list_meeting_note_recovery().unwrap().len(), 1);
+        db.update_recording_notes_recovering_guarded(
+            "r1",
+            Some("Newer saved decision\nRecovered condition"),
+            Some("d1"),
+            Some("Newer saved decision"),
+        )
+        .unwrap();
+        assert!(db.list_meeting_note_recovery().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovery_journal_is_idempotent_and_consumed_with_notes() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.queue_meeting_note_recovery("d1", "r1", "", "Final condition stays.")
+            .unwrap();
+        db.queue_meeting_note_recovery("d1", "r1", "", "Final condition stays.")
+            .unwrap();
+        assert_eq!(db.list_meeting_note_recovery().unwrap().len(), 1);
+        assert!(db
+            .queue_meeting_note_recovery("d1", "r1", "", "Different notes")
+            .is_err());
+        db.update_recording_notes_recovering("r1", Some("Final condition stays."), Some("d1"))
+            .unwrap();
+        assert!(db.list_meeting_note_recovery().unwrap().is_empty());
+        assert_eq!(
+            db.get_recording("r1")
+                .unwrap()
+                .unwrap()
+                .meeting_notes
+                .as_deref(),
+            Some("Final condition stays.")
+        );
+    }
+
+    #[test]
+    fn recovery_cannot_consume_another_meeting_and_deletion_cascades() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.create_recording(&sample_recording("r2", "inbox"))
+            .unwrap();
+        db.queue_meeting_note_recovery("d1", "r1", "", "Keep this.")
+            .unwrap();
+        assert!(db
+            .update_recording_notes_recovering("r2", Some("Wrong target"), Some("d1"))
+            .is_err());
+        assert_eq!(db.list_meeting_note_recovery().unwrap().len(), 1);
+        assert!(db
+            .get_recording("r2")
+            .unwrap()
+            .unwrap()
+            .meeting_notes
+            .is_none());
+        db.update_recording_status("r1", "completed").unwrap();
+        db.delete_recording("r1").unwrap();
+        assert!(db.list_meeting_note_recovery().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovery_is_consumed_when_notes_already_saved_and_purged_with_user_data() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.update_recording_notes("r1", Some("Saved notes"))
+            .unwrap();
+        db.queue_meeting_note_recovery("d1", "r1", "", "Saved notes")
+            .unwrap();
+        db.update_recording_notes_recovering("r1", Some("Saved notes"), Some("d1"))
+            .unwrap();
+        assert!(db.list_meeting_note_recovery().unwrap().is_empty());
+        db.queue_meeting_note_recovery("d2", "r1", "Saved notes", "New notes")
+            .unwrap();
+        db.purge_user_content().unwrap();
+        assert!(db.list_meeting_note_recovery().unwrap().is_empty());
+    }
+
+    #[test]
+    fn unchanged_notes_preserve_verified_summary_and_timestamps() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.update_recording_notes("r1", Some("My notes")).unwrap();
+        let summary = "Generated summary";
+        db.patch_recording_analysis_with_provenance(
+            "r1",
+            Some(Some(summary)),
+            None,
+            Some(&sample_summary_provenance(summary)),
+            None,
+        )
+        .unwrap();
+        let before = db.get_recording("r1").unwrap().unwrap();
+        db.update_recording_notes("r1", Some("My notes")).unwrap();
+        let after = db.get_recording("r1").unwrap().unwrap();
+        assert_eq!(after.notes_updated_at, before.notes_updated_at);
+        assert_eq!(after.updated_at, before.updated_at);
+        let kept = after.summary_provenance.unwrap();
+        assert!(kept.grounded);
+        assert_eq!(kept.citations, before.summary_provenance.unwrap().citations);
     }
 
     #[test]
@@ -11512,6 +18925,280 @@ mod tests {
         let signatures = db.get_cluster_voice_signatures("r1").unwrap();
         assert_eq!(signatures.len(), 1);
         assert!((signatures[0].centroid[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_rerun_clears_every_signature_even_the_same_models_and_keeps_names() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.upsert_speaker_alias("r1", "S1", Some("Dana"), None, 0)
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[1.0, 0.0]), "pyannote_community1")
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "S2", &unit(&[0.0, 1.0]), "ecapa_tdnn_speaker")
+            .unwrap();
+
+        // A re-run with community-1 again still drops community-1's old
+        // signature: S1 may now be someone else's stretch of audio.
+        assert_eq!(db.clear_cluster_voice_signatures("r1").unwrap(), 2);
+        assert!(db.get_cluster_voice_signatures("r1").unwrap().is_empty());
+        assert_eq!(
+            db.get_cluster_alias_names("r1")
+                .unwrap()
+                .get("S1")
+                .map(String::as_str),
+            Some("Dana"),
+            "the name stays"
+        );
+
+        // The new run's signature is the only one left once written.
+        db.set_cluster_voice_signature("r1", "S1", &unit(&[0.0, 1.0]), "pyannote_community1")
+            .unwrap();
+        let left = db.get_cluster_voice_signatures("r1").unwrap();
+        assert_eq!(left.len(), 1);
+        assert!((left[0].centroid[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_new_meeting_transcript_drops_names_tied_to_old_speaker_numbers() {
+        let mut db = in_memory_db();
+        db.create_recording(&sample_recording("r1", "inbox"))
+            .unwrap();
+        db.save_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+        db.upsert_speaker_alias("r1", "S1", Some("Alice"), None, 0)
+            .unwrap();
+        db.upsert_speaker_alias("r1", "them", Some("Priya"), None, 0)
+            .unwrap();
+
+        db.save_meeting_transcript(&sample_multi_segment_transcript("r1"))
+            .unwrap();
+
+        let aliases = db.get_speaker_aliases("r1").unwrap();
+        assert!(!aliases.contains_key("S1"), "S1 may be someone else now");
+        assert_eq!(
+            aliases.get("them").and_then(|(name, _, _)| name.as_deref()),
+            Some("Priya"),
+            "the far side of the call is the same people"
+        );
+    }
+
+    #[test]
+    fn deleting_a_meeting_removes_the_voice_samples_it_taught() {
+        let mut db = in_memory_db();
+        for id in ["r1", "r2", "r3"] {
+            let mut recording = sample_recording(id, "inbox");
+            recording.status = "completed".to_string();
+            db.create_recording(&recording).unwrap();
+        }
+        // Dana was heard in r1 and r2; Lee only in r3.
+        let dana = db
+            .remember_speaker_voice(
+                "Dana",
+                "ecapa_tdnn_speaker",
+                &unit(&[1.0, 0.0, 0.0]),
+                Some("r1"),
+                None,
+            )
+            .unwrap();
+        db.remember_speaker_voice(
+            "Dana",
+            "ecapa_tdnn_speaker",
+            &unit(&[0.0, 1.0, 0.0]),
+            Some("r2"),
+            None,
+        )
+        .unwrap();
+        let lee = db
+            .remember_speaker_voice(
+                "Lee",
+                "ecapa_tdnn_speaker",
+                &unit(&[0.0, 0.0, 1.0]),
+                Some("r3"),
+                None,
+            )
+            .unwrap();
+        let samples_from = |db: &Database, recording: &str| -> i64 {
+            db.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM speaker_profile_samples WHERE source_recording_id = ?1",
+                    params![recording],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+
+        db.delete_recording("r1").unwrap();
+        assert_eq!(samples_from(&db, "r1"), 0);
+        // Dana is now only what r2 taught.
+        let (count, centroid): (i64, Vec<u8>) = db
+            .conn
+            .query_row(
+                "SELECT sample_count, centroid FROM speaker_profiles WHERE id = ?1",
+                params![&dana],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        let centroid = blob_to_f32_vec(&centroid);
+        assert!((centroid[1] - 1.0).abs() < 1e-5, "{centroid:?}");
+
+        // A voice only one deleted meeting taught goes with it.
+        db.delete_recording("r3").unwrap();
+        let lee_left: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM speaker_profiles WHERE id = ?1",
+                params![&lee],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lee_left, 0);
+        assert_eq!(samples_from(&db, "r3"), 0);
+    }
+
+    fn profile_state(db: &Database, profile_id: &str) -> Option<(i64, Vec<f32>)> {
+        db.conn
+            .query_row(
+                "SELECT sample_count, centroid FROM speaker_profiles WHERE id = ?1",
+                params![profile_id],
+                |row| Ok((row.get(0)?, blob_to_f32_vec(&row.get::<_, Vec<u8>>(1)?))),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn correcting_a_confirmed_speaker_withdraws_only_the_sample_it_added() {
+        let mut db = in_memory_db();
+        for id in ["r1", "r2"] {
+            let mut recording = sample_recording(id, "inbox");
+            recording.status = "completed".to_string();
+            db.create_recording(&recording).unwrap();
+        }
+        // Dana was confirmed in r1. In r2, speaker_1 was wrongly confirmed as
+        // Dana too, and speaker_2 rightly.
+        let dana = db
+            .remember_cluster_voice(
+                "Dana",
+                "ecapa_tdnn_speaker",
+                &unit(&[1.0, 0.0, 0.0]),
+                "r1",
+                "speaker_0",
+            )
+            .unwrap();
+        db.add_cluster_voice_sample(&dana, &unit(&[0.0, 1.0, 0.0]), "r2", "speaker_1")
+            .unwrap();
+        db.add_cluster_voice_sample(&dana, &unit(&[1.0, 0.1, 0.0]), "r2", "speaker_2")
+            .unwrap();
+        assert_eq!(profile_state(&db, &dana).unwrap().0, 3);
+
+        // A rename that keeps the confirmed name is not a correction.
+        assert_eq!(
+            db.retract_cluster_voice_samples("r2", "speaker_1", Some(" dana "), None)
+                .unwrap(),
+            0
+        );
+        // Renaming speaker_1 to someone else withdraws its sample alone.
+        assert_eq!(
+            db.retract_cluster_voice_samples("r2", "speaker_1", Some("Sam"), None)
+                .unwrap(),
+            1
+        );
+        let (count, centroid) = profile_state(&db, &dana).unwrap();
+        assert_eq!(count, 2);
+        assert!(
+            centroid[1].abs() < 0.1,
+            "the wrong voice no longer pulls Dana toward it: {centroid:?}"
+        );
+        // Withdrawing again finds nothing: it is already gone.
+        assert_eq!(
+            db.retract_cluster_voice_samples("r2", "speaker_1", None, None)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_voice_taught_only_by_a_withdrawn_confirmation_is_forgotten() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.status = "completed".to_string();
+        db.create_recording(&recording).unwrap();
+        let dna = db
+            .remember_cluster_voice(
+                "Dna",
+                "ecapa_tdnn_speaker",
+                &unit(&[1.0, 0.0]),
+                "r1",
+                "speaker_0",
+            )
+            .unwrap();
+        let other = db
+            .remember_cluster_voice(
+                "Lee",
+                "ecapa_tdnn_speaker",
+                &unit(&[0.0, 1.0]),
+                "r1",
+                "speaker_1",
+            )
+            .unwrap();
+
+        // "Not them" limited to another voice leaves this one alone.
+        assert_eq!(
+            db.retract_cluster_voice_samples("r1", "speaker_0", None, Some(other.as_str()))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.retract_cluster_voice_samples("r1", "speaker_0", Some("Dana"), None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(profile_state(&db, &dna), None);
+        assert_eq!(profile_state(&db, &other).unwrap().0, 1);
+    }
+
+    #[test]
+    fn a_sample_from_before_speakers_were_recorded_is_found_through_the_alias() {
+        let mut db = in_memory_db();
+        let mut recording = sample_recording("r1", "inbox");
+        recording.status = "completed".to_string();
+        db.create_recording(&recording).unwrap();
+        let wrong = unit(&[0.0, 1.0]);
+        let dana = db
+            .remember_speaker_voice(
+                "Dana",
+                "ecapa_tdnn_speaker",
+                &unit(&[1.0, 0.0]),
+                Some("r0"),
+                None,
+            )
+            .unwrap();
+        // The pre-migration shape: no speaker on the sample, the confirmation
+        // recorded on the alias with the signature that was added.
+        db.add_speaker_profile_sample(&dana, &wrong, Some("r1"))
+            .unwrap();
+        db.set_cluster_voice_signature("r1", "speaker_3", &wrong, "ecapa_tdnn_speaker")
+            .unwrap();
+        db.set_cluster_voice_match("r1", "speaker_3", &dana, voiceprints::MATCH_STATE_CONFIRMED)
+            .unwrap();
+        // Another speaker of r1 with no confirmation does not match it.
+        assert_eq!(
+            db.retract_cluster_voice_samples("r1", "speaker_4", None, None)
+                .unwrap(),
+            0
+        );
+
+        assert_eq!(
+            db.retract_cluster_voice_samples("r1", "speaker_3", None, Some(dana.as_str()))
+                .unwrap(),
+            1
+        );
+        let (count, centroid) = profile_state(&db, &dana).unwrap();
+        assert_eq!(count, 1);
+        assert!((centroid[0] - 1.0).abs() < 1e-5, "{centroid:?}");
     }
 
     #[test]
@@ -11945,6 +19632,161 @@ mod tests {
     }
 
     #[test]
+    fn dictionary_create_replay_returns_same_normalized_entry_without_mutation() {
+        let mut db = in_memory_db();
+        let first = db
+            .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                spoken_form: "  open ai  ".to_string(),
+                replacement: "  OpenAI  ".to_string(),
+                app_scope: Some("   ".to_string()),
+                case_sensitive: false,
+                enabled: true,
+                category_scope: Some("  EMAIL  ".to_string()),
+            })
+            .unwrap();
+        let replay = db
+            .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                spoken_form: "open ai".to_string(),
+                replacement: "OpenAI".to_string(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: Some("email".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(replay.id, first.id);
+        assert_eq!(replay.created_at, first.created_at);
+        assert_eq!(replay.updated_at, first.updated_at);
+        assert_eq!(replay.spoken_form, "open ai");
+        assert_eq!(replay.replacement, "OpenAI");
+        assert!(replay.app_scope.is_none());
+        assert_eq!(replay.category_scope.as_deref(), Some("email"));
+        assert_eq!(db.list_dictation_dictionary_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dictionary_create_keeps_distinct_tuple_semantics() {
+        let mut db = in_memory_db();
+        let requests = [
+            CreateDictationDictionaryEntryRequest {
+                spoken_form: "jon".into(),
+                replacement: "John".into(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: None,
+            },
+            CreateDictationDictionaryEntryRequest {
+                spoken_form: "jon".into(),
+                replacement: "Jon".into(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: None,
+            },
+            CreateDictationDictionaryEntryRequest {
+                spoken_form: "jon".into(),
+                replacement: "John".into(),
+                app_scope: Some("Mail".into()),
+                case_sensitive: false,
+                enabled: true,
+                category_scope: None,
+            },
+            CreateDictationDictionaryEntryRequest {
+                spoken_form: "jon".into(),
+                replacement: "John".into(),
+                app_scope: None,
+                case_sensitive: true,
+                enabled: true,
+                category_scope: None,
+            },
+            CreateDictationDictionaryEntryRequest {
+                spoken_form: "jon".into(),
+                replacement: "John".into(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: false,
+                category_scope: None,
+            },
+            CreateDictationDictionaryEntryRequest {
+                spoken_form: "jon".into(),
+                replacement: "John".into(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: Some("email".into()),
+            },
+        ];
+
+        let ids = requests
+            .iter()
+            .map(|request| db.create_dictation_dictionary_entry(request).unwrap().id)
+            .collect::<HashSet<_>>();
+        assert_eq!(ids.len(), requests.len());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap().len(),
+            requests.len()
+        );
+    }
+
+    #[test]
+    fn dictionary_create_replay_succeeds_at_capacity() {
+        let mut db = in_memory_db();
+        let request = CreateDictationDictionaryEntryRequest {
+            spoken_form: "open ai".into(),
+            replacement: "OpenAI".into(),
+            app_scope: None,
+            case_sensitive: false,
+            enabled: true,
+            category_scope: None,
+        };
+        let existing = db.create_dictation_dictionary_entry(&request).unwrap();
+        let timestamp = Utc::now().to_rfc3339();
+        let tx = db.conn.transaction().unwrap();
+        for index in 1..MAX_DICTIONARY_ENTRIES {
+            tx.execute(
+                "INSERT INTO dictation_dictionary_entries (
+                    id, spoken_form, replacement, app_scope, case_sensitive, enabled,
+                    category_scope, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, NULL, 0, 1, NULL, ?4, ?4)",
+                params![
+                    format!("capacity-{index}"),
+                    format!("spoken-{index}"),
+                    format!("replacement-{index}"),
+                    &timestamp,
+                ],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let replay = db.create_dictation_dictionary_entry(&request).unwrap();
+        assert_eq!(replay.id, existing.id);
+        assert_eq!(replay.created_at, existing.created_at);
+        assert_eq!(replay.updated_at, existing.updated_at);
+        let count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM dictation_dictionary_entries",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, MAX_DICTIONARY_ENTRIES);
+
+        let distinct =
+            db.create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                replacement: "Open AI".into(),
+                ..request
+            });
+        assert!(distinct
+            .unwrap_err()
+            .to_string()
+            .contains("Dictionary entry limit reached"));
+    }
+
+    #[test]
     fn test_dictation_dictionary_entry_rejects_oversized_fields() {
         let mut db = in_memory_db();
         let result = db.create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
@@ -11966,6 +19808,763 @@ mod tests {
             category_scope: None,
         });
         assert!(result.is_err());
+    }
+
+    fn queue_undo_fixture(db: &mut Database, spoken: &str, replacement: &str) -> String {
+        db.upsert_dictation_correction_suggestion(
+            "Sentence not retained in the undo receipt",
+            "Corrected sentence not retained",
+            spoken,
+            replacement,
+            None,
+            None,
+        )
+        .unwrap()
+        .1
+        .id
+    }
+
+    fn approval_snapshot(
+        db: &Database,
+        suggestion_id: &str,
+    ) -> CorrectionApprovalDictionarySnapshot {
+        db.get_dictation_correction_suggestion(suggestion_id)
+            .unwrap()
+            .unwrap()
+            .approval_dictionary
+            .unwrap()
+    }
+
+    fn dictionary_revision(db: &Database, id: &str) -> i64 {
+        db.conn
+            .query_row(
+                "SELECT revision FROM dictation_dictionary_entries WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn correction_approval_snapshot_serialization_and_upsert_refresh() {
+        assert_eq!(
+            serde_json::to_value(CorrectionApprovalDictionarySnapshot::Missing).unwrap(),
+            serde_json::json!({"kind": "missing"})
+        );
+        assert_eq!(
+            serde_json::to_value(CorrectionApprovalDictionarySnapshot::Entry {
+                entry_id: "entry".into(),
+                revision: 42,
+                spoken_form: "Jon".into(),
+                replacement: "Jonathan".into(),
+            })
+            .unwrap(),
+            serde_json::json!({"kind": "entry", "entryId": "entry", "revision": 42, "spokenForm": "Jon", "replacement": "Jonathan"})
+        );
+        let mut db = in_memory_db();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        assert_eq!(
+            approval_snapshot(&db, &suggestion),
+            CorrectionApprovalDictionarySnapshot::Missing
+        );
+        let entry = db
+            .learn_dictation_correction("Jon", "Manual")
+            .unwrap()
+            .entry
+            .unwrap();
+        let expected = CorrectionApprovalDictionarySnapshot::Entry {
+            entry_id: entry.id.clone(),
+            revision: dictionary_revision(&db, &entry.id),
+            spoken_form: entry.spoken_form.clone(),
+            replacement: entry.replacement.clone(),
+        };
+        assert_eq!(approval_snapshot(&db, &suggestion), expected);
+        let refreshed = db
+            .upsert_dictation_correction_suggestion("Jon", "John", "Jon", "John", None, None)
+            .unwrap()
+            .1;
+        assert_eq!(refreshed.id, suggestion);
+        assert_eq!(refreshed.approval_dictionary, Some(expected));
+    }
+
+    #[test]
+    fn correction_approval_snapshot_rejects_manual_edit_aba_and_recreated_target() {
+        let mut db = in_memory_db();
+        let entry = db
+            .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                spoken_form: "Jon".into(),
+                replacement: "Initial".into(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: None,
+            })
+            .unwrap();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let expected = approval_snapshot(&db, &suggestion);
+        db.conn
+            .execute(
+                "UPDATE dictation_dictionary_entries SET replacement = 'Manual' WHERE id = ?1",
+                [&entry.id],
+            )
+            .unwrap();
+        assert!(db
+            .approve_dictation_correction_suggestion(&suggestion, &expected)
+            .is_err());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap()[0].replacement,
+            "Manual"
+        );
+        db.conn
+            .execute(
+                "UPDATE dictation_dictionary_entries SET replacement = 'Initial' WHERE id = ?1",
+                [&entry.id],
+            )
+            .unwrap();
+        assert!(db
+            .approve_dictation_correction_suggestion(&suggestion, &expected)
+            .is_err());
+        let refreshed = approval_snapshot(&db, &suggestion);
+        assert_ne!(expected, refreshed);
+        db.delete_dictation_dictionary_entry(&entry.id).unwrap();
+        db.conn.execute(
+            "INSERT INTO dictation_dictionary_entries
+             (id, spoken_form, replacement, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at)
+             VALUES (?1, 'Jon', 'Initial', NULL, 0, 1, NULL, ?2, ?2)",
+            params![&entry.id, Utc::now().to_rfc3339()],
+        ).unwrap();
+        assert!(db
+            .approve_dictation_correction_suggestion(&suggestion, &refreshed)
+            .is_err());
+        assert!(db
+            .get_dictation_correction_suggestion(&suggestion)
+            .unwrap()
+            .is_some());
+        assert!(db.correction_approval_undo.is_empty());
+    }
+
+    #[test]
+    fn correction_approval_missing_snapshot_rejects_new_dictionary_entry() {
+        let mut db = in_memory_db();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let expected = approval_snapshot(&db, &suggestion);
+        assert_eq!(expected, CorrectionApprovalDictionarySnapshot::Missing);
+        db.learn_dictation_correction("Jon", "Manual").unwrap();
+        assert!(db
+            .approve_dictation_correction_suggestion(&suggestion, &expected)
+            .is_err());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap()[0].replacement,
+            "Manual"
+        );
+    }
+
+    #[test]
+    fn correction_approval_and_learning_leave_inactive_and_scoped_rules_untouched() {
+        for (enabled, app_scope, category_scope) in [
+            (false, None, Some("email")),
+            (false, None, None),
+            (true, None, Some("email")),
+            (true, Some("Mail"), None),
+        ] {
+            let mut db = in_memory_db();
+            let original = db
+                .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                    spoken_form: "Jon".into(),
+                    replacement: "Original".into(),
+                    app_scope: app_scope.map(str::to_string),
+                    case_sensitive: true,
+                    enabled,
+                    category_scope: category_scope.map(str::to_string),
+                })
+                .unwrap();
+            let original_revision = dictionary_revision(&db, &original.id);
+            let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+            let learned = db
+                .approve_dictation_correction_suggestion(
+                    &suggestion,
+                    &approval_snapshot(&db, &suggestion),
+                )
+                .unwrap();
+            let entry = learned.entry.unwrap();
+            assert_ne!(entry.id, original.id);
+            assert!(entry.enabled);
+            assert!(entry.app_scope.is_none());
+            assert!(entry.category_scope.is_none());
+            assert_eq!(learned.action.as_deref(), Some("created"));
+            let entries = db.list_dictation_dictionary_entries().unwrap();
+            assert_eq!(
+                serde_json::to_value(entries.iter().find(|entry| entry.id == original.id)).unwrap(),
+                serde_json::to_value(Some(&original)).unwrap()
+            );
+            assert_eq!(dictionary_revision(&db, &original.id), original_revision);
+            let (text, applied) = crate::dictation_pipeline::apply_learned_dictionary(
+                "Hello Jon",
+                &entries,
+                Some("Notes"),
+                crate::text::format::DictationAppCategory::Notes,
+            );
+            assert_eq!(text, "Hello John");
+            assert_eq!(applied, 1);
+            db.undo_dictation_correction_approval(learned.undo_token.as_deref().unwrap())
+                .unwrap();
+            let direct = db
+                .learn_dictation_correction("JON", "Jonathan")
+                .unwrap()
+                .entry
+                .unwrap();
+            assert_ne!(direct.id, original.id);
+            assert!(direct.enabled);
+            assert!(direct.app_scope.is_none());
+            assert!(direct.category_scope.is_none());
+            assert_eq!(dictionary_revision(&db, &original.id), original_revision);
+        }
+    }
+
+    #[test]
+    fn correction_approval_rejects_expired_invalid_and_future_suggestions() {
+        let mut db = in_memory_db();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let expected = approval_snapshot(&db, &suggestion);
+        for timestamp in [
+            (Utc::now()
+                - chrono::Duration::days(
+                    crate::dictation_correction_capture::CORRECTION_SUGGESTION_MAX_AGE_DAYS,
+                ))
+            .to_rfc3339(),
+            "invalid".into(),
+            (Utc::now() + chrono::Duration::days(1)).to_rfc3339(),
+        ] {
+            db.conn
+                .execute(
+                    "UPDATE dictation_correction_suggestions SET updated_at = ?1 WHERE id = ?2",
+                    params![timestamp, &suggestion],
+                )
+                .unwrap();
+            assert!(db
+                .approve_dictation_correction_suggestion(&suggestion, &expected)
+                .is_err());
+            assert!(db
+                .get_dictation_correction_suggestion(&suggestion)
+                .unwrap()
+                .is_some());
+            assert!(db.list_dictation_dictionary_entries().unwrap().is_empty());
+            assert!(db.correction_approval_undo.is_empty());
+        }
+    }
+
+    #[test]
+    fn direct_correction_learning_undo_restores_prior_entry_and_refuses_newer_edits() {
+        let mut db = in_memory_db();
+        let original = db
+            .learn_dictation_correction("Jon", "Jonathan")
+            .unwrap()
+            .entry
+            .unwrap();
+        let learned = db.learn_dictation_correction("Jon", "John").unwrap();
+        let restored = db
+            .undo_dictation_correction_approval(learned.undo_token.as_deref().unwrap())
+            .unwrap()
+            .entry
+            .unwrap();
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.replacement, "Jonathan");
+        let learned = db.learn_dictation_correction("Jon", "John").unwrap();
+        db.conn
+            .execute(
+                "UPDATE dictation_dictionary_entries SET replacement = 'Johnny' WHERE id = ?1",
+                [&original.id],
+            )
+            .unwrap();
+        assert!(db
+            .undo_dictation_correction_approval(learned.undo_token.as_deref().unwrap())
+            .is_err());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap()[0].replacement,
+            "Johnny"
+        );
+        let created = db.learn_dictation_correction("Sara", "Sarah").unwrap();
+        let undone = db
+            .undo_dictation_correction_approval(created.undo_token.as_deref().unwrap())
+            .unwrap();
+        assert!(undone.entry.is_none());
+        assert_eq!(db.list_dictation_dictionary_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn direct_correction_learning_rolls_back_on_suggestion_delete_failure() {
+        let mut db = in_memory_db();
+        let original = db
+            .learn_dictation_correction("Jon", "Original")
+            .unwrap()
+            .entry
+            .unwrap();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let revision = dictionary_revision(&db, &original.id);
+        db.conn.execute_batch("CREATE TRIGGER deny_learning_delete BEFORE DELETE ON dictation_correction_suggestions
+            BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END;").unwrap();
+        assert!(db.learn_dictation_correction("Jon", "John").is_err());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap()[0].replacement,
+            "Original"
+        );
+        assert_eq!(dictionary_revision(&db, &original.id), revision);
+        assert!(db
+            .get_dictation_correction_suggestion(&suggestion)
+            .unwrap()
+            .is_some());
+        db.conn
+            .execute_batch("DROP TRIGGER deny_learning_delete;")
+            .unwrap();
+        assert_eq!(
+            db.learn_dictation_correction("Jon", "John")
+                .unwrap()
+                .action
+                .as_deref(),
+            Some("updated")
+        );
+        assert!(db
+            .get_dictation_correction_suggestion(&suggestion)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn correction_approval_undo_created_entry_and_replay() {
+        let mut db = in_memory_db();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let learned = db
+            .approve_dictation_correction_suggestion(
+                &suggestion,
+                &approval_snapshot(&db, &suggestion),
+            )
+            .unwrap();
+        let token = learned.undo_token.unwrap();
+        let entry = learned.entry.unwrap();
+        assert_eq!(learned.action.as_deref(), Some("created"));
+        assert!(db
+            .get_dictation_correction_suggestion(&suggestion)
+            .unwrap()
+            .is_none());
+        assert!(db.correction_approval_undo[&token].previous_entry.is_none());
+        assert!(dictionary_revision(&db, &entry.id) > 0);
+        let undone = db.undo_dictation_correction_approval(&token).unwrap();
+        assert_eq!(undone.entry_id, entry.id);
+        assert!(undone.entry.is_none());
+        assert!(db.list_dictation_dictionary_entries().unwrap().is_empty());
+        assert!(db.undo_dictation_correction_approval(&token).is_err());
+    }
+
+    #[test]
+    fn correction_approval_undo_restores_all_prior_fields() {
+        let mut db = in_memory_db();
+        let original = db
+            .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                spoken_form: "jOn".into(),
+                replacement: "Original".into(),
+                app_scope: None,
+                case_sensitive: true,
+                enabled: true,
+                category_scope: None,
+            })
+            .unwrap();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let learned = db
+            .approve_dictation_correction_suggestion(
+                &suggestion,
+                &approval_snapshot(&db, &suggestion),
+            )
+            .unwrap();
+        assert_eq!(learned.action.as_deref(), Some("updated"));
+        let changed_revision = dictionary_revision(&db, &original.id);
+        let restored = db
+            .undo_dictation_correction_approval(learned.undo_token.as_deref().unwrap())
+            .unwrap()
+            .entry
+            .unwrap();
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.spoken_form, original.spoken_form);
+        assert_eq!(restored.replacement, original.replacement);
+        assert_eq!(restored.app_scope, original.app_scope);
+        assert_eq!(restored.case_sensitive, original.case_sensitive);
+        assert_eq!(restored.enabled, original.enabled);
+        assert_eq!(restored.category_scope, original.category_scope);
+        assert_eq!(restored.created_at, original.created_at);
+        assert!(dictionary_revision(&db, &original.id) > changed_revision);
+    }
+
+    #[test]
+    fn correction_approval_undo_rejects_aba_even_with_same_timestamp() {
+        let mut db = in_memory_db();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let learned = db
+            .approve_dictation_correction_suggestion(
+                &suggestion,
+                &approval_snapshot(&db, &suggestion),
+            )
+            .unwrap();
+        let entry = learned.entry.unwrap();
+        let expected = dictionary_revision(&db, &entry.id);
+        db.conn
+            .execute(
+                "UPDATE dictation_dictionary_entries SET replacement = 'Other' WHERE id = ?1",
+                [&entry.id],
+            )
+            .unwrap();
+        db.conn.execute("UPDATE dictation_dictionary_entries SET replacement = ?1, updated_at = ?2 WHERE id = ?3",
+            params![&entry.replacement, entry.updated_at.to_rfc3339(), &entry.id]).unwrap();
+        assert!(dictionary_revision(&db, &entry.id) > expected);
+        assert!(db
+            .undo_dictation_correction_approval(learned.undo_token.as_deref().unwrap())
+            .is_err());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap()[0].replacement,
+            "John"
+        );
+    }
+
+    #[test]
+    fn correction_approval_undo_rejects_deleted_and_recreated_identity() {
+        let mut db = in_memory_db();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let learned = db
+            .approve_dictation_correction_suggestion(
+                &suggestion,
+                &approval_snapshot(&db, &suggestion),
+            )
+            .unwrap();
+        let entry = learned.entry.unwrap();
+        let expected = dictionary_revision(&db, &entry.id);
+        let token = learned.undo_token.unwrap();
+        db.delete_dictation_dictionary_entry(&entry.id).unwrap();
+        assert!(db.undo_dictation_correction_approval(&token).is_err());
+        db.conn.execute(
+            "INSERT INTO dictation_dictionary_entries
+             (id, spoken_form, replacement, app_scope, case_sensitive, enabled, category_scope, created_at, updated_at)
+             VALUES (?1, ?2, ?3, NULL, 0, 1, NULL, ?4, ?5)",
+            params![&entry.id, &entry.spoken_form, &entry.replacement, entry.created_at.to_rfc3339(), entry.updated_at.to_rfc3339()],
+        ).unwrap();
+        assert!(dictionary_revision(&db, &entry.id) > expected);
+        assert!(db.undo_dictation_correction_approval(&token).is_err());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap()[0].id,
+            entry.id
+        );
+    }
+
+    #[test]
+    fn correction_approval_undo_receipts_expire_and_are_bounded() {
+        let mut db = in_memory_db();
+        let mut first = String::new();
+        let mut latest = String::new();
+        for index in 0..=CORRECTION_APPROVAL_UNDO_CAP {
+            let suggestion = queue_undo_fixture(
+                &mut db,
+                &format!("spoken-{index}"),
+                &format!("written-{index}"),
+            );
+            latest = db
+                .approve_dictation_correction_suggestion(
+                    &suggestion,
+                    &approval_snapshot(&db, &suggestion),
+                )
+                .unwrap()
+                .undo_token
+                .unwrap();
+            if index == 0 {
+                first = latest.clone();
+                db.correction_approval_undo
+                    .get_mut(&first)
+                    .unwrap()
+                    .issued_at = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(1))
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            db.correction_approval_undo.len(),
+            CORRECTION_APPROVAL_UNDO_CAP
+        );
+        assert!(!db.correction_approval_undo.contains_key(&first));
+        assert!(db.undo_dictation_correction_approval(&first).is_err());
+        db.correction_approval_undo
+            .get_mut(&latest)
+            .unwrap()
+            .issued_at = std::time::Instant::now()
+            .checked_sub(CORRECTION_APPROVAL_UNDO_TTL + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(db.undo_dictation_correction_approval(&latest).is_err());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap().len(),
+            CORRECTION_APPROVAL_UNDO_CAP + 1
+        );
+    }
+
+    #[test]
+    fn correction_approval_undo_approval_rolls_back_if_suggestion_delete_fails() {
+        let mut db = in_memory_db();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        db.conn.execute_batch("CREATE TRIGGER deny_suggestion_delete BEFORE DELETE ON dictation_correction_suggestions
+            BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END;").unwrap();
+        assert!(db
+            .approve_dictation_correction_suggestion(
+                &suggestion,
+                &approval_snapshot(&db, &suggestion)
+            )
+            .is_err());
+        assert!(db.list_dictation_dictionary_entries().unwrap().is_empty());
+        assert!(db
+            .get_dictation_correction_suggestion(&suggestion)
+            .unwrap()
+            .is_some());
+        assert!(db.correction_approval_undo.is_empty());
+        db.conn
+            .execute_batch("DROP TRIGGER deny_suggestion_delete;")
+            .unwrap();
+        assert!(db
+            .approve_dictation_correction_suggestion(
+                &suggestion,
+                &approval_snapshot(&db, &suggestion)
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn correction_approval_undo_failed_restore_retains_receipt_for_retry() {
+        let mut db = in_memory_db();
+        let original = db
+            .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                spoken_form: "Jon".into(),
+                replacement: "Original".into(),
+                app_scope: None,
+                case_sensitive: true,
+                enabled: true,
+                category_scope: None,
+            })
+            .unwrap();
+        let suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let learned = db
+            .approve_dictation_correction_suggestion(
+                &suggestion,
+                &approval_snapshot(&db, &suggestion),
+            )
+            .unwrap();
+        let token = learned.undo_token.unwrap();
+        let expected_revision = dictionary_revision(&db, &original.id);
+        db.conn.execute_batch("CREATE TRIGGER deny_dictionary_restore BEFORE UPDATE OF replacement ON dictation_dictionary_entries
+            WHEN NEW.replacement = 'Original' BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END;").unwrap();
+        assert!(db.undo_dictation_correction_approval(&token).is_err());
+        assert_eq!(dictionary_revision(&db, &original.id), expected_revision);
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap()[0].replacement,
+            "John"
+        );
+        assert!(db.correction_approval_undo.contains_key(&token));
+        db.conn
+            .execute_batch("DROP TRIGGER deny_dictionary_restore;")
+            .unwrap();
+        assert_eq!(
+            db.undo_dictation_correction_approval(&token)
+                .unwrap()
+                .entry
+                .unwrap()
+                .replacement,
+            "Original"
+        );
+    }
+
+    #[test]
+    fn correction_approval_undo_old_receipt_cannot_revert_a_newer_approval() {
+        let mut db = in_memory_db();
+        let first_suggestion = queue_undo_fixture(&mut db, "Jon", "John");
+        let first = db
+            .approve_dictation_correction_suggestion(
+                &first_suggestion,
+                &approval_snapshot(&db, &first_suggestion),
+            )
+            .unwrap();
+        let second_suggestion = queue_undo_fixture(&mut db, "Jon", "Jonathan");
+        let second = db
+            .approve_dictation_correction_suggestion(
+                &second_suggestion,
+                &approval_snapshot(&db, &second_suggestion),
+            )
+            .unwrap();
+        assert!(db
+            .undo_dictation_correction_approval(first.undo_token.as_deref().unwrap())
+            .is_err());
+        let restored = db
+            .undo_dictation_correction_approval(second.undo_token.as_deref().unwrap())
+            .unwrap()
+            .entry
+            .unwrap();
+        assert_eq!(restored.replacement, "John");
+        assert!(db
+            .undo_dictation_correction_approval(first.undo_token.as_deref().unwrap())
+            .is_err());
+        assert_eq!(
+            db.list_dictation_dictionary_entries().unwrap()[0].replacement,
+            "John"
+        );
+    }
+
+    #[test]
+    fn correction_approval_undo_migration_preserves_legacy_entries_and_adds_revision() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE dictation_dictionary_entries (
+            id TEXT PRIMARY KEY, spoken_form TEXT NOT NULL, replacement TEXT NOT NULL,
+            app_scope TEXT, case_sensitive INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+            category_scope TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+            INSERT INTO dictation_dictionary_entries VALUES ('legacy', 'Jon', 'Original', NULL, 1, 0,
+                'email', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');").unwrap();
+        let mut db = Database {
+            conn,
+            encrypted: false,
+            correction_approval_undo: HashMap::new(),
+        };
+        db.init_tables().unwrap();
+        let original = db.list_dictation_dictionary_entries().unwrap().remove(0);
+        assert_eq!(original.id, "legacy");
+        assert_eq!(original.replacement, "Original");
+        assert!(original.case_sensitive);
+        assert!(!original.enabled);
+        assert_eq!(original.category_scope.as_deref(), Some("email"));
+        assert_eq!(dictionary_revision(&db, "legacy"), 0);
+        db.conn
+            .execute(
+                "UPDATE dictation_dictionary_entries SET enabled = 1 WHERE id = 'legacy'",
+                [],
+            )
+            .unwrap();
+        assert!(dictionary_revision(&db, "legacy") > 0);
+        db.init_tables().unwrap();
+        assert!(dictionary_revision(&db, "legacy") > 0);
+    }
+
+    #[test]
+    fn correction_approval_undo_dictionary_updates_advance_revision_with_recursive_triggers() {
+        let mut db = in_memory_db();
+        db.conn
+            .execute_batch("PRAGMA recursive_triggers = ON;")
+            .unwrap();
+        let entry = db
+            .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                spoken_form: "Jon".into(),
+                replacement: "John".into(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: None,
+            })
+            .unwrap();
+        let initial = dictionary_revision(&db, &entry.id);
+        db.update_dictation_dictionary_entry(
+            &entry.id,
+            &UpdateDictationDictionaryEntryRequest {
+                spoken_form: None,
+                replacement: None,
+                app_scope: None,
+                case_sensitive: None,
+                enabled: Some(false),
+                category_scope: None,
+            },
+        )
+        .unwrap();
+        assert!(dictionary_revision(&db, &entry.id) > initial);
+    }
+
+    #[test]
+    fn learned_global_correction_requires_an_enabled_unscoped_exact_replacement() {
+        let mut db = in_memory_db();
+        let entry = db
+            .create_dictation_dictionary_entry(&CreateDictationDictionaryEntryRequest {
+                spoken_form: "janavi".into(),
+                replacement: "Jeanne-Oui".into(),
+                app_scope: None,
+                case_sensitive: false,
+                enabled: true,
+                category_scope: None,
+            })
+            .unwrap();
+        assert!(db
+            .has_learned_global_dictation_correction("JANAVI", "Jeanne-Oui")
+            .unwrap());
+        assert!(!db
+            .has_learned_global_dictation_correction("janavi", "jeanne-oui")
+            .unwrap());
+        let unchanged = || UpdateDictationDictionaryEntryRequest {
+            spoken_form: None,
+            replacement: None,
+            app_scope: None,
+            case_sensitive: None,
+            enabled: None,
+            category_scope: None,
+        };
+        for change in [
+            UpdateDictationDictionaryEntryRequest {
+                enabled: Some(false),
+                ..unchanged()
+            },
+            UpdateDictationDictionaryEntryRequest {
+                enabled: Some(true),
+                app_scope: Some(Some("Mail".into())),
+                ..unchanged()
+            },
+            UpdateDictationDictionaryEntryRequest {
+                app_scope: Some(None),
+                category_scope: Some(Some("email".into())),
+                ..unchanged()
+            },
+            UpdateDictationDictionaryEntryRequest {
+                category_scope: Some(None),
+                case_sensitive: Some(true),
+                ..unchanged()
+            },
+        ] {
+            db.update_dictation_dictionary_entry(&entry.id, &change)
+                .unwrap();
+            assert!(!db
+                .has_learned_global_dictation_correction("janavi", "Jeanne-Oui")
+                .unwrap());
+        }
+    }
+
+    #[test]
+    fn learned_correction_clears_only_matching_suggestions_across_apps() {
+        let mut db = in_memory_db();
+        for (spoken, replacement, app) in [
+            ("janavi", "Jeanne-Oui", None),
+            ("JANAVI", "Jeanne-Oui", Some("TextEdit")),
+            ("janavi", "Jeanne-Oui", Some("Mail")),
+            ("janavi", "Jeanne", None),
+            ("janavi", "jeanne-oui", None),
+            ("jon", "John", None),
+        ] {
+            db.upsert_dictation_correction_suggestion(
+                spoken,
+                replacement,
+                spoken,
+                replacement,
+                app,
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db.clear_learned_dictation_correction_suggestions("Janavi", "Jeanne-Oui")
+                .unwrap(),
+            3
+        );
+        let remaining = db.list_dictation_correction_suggestions().unwrap();
+        assert_eq!(remaining.len(), 3);
+        assert!(remaining.iter().any(|s| s.replacement == "Jeanne"));
+        assert!(remaining.iter().any(|s| s.replacement == "jeanne-oui"));
+        assert!(remaining.iter().any(|s| s.spoken_form == "jon"));
+        assert_eq!(
+            db.clear_learned_dictation_correction_suggestions("Janavi", "Jeanne-Oui")
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -12027,11 +20626,52 @@ mod tests {
             Some(crate::models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP)
         );
 
+        let (action, in_app) = db
+            .upsert_dictation_correction_suggestion(
+                "send it to cuban netties",
+                "send it to kubernetes",
+                "cuban netties",
+                "kubernetes",
+                Some("Slack"),
+                None,
+            )
+            .unwrap();
+        assert_eq!(action, "created");
+        assert_ne!(external.id, in_app.id);
+        assert!(in_app.source.is_none());
+
+        for (source, expected_id) in [
+            (None, in_app.id.as_str()),
+            (Some(" external_app_readback "), external.id.as_str()),
+        ] {
+            let (action, retried) = db
+                .upsert_dictation_correction_suggestion(
+                    "send it to cuban netties tomorrow",
+                    "send it to kubernetes tomorrow",
+                    "Cuban Netties",
+                    "kubernetes",
+                    Some(" slack "),
+                    source,
+                )
+                .unwrap();
+            assert_eq!(action, "updated");
+            assert_eq!(retried.id, expected_id);
+            assert_eq!(retried.source.as_deref(), source.map(str::trim));
+        }
+
         let stored = db.list_dictation_correction_suggestions().unwrap();
-        assert_eq!(
-            stored[0].source.as_deref(),
-            Some(crate::models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP)
-        );
+        assert_eq!(stored.len(), 2);
+        for (id, expected_source) in [
+            (in_app.id.as_str(), None),
+            (
+                external.id.as_str(),
+                Some(crate::models::CORRECTION_SUGGESTION_SOURCE_EXTERNAL_APP),
+            ),
+        ] {
+            let row = stored.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(row.source.as_deref(), expected_source);
+            assert_eq!(row.corrected_text, "send it to kubernetes tomorrow");
+        }
     }
 
     #[test]
@@ -12245,8 +20885,70 @@ mod tests {
     }
 
     #[test]
+    fn hostile_search_queries_cannot_inject_sql_or_fts_operators() {
+        let mut db = in_memory_db();
+        for (id, text) in [("r1", "launch readiness"), ("r2", "unrelated material")] {
+            db.create_recording(&sample_recording(id, "inbox")).unwrap();
+            let mut transcript = sample_transcript(id);
+            for segment in &mut transcript.segments {
+                segment.text = text.to_string();
+            }
+            transcript.full_text = text.to_string();
+            db.save_transcript(&transcript).unwrap();
+        }
+        for query in [
+            "launch\" OR 1=1 --",
+            "\"; DROP TABLE recordings; --",
+            "NEAR(launch, missing, 100)",
+            "title:launch NOT missing",
+            "***",
+            "\0",
+        ] {
+            let hits = db
+                .search_transcripts(query, 10, None)
+                .expect("literal search");
+            assert!(
+                hits.iter().all(|hit| hit.recording_id == "r1"),
+                "{query}: {hits:?}"
+            );
+            let count: i64 = db
+                .conn
+                .query_row("SELECT COUNT(*) FROM recordings", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 2);
+        }
+        assert!(!db
+            .search_transcripts("launch", 10, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn test_build_fts_query_sanitizes_input() {
         let query = build_fts_query("launch-ready?! qa");
         assert_eq!(query, "launch* OR ready* OR qa*");
+    }
+}
+
+#[cfg(test)]
+mod capture_completion_policy_tests {
+    use super::*;
+
+    #[test]
+    fn capture_loss_is_sticky_and_combined_reason_is_idempotent() {
+        assert_eq!(
+            capture_safe_completion(true, None, Some(" loss ")),
+            (false, Some("loss".into()))
+        );
+        let combined = capture_safe_completion(false, Some("ASR failed"), Some("loss"));
+        assert_eq!(combined, (false, Some("loss ASR failed".into())));
+        assert_eq!(
+            capture_safe_completion(true, combined.1.as_deref(), Some("loss")),
+            combined
+        );
+        assert_eq!(
+            capture_safe_completion(true, None, Some("  ")),
+            (true, None)
+        );
     }
 }

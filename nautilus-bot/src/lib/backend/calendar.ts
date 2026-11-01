@@ -52,8 +52,10 @@ export async function getCalendarSnapshot(options?: {
  * `src/__tests__/calendar-access-gesture.test.ts` reads this file and its
  * callers to keep that true.
  */
-export async function requestCalendarAccess(): Promise<CalendarSnapshot> {
-  return normalizeSnapshot(await invoke("request_calendar_access"));
+export async function requestCalendarAccess(options?: { reconnect: true }): Promise<CalendarSnapshot> {
+  return normalizeSnapshot(options
+    ? await invoke("request_calendar_access", options)
+    : await invoke("request_calendar_access"));
 }
 
 /**
@@ -90,6 +92,7 @@ export interface RelatedMeeting {
   reason: RelatedMeetingReason;
   /** Names only. The sidecar never puts an address in this. */
   sharedAttendeeNames: string[];
+  needsReview: boolean;
   summary: string | null;
   openItems: string[];
   decisions: string[];
@@ -110,7 +113,7 @@ export interface MeetingBriefResult {
    * `sources_only` — related meetings found, but no brief; `unavailableReason`
    *   says why. This is what a Mac with no analysis provider gets, and the
    *   panel shows the raw list instead of an error.
-   * `no_sources` — nothing on this Mac relates to this event.
+   * `no_sources` — no match among the newest 200 meetings on this Mac.
    */
   state: "ready" | "sources_only" | "no_sources";
   related: RelatedMeeting[];

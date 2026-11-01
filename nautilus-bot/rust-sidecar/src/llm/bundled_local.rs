@@ -7,7 +7,7 @@
 //! "so um i need to like send the the report by uh friday no wait thursday"
 //! into "I need to send the report by Thursday." -- unreachable on a fresh
 //! install. This provider is the out-of-the-box route: one ~484 MB download
-//! through the app's own pinned-hash path, then inference in-process with no
+//! through the app's own pinned-hash path, then inference in the text helper with no
 //! network, no server and no account.
 //!
 //! # Why S1-mini and not a general chat model
@@ -27,14 +27,12 @@
 //!   * Conversely it means this provider must never be offered for meeting
 //!     summaries. See `supports_purpose`.
 //!
-//! # Why Candle and not llama.cpp
+//! # Where it runs
 //!
-//! `candle-core`/`-nn`/`-transformers` 0.10 are already dependencies (the
-//! `asr-canary` feature, on by default), `candle-metal` already ships on
-//! macOS, and `candle_transformers::models::quantized_qwen3::ModelWeights`
-//! already reads a Qwen3 GGUF and runs it with a KV cache. Adding llama.cpp
-//! would mean a new C++ toolchain dependency to build, sign and audit for a
-//! model the existing crates run unmodified.
+//! In `plainsong-text-helper`, the llama.cpp process the notes model also
+//! uses (see `text_helper`), so ending the helper gives every byte back to
+//! macOS. The warm helper exits after a short idle window that follows the
+//! Mac's hardware tier.
 //!
 //! # License
 //!
@@ -45,7 +43,7 @@
 //! `MODEL_DISPLAY_NAME` / `MODEL_VENDOR` are what every surface renders.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::text::format::DictationAppCategory;
@@ -67,13 +65,8 @@ pub const MODEL_VENDOR: &str = "Superwhisper";
 /// Directory under the models root that holds the bundled cleanup model.
 pub const MODEL_DIR_NAME: &str = "bundled_cleanup";
 
-/// Roughly what the loaded model holds in memory: the Q4 weights themselves,
-/// plus a KV cache that is cleared between requests and small next to them.
-///
-/// Quoted in the Models screen because keeping a model warm is a real cost the
-/// user is entitled to know about before choosing this route, and because the
-/// keep-warm switch is what decides whether it stays paid between dictations.
-pub const RESIDENT_BYTES: u64 = 484_219_808;
+/// Exact size of the pinned GGUF.
+pub const WEIGHTS_BYTES: u64 = 484_219_808;
 
 /// The system prompt, verbatim from the model card. Changing a single word
 /// of this is a documented way to make the model hallucinate: it is part of
@@ -102,6 +95,19 @@ pub const MAX_OUTPUT_TOKENS: usize = 1_800;
 /// is the ~1K the card documents plus its output. Nothing in the app should
 /// pack 32K of transcript into a 0.6B normalizer.
 pub const CONTEXT_WINDOW_TOKENS: usize = 4_096;
+
+#[derive(Debug)]
+struct MemoryHeadroom;
+
+impl std::fmt::Display for MemoryHeadroom {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(
+            "Not enough verified memory headroom to run built-in cleanup alongside other applications",
+        )
+    }
+}
+
+impl std::error::Error for MemoryHeadroom {}
 
 /// One axis triple for the model's control line. Every field is one of the
 /// trained values; there is no free-text path into this struct.
@@ -223,49 +229,176 @@ pub fn max_new_tokens_for_input(input_tokens: usize) -> usize {
 /// means what it says.
 pub const IDLE_UNLOAD_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Mirrors `transcription.dictationKeepWarm`. Global because the setting is
-/// global: threading it through `ProviderTransport::new` would put a
-/// dictation-only preference into every provider's constructor.
-static KEEP_WARM: AtomicBool = AtomicBool::new(true);
-
-static LAST_USED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-
-pub fn set_keep_warm(enabled: bool) {
-    KEEP_WARM.store(enabled, Ordering::Relaxed);
-}
-
-/// Serializes the tests that write the process-wide keep-warm flag. Tests in a
-/// crate share one binary and run in parallel, so without this the settings
-/// test in `lib.rs` and the residency test here race each other.
-#[cfg(test)]
-pub(crate) static KEEP_WARM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub fn keep_warm_enabled() -> bool {
-    KEEP_WARM.load(Ordering::Relaxed)
-}
-
-/// Record that a cleanup just used the resident model.
-pub fn note_use() {
-    *LAST_USED.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
-}
-
-/// Drop the resident model if nothing has used it for `min_idle`.
+/// Keep-warm, active-worker and last-use state for the resident model.
 ///
-/// Returns whether it unloaded. A cleanup that arrived while the timer was
-/// running refreshes `LAST_USED` and schedules its own unload, so the answer
-/// here is simply "was I the last one".
-pub fn unload_if_idle_for(min_idle: std::time::Duration) -> bool {
-    let idle_since = *LAST_USED.lock().unwrap_or_else(|e| e.into_inner());
-    let stale = idle_since.is_none_or(|last| last.elapsed() >= min_idle);
-    if stale {
-        clear_cached_runtime();
+/// Production uses the one process-wide [`RESIDENCY`], because the setting is
+/// global: threading it through `ProviderTransport::new` would put a
+/// dictation-only preference into every provider's constructor. It is still a
+/// type rather than loose statics so a test can own a private instance:
+/// settings saves and app-state builds in other tests write the global
+/// keep-warm flag, and the test binary runs tests in parallel.
+pub(crate) struct Residency {
+    /// Mirrors `transcription.dictationKeepWarm`.
+    keep_warm: AtomicBool,
+    active_cleanups: AtomicUsize,
+    gate: std::sync::Mutex<()>,
+    last_used: std::sync::Mutex<Option<std::time::Instant>>,
+    #[cfg(test)]
+    idle_unload_schedules: AtomicUsize,
+}
+
+static RESIDENCY: Residency = Residency::new();
+
+impl Residency {
+    const fn new() -> Self {
+        Self {
+            keep_warm: AtomicBool::new(true),
+            active_cleanups: AtomicUsize::new(0),
+            gate: std::sync::Mutex::new(()),
+            last_used: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            idle_unload_schedules: AtomicUsize::new(0),
+        }
     }
-    stale
+
+    /// A private instance for one test. Leaked because the idle timer task
+    /// needs `'static`; it is a few words per test.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> &'static Self {
+        Box::leak(Box::new(Self::new()))
+    }
+
+    pub(crate) fn set_keep_warm(&'static self, enabled: bool) {
+        self.keep_warm.store(enabled, Ordering::Relaxed);
+        // A model loaded while keep-warm was on has no eviction timer yet.
+        if !enabled {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                self.schedule_idle_unload(&runtime);
+            } else {
+                // A synchronous settings caller has no timer executor. Release an
+                // idle model now; an active worker releases it when it finishes.
+                self.unload_if_idle_for(std::time::Duration::ZERO);
+            }
+        }
+    }
+
+    pub(crate) fn keep_warm_enabled(&self) -> bool {
+        self.keep_warm.load(Ordering::Relaxed)
+    }
+
+    /// Record that a cleanup just used the resident model.
+    fn note_use(&self) {
+        *self.last_used.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+    }
+
+    /// Drop the resident model if nothing has used it for `min_idle`.
+    ///
+    /// Returns whether it unloaded. A cleanup that arrived while the timer was
+    /// running refreshes the last use and schedules its own unload, so the
+    /// answer here is simply "was I the last one".
+    fn unload_if_idle_for(&self, min_idle: std::time::Duration) -> bool {
+        // Keep worker admission and eviction atomic with respect to each other.
+        // Otherwise a worker can start after the active-count check and have its
+        // newly used model cleared as soon as it releases the resident lock.
+        let _gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.keep_warm_enabled() || self.active_cleanups.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        let idle_since = *self.last_used.lock().unwrap_or_else(|e| e.into_inner());
+        let idle_for = idle_since.map_or(min_idle, |last| last.elapsed());
+        let stale = idle_unload_due(false, 0, idle_for, min_idle);
+        if stale {
+            clear_cached_runtime();
+        }
+        stale
+    }
+
+    fn schedule_idle_unload(&'static self, runtime: &tokio::runtime::Handle) {
+        if !should_schedule_idle_unload(self.keep_warm_enabled()) {
+            return;
+        }
+        #[cfg(test)]
+        self.idle_unload_schedules.fetch_add(1, Ordering::AcqRel);
+        runtime.spawn(async move {
+            tokio::time::sleep(IDLE_UNLOAD_AFTER).await;
+            if self.unload_if_idle_for(IDLE_UNLOAD_AFTER) {
+                tracing::info!(
+                    "{} unloaded after {}s idle (keep-warm is off)",
+                    MODEL_DISPLAY_NAME,
+                    IDLE_UNLOAD_AFTER.as_secs()
+                );
+            }
+        });
+    }
+}
+
+/// The process-wide residency state the settings and the workers share.
+pub(crate) fn residency() -> &'static Residency {
+    &RESIDENCY
+}
+
+fn idle_unload_due(
+    keep_warm: bool,
+    active_cleanups: usize,
+    idle_for: std::time::Duration,
+    min_idle: std::time::Duration,
+) -> bool {
+    !keep_warm && active_cleanups == 0 && idle_for >= min_idle
 }
 
 /// Whether a finished cleanup should arm the idle-unload timer.
 pub fn should_schedule_idle_unload(keep_warm: bool) -> bool {
     !keep_warm
+}
+
+struct WorkerResidencyGuard {
+    residency: &'static Residency,
+    runtime: Option<tokio::runtime::Handle>,
+}
+
+impl WorkerResidencyGuard {
+    fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self::tracking(&RESIDENCY, Some(runtime))
+    }
+
+    fn with_runtime(runtime: Option<tokio::runtime::Handle>) -> Self {
+        Self::tracking(&RESIDENCY, runtime)
+    }
+
+    fn tracking(residency: &'static Residency, runtime: Option<tokio::runtime::Handle>) -> Self {
+        let _gate = residency
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        residency.active_cleanups.fetch_add(1, Ordering::AcqRel);
+        Self { residency, runtime }
+    }
+}
+
+impl Drop for WorkerResidencyGuard {
+    fn drop(&mut self) {
+        // This guard lives inside the blocking worker, so every terminal path
+        // records residency even if the async caller stopped awaiting it.
+        {
+            let _gate = self
+                .residency
+                .gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.residency.note_use();
+            self.residency
+                .active_cleanups
+                .fetch_sub(1, Ordering::AcqRel);
+        }
+        if let Some(runtime) = &self.runtime {
+            self.residency.schedule_idle_unload(runtime);
+        } else {
+            self.residency.unload_if_idle_for(std::time::Duration::ZERO);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +411,7 @@ pub const BACKEND_METAL: &str = "metal";
 /// The fallback path: correct, and too slow for a long dictation.
 pub const BACKEND_CPU: &str = "cpu";
 
-/// A build without the `local-llm` feature has no backend at all.
+/// A build or bundle without the text helper has no backend at all.
 pub const BACKEND_UNAVAILABLE: &str = "unavailable";
 
 /// Whether this backend can clean up a long dictation inside the pre-insert
@@ -303,7 +436,7 @@ pub fn backend_meets_dictation_budget(backend: &str) -> bool {
 
 /// Whether there is a backend at all.
 ///
-/// False only in a build compiled without `local-llm`, where the provider
+/// False only in a build or bundle without the text helper, where the provider
 /// cannot run and the honest thing for a status surface to say is that this
 /// build has no runtime for it -- not that the machine is slow.
 pub fn backend_is_present(backend: &str) -> bool {
@@ -330,7 +463,7 @@ pub fn backend_is_present(backend: &str) -> bool {
 /// decode loop checks it before every token, so the mutex is released within
 /// one token of the timeout rather than within the remaining budget.
 #[derive(Debug, Clone, Default)]
-pub struct CancelFlag(Arc<AtomicBool>);
+pub struct CancelFlag(Arc<AtomicBool>, Arc<AtomicBool>);
 
 impl CancelFlag {
     pub fn new() -> Self {
@@ -344,6 +477,17 @@ impl CancelFlag {
 
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Relaxed)
+    }
+
+    /// Stop without the helper's cancel grace: the process is ended at once
+    /// so its memory returns. Live speech uses this on background work.
+    pub fn stop_now(&self) {
+        self.1.store(true, Ordering::SeqCst);
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn must_stop_now(&self) -> bool {
+        self.1.load(Ordering::SeqCst)
     }
 }
 
@@ -371,28 +515,16 @@ impl Drop for CancelOnDrop {
 pub const CANCELLED_MESSAGE: &str =
     "The built-in cleanup was cancelled before it finished; keeping the local text.";
 
-/// Drive a greedy decode, checking `cancel` before every token.
-///
-/// `step` produces the next token for the given index, or `None` when the
-/// model emitted a stop token. Keeping the loop here -- rather than inline in
-/// the Candle code -- is what lets the cancellation contract be tested against
-/// a stub decoder, with no weights, no Metal device and no 484 MB download.
-pub fn decode_greedy<F>(budget: usize, cancel: &CancelFlag, mut step: F) -> anyhow::Result<Vec<u32>>
-where
-    F: FnMut(usize) -> anyhow::Result<Option<u32>>,
-{
-    let mut generated: Vec<u32> = Vec::with_capacity(budget.min(256));
-    for index in 0..budget {
-        if cancel.is_cancelled() {
-            return Err(anyhow::anyhow!(CANCELLED_MESSAGE));
-        }
-        match step(index)? {
-            Some(token) => generated.push(token),
-            None => break,
-        }
+#[derive(Debug)]
+struct OutputLimit;
+
+impl std::fmt::Display for OutputLimit {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str("The built-in cleanup reached its output limit before finishing; keeping the local text.")
     }
-    Ok(generated)
 }
+
+impl std::error::Error for OutputLimit {}
 
 // ---------------------------------------------------------------------------
 // Untrusted text at the model boundary
@@ -476,11 +608,11 @@ pub struct BundledArtifact {
     pub max_bytes: u64,
 }
 
-/// The four files the bundled cleanup model needs, pinned to immutable
-/// commit revisions.
+/// The three files the bundled cleanup model needs, pinned to immutable
+/// commit revisions. The helper reads the tokenizer from the GGUF itself.
 ///
 /// Digests were taken from the Hugging Face LFS `oid` (sha256) for the large
-/// files and computed directly for the two text files, on 2026-09-02, and are
+/// file and computed directly for the two text files, on 2026-09-02, and are
 /// re-verified by `download_verified_model_asset` on every fetch. If upstream
 /// republishes, these must be regenerated -- the download will otherwise be
 /// rejected as an integrity failure, which is the intended behavior.
@@ -488,7 +620,7 @@ pub struct BundledArtifact {
 /// LICENSE and NOTICE are downloaded, not merely linked: the license requires
 /// that both travel with the model, and a user who has the weights on disk
 /// should have the terms on disk too.
-pub fn artifacts() -> [BundledArtifact; 4] {
+pub fn artifacts() -> [BundledArtifact; 3] {
     const GGUF_REPO: &str = "superwhisper/s1-mini-GGUF";
     const GGUF_REVISION: &str = "34add00a48a2e5d24e5a4ee5405a99620a3a240c";
     const WEIGHTS_REPO: &str = "superwhisper/s1-mini";
@@ -501,17 +633,8 @@ pub fn artifacts() -> [BundledArtifact; 4] {
             hf_path: "s1-mini-q4_k_m.gguf",
             local_name: WEIGHTS_FILE,
             sha256: "3b41ebe2502cbd03e811d5d16b022f5ab551eda58d62597d152f89535003c634",
-            size_bytes: 484_219_808,
+            size_bytes: WEIGHTS_BYTES,
             max_bytes: 1024 * 1024 * 1024,
-        },
-        BundledArtifact {
-            repo: WEIGHTS_REPO,
-            revision: WEIGHTS_REVISION,
-            hf_path: "tokenizer.json",
-            local_name: TOKENIZER_FILE,
-            sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
-            size_bytes: 11_422_654,
-            max_bytes: 64 * 1024 * 1024,
         },
         BundledArtifact {
             repo: WEIGHTS_REPO,
@@ -535,7 +658,6 @@ pub fn artifacts() -> [BundledArtifact; 4] {
 }
 
 pub const WEIGHTS_FILE: &str = "s1-mini-q4_k_m.gguf";
-pub const TOKENIZER_FILE: &str = "tokenizer.json";
 
 /// Total bytes the download will fetch, for the Models-screen size label.
 pub fn total_download_bytes() -> u64 {
@@ -546,16 +668,13 @@ pub fn model_dir(models_root: &Path) -> PathBuf {
     models_root.join(MODEL_DIR_NAME)
 }
 
-/// Whether every pinned file in `model_dir` carries a *trusted* integrity
-/// receipt -- the MAC'd sibling the download path or the startup migration
-/// writes after hashing the file.
-///
-/// Readiness is defined as "trusted", not "present": a file that exists but
-/// whose receipt is missing, stale or forged must not be loaded into an
-/// inference runtime. This mirrors `asr::qwen3_asr::artifacts_trusted`.
-pub fn artifacts_trusted(model_dir: &Path) -> bool {
+/// Whether every pinned file in `model_dir` is present and this session has
+/// not found it wrong. The bytes are hashed against their pins when the model
+/// loads; a mismatch there makes this false, which offers the download. This
+/// mirrors `asr::qwen3_asr::artifacts_installed`.
+pub fn artifacts_installed(model_dir: &Path) -> bool {
     artifacts().iter().all(|entry| {
-        crate::download::is_model_artifact_trusted(
+        crate::download::is_model_artifact_installed(
             &model_dir.join(entry.local_name),
             Some(entry.sha256),
         )
@@ -568,7 +687,7 @@ pub fn untrusted_artifacts(model_dir: &Path) -> Vec<String> {
     artifacts()
         .iter()
         .filter(|entry| {
-            !crate::download::is_model_artifact_trusted(
+            !crate::download::is_model_artifact_installed(
                 &model_dir.join(entry.local_name),
                 Some(entry.sha256),
             )
@@ -585,7 +704,7 @@ pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, Str
         .collect()
 }
 
-/// Bytes actually on disk for this model, ignoring integrity receipts.
+/// Bytes actually on disk for this model, whether or not they were checked.
 pub fn bytes_on_disk(models_root: &Path) -> u64 {
     let dir = model_dir(models_root);
     artifacts()
@@ -647,7 +766,8 @@ pub async fn download(
     Ok(())
 }
 
-/// Remove the model and its integrity receipts, and drop any cached runtime
+/// Remove the model and anything older builds wrote beside it, forget its
+/// session checks, and drop any cached runtime
 /// that still holds the weights open.
 pub fn delete(models_root: &Path) -> anyhow::Result<()> {
     let dir = model_dir(models_root);
@@ -658,354 +778,222 @@ pub fn delete(models_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(feature = "local-llm"))]
-pub fn clear_cached_runtime() {}
-
 // ---------------------------------------------------------------------------
 // Inference
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "local-llm")]
-mod runtime {
-    use super::*;
-    use anyhow::{anyhow, Context, Result};
-    use candle_core::{Device, Tensor};
-    use candle_transformers::models::quantized_qwen3::ModelWeights;
-    use std::sync::{Mutex, OnceLock};
+/// The warm cleanup helper. Dictation cleanup runs on every capture behind a
+/// 6 s budget, so it stays loaded between dictations for the tier's idle
+/// window; the notes model has a helper of its own.
+static CLEANUP_HELPER: super::text_helper::WarmSlot = super::text_helper::WarmSlot::new();
 
-    /// The one resident copy of the model.
-    ///
-    /// Loading a 484 MB GGUF costs real time, and dictation cleanup runs on
-    /// every capture behind a 6 s budget, so the first load is the only one
-    /// that may pay it. `Mutex` (not `RwLock`) because generation mutates the
-    /// KV cache: two concurrent cleanups would interleave in the same cache.
-    /// Serializing them is correct and, for a dictation lane where exactly
-    /// one capture is in flight, free.
-    static RESIDENT: OnceLock<Mutex<Option<Resident>>> = OnceLock::new();
+/// The largest window one cleanup can need: the input ceiling, its output
+/// ceiling and the fixed prompt, rounded up.
+const HELPER_CONTEXT_TOKENS: usize = 3_584;
 
-    fn resident() -> &'static Mutex<Option<Resident>> {
-        RESIDENT.get_or_init(|| Mutex::new(None))
-    }
+/// Measured on the helper (2026-10-23, M4 Pro): 724 MB resident and 310 MB
+/// footprint at a 1,536-token window. The per-token term is the q8_0 cache
+/// for 28 layers with 8 KV heads of 128 dimensions, plus compute buffers.
+const HELPER_PROFILE: super::text_helper::MemoryProfile = super::text_helper::MemoryProfile {
+    model_bytes: WEIGHTS_BYTES,
+    fixed_bytes: super::text_helper::FIXED_OVERHEAD_BYTES,
+    per_token_bytes: 64 * 1024,
+};
 
-    struct Resident {
-        model_dir: PathBuf,
-        model: ModelWeights,
-        tokenizer: tokenizers::Tokenizer,
-        device: Device,
-        stop_tokens: Vec<u32>,
-        /// "metal" or "cpu", for the receipt and for diagnostics.
-        backend: &'static str,
-    }
+/// What the warm helper holds between dictations: the mapped model and the
+/// process. Quoted in the Models screen because keeping a model warm is a
+/// real cost the user is entitled to know about.
+pub const RESIDENT_BYTES: u64 = WEIGHTS_BYTES + super::text_helper::FIXED_OVERHEAD_BYTES;
 
-    pub fn clear_cached_runtime() {
-        let mut slot = resident().lock().unwrap_or_else(|e| e.into_inner());
-        *slot = None;
-    }
-
-    /// Metal when the feature is compiled in and a device opens; CPU
-    /// otherwise. A Metal failure is not fatal -- a 0.6B Q4 model is
-    /// perfectly runnable on CPU, and refusing to clean up dictation because
-    /// a GPU device would not open would be a worse product.
-    fn select_device() -> (Device, &'static str) {
-        #[cfg(feature = "candle-metal")]
-        {
-            match Device::new_metal(0) {
-                Ok(device) => return (device, BACKEND_METAL),
-                Err(error) => {
-                    tracing::warn!(
-                        "Metal device unavailable for the bundled cleanup model, using CPU: {error}"
-                    );
-                }
-            }
-        }
-        (Device::Cpu, BACKEND_CPU)
-    }
-
-    /// Which backend a cleanup would run on, without loading 484 MB to find
-    /// out.
-    ///
-    /// A resident model answers for itself; otherwise the device selection is
-    /// run once and cached. The Models screen and the settings default both
-    /// need this answer before any cleanup has happened, because the honest
-    /// version of "no setup" depends on it: on CPU this route misses its
-    /// budget on long dictations (measured 11.3 s p50 / 13.4 s p95 for 199
-    /// words against a 6 s budget -- `artifacts/qa/bundled-cleanup-receipt-2026-09-02.md`).
-    pub fn available_backend() -> &'static str {
-        if let Some(existing) = resident()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            return existing.backend;
-        }
-        static PROBED: OnceLock<&'static str> = OnceLock::new();
-        PROBED.get_or_init(|| {
-            let (_device, backend) = select_device();
-            backend
-        })
-    }
-
-    fn load(model_dir: &Path) -> Result<Resident> {
-        if !artifacts_trusted(model_dir) {
-            return Err(anyhow!(
-                "{MODEL_DISPLAY_NAME} is not ready: {} did not pass an integrity check. Re-download it in Models.",
-                untrusted_artifacts(model_dir).join(", ")
-            ));
-        }
-
-        let (device, backend) = select_device();
-        let weights_path = model_dir.join(WEIGHTS_FILE);
-        let weights_pin = artifacts()
-            .into_iter()
-            .find(|entry| entry.local_name == WEIGHTS_FILE)
-            .ok_or_else(|| anyhow!("Missing integrity pin for {WEIGHTS_FILE}"))?;
-        let verified_weights =
-            crate::download::open_verified_model_artifact(&weights_path, weights_pin.sha256)?;
-        let mut file = std::fs::File::open(verified_weights.load_path())
-            .with_context(|| format!("Failed to open {}", weights_path.display()))?;
-        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
-            .map_err(|error| anyhow!("Failed to read {}: {error}", weights_path.display()))?;
-        let model = ModelWeights::from_gguf(content, &mut file, &device)
-            .map_err(|error| anyhow!("Failed to load {MODEL_DISPLAY_NAME} weights: {error}"))?;
-
-        let tokenizer_path = model_dir.join(TOKENIZER_FILE);
-        let tokenizer_pin = artifacts()
-            .into_iter()
-            .find(|entry| entry.local_name == TOKENIZER_FILE)
-            .ok_or_else(|| anyhow!("Missing integrity pin for {TOKENIZER_FILE}"))?;
-        let verified_tokenizer =
-            crate::download::open_verified_model_artifact(&tokenizer_path, tokenizer_pin.sha256)?;
-        let tokenizer = tokenizers::Tokenizer::from_file(verified_tokenizer.load_path())
-            .map_err(|error| anyhow!("Failed to load {MODEL_DISPLAY_NAME} tokenizer: {error}"))?;
-
-        // Resolved from the shipped tokenizer rather than hard-coded ids, so
-        // a future revision that renumbers the specials cannot leave us
-        // generating past the end of the turn.
-        let stop_tokens: Vec<u32> = ["<|im_end|>", "<|endoftext|>"]
-            .iter()
-            .filter_map(|token| tokenizer.token_to_id(token))
-            .collect();
-        if stop_tokens.is_empty() {
-            return Err(anyhow!(
-                "{MODEL_DISPLAY_NAME} tokenizer has no end-of-turn token; refusing to generate without a stop condition"
-            ));
-        }
-
-        Ok(Resident {
-            model_dir: model_dir.to_path_buf(),
-            model,
-            tokenizer,
-            device,
-            stop_tokens,
-            backend,
-        })
-    }
-
-    /// A two-token nonsense utterance used only to force the backend to
-    /// compile its kernels. Real enough to reach every matmul the decode loop
-    /// uses, short enough that the warmup itself is trivial.
-    const WARMUP_TRANSCRIPT: &str = "um okay";
-
-    /// Load the model into the resident slot if it is not there already, then
-    /// run one throwaway generation.
-    ///
-    /// The generation is the point, not an extra. Loading the GGUF is cheap
-    /// next to the Metal shader compile that Candle defers to the *first*
-    /// matmul: measured on an M4 Pro under load, a warmed-but-never-run model
-    /// still spent 7.5 s on its first real cleanup and 0.44 s on every one
-    /// after -- which would have blown the 6 s pre-insert budget exactly once
-    /// per launch, on the first dictation, which is the worst possible time.
-    pub fn prewarm(model_dir: &Path) -> Result<&'static str> {
-        let backend = {
-            let mut slot = resident().lock().unwrap_or_else(|e| e.into_inner());
-            match slot.as_ref() {
-                Some(existing) if existing.model_dir == model_dir => existing.backend,
-                _ => {
-                    let loaded = load(model_dir)?;
-                    let backend = loaded.backend;
-                    *slot = Some(loaded);
-                    backend
-                }
-            }
-        };
-        // Failing the warmup generation is not failing the warmup: the model
-        // is loaded, and the next real request will retry (and report) on its
-        // own. Losing the shader compile is a latency cost, not a fault.
-        if let Err(error) = generate(
-            model_dir,
-            StyleControl::DEFAULT,
-            WARMUP_TRANSCRIPT,
-            &CancelFlag::new(),
-        ) {
-            tracing::warn!("Bundled cleanup warmup generation failed: {error}");
-        }
-        Ok(backend)
-    }
-
-    /// Greedy, temperature-0 generation. Blocking: callers run it on
-    /// `spawn_blocking`.
-    ///
-    /// `cancel` is checked before the lock is taken and before every token, so
-    /// a caller that has stopped waiting gets the `RESIDENT` mutex back within
-    /// one token instead of within the whole remaining budget.
-    pub fn generate(
-        model_dir: &Path,
-        control: StyleControl,
-        transcript: &str,
-        cancel: &CancelFlag,
-    ) -> Result<String> {
-        if cancel.is_cancelled() {
-            // Nothing has been loaded or locked yet: leave the resident model
-            // alone for whoever is actually still waiting.
-            return Err(anyhow!(CANCELLED_MESSAGE));
-        }
-        let mut slot = resident().lock().unwrap_or_else(|e| e.into_inner());
-        let stale = slot
-            .as_ref()
-            .is_none_or(|existing| existing.model_dir != model_dir);
-        if stale {
-            *slot = Some(load(model_dir)?);
-        }
-        let resident = slot
-            .as_mut()
-            .expect("resident model was just loaded above if it was missing");
-
-        let prompt = build_prompt(control, transcript);
-        let encoded = resident
-            .tokenizer
-            .encode(prompt.as_str(), false)
-            .map_err(|error| anyhow!("Failed to tokenize the cleanup prompt: {error}"))?;
-        let mut tokens: Vec<u32> = encoded.get_ids().to_vec();
-        if tokens.is_empty() {
-            return Err(anyhow!("The cleanup prompt tokenized to nothing"));
-        }
-        let transcript_tokens = resident
-            .tokenizer
-            .encode(transcript, false)
-            .map(|encoding| encoding.get_ids().len())
-            .unwrap_or(tokens.len());
-        if transcript_tokens > MAX_INPUT_TOKENS {
-            return Err(anyhow!(
-                "This dictation is {transcript_tokens} tokens, past the {MAX_INPUT_TOKENS}-token budget {MODEL_DISPLAY_NAME} is validated for"
-            ));
-        }
-
-        // A fresh cache per request: the previous dictation's keys are not
-        // context for this one, and leaving them would both change the answer
-        // and grow without bound.
-        resident.model.clear_kv_cache();
-
-        let budget = max_new_tokens_for_input(transcript_tokens);
-        let prompt_len = tokens.len();
-        let mut offset = 0usize;
-
-        let model = &mut resident.model;
-        let device = &resident.device;
-        let stop_tokens = &resident.stop_tokens;
-        let generated = decode_greedy(budget, cancel, |step| {
-            let window: &[u32] = if step == 0 {
-                &tokens[..]
-            } else {
-                &tokens[tokens.len() - 1..]
-            };
-            let input = Tensor::new(window, device)
-                .and_then(|tensor| tensor.unsqueeze(0))
-                .map_err(|error| anyhow!("Failed to build the input tensor: {error}"))?;
-            let logits = model
-                .forward(&input, offset)
-                .map_err(|error| anyhow!("{MODEL_DISPLAY_NAME} inference failed: {error}"))?;
-            offset += window.len();
-
-            // Greedy: argmax, no sampler, no temperature. Normalization is a
-            // deterministic transformation and the model ships
-            // `do_sample: false`.
-            let next = logits
-                .squeeze(0)
-                .and_then(|row| row.to_dtype(candle_core::DType::F32))
-                .and_then(|row| row.to_vec1::<f32>())
-                .map_err(|error| anyhow!("Failed to read logits: {error}"))?
-                .into_iter()
-                .enumerate()
-                .max_by(|(_, left), (_, right)| {
-                    left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .map(|(index, _)| index as u32)
-                .ok_or_else(|| anyhow!("{MODEL_DISPLAY_NAME} produced an empty logit row"))?;
-
-            if stop_tokens.contains(&next) {
-                return Ok(None);
-            }
-            tokens.push(next);
-            Ok(Some(next))
-        })?;
-
-        debug_assert_eq!(prompt_len + generated.len(), tokens.len());
-        let text = resident
-            .tokenizer
-            .decode(&generated, true)
-            .map_err(|error| anyhow!("Failed to decode the cleanup output: {error}"))?;
-        // `skip_special_tokens` above does not remove `<think>`/`</think>`:
-        // they are ordinary text in this tokenizer, not special tokens.
-        let cleaned = sanitize_model_output(&text);
-        if cleaned.is_empty() {
-            return Err(anyhow!(ONLY_A_THINK_BLOCK));
-        }
-        Ok(cleaned)
+/// How long the warm helper stays after its last cleanup while keep-warm is
+/// on: two minutes on an 8 GB Mac, five on larger ones.
+pub fn warm_idle_exit_after(tier: crate::hardware_tier::HardwareTier) -> std::time::Duration {
+    match tier {
+        crate::hardware_tier::HardwareTier::Light => std::time::Duration::from_secs(120),
+        _ => std::time::Duration::from_secs(300),
     }
 }
 
-#[cfg(feature = "local-llm")]
-pub use runtime::{available_backend, clear_cached_runtime};
-
-/// Load the model now so the next dictation does not pay for it. Returns the
-/// backend name ("metal"/"cpu") it warmed.
-#[cfg(feature = "local-llm")]
-pub fn prewarm(models_root: &Path) -> anyhow::Result<&'static str> {
-    runtime::prewarm(&model_dir(models_root))
+fn helper_idle_exit_after() -> std::time::Duration {
+    if RESIDENCY.keep_warm_enabled() {
+        warm_idle_exit_after(crate::hardware_tier::current())
+    } else {
+        IDLE_UNLOAD_AFTER
+    }
 }
 
-#[cfg(not(feature = "local-llm"))]
-pub fn prewarm(_models_root: &Path) -> anyhow::Result<&'static str> {
-    Err(anyhow::anyhow!(BUILD_WITHOUT_LOCAL_LLM))
+pub(super) fn helper_model(model_dir: &Path) -> super::text_helper::HelperModel {
+    super::text_helper::HelperModel {
+        path: model_dir.join(WEIGHTS_FILE),
+        sha256: artifacts()[0].sha256,
+        max_context_tokens: HELPER_CONTEXT_TOKENS,
+        batch_tokens: 256,
+        profile: HELPER_PROFILE,
+    }
 }
 
-/// A build without the runtime has no backend to report. Kept as a function
-/// (rather than the caller branching on the feature) so every surface asks the
-/// same question.
-#[cfg(not(feature = "local-llm"))]
+/// End the warm helper and give its memory back.
+pub fn clear_cached_runtime() {
+    CLEANUP_HELPER.clear();
+}
+
+/// End the warm helper if no cleanup is using it, so a larger job can use
+/// its memory. Never waits on a cleanup in progress.
+pub fn release_idle_helper() -> bool {
+    CLEANUP_HELPER.end_if_idle_for(std::time::Duration::ZERO)
+}
+
+/// Which backend a cleanup runs on: Metal on Apple silicon whenever the
+/// helper ships, nothing when it does not.
 pub fn available_backend() -> &'static str {
-    BACKEND_UNAVAILABLE
+    if !super::text_helper::helper_present() {
+        BACKEND_UNAVAILABLE
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        BACKEND_METAL
+    } else {
+        BACKEND_CPU
+    }
 }
 
-/// What a build without the `local-llm` feature tells the user. It is a build
-/// configuration problem, not something they can fix in the app, so it says
-/// so instead of pointing at a settings screen.
-#[cfg(not(feature = "local-llm"))]
+/// What a build or bundle without the text helper tells the user. It is not
+/// something they can fix in the app, so it says so instead of pointing at a
+/// settings screen.
 pub const BUILD_WITHOUT_LOCAL_LLM: &str =
-    "This build of Plainsong was compiled without the built-in cleanup model. Choose Ollama or a cloud service for dictation cleanup.";
+    "This version of Plainsong doesn't include the built-in cleanup model. Choose Ollama or a cloud service for dictation cleanup.";
+
+fn map_failure(failure: super::text_helper::HelperFailure) -> anyhow::Error {
+    use super::text_helper::HelperFailure;
+    match failure {
+        HelperFailure::Cancelled => anyhow::anyhow!(CANCELLED_MESSAGE),
+        HelperFailure::Unavailable(_) => anyhow::anyhow!(BUILD_WITHOUT_LOCAL_LLM),
+        HelperFailure::Memory(_) => anyhow::Error::new(MemoryHeadroom),
+        other => anyhow::anyhow!("{MODEL_DISPLAY_NAME}: {other}"),
+    }
+}
+
+fn not_ready(model_dir: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{MODEL_DISPLAY_NAME} is not ready: {} did not pass an integrity check. Re-download it in Models.",
+        untrusted_artifacts(model_dir).join(", ")
+    )
+}
+
+/// One cleanup on the warm helper, starting it when needed.
+fn generate_on_helper(
+    model_dir: &Path,
+    control: StyleControl,
+    transcript: &str,
+    cancel: &CancelFlag,
+    deadline: std::time::Instant,
+) -> anyhow::Result<String> {
+    if cancel.is_cancelled() {
+        return Err(anyhow::anyhow!(CANCELLED_MESSAGE));
+    }
+    if !artifacts_installed(model_dir) {
+        return Err(not_ready(model_dir));
+    }
+    let _foreground = super::local_model_load::foreground_work();
+    let _operation = super::native_runtime_gate::TEXT_RUNTIME
+        .acquire()
+        .map_err(anyhow::Error::msg)?;
+    super::native_text::end_job();
+    super::text_helper::ensure_idle_reaper(&CLEANUP_HELPER, helper_idle_exit_after, RESIDENT_BYTES);
+    let model = helper_model(model_dir);
+    let prompt = build_prompt(control, transcript);
+    let generation = CLEANUP_HELPER
+        .with(
+            MODEL_ID,
+            || super::text_helper::HelperProcess::start(&model, MODEL_ID, cancel, deadline),
+            |helper| {
+                let transcript_tokens = helper.count_tokens(transcript, deadline)?;
+                if transcript_tokens > MAX_INPUT_TOKENS {
+                    return Err(super::text_helper::HelperFailure::Context(format!(
+                        "This dictation is {transcript_tokens} tokens, past the {MAX_INPUT_TOKENS}-token budget {MODEL_DISPLAY_NAME} is validated for"
+                    )));
+                }
+                helper.generate(
+                    &prompt,
+                    max_new_tokens_for_input(transcript_tokens),
+                    None,
+                    cancel,
+                    deadline,
+                )
+            },
+        )
+        .map_err(map_failure)?;
+    if !generation.stopped {
+        return Err(OutputLimit.into());
+    }
+    let cleaned = sanitize_model_output(&generation.text);
+    if cleaned.is_empty() {
+        return Err(anyhow::anyhow!(ONLY_A_THINK_BLOCK));
+    }
+    Ok(cleaned)
+}
+
+/// The longest a blocking cleanup may run when its caller set no deadline.
+/// The dictation path's own timeout cancels it much sooner.
+const CLEANUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A two-token nonsense utterance used only to compile the backend's kernels
+/// before the first real dictation needs them.
+const WARMUP_TRANSCRIPT: &str = "um okay";
+
+/// Start the helper now so the next dictation does not pay for it, and run
+/// one throwaway cleanup. Returns the backend it warmed.
+pub fn prewarm(models_root: &Path) -> anyhow::Result<&'static str> {
+    // Track the blocking warmup too: keep-warm can be disabled while it runs.
+    let _residency = WorkerResidencyGuard::with_runtime(tokio::runtime::Handle::try_current().ok());
+    let dir = model_dir(models_root);
+    // Readiness first, then the helper: nothing is started for files that
+    // are missing or this session found wrong.
+    if !artifacts_installed(&dir) {
+        return Err(not_ready(&dir));
+    }
+    if !super::text_helper::helper_present() {
+        return Err(anyhow::anyhow!(BUILD_WITHOUT_LOCAL_LLM));
+    }
+    // The warmup is optional: if speech is refused memory while it runs,
+    // speech stops it (a zero claim is never stopped just for running).
+    let cancel = CancelFlag::new();
+    let warmup = super::speech_priority::PRECEDENCE.begin_background(0, &cancel);
+    // Failing the warmup generation is not failing the warmup unless memory
+    // refused it: the next real request retries and reports on its own.
+    if let Err(error) = generate_on_helper(
+        &dir,
+        StyleControl::DEFAULT,
+        WARMUP_TRANSCRIPT,
+        &cancel,
+        std::time::Instant::now() + CLEANUP_DEADLINE,
+    ) {
+        if error.is::<MemoryHeadroom>() {
+            return Err(error);
+        }
+        if warmup.as_ref().is_some_and(|warmup| warmup.yielded()) {
+            anyhow::bail!("The cleanup model warm-up stopped so speech could use the memory.");
+        }
+        tracing::warn!("Bundled cleanup warmup generation failed: {error}");
+    }
+    Ok(available_backend())
+}
 
 /// Run one cleanup pass. Blocking; call from `spawn_blocking`.
 ///
-/// `cancel` lets the caller stop a decode it is no longer waiting for; see
-/// `CancelFlag`.
-#[cfg(feature = "local-llm")]
+/// `cancel` lets the caller stop a cleanup it is no longer waiting for; the
+/// helper stops at its next token. See `CancelFlag`.
 pub fn clean_up_blocking(
     models_root: &Path,
     control: StyleControl,
     transcript: &str,
     cancel: &CancelFlag,
 ) -> anyhow::Result<String> {
-    runtime::generate(&model_dir(models_root), control, transcript, cancel)
-}
-
-#[cfg(not(feature = "local-llm"))]
-pub fn clean_up_blocking(
-    _models_root: &Path,
-    _control: StyleControl,
-    _transcript: &str,
-    _cancel: &CancelFlag,
-) -> anyhow::Result<String> {
-    Err(anyhow::anyhow!(BUILD_WITHOUT_LOCAL_LLM))
+    generate_on_helper(
+        &model_dir(models_root),
+        control,
+        transcript,
+        cancel,
+        std::time::Instant::now() + CLEANUP_DEADLINE,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,8 +1070,10 @@ impl super::transport::CompletionTransport for BundledLocalClient {
         // is what gets the resident model's lock back for the next dictation.
         let cancel = CancelFlag::new();
         let task_cancel = cancel.clone();
+        let runtime = tokio::runtime::Handle::current();
         let _cancel_on_drop = CancelOnDrop::new(cancel);
         let text = tokio::task::spawn_blocking(move || {
+            let _residency = WorkerResidencyGuard::new(runtime);
             clean_up_blocking(&models_root, control, &transcript, &task_cancel)
         })
         .await
@@ -1095,28 +1085,13 @@ impl super::transport::CompletionTransport for BundledLocalClient {
             )
         })?
         .map_err(|error| {
-            LlmError::new(
-                super::Provider::BundledLocal,
-                ErrorKind::Upstream,
-                error.to_string(),
-            )
+            let kind = if error.is::<OutputLimit>() {
+                ErrorKind::OutputLimit
+            } else {
+                ErrorKind::Upstream
+            };
+            LlmError::new(super::Provider::BundledLocal, kind, error.to_string())
         })?;
-
-        // The model is resident now whether or not a prewarm ever ran, so this
-        // -- not the prewarm -- is where keep-warm has to be honored.
-        note_use();
-        if should_schedule_idle_unload(keep_warm_enabled()) {
-            tokio::spawn(async {
-                tokio::time::sleep(IDLE_UNLOAD_AFTER).await;
-                if unload_if_idle_for(IDLE_UNLOAD_AFTER) {
-                    tracing::info!(
-                        "{} unloaded after {}s idle (keep-warm is off)",
-                        MODEL_DISPLAY_NAME,
-                        IDLE_UNLOAD_AFTER.as_secs()
-                    );
-                }
-            });
-        }
 
         Ok(super::transport::CompletionResponse {
             text,
@@ -1128,6 +1103,56 @@ impl super::transport::CompletionTransport for BundledLocalClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires explicitly selected existing S1-mini weights and a local text fixture"]
+    async fn s1_cleanup_fidelity_probe() {
+        let root = PathBuf::from(std::env::var("PLAINSONG_S1_PROBE_MODELS").unwrap());
+        let input =
+            std::fs::read_to_string(std::env::var("PLAINSONG_S1_PROBE_INPUT").unwrap()).unwrap();
+        let pipeline = (std::env::var("PLAINSONG_S1_PROBE_DEFAULT_PIPELINE").as_deref() == Ok("1"))
+            .then(|| {
+                crate::dictation_pipeline::apply_dictation_pipeline(
+                    crate::dictation_pipeline::DictationPipelineInput {
+                        spoken_language: None,
+                        text: &input,
+                        dictionary_entries: &[],
+                        snippets: &[],
+                        app_target: None,
+                        mode_preset: "voice",
+                        smart_formatting_enabled: true,
+                        clean_disfluencies: crate::settings::TranscriptionSettings::default()
+                            .dictation_remove_disfluencies,
+                        numbers_as_digits: false,
+                        recent_inserted_text: None,
+                        command_mode_enabled: false,
+                        destination_category: crate::text::format::DictationAppCategory::Other,
+                        structured_layout: false,
+                    },
+                )
+            });
+        let recognized = input.clone();
+        let input = pipeline
+            .as_ref()
+            .map_or(input.as_str(), |result| result.text.as_str());
+        for (path, digest) in model_integrity_artifacts(&root) {
+            assert!(
+                crate::download::verify_or_record_model_integrity(&path, Some(&digest))
+                    .await
+                    .unwrap()
+            );
+        }
+        let candidate =
+            clean_up_blocking(&root, StyleControl::DEFAULT, input, &CancelFlag::new()).unwrap();
+        let validation = crate::dictation_fidelity::finish_cleanup(input, &candidate);
+        let report = serde_json::json!({"recognized":recognized,"input":input,"candidate":candidate,"validation":validation,"pipelineStages":pipeline.map(|result| result.pipeline_stage_keys)});
+        std::fs::write(
+            std::env::var("PLAINSONG_S1_PROBE_OUT").unwrap(),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        clear_cached_runtime();
+    }
 
     #[test]
     fn prompt_is_the_literal_format_the_model_card_documents() {
@@ -1301,116 +1326,6 @@ mod tests {
     }
 
     #[test]
-    fn a_decode_runs_to_its_budget_when_nothing_cancels() {
-        let cancel = CancelFlag::new();
-        let generated = decode_greedy(5, &cancel, |index| Ok(Some(index as u32)))
-            .expect("an uncancelled decode returns its tokens");
-        assert_eq!(generated, vec![0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn a_decode_stops_at_the_models_stop_token() {
-        let cancel = CancelFlag::new();
-        let generated = decode_greedy(100, &cancel, |index| {
-            if index == 3 {
-                Ok(None)
-            } else {
-                Ok(Some(index as u32))
-            }
-        })
-        .expect("stopping is not an error");
-        assert_eq!(generated, vec![0, 1, 2]);
-    }
-
-    /// The cancellation contract: at most one more token is decoded after the
-    /// flag is set. Before this, a cancelled cleanup ran to its full budget.
-    #[test]
-    fn a_decode_stops_within_one_token_of_the_cancel_flag() {
-        let cancel = CancelFlag::new();
-        let steps = std::cell::Cell::new(0usize);
-        let error = decode_greedy(1_800, &cancel, |index| {
-            steps.set(steps.get() + 1);
-            if index == 2 {
-                cancel.cancel();
-            }
-            Ok(Some(index as u32))
-        })
-        .expect_err("a cancelled decode must not report a result");
-
-        assert!(error.to_string().contains("cancelled"), "{error}");
-        assert_eq!(
-            steps.get(),
-            3,
-            "the flag was set during token 3, so nothing past it may be decoded"
-        );
-    }
-
-    #[test]
-    fn a_decode_cancelled_before_it_starts_decodes_nothing() {
-        let cancel = CancelFlag::new();
-        cancel.cancel();
-        let steps = std::cell::Cell::new(0usize);
-        let error = decode_greedy(1_800, &cancel, |_| {
-            steps.set(steps.get() + 1);
-            Ok(Some(0))
-        })
-        .expect_err("an already-cancelled decode must not run");
-        assert!(error.to_string().contains("cancelled"), "{error}");
-        assert_eq!(steps.get(), 0);
-    }
-
-    /// The reason cancellation matters is the lock, not the tokens: the
-    /// resident model sits behind a mutex, so an abandoned decode blocks every
-    /// later dictation until it finishes. This runs the real loop shape --
-    /// decode inside the lock, cancel from another thread -- against a stub
-    /// decoder and asserts the lock comes back promptly rather than after the
-    /// full budget.
-    #[test]
-    fn cancelling_releases_the_resident_lock_within_a_token() {
-        use std::sync::Mutex;
-        use std::time::{Duration, Instant};
-
-        static RESIDENT_STUB: Mutex<u32> = Mutex::new(0);
-        const TOKEN: Duration = Duration::from_millis(20);
-        // 1,800 tokens x 20 ms is 36 s: far past any test deadline, which is
-        // exactly the point -- only cancellation can end this in time.
-        const BUDGET: usize = MAX_OUTPUT_TOKENS;
-
-        let cancel = CancelFlag::new();
-        let decoder_cancel = cancel.clone();
-        let decoder = std::thread::spawn(move || {
-            let _held = RESIDENT_STUB.lock().unwrap_or_else(|e| e.into_inner());
-            decode_greedy(BUDGET, &decoder_cancel, |_| {
-                std::thread::sleep(TOKEN);
-                Ok(Some(0))
-            })
-        });
-
-        // Let the decoder take the lock, then stop waiting for it.
-        std::thread::sleep(TOKEN * 3);
-        cancel.cancel();
-
-        let started = Instant::now();
-        let waited = loop {
-            if let Ok(guard) = RESIDENT_STUB.try_lock() {
-                drop(guard);
-                break started.elapsed();
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "the resident lock was still held 5 s after cancellation"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        };
-        assert!(
-            waited < TOKEN * 10,
-            "the lock should come back within a token or two, took {waited:?}"
-        );
-        let outcome = decoder.join().expect("decoder thread");
-        assert!(outcome.is_err(), "a cancelled decode reports no result");
-    }
-
-    #[test]
     fn control_line_uses_only_trained_axis_values() {
         const STYLING: [&str; 4] = ["casual", "semi-casual", "semi-formal", "formal"];
         const STRUCTURE: [&str; 2] = ["prose", "lists"];
@@ -1493,34 +1408,46 @@ mod tests {
         assert!(names.contains(&"LICENSE"));
         assert!(names.contains(&"NOTICE"));
         assert!(names.contains(&WEIGHTS_FILE));
-        assert!(names.contains(&TOKENIZER_FILE));
     }
 
     #[test]
     fn download_footprint_is_the_pinned_total() {
         // The Models screen quotes this before anything is on disk, so it has
         // to be the sum of the pinned sizes rather than a guess.
-        assert_eq!(
-            total_download_bytes(),
-            484_219_808 + 11_422_654 + 12_033 + 470
-        );
+        assert_eq!(total_download_bytes(), 484_219_808 + 12_033 + 470);
     }
 
     #[test]
-    fn readiness_requires_a_trusted_receipt_not_just_a_file() {
+    fn a_file_found_wrong_makes_the_model_not_ready() {
         let dir = std::env::temp_dir().join(format!(
             "plainsong-bundled-cleanup-readiness-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("create temp model dir");
-        // Every file present, with the right names and plausible content --
-        // and no receipts. This must still read as not ready.
+        // Every file present, with the right names and the wrong bytes.
+        // Readiness does not hash, so this reads as installed until a load
+        // checks a file.
         for entry in artifacts() {
             std::fs::write(dir.join(entry.local_name), b"not the real bytes")
                 .expect("write placeholder");
         }
-        assert!(!artifacts_trusted(&dir));
-        assert_eq!(untrusted_artifacts(&dir).len(), artifacts().len());
+        assert!(artifacts_installed(&dir));
+        let notice = artifacts()
+            .into_iter()
+            .find(|entry| entry.local_name != WEIGHTS_FILE)
+            .expect("a small pinned file");
+        assert!(crate::download::is_integrity_mismatch(
+            &crate::download::read_verified_model_bytes(
+                &dir.join(notice.local_name),
+                notice.sha256
+            )
+            .unwrap_err()
+        ));
+        assert!(!artifacts_installed(&dir));
+        assert_eq!(
+            untrusted_artifacts(&dir),
+            vec![notice.local_name.to_string()]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1530,7 +1457,7 @@ mod tests {
             "plainsong-bundled-cleanup-absent-{}",
             uuid::Uuid::new_v4()
         ));
-        assert!(!artifacts_trusted(&dir));
+        assert!(!artifacts_installed(&dir));
         assert_eq!(bytes_on_disk(&dir), 0);
     }
 
@@ -1542,6 +1469,32 @@ mod tests {
         for (path, digest) in listed {
             assert!(path.starts_with(root.join(MODEL_DIR_NAME)));
             assert_eq!(digest.len(), 64);
+        }
+    }
+
+    #[test]
+    fn the_warm_helper_claim_covers_its_measured_peak_and_idles_out_by_tier() {
+        use crate::hardware_tier::HardwareTier;
+        // 724 MB resident at a 1,536-token window, measured on the helper.
+        let at_measured = super::super::text_helper::requirement_bytes(HELPER_PROFILE, 1_536);
+        assert!(at_measured >= 723_877_888);
+        // The largest cleanup fits its window and the 1 GB dictation budget
+        // of an 8 GB Mac.
+        assert!(
+            MAX_INPUT_TOKENS + max_new_tokens_for_input(MAX_INPUT_TOKENS) + 256
+                <= HELPER_CONTEXT_TOKENS
+        );
+        let claim = helper_model(Path::new("/m")).claim_bytes();
+        assert!(claim < HardwareTier::Light.budget().dictation_bytes);
+        assert_eq!(
+            warm_idle_exit_after(HardwareTier::Light),
+            std::time::Duration::from_secs(120)
+        );
+        for tier in [HardwareTier::Balanced, HardwareTier::Best] {
+            assert_eq!(
+                warm_idle_exit_after(tier),
+                std::time::Duration::from_secs(300)
+            );
         }
     }
 
@@ -1566,11 +1519,9 @@ mod tests {
         assert!(MEETINGS_LANE_REFUSAL.contains("Superwhisper"));
     }
 
-    /// Exercises the real load path against an empty models root. Nothing is
-    /// read into memory: readiness is checked before the GGUF is opened, so
-    /// this proves the fail-closed order (receipts first, weights second)
-    /// without a 484 MB download.
-    #[cfg(feature = "local-llm")]
+    /// Exercises the real start path against an empty models root: the
+    /// files are checked before any helper starts, so this proves the
+    /// fail-closed order without a 484 MB download.
     #[test]
     fn prewarm_refuses_an_untrusted_model_directory_instead_of_loading_it() {
         let models_root = std::env::temp_dir().join(format!(
@@ -1594,10 +1545,8 @@ mod tests {
     /// repo actually emit dictation: lowercase, unpunctuated, with fillers and
     /// a self-correction. ~60 and ~200 words, the two sizes the B6 receipt
     /// measures.
-    #[cfg(feature = "local-llm")]
     const EVAL_SHORT: &str = "so um i need to like send the the quarterly report by uh friday no wait make that thursday and i should probably loop in sarah because she owns the numbers section anyway once that goes out we can start on the deck for the review which is uh the week after i think the third or the fourth";
 
-    #[cfg(feature = "local-llm")]
     const EVAL_LONG: &str = "okay so this is the uh the weekly update for the plainsong project um the big thing this week was we got the dictation latency down uh we were seeing something like two and a half seconds end to end and now its more like uh four hundred milliseconds on the on the short clips which is is a big deal because thats the thing people actually notice second thing is the model download path we we pinned every file to a sha two fifty six now so if hugging face republishes something we we reject it instead of loading it uh third we we finally have receipts for the integrity checks so a relaunch doesnt have to rehash two gigabytes of weights every time um what didnt land this week was the the meeting summary chunking i started it but the the grounded orchestrator needs a a real context number from the provider and right now three of the six providers just guess so thats thats next week along with the uh the settings migration for people upgrading from the beta two build and i want to get the the onboarding copy reviewed before we cut beta four";
 
     /// Opt-in, network-bound, real-model validation of the whole provider:
@@ -1605,15 +1554,14 @@ mod tests {
     /// fixtures several times, and print p50/p95 wall time plus the cleaned
     /// text so a human can judge the output.
     ///
-    /// Ignored by default because it fetches ~496 MB into the real models
+    /// Ignored by default because it fetches ~485 MB into the real models
     /// directory and runs local inference. Run with:
     ///
     /// ```text
     /// PLAINSONG_BUNDLED_CLEANUP_EVAL=1 cargo test --lib bundled_cleanup_real_text_eval -- --ignored --nocapture
     /// ```
-    #[cfg(feature = "local-llm")]
     #[tokio::test]
-    #[ignore = "downloads ~496 MB and runs local inference; opt in with PLAINSONG_BUNDLED_CLEANUP_EVAL=1"]
+    #[ignore = "downloads ~485 MB and runs local inference; opt in with PLAINSONG_BUNDLED_CLEANUP_EVAL=1"]
     async fn bundled_cleanup_real_text_eval() {
         if std::env::var("PLAINSONG_BUNDLED_CLEANUP_EVAL").as_deref() != Ok("1") {
             eprintln!("skipped: set PLAINSONG_BUNDLED_CLEANUP_EVAL=1 to run");
@@ -1634,15 +1582,15 @@ mod tests {
         eprintln!("models root: {}", models_root.display());
 
         download(&models_root, |percentage| {
-            if percentage as u32 % 10 == 0 {
+            if (percentage as u32).is_multiple_of(10) {
                 eprintln!("download {percentage:.0}%");
             }
         })
         .await
         .expect("download through the app's verified path must succeed");
         assert!(
-            artifacts_trusted(&model_dir(&models_root)),
-            "every pinned file must carry a trusted receipt after the download"
+            artifacts_installed(&model_dir(&models_root)),
+            "every pinned file must read as installed after the download"
         );
         eprintln!(
             "on disk: {} bytes in {}",
@@ -1697,26 +1645,23 @@ mod tests {
     /// prewarm and the first dictation loaded the model for the whole session
     /// either way.
     ///
-    /// One test rather than several because `LAST_USED` is global and the test
-    /// binary runs tests in parallel.
     #[test]
     fn the_idle_unload_honors_keep_warm_and_the_last_use() {
         use std::time::Duration;
 
-        let _serialized = KEEP_WARM_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let residency = Residency::for_test();
 
         assert!(!should_schedule_idle_unload(true), "keep-warm on: stay");
         assert!(should_schedule_idle_unload(false), "keep-warm off: unload");
 
-        note_use();
+        residency.set_keep_warm(false);
+        residency.note_use();
         assert!(
-            !unload_if_idle_for(Duration::from_secs(60)),
+            !residency.unload_if_idle_for(Duration::from_secs(60)),
             "a model used a moment ago is not idle"
         );
         assert!(
-            unload_if_idle_for(Duration::ZERO),
+            residency.unload_if_idle_for(Duration::ZERO),
             "with no idle requirement the timer's own expiry unloads it"
         );
 
@@ -1724,12 +1669,150 @@ mod tests {
         // short enough that the switch means something.
         assert_eq!(IDLE_UNLOAD_AFTER, Duration::from_secs(60));
 
-        // The flag starts where `TranscriptionSettings::default()` does.
-        assert!(keep_warm_enabled());
-        set_keep_warm(false);
-        assert!(!keep_warm_enabled());
-        set_keep_warm(true);
-        assert!(keep_warm_enabled());
+        assert!(!residency.keep_warm_enabled());
+    }
+
+    #[test]
+    fn synchronous_keep_warm_changes_preserve_an_active_fake_worker() {
+        let residency = Residency::for_test();
+        residency.set_keep_warm(true);
+        let warmup = WorkerResidencyGuard::tracking(residency, None);
+        residency.set_keep_warm(false);
+        assert_eq!(residency.active_cleanups.load(Ordering::Acquire), 1);
+        assert!(!residency.unload_if_idle_for(std::time::Duration::ZERO));
+        drop(warmup);
+        assert_eq!(residency.active_cleanups.load(Ordering::Acquire), 0);
+        assert!(residency.unload_if_idle_for(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn disabling_keep_warm_arms_eviction_without_another_cleanup() {
+        let residency = Residency::for_test();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            residency.set_keep_warm(true);
+            assert_eq!(residency.idle_unload_schedules.load(Ordering::Acquire), 0);
+            residency.set_keep_warm(false);
+            assert_eq!(residency.idle_unload_schedules.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn disabling_keep_warm_during_fake_warmup_rearms_at_worker_exit() {
+        let residency = Residency::for_test();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            residency.set_keep_warm(true);
+            let warmup =
+                WorkerResidencyGuard::tracking(residency, Some(tokio::runtime::Handle::current()));
+            residency.set_keep_warm(false);
+            assert_eq!(residency.idle_unload_schedules.load(Ordering::Acquire), 1);
+            assert!(!residency.unload_if_idle_for(std::time::Duration::ZERO));
+            drop(warmup);
+            assert_eq!(residency.active_cleanups.load(Ordering::Acquire), 0);
+            assert_eq!(residency.idle_unload_schedules.load(Ordering::Acquire), 2);
+        });
+    }
+
+    #[test]
+    fn worker_residency_guard_records_success_error_and_panic_exits() {
+        let residency = Residency::for_test();
+        residency.set_keep_warm(false);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+
+        {
+            let _worker = WorkerResidencyGuard::tracking(residency, Some(handle.clone()));
+        }
+        let failed: anyhow::Result<()> = {
+            let _worker = WorkerResidencyGuard::tracking(residency, Some(handle.clone()));
+            Err(anyhow::anyhow!("fake worker error"))
+        };
+        assert!(failed.is_err());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _worker = WorkerResidencyGuard::tracking(residency, Some(handle));
+            panic!("fake worker panic");
+        }));
+        assert!(panicked.is_err());
+
+        assert_eq!(residency.active_cleanups.load(Ordering::Acquire), 0);
+        assert!(residency
+            .last_used
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some());
+        assert_eq!(residency.idle_unload_schedules.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn aborted_waiter_keeps_fake_worker_active_until_actual_exit() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let residency = Residency::for_test();
+        residency.set_keep_warm(false);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let handle = tokio::runtime::Handle::current();
+            let waiter = tokio::task::spawn_blocking(move || {
+                {
+                    let _worker = WorkerResidencyGuard::tracking(residency, Some(handle));
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                }
+                finished_tx.send(()).unwrap();
+            });
+
+            started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            waiter.abort();
+            drop(waiter);
+            assert_eq!(residency.active_cleanups.load(Ordering::Acquire), 1);
+            assert!(residency
+                .last_used
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none());
+            assert_eq!(residency.idle_unload_schedules.load(Ordering::Acquire), 0);
+
+            release_tx.send(()).unwrap();
+            finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(residency.active_cleanups.load(Ordering::Acquire), 0);
+            assert!(residency
+                .last_used
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some());
+            assert_eq!(residency.idle_unload_schedules.load(Ordering::Acquire), 1);
+        });
+    }
+
+    #[test]
+    fn idle_timer_rechecks_keep_warm_active_workers_and_fake_clock() {
+        use std::time::Duration;
+
+        let delay = Duration::from_secs(60);
+        assert!(!idle_unload_due(true, 0, delay, delay));
+        assert!(!idle_unload_due(false, 1, delay, delay));
+        assert!(!idle_unload_due(false, 0, Duration::from_secs(59), delay,));
+        assert!(idle_unload_due(false, 0, delay, delay));
+        assert!(idle_unload_due(false, 0, Duration::from_secs(61), delay,));
     }
 
     /// The measured reason this answer exists: on CPU a 199-word dictation

@@ -12,14 +12,22 @@
 //! could replace the custom Parakeet-on-Metal FFI that
 //! `docs/model-inventory-upgrades.md` item 1 estimated at 1-2 weeks.
 //!
-//! It is evidence, not a product decision:
-//!
-//! - The whole module is behind `asr-transcribe-cpp`, which is OFF by default
-//!   and deliberately absent from `scripts/sidecar-cargo-features.mjs`, so no
-//!   shipped binary contains it.
-//! - When it *is* compiled in, it appears as one extra local route labelled
-//!   experimental in the route catalog and is never recommended or defaulted.
-//! - The measurements are in `artifacts/qa/transcribe-cpp-spike-2026-09-02.md`.
+//! - The whole module is behind `asr-transcribe-cpp`, which is off in Cargo's
+//!   default set and enabled for macOS builds by
+//!   `scripts/sidecar-cargo-features.ts`, so the shipped Mac app contains it
+//!   (the Nemotron live preview runs here).
+//! - Parakeet TDT 0.6B v3 Q8_0 is the dictation and meeting default for new
+//!   installs on Apple Silicon (`settings::fresh_install_dictation_route`);
+//!   older installs keep their meeting route unless the user names this one.
+//!   Fluid Speech Mini and Underdog Bark 3.0 Pro are optional English models
+//!   for dictation and meetings, served from Plainsong's own model release.
+//!   Every other batch route here is labelled experimental. None of them is
+//!   ever recommended.
+//! - The original spike is `artifacts/qa/transcribe-cpp-spike-2026-09-02.md`.
+//!   The Parakeet GGUF admission measurements are next to
+//!   `parakeet_gguf_memory_budget`.
+
+mod windowing;
 
 use super::{
     streaming_chunk_samples, AsrProvider, AsrProviderType, DownloadStatus, ModelInfo, ModelOption,
@@ -33,8 +41,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant};
 use transcribe_cpp::{
-    Backend, CancelToken, CommitPolicy, Model, ModelOptions, ParakeetStreamOptions, RunOptions,
-    Session, StreamExtension, StreamOptions, TimestampKind,
+    Backend, CancelToken, CommitPolicy, Model, ModelOptions, MoonshineStreamingOptions,
+    ParakeetStreamOptions, RunOptions, Session, StreamExtension, StreamOptions, TimestampKind,
 };
 
 /// Directory under `models/` that holds every GGUF this provider fetches.
@@ -46,11 +54,64 @@ pub(crate) const TRANSCRIBE_CPP_MODEL_DIR: &str = "transcribe_cpp";
 /// the closest GGUF analogue to the int8 ONNX export the app ships today.
 pub const PARAKEET_GGUF_MODEL_ID: &str = "parakeet-tdt-0.6b-v3-q8_0";
 
-/// Loaded (and benchmarked) only to prove the runtime path for a
-/// streaming-capable family; NOT offered as a route — streaming integration is
-/// a separate piece of work, and a batch decode of a streaming model is not a
-/// streaming feature.
+/// Orukeet r3 converted to the Parakeet-compatible GGUF architecture.
+/// English is the only language qualified in Plainsong, and the route stays
+/// dictation-only even if the runtime exposes token timing rows.
+pub const ORUKEET_R3_GGUF_MODEL_ID: &str = "orukeet-r3-q8_0";
+
+/// English dictation qualification only. This port returns no measured timestamps.
+pub const QWEN3_ASR_17_GGUF_MODEL_ID: &str = "qwen3-asr-1.7b-q8_0";
+
+/// Experimental English dictation. Three-minute continuity is not yet qualified.
+pub const QWEN3_ASR_06_GGUF_MODEL_ID: &str = "qwen3-asr-0.6b-q6_k";
+
+/// NVIDIA's English-only unified offline and buffered-streaming model.
+/// Plainsong exposes batch dictation and experimental English meetings. Live
+/// preview still needs its own buffered-stream qualification.
+pub const PARAKEET_UNIFIED_EN_GGUF_MODEL_ID: &str = "parakeet-unified-en-0.6b-q8_0";
+
+/// Section 3 of NVIDIA's governing agreement requires this exact sentence in
+/// a Notice file when the model is redistributed. The downloaded model card
+/// records provenance; the separately downloaded PDF is the agreement itself.
+pub const PARAKEET_UNIFIED_EN_ATTRIBUTION_NOTICE: &str =
+    "Licensed by NVIDIA Corporation under the NVIDIA Open Model License";
+
+/// Fluid Speech Mini (FluidVoice), a Parakeet TDT 0.6B v3 derivative that
+/// Plainsong converts to this runtime's Q8_0 layout. Optional English model for
+/// dictation and meetings, never a default: on the 2026-10-21 evaluation it
+/// wrote fewer stray words with another voice talking nearby in synthetic audio,
+/// but left more real-speech clips empty, made more critical errors in the
+/// dictation tests, did worse in synthetic crowd noise and dropped very short
+/// replies (`artifacts/continuation-2026-10-20/opus-bark/report.md`).
+pub const FLUID_SPEECH_MINI_GGUF_MODEL_ID: &str = "fluid-speech-mini-q8_0";
+
+/// Underdog Bark 3.0 Pro (Conway Research), converted the same way, with
+/// `<unk>` typed as a control token so the runtime drops it from text. Optional
+/// English model, never a default: better on short distant-microphone clips,
+/// with whole-meeting differences within test variation. Synthetic-voice
+/// dictation often lost capitals, punctuation and the space between digits and
+/// words.
+pub const UNDERDOG_BARK_PRO_GGUF_MODEL_ID: &str = "underdog-bark-3.0-pro-q8_0";
+
+/// The attribution FluidVoice asks for, word for word (CC BY 4.0).
+pub const FLUID_SPEECH_MINI_ATTRIBUTION: &str =
+    "Fluid Speech Mini by FluidVoice. Built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra.";
+
+/// The credits Conway Research's NOTICE names (CC BY 4.0).
+pub const UNDERDOG_BARK_PRO_ATTRIBUTION: &str = "Underdog Bark 3.0 Pro by Conway Research. Built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra; post-trained and compressed by Conway Research.";
+
+/// Plainsong's own release that serves the GGUFs it converted. Upstream
+/// publishes neither model in this runtime's layout, so the converted bytes are
+/// hosted here and pinned by SHA-256 like every other download.
+const PLAINSONG_MODEL_RELEASE_URL: &str =
+    "https://github.com/JonathanRReed/Plainsong/releases/download/models-2026-10";
+
+/// Shared weights for the existing streaming preview and experimental English
+/// final dictation. Batch selection does not qualify new languages or meetings.
 pub const NEMOTRON_STREAMING_GGUF_MODEL_ID: &str = "nemotron-3.5-asr-streaming-0.6b-q8_0";
+
+/// English batch dictation only; numeric accuracy and streaming remain unqualified.
+pub const MOONSHINE_STREAM_MEDIUM_MODEL_ID: &str = "moonshine-streaming-medium-q8_0";
 
 /// Mistral's offline audio-LLM, the open-weights accuracy leader on the
 /// Artificial Analysis non-streaming board. Measured here on 2026-09-03 and
@@ -67,14 +128,16 @@ pub const VOXTRAL_REALTIME_4B_GGUF_MODEL_ID: &str = "voxtral-mini-4b-realtime-26
 /// default (`Auto`) is what a user would get.
 pub(crate) const BACKEND_ENV_VAR: &str = "PLAINSONG_TRANSCRIBE_CPP_BACKEND";
 
-/// Parakeet is a transducer: it emits a blank per frame and reports no
-/// per-token probability, so there is no measured confidence to report. This
-/// is the same placeholder `asr/parakeet.rs` uses for the same weights, chosen
-/// so that swapping the runtime under a route does not silently move the
-/// transcript quality score in `lib.rs`. It is a constant, not a measurement,
-/// and `token_confidence` below prefers a real number whenever the family
-/// gives one.
+/// Fallback only when a transducer token has no usable probability. The GGUF
+/// Parakeet decoder supplies per-token probabilities through `decoder.cpp`;
+/// `token_confidence` below uses those measured values when available. Keep
+/// the fallback aligned with `asr/parakeet.rs` for unscored tokens.
 const UNSCORED_TRANSDUCER_CONFIDENCE: f64 = 0.88;
+
+/// User-facing copy when the weights are absent or unverified. No runtime or
+/// file-format names: the details stay in logs and diagnostics.
+const MISSING_SPEECH_MODEL: &str =
+    "The speech model is missing or couldn't be verified. Download it again in Settings > Models.";
 
 /// A GGUF this provider knows how to fetch, verify and load.
 pub(crate) struct TranscribeCppModelSpec {
@@ -86,6 +149,10 @@ pub(crate) struct TranscribeCppModelSpec {
     /// Pinned repo commit, so the URL is immutable the way every other model
     /// download in this app is.
     pub hf_revision: &'static str,
+    /// The GGUF is Plainsong's own conversion, downloaded from
+    /// `PLAINSONG_MODEL_RELEASE_URL`. `hf_repo` and `hf_revision` then name
+    /// the source the bytes were converted from, and the SHA-256 is the pin.
+    pub hosted_by_plainsong: bool,
     pub sha256: &'static str,
     pub size_bytes: u64,
     pub license: &'static str,
@@ -95,8 +162,102 @@ pub(crate) struct TranscribeCppModelSpec {
     pub offered_as_route: bool,
 }
 
+pub(crate) struct TranscribeCppAuxiliarySpec {
+    pub source_url: &'static str,
+    pub local_file_name: &'static str,
+    pub sha256: &'static str,
+    pub size_bytes: u64,
+}
+
+const ORUKEET_R3_AUXILIARY_SPECS: &[TranscribeCppAuxiliarySpec] = &[
+    TranscribeCppAuxiliarySpec {
+        source_url: "https://huggingface.co/oruk/orukeet/resolve/b59c13a733fce5cf193230d0fa317ee7f145a108/LICENSE-WEIGHTS",
+        local_file_name: "orukeet-r3-LICENSE-WEIGHTS",
+        sha256: "23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2",
+        size_bytes: 20_137,
+    },
+    TranscribeCppAuxiliarySpec {
+        source_url: "https://huggingface.co/oruk/orukeet/resolve/b59c13a733fce5cf193230d0fa317ee7f145a108/NOTICE.md",
+        local_file_name: "orukeet-r3-NOTICE.md",
+        sha256: "f1cf43822e52f0a2e5aa3c0b1252d34a17d30cd29303a12eb2f0b151e7433132",
+        size_bytes: 4_765,
+    },
+];
+
+const PARAKEET_UNIFIED_EN_AUXILIARY_SPECS: &[TranscribeCppAuxiliarySpec] = &[
+    TranscribeCppAuxiliarySpec {
+        source_url: "https://huggingface.co/nvidia/parakeet-unified-en-0.6b/resolve/fe53cd885760c96b6a5f51a0bfd362cb4584a98b/README.md",
+        local_file_name: "parakeet-unified-en-0.6b-NVIDIA-MODEL-CARD.md",
+        sha256: "505590d4440b38ca33ed4d5b8af2a10c2391ecd8740c945bfdf82825e1a05fb3",
+        size_bytes: 17_800,
+    },
+    TranscribeCppAuxiliarySpec {
+        source_url: "https://www.nvidia.com/content/dam/en-zz/Solutions/license-agreements/enterprise-software/nvidia-open-model-license-agreements-24-10-2025.pdf",
+        local_file_name: "parakeet-unified-en-0.6b-NVIDIA-OPEN-MODEL-LICENSE.pdf",
+        sha256: "4d2fb590aa9b30c47f2058bff17291df7fa2aa0c1bd775a20703da9bb267cfab",
+        size_bytes: 79_005,
+    },
+];
+
+/// CC BY 4.0 asks for the licence text and the credits to travel with the
+/// weights, so both files are part of the download and of readiness. The two
+/// licence files are the same Creative Commons legal code, byte for byte.
+const FLUID_SPEECH_MINI_AUXILIARY_SPECS: &[TranscribeCppAuxiliarySpec] = &[
+    TranscribeCppAuxiliarySpec {
+        source_url: "https://github.com/JonathanRReed/Plainsong/releases/download/models-2026-10/fluid-speech-mini-LICENSE.txt",
+        local_file_name: "fluid-speech-mini-LICENSE.txt",
+        sha256: "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+        size_bytes: 18_657,
+    },
+    TranscribeCppAuxiliarySpec {
+        source_url: "https://github.com/JonathanRReed/Plainsong/releases/download/models-2026-10/fluid-speech-mini-NOTICE.txt",
+        local_file_name: "fluid-speech-mini-NOTICE.txt",
+        sha256: "6ce6d4b65f1ff18dbf9e96ba9dce44c7c7953961dd1ca14e721889de60fcaaad",
+        size_bytes: 2_346,
+    },
+];
+
+const UNDERDOG_BARK_PRO_AUXILIARY_SPECS: &[TranscribeCppAuxiliarySpec] = &[
+    TranscribeCppAuxiliarySpec {
+        source_url: "https://github.com/JonathanRReed/Plainsong/releases/download/models-2026-10/underdog-bark-3.0-pro-LICENSE.txt",
+        local_file_name: "underdog-bark-3.0-pro-LICENSE.txt",
+        sha256: "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+        size_bytes: 18_657,
+    },
+    TranscribeCppAuxiliarySpec {
+        source_url: "https://github.com/JonathanRReed/Plainsong/releases/download/models-2026-10/underdog-bark-3.0-pro-NOTICE.txt",
+        local_file_name: "underdog-bark-3.0-pro-NOTICE.txt",
+        sha256: "c5832f497dd20becaaea71f8dbe616e3658333a63bada5b7b615f8e996832948",
+        size_bytes: 2_490,
+    },
+];
+
+impl TranscribeCppAuxiliarySpec {
+    pub(crate) fn url(&self) -> String {
+        self.source_url.to_string()
+    }
+
+    #[cfg(test)]
+    fn source_file_name(&self) -> &str {
+        self.source_url.rsplit('/').next().unwrap_or_default()
+    }
+}
+
+pub(crate) fn auxiliary_specs_for(model_id: &str) -> &'static [TranscribeCppAuxiliarySpec] {
+    match model_id {
+        ORUKEET_R3_GGUF_MODEL_ID => ORUKEET_R3_AUXILIARY_SPECS,
+        PARAKEET_UNIFIED_EN_GGUF_MODEL_ID => PARAKEET_UNIFIED_EN_AUXILIARY_SPECS,
+        FLUID_SPEECH_MINI_GGUF_MODEL_ID => FLUID_SPEECH_MINI_AUXILIARY_SPECS,
+        UNDERDOG_BARK_PRO_GGUF_MODEL_ID => UNDERDOG_BARK_PRO_AUXILIARY_SPECS,
+        _ => &[],
+    }
+}
+
 impl TranscribeCppModelSpec {
     pub(crate) fn url(&self) -> String {
+        if self.hosted_by_plainsong {
+            return format!("{PLAINSONG_MODEL_RELEASE_URL}/{}", self.file_name);
+        }
         format!(
             "https://huggingface.co/{}/resolve/{}/{}",
             self.hf_repo, self.hf_revision, self.file_name
@@ -135,11 +296,12 @@ const VOXTRAL_REALTIME_LANGUAGES: &[&str] = &[
 pub(crate) const MODEL_SPECS: &[TranscribeCppModelSpec] = &[
     TranscribeCppModelSpec {
         model_id: PARAKEET_GGUF_MODEL_ID,
-        label: "Parakeet TDT 0.6B v3 GGUF Q8_0 via transcribe.cpp (experimental)",
+        label: "Parakeet TDT 0.6B v3 GGUF Q8_0 via transcribe.cpp",
         display_name: "Parakeet TDT 0.6B v3 (GGUF Q8_0)",
         file_name: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
         hf_repo: "handy-computer/parakeet-tdt-0.6b-v3-gguf",
         hf_revision: "85ac09ea12fc4b1112fa76810059364bc6adc9de",
+        hosted_by_plainsong: false,
         sha256: "5859f77944efcd8eafa23a6350731960b2b55b2203df51f319665c807d802cc7",
         size_bytes: 739_508_576,
         // Verified on the GGUF repo's own model card metadata
@@ -151,23 +313,130 @@ pub(crate) const MODEL_SPECS: &[TranscribeCppModelSpec] = &[
         offered_as_route: true,
     },
     TranscribeCppModelSpec {
+        model_id: ORUKEET_R3_GGUF_MODEL_ID,
+        label: "Orukeet r3 GGUF Q8_0 via transcribe.cpp (experimental, English dictation)",
+        display_name: "Orukeet r3 (GGUF Q8_0, experimental)",
+        file_name: "orukeet-transcribe-cpp-Q8_0.gguf",
+        hf_repo: "oruk/orukeet",
+        hf_revision: "b59c13a733fce5cf193230d0fa317ee7f145a108",
+        hosted_by_plainsong: false,
+        sha256: "cad2f52ac91cad829279422301989687c2cf02e19157352ed25ea501b90dbb7e",
+        size_bytes: 739_508_608,
+        license: "CC-BY-SA-4.0 weights; NVIDIA attribution applies",
+        upstream_url: "https://huggingface.co/oruk/orukeet",
+        languages: &["en"],
+        offered_as_route: true,
+    },
+    TranscribeCppModelSpec {
+        model_id: QWEN3_ASR_17_GGUF_MODEL_ID,
+        label: "Qwen3-ASR 1.7B GGUF Q8_0 (experimental, English dictation)",
+        display_name: "Qwen3-ASR 1.7B (GGUF Q8_0, experimental)",
+        file_name: "Qwen3-ASR-1.7B-Q8_0.gguf",
+        hf_repo: "ldov/Qwen3-ASR-1.7B-gguf",
+        hf_revision: "72670a53ff1598622ea968904093b71f767d2ffa",
+        hosted_by_plainsong: false,
+        sha256: "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
+        size_bytes: 2_185_030_624,
+        license: "Apache-2.0",
+        upstream_url: "https://huggingface.co/Qwen/Qwen3-ASR-1.7B",
+        languages: &["en"],
+        offered_as_route: true,
+    },
+    TranscribeCppModelSpec {
+        model_id: QWEN3_ASR_06_GGUF_MODEL_ID,
+        label: "Qwen3-ASR 0.6B GGUF Q6_K (experimental, English dictation)",
+        display_name: "Qwen3-ASR 0.6B (GGUF Q6_K, experimental)",
+        file_name: "Qwen3-ASR-0.6B-Q6_K.gguf",
+        hf_repo: "handy-computer/Qwen3-ASR-0.6B-gguf",
+        hf_revision: "7e7c69a577fa2725dfedbe34b5e999336e30a19b",
+        hosted_by_plainsong: false,
+        sha256: "3b051f108f03c0c91bbe1a3b2c1ee15e3ed51e4caec2a48751b01f2a21441cc3",
+        size_bytes: 690_417_824,
+        license: "Apache-2.0",
+        upstream_url: "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
+        languages: &["en"],
+        offered_as_route: true,
+    },
+    TranscribeCppModelSpec {
+        model_id: PARAKEET_UNIFIED_EN_GGUF_MODEL_ID,
+        label: "Parakeet Unified EN 0.6B GGUF Q8_0 (experimental, English dictation and meetings)",
+        display_name: "Parakeet Unified EN 0.6B (GGUF Q8_0, experimental)",
+        file_name: "parakeet-unified-en-0.6b-Q8_0.gguf",
+        hf_repo: "handy-computer/parakeet-unified-en-0.6b-gguf",
+        hf_revision: "7e948f21b7bdbac698d3318db9d350f1096f3b6c",
+        hosted_by_plainsong: false,
+        sha256: "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
+        size_bytes: 731_357_568,
+        license: "NVIDIA Open Model License",
+        upstream_url: "https://huggingface.co/nvidia/parakeet-unified-en-0.6b",
+        languages: &["en"],
+        offered_as_route: true,
+    },
+    TranscribeCppModelSpec {
         model_id: NEMOTRON_STREAMING_GGUF_MODEL_ID,
-        label: "Nemotron 3.5 ASR Streaming 0.6B GGUF Q8_0 (runtime proof only)",
-        display_name: "Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0)",
+        label: "Nemotron 3.5 ASR Streaming 0.6B GGUF Q8_0 (experimental, English dictation)",
+        display_name: "Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0, experimental)",
         file_name: "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
         hf_repo: "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
         hf_revision: "6d44e540bc31b0de1dbe174a3cea87f53a7f22fb",
+        hosted_by_plainsong: false,
         sha256: "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
         size_bytes: 751_094_240,
         // NVIDIA ships this one under OpenMDW-1.1, not CC-BY-4.0. It is
-        // loaded by the benchmark to prove the runtime path and is NOT
-        // offered as a route, so nothing redistributes it.
+        // Existing preview and experimental batch dictation share these weights.
         license: "OpenMDW-1.1",
         upstream_url: "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
         // The model card lists 32 language-locales; only English is exercised
         // here, so no language list is claimed.
         languages: &["en"],
-        offered_as_route: false,
+        offered_as_route: true,
+    },
+    TranscribeCppModelSpec {
+        model_id: MOONSHINE_STREAM_MEDIUM_MODEL_ID,
+        label: "Moonshine Streaming Medium Q8_0 (experimental, English dictation; check numbers)",
+        display_name: "Moonshine Streaming Medium (Q8_0, experimental)",
+        file_name: "moonshine-streaming-medium-Q8_0.gguf",
+        hf_repo: "handy-computer/moonshine-streaming-medium-gguf",
+        hf_revision: "0f99e956a9e63d591ddd7f2a20dfead255e96c68",
+        hosted_by_plainsong: false,
+        sha256: "f7c9564249b508f6012927ec4f9e536087da53a7047f858ca9975bea5f75299e",
+        size_bytes: 295_793_568,
+        license: "MIT",
+        upstream_url: "https://huggingface.co/moonshine-ai/moonshine-streaming-medium",
+        languages: &["en"],
+        offered_as_route: true,
+    },
+    TranscribeCppModelSpec {
+        model_id: FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+        label: "Fluid Speech Mini by FluidVoice (GGUF Q8_0, optional, English)",
+        display_name: "Fluid Speech Mini by FluidVoice (GGUF Q8_0)",
+        file_name: "fluid-speech-mini-q8_0.gguf",
+        // The source the release bytes were converted from; the release
+        // README and NOTICE record the steps, which reproduce this digest.
+        hf_repo: "FluidVoice-Labs/fluid-speech-mini-gguf",
+        hf_revision: "490bcd5de891f5efd0e732434dfb0a4b0899aead",
+        hosted_by_plainsong: true,
+        sha256: "15dbfb78d8f02d4618447fe25a60dde13f35ad12513842bac41e321ff0fa6219",
+        size_bytes: 739_508_608,
+        license: "CC-BY-4.0",
+        upstream_url: "https://huggingface.co/FluidVoice-Labs/fluid-speech-mini-gguf",
+        languages: &["en"],
+        offered_as_route: true,
+    },
+    TranscribeCppModelSpec {
+        model_id: UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+        label: "Underdog Bark 3.0 Pro by Conway Research (GGUF Q8_0, optional, English)",
+        display_name: "Underdog Bark 3.0 Pro by Conway Research (GGUF Q8_0)",
+        file_name: "underdog-bark-3.0-pro-q8_0.gguf",
+        hf_repo: "ConwayResearch/Underdog-Bark-3.0-Pro",
+        hf_revision: "4b5c51e04aa8d16dda9ecdff71bc29f7360149e4",
+        hosted_by_plainsong: true,
+        sha256: "017193232ec9ca53f53800877cacd8f8c468040f4a8d377fc07e1e959808ac6f",
+        size_bytes: 739_508_608,
+        license: "CC-BY-4.0",
+        upstream_url: "https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Pro",
+        languages: &["en"],
+        offered_as_route: true,
     },
     TranscribeCppModelSpec {
         model_id: VOXTRAL_MINI_3B_GGUF_MODEL_ID,
@@ -176,6 +445,7 @@ pub(crate) const MODEL_SPECS: &[TranscribeCppModelSpec] = &[
         file_name: "Voxtral-Mini-3B-2507-Q4_K_M.gguf",
         hf_repo: "handy-computer/Voxtral-Mini-3B-2507-gguf",
         hf_revision: "5690205813042c07cbaa86d2a9dcc585fcd31304",
+        hosted_by_plainsong: false,
         sha256: "3a6717aa8f8989108d260cbd237584289eec43cc987e10133c33643515936205",
         size_bytes: 2_984_721_056,
         // Mistral ships Voxtral under Apache-2.0 and the GGUF repo's card
@@ -195,6 +465,7 @@ pub(crate) const MODEL_SPECS: &[TranscribeCppModelSpec] = &[
         file_name: "Voxtral-Mini-4B-Realtime-2602-Q4_K_M.gguf",
         hf_repo: "handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf",
         hf_revision: "b3e1c979e3775cbd0a49a65878a0ec7f06789ed7",
+        hosted_by_plainsong: false,
         sha256: "39dc1f65539373a406edea7490505822d77c12edff521744678717eef4da4723",
         size_bytes: 2_830_493_984,
         license: "Apache-2.0",
@@ -212,14 +483,8 @@ pub(crate) fn spec_for(model_id: &str) -> &'static TranscribeCppModelSpec {
         .unwrap_or(&MODEL_SPECS[0])
 }
 
-/// The same lookup, restricted to what the route catalog actually offers.
-///
-/// `spec_for` knows every model this provider can load, including the Nemotron
-/// streaming GGUF the benchmark loads to prove the runtime path. A saved
-/// settings file must not be able to name that one: `model_options()` never
-/// offers it, so a settings value normalized through `spec_for` would leave the
-/// picker showing a model it does not list and the route pointing at weights
-/// nobody can download from the app.
+/// Restrict saved settings to models offered by the app catalog. Hidden
+/// runtime probes such as Voxtral must not become selectable accidentally.
 pub(crate) fn route_spec_for(model_id: &str) -> &'static TranscribeCppModelSpec {
     let spec = spec_for(model_id);
     if spec.offered_as_route {
@@ -243,6 +508,63 @@ pub fn route_model_options() -> Vec<ModelOption> {
         .collect()
 }
 
+/// Every byte choosing Download for Parakeet fetches on this Mac: the Neural
+/// Engine build and, where dictation can be English, the vocabulary model
+/// where `download_models` fetches those, otherwise the ggml file. The
+/// Models screen and setup show this figure in place of the catalog's size.
+pub(crate) fn parakeet_download_bytes() -> u64 {
+    super::neural_engine::coreml_download_bytes().unwrap_or_else(parakeet_ggml_bytes)
+}
+
+/// The ggml file alone, for the background download that fetches it when
+/// this Mac needs it.
+pub(crate) fn parakeet_ggml_bytes() -> u64 {
+    spec_for(PARAKEET_GGUF_MODEL_ID).size_bytes
+}
+
+/// Whether Parakeet's ggml file is on this Mac and not already found wrong in
+/// this session. Never hashes.
+pub(crate) fn parakeet_ggml_ready(models_root: &Path) -> bool {
+    TranscribeCppProvider::with_models_root(models_root, Some(PARAKEET_GGUF_MODEL_ID)).ggml_ready()
+}
+
+/// Fetch and verify Parakeet's ggml file, for [`super::neural_engine`]'s
+/// background download when the Core ML build cannot serve on this Mac.
+pub(crate) async fn download_parakeet_ggml(
+    models_root: &Path,
+    progress: Arc<dyn Fn(f32) + Send + Sync>,
+) -> Result<()> {
+    TranscribeCppProvider::with_models_root(models_root, Some(PARAKEET_GGUF_MODEL_ID))
+        .download_ggml(progress)
+        .await
+}
+
+/// How one download's progress (0-100) splits over its parts, by bytes.
+#[derive(Clone, Copy, Debug)]
+struct DownloadShares {
+    neural: f32,
+    vocabulary: f32,
+}
+
+impl DownloadShares {
+    fn new(neural_bytes: u64, vocabulary_bytes: u64) -> Self {
+        let total = (neural_bytes + vocabulary_bytes).max(1) as f32;
+        Self {
+            neural: neural_bytes as f32 / total,
+            vocabulary: vocabulary_bytes as f32 / total,
+        }
+    }
+
+    /// 100 is reported once, by the caller, after every part.
+    fn neural(self, p: f32) -> f32 {
+        (p * self.neural).min(99.9)
+    }
+
+    fn vocabulary(self, p: f32) -> f32 {
+        (self.neural * 100.0 + p * self.vocabulary).min(99.9)
+    }
+}
+
 /// Every model this provider can load, including the ones the route catalog is
 /// not offered. `benchmark-latency` uses this so the spike's runtime proof for
 /// a streaming-capable family can be measured without making it a route.
@@ -256,14 +578,57 @@ pub fn benchmark_model_options() -> Vec<ModelOption> {
         .collect()
 }
 
-/// Pinned (path, sha256) pairs for the startup integrity sweep, exactly like
-/// every other local model.
+/// Whether this route's Parakeet can transcribe on this Mac: its GGUF is here
+/// and not already found wrong in this session, or the Core ML build serves
+/// without it. Bytes are checked when a model first loads.
+pub(crate) fn parakeet_route_ready(models_root: &Path) -> bool {
+    TranscribeCppProvider::with_models_root(models_root, Some(PARAKEET_GGUF_MODEL_ID))
+        .is_available()
+}
+
+/// The pinned files a request on `model_id` loads first: the Neural Engine
+/// model when it serves Parakeet v3, otherwise the GGUF. The auxiliary
+/// licence and notice files are never loaded.
+pub(crate) fn route_model_artifacts(models_root: &Path, model_id: &str) -> Vec<(PathBuf, String)> {
+    let spec = route_spec_for(model_id);
+    if spec.model_id == PARAKEET_GGUF_MODEL_ID {
+        if let Some(neural) = super::neural_engine::request_spec_for_family(
+            models_root,
+            super::neural_engine::preferred_family(),
+            parakeet_ggml_ready(models_root),
+        ) {
+            let dir = neural.dir(models_root);
+            return neural
+                .files
+                .iter()
+                .map(|file| (dir.join(file.path), file.sha256.to_string()))
+                .collect();
+        }
+    }
+    vec![(
+        models_root
+            .join(TRANSCRIBE_CPP_MODEL_DIR)
+            .join(spec.file_name),
+        spec.sha256.to_string(),
+    )]
+}
+
+/// Every pinned (path, sha256) pair, for the export inventory and the test
+/// that each one carries a real digest.
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let dir = models_root.join(TRANSCRIBE_CPP_MODEL_DIR);
-    MODEL_SPECS
+    let mut artifacts: Vec<(PathBuf, String)> = MODEL_SPECS
         .iter()
         .map(|spec| (dir.join(spec.file_name), spec.sha256.to_string()))
-        .collect()
+        .collect();
+    for spec in MODEL_SPECS {
+        artifacts.extend(
+            auxiliary_specs_for(spec.model_id)
+                .iter()
+                .map(|aux| (dir.join(aux.local_file_name), aux.sha256.to_string())),
+        );
+    }
+    artifacts
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +690,64 @@ pub(crate) struct RawSegment {
     pub start_ms: i64,
     pub end_ms: i64,
     pub text: String,
+}
+
+fn has_complete_native_word_alignment(transcript: &::transcribe_cpp::Transcript) -> bool {
+    let words = &transcript.words;
+    matches!(
+        transcript.timestamp_kind,
+        TimestampKind::Word | TimestampKind::Token
+    ) && !words.is_empty()
+        && words
+            .iter()
+            .all(|word| word.t0_ms >= 0 && word.t1_ms >= word.t0_ms)
+        && words.windows(2).all(|pair| pair[0].t0_ms <= pair[1].t0_ms)
+        && words
+            .iter()
+            .map(|word| word.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .eq(transcript.text.split_whitespace())
+}
+
+fn native_timed_rows(transcript: &::transcribe_cpp::Transcript) -> Vec<RawSegment> {
+    if has_complete_native_word_alignment(transcript) {
+        return transcript
+            .words
+            .iter()
+            .map(|word| RawSegment {
+                start_ms: word.t0_ms,
+                end_ms: word.t1_ms,
+                text: word.text.clone(),
+            })
+            .collect();
+    }
+    transcript
+        .segments
+        .iter()
+        .map(|segment| RawSegment {
+            start_ms: segment.t0_ms,
+            end_ms: segment.t1_ms,
+            text: segment.text.clone(),
+        })
+        .collect()
+}
+
+/// The language to stamp on a result when the runtime detected none.
+///
+/// transcribe.cpp's Parakeet family has no language head and reports no
+/// detected language, and the v3 weights decode 25 languages, so defaulting
+/// to English mislabelled every French or German dictation on this route.
+/// Mirrors `asr/parakeet.rs`'s `result_language` for the ONNX export of the
+/// same weights: an English-only spec says "en", a multilingual one says
+/// nothing rather than guess.
+fn fallback_result_language(spec: &TranscribeCppModelSpec) -> &'static str {
+    if matches!(spec.languages, ["en"]) {
+        "en"
+    } else {
+        ""
+    }
 }
 
 /// Mean of the finite per-token probabilities, or the documented placeholder
@@ -398,6 +821,23 @@ pub(crate) fn build_segments(
     segments
 }
 
+/// Preserve the runtime's timestamp capability instead of treating an
+/// untimed full-text container row as a measured span.
+pub(crate) fn build_segments_for_timestamp_kind(
+    raw: &[RawSegment],
+    full_text: &str,
+    audio_seconds: f64,
+    confidence: f64,
+    timestamp_kind: TimestampKind,
+) -> Vec<TranscriptSegment> {
+    match timestamp_kind {
+        TimestampKind::Segment | TimestampKind::Word | TimestampKind::Token => {
+            build_segments(raw, full_text, audio_seconds, confidence)
+        }
+        TimestampKind::None | TimestampKind::Auto => Vec::new(),
+    }
+}
+
 /// The longest upstream diagnostic that may be quoted into a user-facing
 /// sentence before it stops being a sentence.
 const MAX_UPSTREAM_DETAIL_CHARS: usize = 160;
@@ -442,9 +882,10 @@ fn with_upstream_detail(sentence: String, raw: &str) -> String {
 pub(crate) fn describe_transcribe_error(model_id: &str, error: &transcribe_cpp::Error) -> String {
     use transcribe_cpp::Error;
     match error {
-        Error::ModelFileNotFound(_) => format!(
-            "The transcribe.cpp weights for '{model_id}' are not on disk. Download the model from Settings."
-        ),
+        Error::ModelFileNotFound(_) => {
+            tracing::warn!("transcribe.cpp weights for '{model_id}' are not on disk");
+            MISSING_SPEECH_MODEL.to_string()
+        }
         Error::ModelLoad(detail) => {
             tracing::warn!("transcribe.cpp could not load '{model_id}': {detail}");
             with_upstream_detail(
@@ -520,19 +961,18 @@ struct CachedRuntime {
 
 /// What to ask a loaded model for, given the finest granularity it advertises.
 ///
-/// The dictation and meeting contracts want `Segment` rows. Families differ:
+/// Prefer measured word rows when available. Families differ:
 /// Parakeet advertises `Token`, Voxtral advertises `None`. `transcribe_run`
 /// rejects a request finer than `max_timestamp_kind` with
 /// `TRANSCRIBE_ERR_UNSUPPORTED_TIMESTAMPS` rather than clamping it, so asking
 /// every family for `Segment` makes a timestamp-free family fail to decode at
 /// all instead of returning the text it does have. Clamp here, explicitly,
-/// rather than passing `Auto` — `Auto` would let a token-capable family return
-/// per-token rows this provider would then throw away.
+/// rather than passing `Auto`. Word rows avoid splitting subword tokens while
+/// retaining alignment that would be lost in a whole-utterance segment.
 pub(crate) fn timestamp_request_for(max_timestamp_kind: TimestampKind) -> TimestampKind {
     match max_timestamp_kind {
-        TimestampKind::Segment | TimestampKind::Word | TimestampKind::Token => {
-            TimestampKind::Segment
-        }
+        TimestampKind::Word | TimestampKind::Token => TimestampKind::Word,
+        TimestampKind::Segment => TimestampKind::Segment,
         // `Auto` is not a capability a model reports; treat anything else as
         // "no timed rows available".
         TimestampKind::None | TimestampKind::Auto => TimestampKind::None,
@@ -541,7 +981,11 @@ pub(crate) fn timestamp_request_for(max_timestamp_kind: TimestampKind) -> Timest
 
 fn runtime_cache() -> &'static Mutex<Option<CachedRuntime>> {
     static CACHE: OnceLock<Mutex<Option<CachedRuntime>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    static REGISTRATION: OnceLock<std::sync::Arc<crate::model_residency::IdleModel>> =
+        OnceLock::new();
+    crate::model_residency::watch_cache(&REGISTRATION, 2 * 1024 * 1024 * 1024, cache);
+    cache
 }
 
 fn runtime_key(model_path: &Path, backend: BackendChoice) -> String {
@@ -582,6 +1026,83 @@ pub(crate) fn clear_cached_runtime() {
     if lock_runtime_cache().take().is_some() {
         tracing::info!("Cleared cached transcribe.cpp runtime");
     }
+}
+
+fn runtime_key_matches_model(runtime_key: &str, model_path: &Path) -> bool {
+    runtime_key.starts_with(&format!("{}::", model_path.to_string_lossy()))
+}
+
+/// Drop the cached runtime only when it belongs to the measured model.
+/// Another route may have warmed the shared slot while benchmark cleanup was
+/// waiting for the native runtime gate.
+pub(crate) fn clear_cached_runtime_for_model(model_path: &Path) {
+    let mut cache = lock_runtime_cache();
+    if cache
+        .as_ref()
+        .is_some_and(|runtime| runtime_key_matches_model(&runtime.key, model_path))
+    {
+        *cache = None;
+        tracing::info!(model = %model_path.display(), "Cleared cached transcribe.cpp runtime");
+    }
+}
+
+/// When the cached runtime last finished a decode or a load.
+fn runtime_last_used() -> &'static Mutex<Option<Instant>> {
+    static LAST_USED: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    LAST_USED.get_or_init(|| Mutex::new(None))
+}
+
+fn mark_runtime_used() {
+    *runtime_last_used()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+    super::speech_residency::ensure_idle_release();
+}
+
+/// Whether the "Keep speech model ready for" timer governs this cached
+/// runtime. Only Parakeet: every other model here (Moonshine, Fluid Speech
+/// Mini, Bark and the rest) follows the older dictation keep-warm switch, as
+/// `speech_residency::manages_route` and the setting's copy say.
+fn runtime_follows_speech_idle_timer(runtime_key: &str) -> bool {
+    runtime_key
+        .split("::")
+        .next()
+        .and_then(|path| Path::new(path).file_name())
+        .is_some_and(|name| name == spec_for(PARAKEET_GGUF_MODEL_ID).file_name)
+}
+
+/// Drop the cached Parakeet runtime if nothing has used it for `idle`. Never
+/// waits: a runtime whose lock is held is decoding, which is the opposite of
+/// idle.
+pub(crate) fn release_parakeet_runtime_if_idle(idle: Duration) -> bool {
+    let mut cache = match runtime_cache().try_lock() {
+        Ok(cache) => cache,
+        Err(_) => return false,
+    };
+    if !cache
+        .as_ref()
+        .is_some_and(|runtime| runtime_follows_speech_idle_timer(&runtime.key))
+    {
+        return false;
+    }
+    let stale = runtime_last_used()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_none_or(|last| last.elapsed() >= idle);
+    if stale {
+        *cache = None;
+    }
+    stale
+}
+
+/// Drop a cached ggml Parakeet before the Neural Engine copy of the same model
+/// loads, so the two are never resident together.
+pub(crate) fn clear_cached_parakeet_runtime(models_root: &Path) {
+    clear_cached_runtime_for_model(
+        &models_root
+            .join(TRANSCRIBE_CPP_MODEL_DIR)
+            .join(spec_for(PARAKEET_GGUF_MODEL_ID).file_name),
+    );
 }
 
 /// Wall-clock milliseconds spent loading the cached model, or `None` when no
@@ -765,8 +1286,88 @@ struct NativeRun {
     text: String,
     raw_segments: Vec<RawSegment>,
     token_probabilities: Vec<f32>,
+    timestamp_kind: TimestampKind,
+    measured_word_timestamps: bool,
     load_ms: u64,
     language: Option<String>,
+}
+
+// Only the integrity-verified pinned route and measured PCM range use the
+// calibrated reserve. Longer input retains the generic admission policy.
+fn moonshine_memory_budget(model_label: &str, sample_count: usize) -> Option<u64> {
+    if model_label != spec_for(MOONSHINE_STREAM_MEDIUM_MODEL_ID).file_name
+        || sample_count > 180 * 16_000
+    {
+        return None;
+    }
+    Some(if sample_count > 30 * 16_000 {
+        1536 * 1024 * 1024
+    } else {
+        0
+    })
+}
+
+/// Extra host bytes the pinned Parakeet v3 GGUF route reserves beyond its
+/// calibrated workspace (the model size), or `None` outside the measured range.
+///
+/// Measured 2026-10-21 with `asr-eval-batch` (release, Metal, M4 Pro 24 GB),
+/// process peak physical footprint from `/usr/bin/time -l` and `footprint`:
+/// about 1.0 GB after load and across 750 clips of 3-8 s; 1.01, 1.16, 1.32,
+/// 1.69 and 1.73 GB for single 15, 120, 236, 415 and 534 s decodes. Mixed
+/// 15-534 s sequences settle between 1.2 and 3.0 GB peak (340 decodes, no
+/// upward trend after the first ~80), because the ggml scheduler keeps
+/// buffers sized for earlier long graphs. So up to 30 s needs only the
+/// model-sized workspace, and up to 600 s gets 1.5 GiB more (2.2 GiB in
+/// all), covering the ~2.0 GB seen above the loaded baseline. Longer input
+/// decodes in one
+/// full-attention pass that was not measured, so it keeps the generic rule.
+///
+/// Fluid Speech Mini and Underdog Bark 3.0 Pro are the same architecture at
+/// the same size (697 tensors in the same types, 739,508,608 bytes) and share
+/// this budget; their peaks are next to `PARAKEET_GGUF_SHAPED_MODEL_IDS`.
+fn parakeet_gguf_memory_budget(
+    model_label: &str,
+    sample_count: usize,
+) -> Option<(&'static str, u64)> {
+    let model_id = PARAKEET_GGUF_SHAPED_MODEL_IDS
+        .iter()
+        .copied()
+        .find(|model_id| spec_for(model_id).file_name == model_label)?;
+    if sample_count > 600 * 16_000 {
+        return None;
+    }
+    Some((
+        model_id,
+        if sample_count > 30 * 16_000 {
+            1536 * 1024 * 1024
+        } else {
+            0
+        },
+    ))
+}
+
+/// Pinned routes that are Parakeet TDT 0.6B v3 in this runtime's Q8_0 layout:
+/// the default and the two optional English derivatives. Each is admitted on
+/// the `ParakeetGguf` profile in `llm::local_model_load`.
+///
+/// Measured 2026-10-21 with `asr-eval-batch` (release, Metal, M4 Pro 24 GB),
+/// process peak footprint from `/usr/bin/time -l`, default / Fluid / Bark Pro
+/// in the same build: 982 / 976 / 972 MiB across 20 clips of 0.3-12 s; 1380 /
+/// 1317 / 1345 MiB for a single 292 s decode; 1420 / 1418 / 1364 MiB for 20
+/// short clips with two 292 s decodes between them. Neither derivative needs
+/// more than the default's allowance.
+pub(crate) const PARAKEET_GGUF_SHAPED_MODEL_IDS: &[&str] = &[
+    PARAKEET_GGUF_MODEL_ID,
+    FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+    UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+];
+
+/// The admission profile key and extra host bytes for a pinned route whose
+/// native footprint was measured in Plainsong, or `None` for the generic rule.
+fn calibrated_memory_budget(model_label: &str, sample_count: usize) -> Option<(&'static str, u64)> {
+    moonshine_memory_budget(model_label, sample_count)
+        .map(|bytes| (MOONSHINE_STREAM_MEDIUM_MODEL_ID, bytes))
+        .or_else(|| parakeet_gguf_memory_budget(model_label, sample_count))
 }
 
 fn run_native(
@@ -776,14 +1377,71 @@ fn run_native(
     audio_seconds: f64,
     abandoned: &Arc<AtomicBool>,
 ) -> Result<NativeRun> {
+    run_native_with_deadline(model_path, backend, pcm, audio_seconds, abandoned, None)
+}
+
+fn retain_runtime_after_admission<T, A>(cache: &mut Option<T>, admission: Result<A>) -> Result<A> {
+    admission.inspect_err(|error| {
+        if crate::llm::local_model_load::is_headroom_refusal(&format!("{error:#}")) {
+            *cache = None;
+        }
+    })
+}
+
+/// The pinned GGUF at `model_path`, verified for this session and opened
+/// for transcribe.cpp. It opens the file several times by path, so it gets
+/// the inode path (`/.vol/...`), never the shared-offset `/dev/fd`.
+fn open_verified_native_model(model_path: &Path) -> Result<crate::download::VerifiedModelArtifact> {
+    let file_name = model_path.file_name().and_then(|name| name.to_str());
+    let spec = MODEL_SPECS
+        .iter()
+        .find(|spec| Some(spec.file_name) == file_name)
+        .ok_or_else(|| anyhow::anyhow!(MISSING_SPEECH_MODEL))?;
+    crate::download::open_verified_model_artifact(model_path, spec.sha256).map_err(|error| {
+        tracing::warn!("transcribe.cpp model check failed: {error:#}");
+        if crate::download::is_integrity_mismatch(&error) {
+            anyhow::anyhow!(MISSING_SPEECH_MODEL)
+        } else {
+            error
+        }
+    })
+}
+
+fn run_native_with_deadline(
+    model_path: &Path,
+    backend: BackendChoice,
+    pcm: &[f32],
+    audio_seconds: f64,
+    abandoned: &Arc<AtomicBool>,
+    outer_deadline: Option<Instant>,
+) -> Result<NativeRun> {
     let model_label = model_path
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let budget = decode_budget_for_audio(audio_seconds);
-    let deadline = Instant::now() + budget;
+    let now = Instant::now();
+    let budget = decode_budget_for_audio(audio_seconds).min(
+        outer_deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .unwrap_or(Duration::MAX),
+    );
+    let deadline = now + budget;
 
+    let _speech_route = if model_label == spec_for(PARAKEET_GGUF_MODEL_ID).file_name {
+        let guard = super::neural_engine::acquire_route(abandoned, deadline)
+            .map_err(|stop| runtime_wait_error(stop, &model_label, budget))?;
+        super::neural_engine::stop_helper();
+        if let Some(root) = model_path.parent().and_then(Path::parent) {
+            super::parakeet::clear_cached_model_runtime(root, "parakeet-tdt-0.6b-v3");
+            super::parakeet::clear_cached_model_runtime(root, "parakeet-tdt-0.6b-v2");
+        }
+        Some(guard)
+    } else {
+        None
+    };
+
+    let calibrated = calibrated_memory_budget(&model_label, pcm.len());
     let key = runtime_key(model_path, backend);
     let mut cache = acquire_runtime(abandoned, deadline, &model_label, budget)?;
 
@@ -796,19 +1454,37 @@ fn run_native(
     }
 
     if cache.is_none() {
+        let _model_load = if let Some((model_id, _)) = calibrated {
+            crate::llm::local_model_load::admit_asr(
+                &[model_path],
+                AsrProviderType::TranscribeCpp,
+                model_id,
+                crate::llm::local_model_load::NativeAllocation::Constructor,
+            )?
+        } else {
+            crate::llm::local_model_load::guard(&[model_path])?
+        };
         let started = std::time::Instant::now();
-        let model = Model::load_with(
-            model_path,
-            &ModelOptions {
-                backend: backend.to_backend(),
-                device: None,
-            },
-        )
-        .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))?;
-        let session = model
-            .session()
+        let verified = open_verified_native_model(model_path)?;
+        let verified_ms = started.elapsed().as_millis() as u64;
+        let (model, session) = verified.load(|path| {
+            let model = Model::load_with(
+                path,
+                &ModelOptions {
+                    backend: backend.to_backend(),
+                    device: None,
+                },
+            )
             .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))?;
+            let session = model.session().map_err(|error| {
+                anyhow::anyhow!(describe_transcribe_error(&model_label, &error))
+            })?;
+            Ok((model, session))
+        })?;
         let load_ms = started.elapsed().as_millis() as u64;
+        tracing::info!(
+            "transcribe.cpp waited {verified_ms} ms for the integrity check of {model_label}"
+        );
         let max_timestamp_kind = model.capabilities().max_timestamp_kind;
         tracing::info!(
             "transcribe.cpp loaded {} on {} in {} ms (max timestamps: {:?})",
@@ -826,11 +1502,23 @@ fn run_native(
         });
     }
 
+    let working = if let Some((model_id, host_bytes)) = calibrated {
+        crate::llm::local_model_load::admit_asr(
+            &[model_path],
+            AsrProviderType::TranscribeCpp,
+            model_id,
+            crate::llm::local_model_load::NativeAllocation::Inference { host_bytes },
+        )
+    } else {
+        crate::llm::local_model_load::working_buffers(&[model_path])
+    };
+    let _working = retain_runtime_after_admission(&mut cache, working)?;
     let runtime = cache
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("transcribe.cpp runtime disappeared after loading"))?;
 
     let options = RunOptions {
+        language: batch_language_for_model(&model_label, &runtime._model.capabilities().languages)?,
         // Segment granularity is what the dictation and meeting contracts
         // consume, clamped to what this family can actually produce: a request
         // finer than the model's `max_timestamp_kind` is rejected outright.
@@ -844,39 +1532,155 @@ fn run_native(
     let token = CancelToken::new();
     runtime.session.set_cancel_token(&token);
     let watchdog = DecodeWatchdog::spawn(token, Arc::clone(abandoned), deadline);
-    let outcome = runtime.session.run(pcm, &options);
+    let outcome = if model_label == spec_for(MOONSHINE_STREAM_MEDIUM_MODEL_ID).file_name {
+        run_saved_moonshine_stream(&mut runtime.session, pcm, &options)
+    } else {
+        runtime.session.run(pcm, &options)
+    };
     runtime.session.clear_cancel_token();
     let stop = watchdog.finish();
 
-    let transcript = match outcome {
-        Ok(transcript) => transcript,
-        Err(error) => {
-            return Err(match stop {
-                // The watchdog, not the model, ended this one. Upstream calls
-                // it `Aborted` either way, so say which of ours it was.
-                Some(DecodeStop::DeadlineExceeded) => anyhow::anyhow!(
-                    "transcribe.cpp did not finish '{model_label}' within its {:.0} s budget for {audio_seconds:.1} s of audio, so the decode was stopped. Use a shorter clip or another route.",
-                    budget.as_secs_f64()
-                ),
-                _ => anyhow::anyhow!(describe_transcribe_error(&model_label, &error)),
-            });
-        }
-    };
+    let transcript =
+        completed_native_transcript(outcome, stop, &model_label, budget, audio_seconds)?;
 
+    let measured_word_timestamps = has_complete_native_word_alignment(&transcript);
+    mark_runtime_used();
     Ok(NativeRun {
         text: transcript.text.clone(),
-        raw_segments: transcript
-            .segments
-            .iter()
-            .map(|segment| RawSegment {
-                start_ms: segment.t0_ms,
-                end_ms: segment.t1_ms,
-                text: segment.text.clone(),
-            })
-            .collect(),
+        raw_segments: native_timed_rows(&transcript),
         token_probabilities: transcript.tokens.iter().map(|token| token.p).collect(),
+        timestamp_kind: transcript.timestamp_kind,
+        measured_word_timestamps,
         load_ms: runtime.load_ms,
         language: transcript.language.clone(),
+    })
+}
+
+fn run_saved_moonshine_stream(
+    session: &mut Session,
+    pcm: &[f32],
+    options: &RunOptions,
+) -> transcribe_cpp::Result<transcribe_cpp::Transcript> {
+    let stream_options = StreamOptions {
+        family: Some(StreamExtension::MoonshineStreaming(
+            MoonshineStreamingOptions {
+                // Saved audio only needs the final decode. Keep incremental encoder
+                // feeds small without repeatedly decoding partial hypotheses.
+                min_decode_interval_ms: Some(i32::MAX),
+            },
+        )),
+        ..StreamOptions::default()
+    };
+    let transcript = {
+        let mut stream = session.stream(options, &stream_options)?;
+        for samples in pcm.chunks(16_000) {
+            stream.feed(samples)?;
+        }
+        stream.finalize()?;
+        stream.snapshot()
+    };
+    // The pinned native streaming finalize can return OK at its generation
+    // budget. Snapshot before Stream::drop resets the result, then read the
+    // retained truncation flag so incomplete text never becomes a success.
+    completed_moonshine_stream(transcript, session.was_truncated())
+}
+
+fn completed_moonshine_stream(
+    transcript: transcribe_cpp::Transcript,
+    truncated: bool,
+) -> transcribe_cpp::Result<transcribe_cpp::Transcript> {
+    if truncated {
+        Err(transcribe_cpp::Error::OutputTruncated {
+            message: "stream finalize reached the generation budget".into(),
+            partial: Some(Box::new(transcript)),
+        })
+    } else {
+        Ok(transcript)
+    }
+}
+
+fn completed_native_transcript(
+    outcome: transcribe_cpp::Result<transcribe_cpp::Transcript>,
+    stop: Option<DecodeStop>,
+    model_label: &str,
+    budget: Duration,
+    audio_seconds: f64,
+) -> Result<transcribe_cpp::Transcript> {
+    outcome.map_err(|error| match stop {
+        // The watchdog, not the model, ended this one. Upstream calls
+        // it `Aborted` either way, so say which of ours it was.
+        Some(DecodeStop::DeadlineExceeded) => anyhow::anyhow!(
+            "transcribe.cpp did not finish '{model_label}' within its {:.0} s budget for {audio_seconds:.1} s of audio, so the decode was stopped. Use a shorter clip or another route.",
+            budget.as_secs_f64()
+        ),
+        _ => anyhow::anyhow!(describe_transcribe_error(model_label, &error)),
+    })
+}
+
+// Long Unified recordings use the fixed contextual windows qualified on the
+// frozen public meetings. Other models and short captures keep their path.
+fn uses_bounded_unified(model_id: &str, samples: usize) -> bool {
+    model_id == PARAKEET_UNIFIED_EN_GGUF_MODEL_ID && samples > 60 * 16_000
+}
+
+fn run_bounded_unified(
+    model_path: &Path,
+    backend: BackendChoice,
+    pcm: &[f32],
+    abandoned: &Arc<AtomicBool>,
+) -> Result<NativeRun> {
+    let duration = pcm.len() as f64 / 16_000.0;
+    let deadline = Instant::now() + decode_budget_for_audio(duration);
+    let windows = windowing::plan(pcm.len());
+    let count = windows.len();
+    let mut decoded = Vec::with_capacity(count);
+    let mut probabilities = Vec::new();
+    let mut language = None;
+    let mut load_ms = 0;
+    for window in windows {
+        check_decode_control(abandoned, deadline).map_err(|stop| {
+            anyhow::anyhow!("Bounded Unified transcription stopped before completion: {stop:?}")
+        })?;
+        let samples = &pcm[window.decode_start..window.decode_end];
+        let run = run_native_with_deadline(
+            model_path,
+            backend,
+            samples,
+            samples.len() as f64 / 16_000.0,
+            abandoned,
+            Some(deadline),
+        )?;
+        if !run.text.trim().is_empty() && !run.measured_word_timestamps {
+            anyhow::bail!("Bounded Unified transcription requires complete measured word timestamps; no partial transcript was saved.");
+        }
+        if decoded.is_empty() {
+            load_ms = run.load_ms;
+            language = run.language;
+        }
+        probabilities.extend(run.token_probabilities);
+        decoded.push((window, run.raw_segments));
+    }
+    check_decode_control(abandoned, deadline).map_err(|stop| {
+        anyhow::anyhow!("Bounded Unified transcription stopped before completion: {stop:?}")
+    })?;
+    let merged = windowing::merge(decoded, pcm.len())?;
+    check_decode_control(abandoned, deadline).map_err(|stop| {
+        anyhow::anyhow!("Bounded Unified transcription stopped before completion: {stop:?}")
+    })?;
+    tracing::info!(
+        windows = count,
+        removed_duplicates = merged.removed_duplicates,
+        unresolved_boundaries = merged.unresolved_count,
+        "Completed bounded Unified transcription"
+    );
+    Ok(NativeRun {
+        measured_word_timestamps: !merged.words.is_empty(),
+        text: merged.text,
+        raw_segments: merged.words,
+        token_probabilities: probabilities,
+        timestamp_kind: TimestampKind::Word,
+        load_ms,
+        language,
     })
 }
 
@@ -898,11 +1702,41 @@ impl TranscribeCppProvider {
         Self::with_models_root(&models_root, selected_model_id)
     }
 
+    /// Select a pinned runtime probe without exposing it as an app route.
+    pub fn for_benchmark(model_id: &str) -> Result<Self, String> {
+        let spec = MODEL_SPECS
+            .iter()
+            .find(|spec| spec.model_id == model_id.trim())
+            .ok_or_else(|| format!("Unknown transcribe.cpp benchmark model: {model_id}"))?;
+        let mut provider = Self::new(None);
+        provider.model_id = spec.model_id.to_string();
+        Ok(provider)
+    }
+    /// `asr-eval-batch`: compile the installed vocabulary model now, as the
+    /// app's background maintenance would once the speech model serves.
+    #[doc(hidden)]
+    pub fn prepare_vocabulary_model_for_eval(&self) -> Result<(), String> {
+        // Model verification can start speech preparation in the background.
+        // Wait through that admission refusal without bypassing its ownership.
+        super::neural_engine::prepare_until_settled(
+            || {
+                super::neural_engine::prepare_blocking(
+                    &self.models_root(),
+                    &super::neural_engine::PARAKEET_CTC_VOCABULARY,
+                )
+            },
+            Duration::from_secs(1),
+            Duration::from_secs(90),
+            std::thread::sleep,
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// The same provider rooted at an arbitrary models directory, so the
     /// integrity rules can be exercised against real files in a temp dir
     /// instead of the user's data directory.
     pub(crate) fn with_models_root(models_root: &Path, selected_model_id: Option<&str>) -> Self {
-        let spec = spec_for(selected_model_id.unwrap_or(PARAKEET_GGUF_MODEL_ID));
+        let spec = route_spec_for(selected_model_id.unwrap_or(PARAKEET_GGUF_MODEL_ID));
         Self {
             model_dir: models_root.join(TRANSCRIBE_CPP_MODEL_DIR),
             model_id: spec.model_id.to_string(),
@@ -918,13 +1752,156 @@ impl TranscribeCppProvider {
     }
 
     fn has_required_file(&self) -> bool {
-        std::fs::metadata(self.model_path())
+        let model_present = std::fs::metadata(self.model_path())
             .map(|metadata| metadata.is_file() && metadata.len() > 0)
-            .unwrap_or(false)
+            .unwrap_or(false);
+        model_present
+            && auxiliary_specs_for(&self.model_id).iter().all(|aux| {
+                std::fs::metadata(self.model_dir.join(aux.local_file_name))
+                    .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                    .unwrap_or(false)
+            })
     }
 
     fn has_trusted_required_file(&self) -> bool {
-        crate::download::is_model_artifact_trusted(&self.model_path(), Some(self.spec().sha256))
+        crate::download::is_model_artifact_installed(&self.model_path(), Some(self.spec().sha256))
+            && auxiliary_specs_for(&self.model_id).iter().all(|aux| {
+                crate::download::is_model_artifact_installed(
+                    &self.model_dir.join(aux.local_file_name),
+                    Some(aux.sha256),
+                )
+            })
+    }
+
+    fn models_root(&self) -> PathBuf {
+        self.model_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.model_dir.clone())
+    }
+
+    /// The GGUF (and its auxiliary files) is here and not found wrong.
+    fn ggml_ready(&self) -> bool {
+        self.has_required_file() && self.has_trusted_required_file()
+    }
+
+    fn is_parakeet(&self) -> bool {
+        self.model_id == PARAKEET_GGUF_MODEL_ID
+    }
+
+    /// The Neural Engine model serving this route now, if any. Only Parakeet
+    /// TDT 0.6B v3 has one; every other GGUF route runs on ggml as before.
+    fn neural_engine_spec(&self) -> Option<&'static super::neural_engine::ModelSpec> {
+        if self.model_id != PARAKEET_GGUF_MODEL_ID {
+            return None;
+        }
+        super::neural_engine::route_spec(&self.models_root())
+    }
+
+    /// Decode on the Neural Engine. `Err(Engine)` means the caller falls back
+    /// to ggml; `Err(Admission)` is returned as the ggml route would return it.
+    async fn transcribe_on_neural_engine(
+        &self,
+        spec: &'static super::neural_engine::ModelSpec,
+        audio_path: &Path,
+        vocabulary: &[super::AcousticVocabularyTerm],
+    ) -> std::result::Result<TranscriptionResult, super::neural_engine::NeuralError> {
+        use super::neural_engine::{self, NeuralError};
+        let start = std::time::Instant::now();
+        let duration = Self::wav_duration_seconds(audio_path);
+        let samples = crate::audio::utils::load_audio_file(audio_path)
+            .context("Failed to load audio for the speech model")
+            .map_err(NeuralError::Admission)?;
+        let silent = samples.iter().all(|sample| *sample == 0.0);
+        let models_root = self.models_root();
+        // Same wait as the ggml route: bounded by the audio's decode budget,
+        // and over as soon as the caller drops this future.
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let _cancel_guard = CancelOnDrop(Arc::clone(&abandoned));
+        let route_deadline = std::time::Instant::now() + decode_budget_for_audio(duration);
+        let transcript = if silent {
+            neural_engine::NeuralTranscript {
+                text: String::new(),
+                words: Vec::new(),
+                processing_ms: 0,
+                load_ms: None,
+                vocabulary_candidates: Vec::new(),
+            }
+        } else {
+            let vocabulary = vocabulary.to_vec();
+            tokio::task::spawn_blocking(move || {
+                neural_engine::transcribe_blocking(
+                    &models_root,
+                    spec,
+                    &samples,
+                    &vocabulary,
+                    &abandoned,
+                    route_deadline,
+                )
+            })
+            .await
+            .map_err(|error| {
+                neural_engine::engine(format!("the decode task panicked: {error}"))
+            })??
+        };
+        let measured = neural_engine::words_align_with_text(&transcript.words, &transcript.text);
+        let raw: Vec<RawSegment> = transcript
+            .words
+            .iter()
+            .map(|word| RawSegment {
+                start_ms: word.start_ms,
+                end_ms: word.end_ms,
+                text: word.text.clone(),
+            })
+            .collect();
+        // Same placeholder as the ggml route, which reports no token
+        // probabilities for Parakeet: stored quality scores stay comparable
+        // whichever runtime decoded the audio.
+        let confidence = UNSCORED_TRANSDUCER_CONFIDENCE;
+        let segments = build_segments(&raw, &transcript.text, duration, confidence);
+        tracing::info!(
+            "Parakeet on the {}: model={}, load={:?}ms, decode={}ms, {} chars in {}ms",
+            match neural_engine::compute_units() {
+                neural_engine::ComputeUnits::CpuOnly => "CPU (Core ML)",
+                neural_engine::ComputeUnits::CpuAndNeuralEngine => "Neural Engine",
+            },
+            spec.model_id,
+            transcript.load_ms,
+            transcript.processing_ms,
+            transcript.text.len(),
+            start.elapsed().as_millis()
+        );
+        let language = match spec.family {
+            neural_engine::Family::English => "en".to_string(),
+            neural_engine::Family::Multilingual => {
+                fallback_result_language(self.spec()).to_string()
+            }
+        };
+        // "neural_engine" on most Macs, "coreml_cpu" on the Light tier, where
+        // the same Core ML build decodes on the CPU. Diagnostics and the
+        // footprint gate's receipts tell the two apart.
+        let engine_name = neural_engine::speech_engine_name().to_string();
+        Ok(TranscriptionResult {
+            text: transcript.text,
+            segments,
+            measured_word_timestamps: measured,
+            speaker_turns: Vec::new(),
+            language,
+            confidence,
+            processing_time_ms: start.elapsed().as_millis() as u64,
+            // The model that decoded, which for English is v2, not the v3
+            // file the route is named after.
+            model_name: spec.display_name.to_string(),
+            model_id: spec.model_id.to_string(),
+            requested_provider: AsrProviderType::TranscribeCpp,
+            actual_provider: AsrProviderType::TranscribeCpp,
+            requested_engine: Some(engine_name.clone()),
+            actual_engine: Some(engine_name),
+            optimization_applied: false,
+            fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
+            vocabulary_candidates: transcript.vocabulary_candidates,
+        })
     }
 
     fn wav_duration_seconds(path: &Path) -> f64 {
@@ -951,32 +1928,65 @@ impl Default for TranscribeCppProvider {
 #[async_trait]
 impl AsrProvider for TranscribeCppProvider {
     fn name(&self) -> &str {
-        "transcribe.cpp (experimental)"
+        "transcribe.cpp"
     }
 
     fn description(&self) -> &str {
-        "Experimental: Parakeet TDT 0.6B v3 in GGUF through transcribe.cpp's ggml runtime, on Metal. Same weights as the shipped Parakeet route, a different engine."
+        if self.model_id == QWEN3_ASR_06_GGUF_MODEL_ID {
+            return "Experimental Qwen3-ASR 0.6B Q6_K for short English dictation. Longer recordings can repeat text and omit speech. No measured timestamps or meeting support.";
+        }
+        if self.model_id == NEMOTRON_STREAMING_GGUF_MODEL_ID {
+            return "Experimental English final dictation with Nemotron 3.5 through transcribe.cpp. Shares verified weights with live preview; meetings and other batch languages remain unqualified.";
+        }
+        if self.model_id == FLUID_SPEECH_MINI_GGUF_MODEL_ID {
+            return "English only. Fewer stray words when someone else talks nearby in our synthetic audio tests; can miss very short replies.";
+        }
+        if self.model_id == UNDERDOG_BARK_PRO_GGUF_MODEL_ID {
+            return "English only. Did better on short distant-microphone meeting clips in our tests; dictation may lose capitals and punctuation.";
+        }
+        if self.model_id == PARAKEET_GGUF_MODEL_ID {
+            return "Parakeet TDT 0.6B v3 in GGUF through transcribe.cpp on Metal: the recommended dictation engine on Apple Silicon. Same weights as the ONNX Parakeet route, a different engine. It decodes one recording at a time.";
+        }
+        "Experimental model through transcribe.cpp's ggml runtime on Metal."
     }
 
-    /// Readiness follows the integrity receipt, not the bytes.
+    /// Readiness reads no bytes, and agrees with the diagnostics in
+    /// `asr/manager.rs`: a file is ready when it is present and this session
+    /// has not hashed it and found it wrong. `has_required_file` alone only
+    /// proves something non-empty is at the path. The load hashes the file
+    /// against its pin.
     ///
-    /// `has_required_file` only proves something non-empty is at the path, and
-    /// the diagnostics surface in `asr/manager.rs` already refuses to call the
-    /// route ready without the receipt. Reporting `true` here while the
-    /// diagnostics said "not verified" put the two in direct contradiction on
-    /// the same screen, and it is the looser of the two that decides whether
-    /// `transcribe()` is even attempted.
+    /// Parakeet is also ready on the Core ML build alone, where this Mac runs
+    /// it: a Download there fetches no ggml file. A build not compiled yet
+    /// counts, because the first request compiles it. Readiness only reads
+    /// the Neural Engine route's state, so it cannot start a compile.
     fn is_available(&self) -> bool {
-        self.has_required_file() && self.has_trusted_required_file()
+        self.ggml_ready()
+            || (self.is_parakeet()
+                && super::neural_engine::serves_without_ggml(
+                    &self.models_root(),
+                    super::neural_engine::preferred_family(),
+                ))
     }
 
     fn model_info(&self) -> ModelInfo {
         let spec = self.spec();
+        let (version, parameters) = if spec.model_id == QWEN3_ASR_17_GGUF_MODEL_ID {
+            ("q8_0", "1.7B")
+        } else if spec.model_id == QWEN3_ASR_06_GGUF_MODEL_ID {
+            ("q6_k", "0.6B")
+        } else if spec.model_id == MOONSHINE_STREAM_MEDIUM_MODEL_ID {
+            ("q8_0", "245M")
+        } else if spec.model_id == ORUKEET_R3_GGUF_MODEL_ID {
+            ("r3-q8_0", "600M")
+        } else {
+            ("q8_0", "600M")
+        };
         ModelInfo {
             name: spec.display_name.to_string(),
-            version: "q8_0".to_string(),
+            version: version.to_string(),
             size_mb: spec.size_mib(),
-            parameters: "600M".to_string(),
+            parameters: parameters.to_string(),
             languages: spec.languages.iter().map(|code| code.to_string()).collect(),
             // No WER or RTF is claimed here. Upstream publishes both, but they
             // were not measured in Plainsong, and this struct is rendered to
@@ -989,17 +1999,259 @@ impl AsrProvider for TranscribeCppProvider {
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
+        self.transcribe_for_family(audio_path, super::neural_engine::preferred_family(), &[])
+            .await
+    }
+
+    async fn transcribe_path_with_options(
+        &self,
+        audio_path: &Path,
+        options: &super::TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        self.transcribe_for_family(
+            audio_path,
+            super::neural_engine::family_for_language(options.language.as_deref()),
+            &options.acoustic_vocabulary,
+        )
+        .await
+    }
+
+    async fn transcribe_bytes_with_options(
+        &self,
+        audio_data: &[u8],
+        options: &super::TranscriptionOptions,
+    ) -> Result<TranscriptionResult> {
+        let path =
+            std::env::temp_dir().join(format!("transcribe_cpp_{}.wav", uuid::Uuid::new_v4()));
+        let temp = crate::recording_audio::write_secure_temporary_audio(&path, audio_data)?;
+        self.transcribe_path_with_options(temp.path(), options)
+            .await
+    }
+
+    async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
+        let temp_path =
+            std::env::temp_dir().join(format!("transcribe_cpp_{}.wav", uuid::Uuid::new_v4()));
+        let temp = crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
+            .context("failed to write temp wav for transcribe.cpp")?;
+        self.transcribe(temp.path()).await
+    }
+
+    async fn prewarm(&self) -> Result<()> {
+        if self.is_parakeet()
+            && super::neural_engine::first_use_compile_pending(
+                &self.models_root(),
+                super::neural_engine::preferred_family(),
+                self.ggml_ready(),
+            )
+        {
+            // A prewarm would be the ~10 s first-use compile at a warm load's
+            // memory allowance; the background compile does it instead.
+            super::neural_engine::schedule_prepare_if_needed(
+                &self.models_root(),
+                super::neural_engine::preferred_family(),
+            );
+            return Ok(());
+        }
+        if let Some(spec) = self.neural_engine_spec() {
+            let models_root = self.models_root();
+            let result = tokio::task::spawn_blocking(move || {
+                super::neural_engine::prewarm(&models_root, spec)
+            })
+            .await
+            .context("Speech model prewarm task panicked")?;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(super::neural_engine::NeuralError::Admission(error)) => return Err(error),
+                Err(super::neural_engine::NeuralError::Engine(failure)) => {
+                    super::neural_engine::record_failure(&failure);
+                }
+            }
+        }
+        self.prewarm_on_ggml().await
+    }
+
+    fn download_status(&self) -> DownloadStatus {
+        // A Parakeet download on a Mac that runs the Core ML build fetches
+        // that build alone (`download_models`), so either copy is the
+        // download. Under the ggml override only the ggml file counts.
+        if self.has_required_file()
+            || (self.is_parakeet()
+                && super::neural_engine::coreml_files_present(
+                    &self.models_root(),
+                    super::neural_engine::preferred_family(),
+                ))
+        {
+            DownloadStatus::Downloaded
+        } else {
+            DownloadStatus::NotDownloaded
+        }
+    }
+
+    async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
+        let progress_cb: Arc<dyn Fn(f32) + Send + Sync> = Arc::from(progress_cb);
+        // Parakeet on a Mac that can run it fetches the Neural Engine build and,
+        // where dictation can be English, the vocabulary model, in place of
+        // the ggml file, so the size the app showed is what leaves the
+        // network (`parakeet_download_bytes`). The ggml file comes later only
+        // if this Mac needs it (`neural_engine::fetch_ggml_if_needed`).
+        let neural = if self.is_parakeet() {
+            super::neural_engine::spec_to_download()
+        } else {
+            None
+        };
+        let Some(spec) = neural else {
+            self.download_ggml(Arc::clone(&progress_cb)).await?;
+            progress_cb(100.0);
+            return Ok(());
+        };
+        let vocabulary = super::neural_engine::vocabulary_spec_to_download();
+        let shares = DownloadShares::new(
+            spec.total_bytes(),
+            vocabulary.map_or(0, |spec| spec.total_bytes()),
+        );
+        let neural_progress = Arc::clone(&progress_cb);
+        super::neural_engine::download_and_prepare(
+            &self.models_root(),
+            spec,
+            Arc::new(move |p| neural_progress(shares.neural(p))),
+        )
+        .await
+        .with_context(|| format!("Failed to download {}", spec.model_id))?;
+        if vocabulary.is_some() {
+            let vocabulary_progress = Arc::clone(&progress_cb);
+            let result = super::neural_engine::download_vocabulary_files(
+                &self.models_root(),
+                Arc::new(move |p| vocabulary_progress(shares.vocabulary(p))),
+            )
+            .await;
+            // Dictation never waits on it; maintenance fetches it again later.
+            if let Err(error) = result {
+                tracing::info!("Fetching the vocabulary model failed: {error:#}");
+            }
+        }
+        progress_cb(100.0);
+        Ok(())
+    }
+}
+
+impl TranscribeCppProvider {
+    async fn transcribe_for_family(
+        &self,
+        audio_path: &Path,
+        family: super::neural_engine::Family,
+        vocabulary: &[super::AcousticVocabularyTerm],
+    ) -> Result<TranscriptionResult> {
+        let parakeet = self.is_parakeet();
+        let models_root = self.models_root();
+        let ggml_ready = self.ggml_ready();
+        let mut neural_failure = None;
+        if let Some(spec) = if parakeet {
+            super::neural_engine::request_spec_for_family(&models_root, family, ggml_ready)
+        } else {
+            None
+        } {
+            match self
+                .transcribe_on_neural_engine(spec, audio_path, vocabulary)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(super::neural_engine::NeuralError::Admission(error)) => return Err(error),
+                Err(super::neural_engine::NeuralError::Engine(failure)) => {
+                    if super::neural_engine::runtime_override()
+                        == super::neural_engine::RuntimeOverride::NeuralEngine
+                    {
+                        anyhow::bail!("The Neural Engine route failed: {failure}");
+                    }
+                    super::neural_engine::record_failure(&failure);
+                    neural_failure = Some(failure);
+                }
+            }
+        }
+        if parakeet
+            && super::neural_engine::runtime_override()
+                == super::neural_engine::RuntimeOverride::NeuralEngine
+        {
+            anyhow::bail!("The requested speech runtime is not prepared and verified for this Mac");
+        }
+        if parakeet && !ggml_ready {
+            // Nothing else can serve: the Core ML build failed or cannot run
+            // here, or this language's build is still to come. The audio is
+            // kept by the caller (failed dictations go to History).
+            if let Some(download) = super::neural_engine::fetch_ggml_if_needed(&models_root, family)
+            {
+                if let Some(failure) = &neural_failure {
+                    tracing::info!("Parakeet has no other copy to serve this request: {failure}");
+                }
+                anyhow::bail!(needed_download_message(download));
+            }
+        }
+        if parakeet && crate::hardware_tier::current() == crate::hardware_tier::HardwareTier::Light
+        {
+            tracing::warn!(
+                actual_engine = %format!("transcribe_cpp_{}", backend_choice_from_env().label()),
+                dictation_budget_bytes = crate::hardware_tier::HardwareTier::Light.budget().dictation_bytes,
+                "Core ML speech is unavailable; GGUF fallback may exceed the Light dictation footprint budget and requires its own native constructor and inference admission"
+            );
+        }
+        let result = self.transcribe_on_ggml(audio_path).await?;
+        if parakeet && neural_failure.is_none() {
+            // A verified model not compiled for this macOS build yet starts
+            // compiling now, in the background, after the user's request.
+            super::neural_engine::schedule_prepare_if_needed(&models_root, family);
+        }
+        Ok(same_model_fallback_result(result, neural_failure.as_ref()))
+    }
+}
+
+/// What a dictation that Parakeet could not transcribe says while the
+/// download it needs runs, or after that download failed. It reaches the
+/// dictation HUD, so it is plain copy.
+pub(crate) const NEEDED_DOWNLOAD_RUNNING: &str =
+    "Parakeet is downloading a file it needs on this Mac. Dictation will be ready when it finishes; see Settings > Models.";
+pub(crate) const NEEDED_DOWNLOAD_FAILED: &str =
+    "Parakeet couldn't download a file it needs on this Mac. Check your connection; Plainsong will try again.";
+
+fn needed_download_message(download: super::neural_engine::NeededDownload) -> &'static str {
+    match download {
+        super::neural_engine::NeededDownload::Running => NEEDED_DOWNLOAD_RUNNING,
+        super::neural_engine::NeededDownload::Failed => NEEDED_DOWNLOAD_FAILED,
+    }
+}
+
+/// The ggml route served a request the Neural Engine route could not, with
+/// the same model. That is a complete, normal result: no fallback notice in
+/// the dictation view, no incomplete meeting transcript. Why the other
+/// runtime failed is for logs and diagnostics (`neural_engine::status`).
+fn same_model_fallback_result(
+    mut result: TranscriptionResult,
+    neural_failure: Option<&super::neural_engine::EngineFailure>,
+) -> TranscriptionResult {
+    if let Some(failure) = neural_failure {
+        result.requested_engine = Some(super::neural_engine::speech_engine_name().to_string());
+        tracing::warn!(
+            "Parakeet served this request on the ggml route after the Neural Engine route failed: {failure}"
+        );
+    }
+    result
+}
+
+impl TranscribeCppProvider {
+    async fn transcribe_on_ggml(&self, audio_path: &Path) -> Result<TranscriptionResult> {
+        // The model id and file stay in logs and Settings diagnostics; the
+        // error reaches the dictation HUD, so it uses plain copy.
         if !self.has_required_file() {
-            return Err(anyhow::anyhow!(
-                "The transcribe.cpp weights for '{}' are not downloaded. Download the model from Settings.",
+            tracing::warn!(
+                "transcribe.cpp weights for '{}' are not downloaded",
                 self.model_id
-            ));
+            );
+            return Err(anyhow::anyhow!(MISSING_SPEECH_MODEL));
         }
         if !self.has_trusted_required_file() {
-            return Err(anyhow::anyhow!(
-                "The transcribe.cpp weights for '{}' have not passed Plainsong integrity verification. Re-download the model from Settings.",
+            tracing::warn!(
+                "transcribe.cpp weights for '{}' failed their integrity check",
                 self.model_id
-            ));
+            );
+            return Err(anyhow::anyhow!(MISSING_SPEECH_MODEL));
         }
 
         let start = std::time::Instant::now();
@@ -1014,14 +2266,35 @@ impl AsrProvider for TranscribeCppProvider {
         // at its next decode step and the runtime is free for the next request.
         let abandoned = Arc::new(AtomicBool::new(false));
         let _cancel_guard = CancelOnDrop(Arc::clone(&abandoned));
+        let bounded = uses_bounded_unified(&self.model_id, samples.len());
         let run = tokio::task::spawn_blocking(move || {
-            run_native(&model_path, backend, &samples, duration, &abandoned)
+            if samples.iter().all(|sample| *sample == 0.0) {
+                Ok(NativeRun {
+                    text: String::new(),
+                    raw_segments: Vec::new(),
+                    token_probabilities: Vec::new(),
+                    timestamp_kind: TimestampKind::None,
+                    measured_word_timestamps: false,
+                    load_ms: 0,
+                    language: None,
+                })
+            } else if bounded {
+                run_bounded_unified(&model_path, backend, &samples, &abandoned)
+            } else {
+                run_native(&model_path, backend, &samples, duration, &abandoned)
+            }
         })
         .await
         .context("transcribe.cpp inference task panicked")??;
 
         let confidence = token_confidence(&run.token_probabilities);
-        let segments = build_segments(&run.raw_segments, &run.text, duration, confidence);
+        let segments = build_segments_for_timestamp_kind(
+            &run.raw_segments,
+            &run.text,
+            duration,
+            confidence,
+            run.timestamp_kind,
+        );
         let text = run.text.trim().to_string();
 
         tracing::info!(
@@ -1036,12 +2309,16 @@ impl AsrProvider for TranscribeCppProvider {
         Ok(TranscriptionResult {
             text,
             segments,
+            measured_word_timestamps: run.measured_word_timestamps,
             // Parakeet through this runtime returns text and timings, never
             // speaker attribution. Empty is the only honest value: a meeting
             // on this route gets Plainsong's own diarizer, and
             // `resolve_meeting_diarizer` reads this to know that.
             speaker_turns: Vec::new(),
-            language: run.language.unwrap_or_else(|| "en".to_string()),
+            language: run
+                .language
+                .filter(|language| !language.trim().is_empty())
+                .unwrap_or_else(|| fallback_result_language(self.spec()).to_string()),
             confidence,
             processing_time_ms: start.elapsed().as_millis() as u64,
             model_name: self.spec().display_name.to_string(),
@@ -1056,18 +2333,11 @@ impl AsrProvider for TranscribeCppProvider {
             // reaches the recognizer on this route. Claiming otherwise is the
             // exact failure the field exists to prevent.
             vocabulary_hint_terms_applied: 0,
+            vocabulary_candidates: Vec::new(),
         })
     }
 
-    async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        let temp_path =
-            std::env::temp_dir().join(format!("transcribe_cpp_{}.wav", uuid::Uuid::new_v4()));
-        let temp = crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
-            .context("failed to write temp wav for transcribe.cpp")?;
-        self.transcribe(temp.path()).await
-    }
-
-    async fn prewarm(&self) -> Result<()> {
+    async fn prewarm_on_ggml(&self) -> Result<()> {
         if !self.has_trusted_required_file() {
             return Err(anyhow::anyhow!(
                 "The transcribe.cpp weights for '{}' are not downloaded and verified yet.",
@@ -1087,18 +2357,11 @@ impl AsrProvider for TranscribeCppProvider {
         })
         .await
         .context("transcribe.cpp prewarm task panicked")??;
+        mark_runtime_used();
         Ok(())
     }
 
-    fn download_status(&self) -> DownloadStatus {
-        if self.has_required_file() {
-            DownloadStatus::Downloaded
-        } else {
-            DownloadStatus::NotDownloaded
-        }
-    }
-
-    async fn download_models(&self, progress_cb: Box<dyn Fn(f32) + Send + Sync>) -> Result<()> {
+    async fn download_ggml(&self, progress_cb: Arc<dyn Fn(f32) + Send + Sync>) -> Result<()> {
         use crate::download::DownloadManager;
 
         std::fs::create_dir_all(&self.model_dir)
@@ -1107,6 +2370,7 @@ impl AsrProvider for TranscribeCppProvider {
         let spec = self.spec();
         let manager = DownloadManager::new()?;
         let destination = self.model_path();
+        let model_progress = Arc::clone(&progress_cb);
         manager
             .download_verified_model_asset(
                 &spec.url(),
@@ -1114,10 +2378,26 @@ impl AsrProvider for TranscribeCppProvider {
                 Some(spec.sha256),
                 spec.max_bytes(),
                 move |p| {
-                    progress_cb(p.percentage as f32);
+                    model_progress(p.percentage as f32 * 0.99);
                 },
             )
             .await?;
+
+        for aux in auxiliary_specs_for(spec.model_id) {
+            let url = aux.url();
+            let destination = self.model_dir.join(aux.local_file_name);
+            let aux_progress = Arc::clone(&progress_cb);
+            manager
+                .download_verified_model_asset(
+                    &url,
+                    &destination,
+                    Some(aux.sha256),
+                    aux.size_bytes + 1024,
+                    move |_| aux_progress(99.5),
+                )
+                .await?;
+        }
+        progress_cb(100.0);
 
         // A new file under an old cache entry would otherwise keep serving the
         // previous weights for the life of the process.
@@ -1228,8 +2508,8 @@ enum StreamCommand {
 ///
 /// Separate from [`TranscribeCppProvider`] on purpose: that one is a route the
 /// user can select and it transcribes what gets inserted. This one is never a
-/// route — `route_model_options()` does not offer the Nemotron GGUF — and
-/// nothing it produces can reach the inserted text.
+/// preview session, and its partials cannot reach inserted text. Final batch
+/// dictation can select the same pinned weights independently.
 pub struct TranscribeCppStreamingProvider {
     model_dir: PathBuf,
     chunk_ms: u32,
@@ -1269,6 +2549,14 @@ impl TranscribeCppStreamingProvider {
         self.model_dir.join(Self::spec().file_name)
     }
 
+    /// Provision this preview's pinned weights without route normalization.
+    pub(crate) fn download_provider(&self) -> TranscribeCppProvider {
+        TranscribeCppProvider {
+            model_dir: self.model_dir.clone(),
+            model_id: Self::spec().model_id.to_string(),
+        }
+    }
+
     pub fn chunk_ms(&self) -> u32 {
         self.chunk_ms
     }
@@ -1289,14 +2577,15 @@ impl StreamingAsrProvider for TranscribeCppStreamingProvider {
         NEMOTRON_STREAMING_GGUF_MODEL_ID
     }
 
-    /// The receipt, not the bytes — the same rule the batch route follows. A
-    /// half-written GGUF is not a live preview, it is a crash.
+    /// Present and not found wrong this session, the same rule the batch
+    /// route follows. A half-written GGUF is not a live preview, it is a
+    /// crash; the load hashes it first.
     fn is_streaming_available(&self) -> bool {
         let path = self.model_path();
         std::fs::metadata(&path)
             .map(|metadata| metadata.is_file() && metadata.len() > 0)
             .unwrap_or(false)
-            && crate::download::is_model_artifact_trusted(&path, Some(Self::spec().sha256))
+            && crate::download::is_model_artifact_installed(&path, Some(Self::spec().sha256))
     }
 
     fn supports_language(&self, language: Option<&str>) -> bool {
@@ -1526,6 +2815,58 @@ impl StreamingAsrSession for TranscribeCppStreamingSession {
 
 /// The body of the live-preview thread: load once, then serve commands until
 /// the handle drops.
+fn batch_language_for_model(model_file: &str, supported: &[String]) -> Result<Option<String>> {
+    if model_file != spec_for(NEMOTRON_STREAMING_GGUF_MODEL_ID).file_name {
+        return Ok(None);
+    }
+    // Final dictation currently offers this model for English only. The
+    // native prompt gate requires the artifact's exact locale, not bare en.
+    supported
+        .iter()
+        .find(|language| {
+            language
+                .split('-')
+                .next()
+                .is_some_and(|base| base.eq_ignore_ascii_case("en"))
+        })
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "The Nemotron final-dictation model does not advertise an English locale"
+            )
+        })
+}
+
+fn streaming_language_for_model(
+    hint: Option<&str>,
+    supported: &[String],
+) -> Result<Option<String>> {
+    let Some(hint) = hint.map(str::trim).filter(|hint| !hint.is_empty()) else {
+        return Ok(None);
+    };
+    if hint.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    let normalized = hint.replace('_', "-");
+    let exact = supported
+        .iter()
+        .find(|language| language.eq_ignore_ascii_case(&normalized));
+    let base = normalized.split('-').next().unwrap_or(&normalized);
+    let selected = exact.or_else(|| {
+        supported.iter().find(|language| {
+            language
+                .split('-')
+                .next()
+                .unwrap_or(language)
+                .eq_ignore_ascii_case(base)
+        })
+    });
+    selected.cloned().map(Some).ok_or_else(|| {
+        anyhow::anyhow!("The streaming preview model does not support the selected language")
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stream_worker(
     model_path: PathBuf,
@@ -1537,20 +2878,30 @@ fn stream_worker(
     command_rx: std::sync::mpsc::Receiver<StreamCommand>,
     reply_tx: std::sync::mpsc::Sender<Result<StreamOutcome>>,
 ) {
+    let model_load = match crate::llm::local_model_load::guard(&[&model_path]) {
+        Ok(permit) => permit,
+        Err(error) => {
+            let _ = ready_tx.send(Err(error));
+            return;
+        }
+    };
     let started = Instant::now();
-    let model = match Model::load_with(
-        &model_path,
-        &ModelOptions {
-            backend: backend.to_backend(),
-            device: None,
-        },
-    ) {
+    let loaded = open_verified_native_model(&model_path).and_then(|verified| {
+        verified.load(|path| {
+            Model::load_with(
+                path,
+                &ModelOptions {
+                    backend: backend.to_backend(),
+                    device: None,
+                },
+            )
+            .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))
+        })
+    });
+    let model = match loaded {
         Ok(model) => model,
         Err(error) => {
-            let _ = ready_tx.send(Err(anyhow::anyhow!(describe_transcribe_error(
-                &model_label,
-                &error
-            ))));
+            let _ = ready_tx.send(Err(error));
             return;
         }
     };
@@ -1560,6 +2911,16 @@ fn stream_worker(
         )));
         return;
     }
+    // The model advertises locale tags, while Plainsong also uses base codes.
+    // Native validation rejects `en` even when the prompt dictionary has it.
+    let language =
+        match streaming_language_for_model(language.as_deref(), &model.capabilities().languages) {
+            Ok(language) => language,
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+        };
     let mut session = match model.session() {
         Ok(session) => session,
         Err(error) => {
@@ -1567,6 +2928,14 @@ fn stream_worker(
                 &model_label,
                 &error
             ))));
+            return;
+        }
+    };
+    drop(model_load);
+    let _working = match crate::llm::local_model_load::working_buffers(&[&model_path]) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            let _ = ready_tx.send(Err(error));
             return;
         }
     };
@@ -1705,14 +3074,17 @@ pub fn streaming_reference_words(model_path: &Path, pcm: &[f32]) -> Result<Vec<(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let model = Model::load_with(
-        model_path,
-        &ModelOptions {
-            backend: backend_choice_from_env().to_backend(),
-            device: None,
-        },
-    )
-    .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))?;
+    let _model_load = crate::llm::local_model_load::guard(&[model_path])?;
+    let model = open_verified_native_model(model_path)?.load(|path| {
+        Model::load_with(
+            path,
+            &ModelOptions {
+                backend: backend_choice_from_env().to_backend(),
+                device: None,
+            },
+        )
+        .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))
+    })?;
     let mut session = model
         .session()
         .map_err(|error| anyhow::anyhow!(describe_transcribe_error(&model_label, &error)))?;
@@ -1734,7 +3106,535 @@ pub fn streaming_reference_words(model_path: &Path, pcm: &[f32]) -> Result<Vec<(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_speech_idle_timer_releases_only_parakeet() {
+        let models = Path::new("/models/transcribe_cpp");
+        let parakeet = models.join(spec_for(PARAKEET_GGUF_MODEL_ID).file_name);
+        assert!(runtime_follows_speech_idle_timer(&runtime_key(
+            &parakeet,
+            BackendChoice::Auto
+        )));
+        for other in [
+            MOONSHINE_STREAM_MEDIUM_MODEL_ID,
+            FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+            UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+            QWEN3_ASR_06_GGUF_MODEL_ID,
+        ] {
+            let path = models.join(spec_for(other).file_name);
+            assert!(
+                !runtime_follows_speech_idle_timer(&runtime_key(&path, BackendChoice::Auto)),
+                "{other} follows the dictation keep-warm switch, not the speech idle timer"
+            );
+        }
+    }
+
+    fn sample_ggml_result() -> TranscriptionResult {
+        TranscriptionResult {
+            text: "Ship it on Friday, not Monday.".to_string(),
+            segments: Vec::new(),
+            measured_word_timestamps: true,
+            speaker_turns: Vec::new(),
+            language: "en".to_string(),
+            confidence: 0.9,
+            processing_time_ms: 120,
+            model_name: spec_for(PARAKEET_GGUF_MODEL_ID).display_name.to_string(),
+            model_id: PARAKEET_GGUF_MODEL_ID.to_string(),
+            requested_provider: AsrProviderType::TranscribeCpp,
+            actual_provider: AsrProviderType::TranscribeCpp,
+            requested_engine: Some("transcribe_cpp_metal".to_string()),
+            actual_engine: Some("transcribe_cpp_metal".to_string()),
+            optimization_applied: false,
+            fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
+            vocabulary_candidates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_same_model_runtime_fallback_is_a_normal_complete_result() {
+        let failure = super::super::neural_engine::EngineFailure {
+            reason: "the speech helper did not answer within 240s".to_string(),
+            refused: false,
+            identity_changed: false,
+        };
+        let result = same_model_fallback_result(sample_ggml_result(), Some(&failure));
+        // A fallback reason is what marks a dictation as a fallback and a
+        // meeting transcript as incomplete; the requested engine differing
+        // from the actual one is what diagnostics read as a route change.
+        assert_eq!(result.fallback_reason, None);
+        assert_eq!(
+            result.requested_engine.as_deref(),
+            Some(super::super::neural_engine::speech_engine_name())
+        );
+        assert_eq!(
+            result.actual_engine.as_deref(),
+            Some("transcribe_cpp_metal")
+        );
+        assert_eq!(result.text, "Ship it on Friday, not Monday.");
+    }
+
+    #[tokio::test]
+    async fn neural_engine_results_name_the_model_that_decoded() {
+        let root =
+            std::env::temp_dir().join(format!("transcribe-cpp-identity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let silence_path = root.join("silence.wav");
+        let mut silence = hound::WavWriter::create(
+            &silence_path,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..1_600 {
+            silence.write_sample(0i16).unwrap();
+        }
+        silence.finalize().unwrap();
+        let provider = TranscribeCppProvider::with_models_root(&root, Some(PARAKEET_GGUF_MODEL_ID));
+        for spec in super::super::neural_engine::MODEL_SPECS {
+            // Silence never reaches the helper, so this needs no model.
+            let result = provider
+                .transcribe_on_neural_engine(spec, &silence_path, &[])
+                .await
+                .unwrap();
+            assert_eq!(result.model_id, spec.model_id);
+            assert_eq!(result.model_name, spec.display_name);
+            assert!(!result.model_name.contains("GGUF"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parakeet_is_not_ready_without_the_file_every_fallback_runs_on() {
+        let root =
+            std::env::temp_dir().join(format!("transcribe-cpp-ready-{}", uuid::Uuid::new_v4()));
+        let provider = TranscribeCppProvider::with_models_root(&root, Some(PARAKEET_GGUF_MODEL_ID));
+        assert!(!provider.is_available());
+        assert_eq!(provider.download_status(), DownloadStatus::NotDownloaded);
+    }
+
+    fn install_coreml_placeholder(root: &Path, spec: &super::super::neural_engine::ModelSpec) {
+        let dir = spec.dir(root);
+        for file in spec.files {
+            let path = dir.join(file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+    }
+
+    #[test]
+    fn parakeet_is_installed_and_ready_on_its_core_ml_build_alone() {
+        use super::super::neural_engine;
+        let root =
+            std::env::temp_dir().join(format!("transcribe-cpp-coreml-{}", uuid::Uuid::new_v4()));
+        install_coreml_placeholder(&root, &neural_engine::PARAKEET_V3_COREML);
+        let provider = TranscribeCppProvider::with_models_root(&root, Some(PARAKEET_GGUF_MODEL_ID));
+        assert!(!provider.ggml_ready());
+        assert!(!parakeet_ggml_ready(&root));
+        // Where this Mac runs the build, it is the download, and the first
+        // request compiles it; elsewhere only the ggml file counts.
+        let supported = neural_engine::route_supported();
+        assert_eq!(
+            provider.download_status() == DownloadStatus::Downloaded,
+            supported
+        );
+        assert_eq!(
+            provider.is_available(),
+            neural_engine::serves_without_ggml(&root, neural_engine::preferred_family())
+        );
+        assert_eq!(parakeet_route_ready(&root), provider.is_available());
+        if provider.is_available() {
+            // The request loads the Core ML files, not a missing GGUF.
+            let artifacts = route_model_artifacts(&root, PARAKEET_GGUF_MODEL_ID);
+            assert!(artifacts
+                .iter()
+                .all(|(path, _)| path.starts_with(root.join(neural_engine::MODEL_DIR))));
+        }
+        // Another transcribe.cpp model is never ready on Parakeet's build.
+        let other =
+            TranscribeCppProvider::with_models_root(&root, Some(NEMOTRON_STREAMING_GGUF_MODEL_ID));
+        assert!(!other.is_available());
+        assert_eq!(other.download_status(), DownloadStatus::NotDownloaded);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn parakeet_with_no_copy_that_can_serve_says_what_it_is_waiting_for() {
+        use super::super::neural_engine;
+        let root =
+            std::env::temp_dir().join(format!("transcribe-cpp-needed-{}", uuid::Uuid::new_v4()));
+        install_coreml_placeholder(&root, &neural_engine::PARAKEET_V3_COREML);
+        // A compile this macOS build refused: only the ggml file could serve.
+        neural_engine::mark_refused_for_test(&root, &neural_engine::PARAKEET_V3_COREML);
+        assert!(neural_engine::request_spec_for_family(
+            &root,
+            neural_engine::Family::Multilingual,
+            false
+        )
+        .is_none());
+        let wav = root.join("speech.wav");
+        let mut writer = hound::WavWriter::create(
+            &wav,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for i in 0..1_600 {
+            writer
+                .write_sample(((i as f32 * 0.05).sin() * 3_000.0) as i16)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        let provider = TranscribeCppProvider::with_models_root(&root, Some(PARAKEET_GGUF_MODEL_ID));
+        let options = super::super::TranscriptionOptions {
+            language: Some("fr".to_string()),
+            ..Default::default()
+        };
+        // Not the "model missing" error: the download it needs has started
+        // (in a unit test it is reported, never spawned).
+        let error = provider
+            .transcribe_path_with_options(&wav, &options)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, NEEDED_DOWNLOAD_RUNNING);
+        assert!(!error.to_lowercase().contains("gguf"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_meeting_on_the_core_ml_build_alone_decodes_there_and_leaves_speakers_to_the_diarizer(
+    ) {
+        use super::super::neural_engine;
+        let root =
+            std::env::temp_dir().join(format!("transcribe-cpp-meeting-{}", uuid::Uuid::new_v4()));
+        install_coreml_placeholder(&root, &neural_engine::PARAKEET_V3_COREML);
+        // Silence decodes without starting the helper, on whichever route the
+        // request picked.
+        let wav = root.join("meeting.wav");
+        let mut writer = hound::WavWriter::create(
+            &wav,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..16_000 {
+            writer.write_sample(0i16).unwrap();
+        }
+        writer.finalize().unwrap();
+        let provider = TranscribeCppProvider::with_models_root(&root, Some(PARAKEET_GGUF_MODEL_ID));
+        let options = super::super::TranscriptionOptions {
+            language: Some("de".to_string()),
+            ..Default::default()
+        };
+        let result = provider.transcribe_path_with_options(&wav, &options).await;
+        if neural_engine::serves_without_ggml(&root, neural_engine::Family::Multilingual) {
+            let result = result.expect("the Core ML build serves the meeting");
+            assert_eq!(
+                result.actual_engine.as_deref(),
+                Some(neural_engine::speech_engine_name())
+            );
+            assert_eq!(result.model_id, neural_engine::PARAKEET_V3_COREML.model_id);
+            // No speaker attribution from the model: the meeting's own
+            // diarizer runs, as on the ggml route.
+            assert!(result.speaker_turns.is_empty());
+            assert!(provider.is_available());
+        } else {
+            // A Mac that cannot run it: the ggml file it needs is what the
+            // meeting waits for, never "model missing".
+            assert_eq!(result.unwrap_err().to_string(), NEEDED_DOWNLOAD_RUNNING);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn needed_download_messages_are_plain_words() {
+        let jargon =
+            regex::Regex::new(r"(?i)neural engine|core ?ml|ggml|gguf|onnx|\bane\b").unwrap();
+        for message in [NEEDED_DOWNLOAD_RUNNING, NEEDED_DOWNLOAD_FAILED] {
+            assert!(!jargon.is_match(message), "{message}");
+        }
+        assert!(NEEDED_DOWNLOAD_FAILED.contains("connection"));
+    }
+
+    #[test]
+    fn busy_admission_keeps_the_resident_runtime_for_the_next_decode() {
+        let mut cache = Some(Box::new(42));
+        let resident = cache.as_deref().unwrap() as *const i32;
+        let busy: Result<()> = Err(anyhow::anyhow!(
+            crate::llm::native_runtime_gate::OPERATION_BUSY
+        ));
+        assert!(retain_runtime_after_admission(&mut cache, busy).is_err());
+        retain_runtime_after_admission(&mut cache, Ok(())).unwrap();
+        assert_eq!(cache.as_deref().unwrap() as *const i32, resident);
+        assert_eq!(**cache.as_ref().unwrap(), 42);
+        let refused: Result<()> = Err(anyhow::anyhow!("Not enough verified memory headroom for native inference working buffers alongside other applications."));
+        assert!(retain_runtime_after_admission(&mut cache, refused).is_err());
+        assert!(cache.is_none());
+    }
+
+    #[test]
+    fn multilingual_parakeet_gguf_does_not_claim_english_when_nothing_was_detected() {
+        assert_eq!(
+            fallback_result_language(spec_for(PARAKEET_GGUF_MODEL_ID)),
+            ""
+        );
+        assert!(spec_for(PARAKEET_GGUF_MODEL_ID).languages.len() > 1);
+        for english_only in [
+            NEMOTRON_STREAMING_GGUF_MODEL_ID,
+            MOONSHINE_STREAM_MEDIUM_MODEL_ID,
+            QWEN3_ASR_06_GGUF_MODEL_ID,
+            PARAKEET_UNIFIED_EN_GGUF_MODEL_ID,
+            FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+            UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+        ] {
+            assert_eq!(fallback_result_language(spec_for(english_only)), "en");
+        }
+    }
+
+    #[test]
+    fn parakeet_gguf_memory_budget_uses_exact_pcm_boundaries_and_pin() {
+        const LONG: u64 = 1536 * 1024 * 1024;
+        for model_id in PARAKEET_GGUF_SHAPED_MODEL_IDS {
+            let pin = spec_for(model_id).file_name;
+            let at = |samples| parakeet_gguf_memory_budget(pin, samples);
+            assert_eq!(at(320), Some((*model_id, 0)));
+            assert_eq!(at(30 * 16_000), Some((*model_id, 0)));
+            assert_eq!(at(30 * 16_000 + 1), Some((*model_id, LONG)));
+            assert_eq!(at(600 * 16_000), Some((*model_id, LONG)));
+            assert_eq!(at(600 * 16_000 + 1), None);
+        }
+        // Same weights under another name, or another Parakeet-family GGUF,
+        // were not measured and keep the generic rule.
+        assert_eq!(
+            parakeet_gguf_memory_budget("parakeet-tdt-0.6b-v3-q8_0.gguf", 16_000),
+            None
+        );
+        for other in [ORUKEET_R3_GGUF_MODEL_ID, PARAKEET_UNIFIED_EN_GGUF_MODEL_ID] {
+            assert_eq!(
+                parakeet_gguf_memory_budget(spec_for(other).file_name, 16_000),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn parakeet_shaped_optional_models_match_the_default_size() {
+        // The shared allowance rests on the same architecture at the same
+        // size; a re-pin that changed either must be measured again.
+        let default = spec_for(PARAKEET_GGUF_MODEL_ID);
+        for model_id in [
+            FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+            UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+        ] {
+            let spec = spec_for(model_id);
+            assert_eq!(spec.model_id, model_id);
+            assert!(
+                spec.size_bytes.abs_diff(default.size_bytes) <= 64,
+                "{model_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn calibrated_memory_budget_keys_admission_by_the_measured_route() {
+        assert_eq!(
+            calibrated_memory_budget(spec_for(PARAKEET_GGUF_MODEL_ID).file_name, 16_000),
+            Some((PARAKEET_GGUF_MODEL_ID, 0))
+        );
+        assert_eq!(
+            calibrated_memory_budget(spec_for(MOONSHINE_STREAM_MEDIUM_MODEL_ID).file_name, 16_000),
+            Some((MOONSHINE_STREAM_MEDIUM_MODEL_ID, 0))
+        );
+        assert_eq!(
+            calibrated_memory_budget(spec_for(PARAKEET_GGUF_MODEL_ID).file_name, 601 * 16_000),
+            None
+        );
+        assert_eq!(
+            calibrated_memory_budget(spec_for(NEMOTRON_STREAMING_GGUF_MODEL_ID).file_name, 16_000),
+            None
+        );
+        for model_id in [
+            FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+            UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+        ] {
+            assert_eq!(
+                calibrated_memory_budget(spec_for(model_id).file_name, 16_000),
+                Some((model_id, 0))
+            );
+        }
+    }
+
+    #[test]
+    fn moonshine_memory_budget_uses_exact_pcm_boundaries_and_pin() {
+        let pin = spec_for(MOONSHINE_STREAM_MEDIUM_MODEL_ID).file_name;
+        assert_eq!(moonshine_memory_budget(pin, 30 * 16_000), Some(0));
+        assert_eq!(
+            moonshine_memory_budget(pin, 30 * 16_000 + 1),
+            Some(1536 * 1024 * 1024)
+        );
+        assert_eq!(
+            moonshine_memory_budget(pin, 180 * 16_000),
+            Some(1536 * 1024 * 1024)
+        );
+        assert_eq!(moonshine_memory_budget(pin, 180 * 16_000 + 1), None);
+        assert_eq!(
+            moonshine_memory_budget("moonshine-streaming-medium-q8_0.gguf", 16_000),
+            None
+        );
+        assert_eq!(
+            moonshine_memory_budget(spec_for(QWEN3_ASR_06_GGUF_MODEL_ID).file_name, 16_000),
+            None
+        );
+    }
+
+    #[test]
+    fn benchmark_cleanup_matches_only_the_measured_model_path() {
+        let measured = std::path::Path::new("/models/parakeet.gguf");
+        assert!(super::runtime_key_matches_model(
+            "/models/parakeet.gguf::metal",
+            measured
+        ));
+        assert!(!super::runtime_key_matches_model(
+            "/models/voxtral.gguf::metal",
+            measured
+        ));
+    }
+
+    #[test]
+    fn streaming_language_uses_advertised_locale_tags() {
+        let languages = ["en-US", "en-GB", "es-US", "es-ES", "fr-FR"].map(str::to_string);
+        for hint in ["en", "EN", "en-AU"] {
+            assert_eq!(
+                super::streaming_language_for_model(Some(hint), &languages).unwrap(),
+                Some("en-US".to_string())
+            );
+        }
+        for hint in ["en-GB", "en_GB", " EN-gb "] {
+            assert_eq!(
+                super::streaming_language_for_model(Some(hint), &languages).unwrap(),
+                Some("en-GB".to_string())
+            );
+        }
+        assert_eq!(
+            super::streaming_language_for_model(Some("es-ES"), &languages).unwrap(),
+            Some("es-ES".to_string())
+        );
+        for hint in [None, Some(""), Some("auto"), Some("AUTO")] {
+            assert_eq!(
+                super::streaming_language_for_model(hint, &languages).unwrap(),
+                None
+            );
+        }
+        assert!(super::streaming_language_for_model(Some("zz"), &languages).is_err());
+    }
+    #[test]
+    fn preview_download_targets_the_preview_weights() {
+        let root = std::path::Path::new("preview-test-models");
+        let preview = super::TranscribeCppStreamingProvider::with_models_root(root, 560);
+        let download = preview.download_provider();
+        assert_eq!(download.model_id, super::NEMOTRON_STREAMING_GGUF_MODEL_ID);
+        assert_eq!(download.model_path(), preview.model_path());
+        assert_eq!(
+            download.spec().sha256,
+            super::TranscribeCppStreamingProvider::spec().sha256
+        );
+    }
     use super::*;
+
+    #[test]
+    fn measured_word_rows_preserve_alignment_and_exact_text() {
+        let text = "Twenty-five euros.";
+        let coarse = ::transcribe_cpp::Segment {
+            t0_ms: 0,
+            t1_ms: 30000,
+            text: text.into(),
+            ..Default::default()
+        };
+        let transcript = ::transcribe_cpp::Transcript {
+            text: text.into(),
+            timestamp_kind: TimestampKind::Word,
+            segments: vec![coarse],
+            words: vec![
+                ::transcribe_cpp::Word {
+                    t0_ms: 29520,
+                    t1_ms: 29840,
+                    text: "Twenty-five".into(),
+                    ..Default::default()
+                },
+                ::transcribe_cpp::Word {
+                    t0_ms: 29920,
+                    t1_ms: 30080,
+                    text: "euros.".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let rows = native_timed_rows(&transcript);
+        assert!(has_complete_native_word_alignment(&transcript));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].start_ms, 29520);
+        assert_eq!(rows[1].text, "euros.");
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            text
+        );
+    }
+
+    #[test]
+    fn incomplete_or_invalid_word_alignment_keeps_coarse_rows() {
+        let coarse = ::transcribe_cpp::Segment {
+            t0_ms: 0,
+            t1_ms: 1000,
+            text: "Keep both words.".into(),
+            ..Default::default()
+        };
+        let mut transcript = ::transcribe_cpp::Transcript {
+            text: coarse.text.clone(),
+            timestamp_kind: TimestampKind::Word,
+            segments: vec![coarse],
+            ..Default::default()
+        };
+        transcript.words = vec![::transcribe_cpp::Word {
+            t0_ms: 100,
+            t1_ms: 300,
+            text: "Keep".into(),
+            ..Default::default()
+        }];
+        assert!(!has_complete_native_word_alignment(&transcript));
+        assert_eq!(native_timed_rows(&transcript).len(), 1);
+        transcript.words[0].text = transcript.text.clone();
+        transcript.words[0].t1_ms = 50;
+        assert!(!has_complete_native_word_alignment(&transcript));
+        assert_eq!(native_timed_rows(&transcript)[0].start_ms, 0);
+        transcript.words[0].t1_ms = 300;
+        transcript.timestamp_kind = TimestampKind::None;
+        assert!(!has_complete_native_word_alignment(&transcript));
+        let rows = native_timed_rows(&transcript);
+        assert!(build_segments_for_timestamp_kind(
+            &rows,
+            &transcript.text,
+            1.0,
+            0.8,
+            TimestampKind::None
+        )
+        .is_empty());
+    }
 
     /// The bug this guards: the provider used to ask every family for
     /// `Segment` timestamps. Voxtral advertises `max_timestamp_kind == None`,
@@ -1743,15 +3643,14 @@ mod tests {
     /// `TRANSCRIBE_ERR_UNSUPPORTED_TIMESTAMPS` instead of returning its text.
     #[test]
     fn the_timestamp_request_is_clamped_to_what_the_family_can_produce() {
-        // Parakeet and Nemotron advertise Token; the meeting contract wants
-        // Segment, and asking for less than the maximum is always allowed.
+        // Token-capable families also support measured word rows.
         assert_eq!(
             timestamp_request_for(TimestampKind::Token),
-            TimestampKind::Segment
+            TimestampKind::Word
         );
         assert_eq!(
             timestamp_request_for(TimestampKind::Word),
-            TimestampKind::Segment
+            TimestampKind::Word
         );
         assert_eq!(
             timestamp_request_for(TimestampKind::Segment),
@@ -1806,6 +3705,285 @@ mod tests {
         }
     }
 
+    #[test]
+    fn download_progress_splits_by_bytes_and_finishes_only_at_the_end() {
+        let close = |left: f32, right: f32| (left - right).abs() < 1e-3;
+        let shares = DownloadShares::new(600, 200);
+        assert!(close(shares.neural(0.0), 0.0));
+        assert!(close(shares.neural(50.0), 37.5));
+        assert!(close(shares.neural(100.0), 75.0));
+        assert!(close(shares.vocabulary(0.0), 75.0));
+        assert!(close(shares.vocabulary(100.0), 99.9));
+        let speech_only = DownloadShares::new(600, 0);
+        assert!(close(speech_only.neural(100.0), 99.9));
+    }
+
+    #[test]
+    fn the_parakeet_download_size_is_one_copy_of_the_model() {
+        let expected = super::super::neural_engine::coreml_download_bytes().unwrap_or(739_508_576);
+        assert_eq!(parakeet_download_bytes(), expected);
+        assert_eq!(parakeet_ggml_bytes(), 739_508_576);
+        // Never both copies: the Core ML build plus vocabulary stays under
+        // the ggml file plus that build.
+        assert!(parakeet_download_bytes() < 739_508_576 + 464_413_247);
+    }
+
+    #[test]
+    fn qwen06_selection_uses_its_own_pinned_artifact_and_metadata() {
+        let provider = TranscribeCppProvider::with_models_root(
+            Path::new("/models"),
+            Some("qwen3-asr-0.6b-q6_k"),
+        );
+        assert_eq!(provider.model_id, "qwen3-asr-0.6b-q6_k");
+        assert_eq!(
+            provider.model_path(),
+            Path::new("/models/transcribe_cpp/Qwen3-ASR-0.6B-Q6_K.gguf")
+        );
+        let spec = provider.spec();
+        assert_eq!(spec.url(), "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/7e7c69a577fa2725dfedbe34b5e999336e30a19b/Qwen3-ASR-0.6B-Q6_K.gguf");
+        assert_eq!(
+            spec.sha256,
+            "3b051f108f03c0c91bbe1a3b2c1ee15e3ed51e4caec2a48751b01f2a21441cc3"
+        );
+        assert_eq!(spec.size_bytes, 690_417_824);
+        let info = provider.model_info();
+        assert_eq!(info.name, "Qwen3-ASR 0.6B (GGUF Q6_K, experimental)");
+        assert_eq!(info.parameters, "0.6B");
+        assert_eq!(info.version, "q6_k");
+        assert_eq!(info.languages, vec!["en"]);
+        assert_eq!(info.license, "Apache-2.0");
+        assert!(provider.description().contains("0.6B"));
+        assert!(route_model_options()
+            .iter()
+            .any(|option| { option.id == provider.model_id && option.label.contains("0.6B") }));
+    }
+
+    #[test]
+    fn orukeet_r3_is_a_pinned_english_dictation_route() {
+        let spec = spec_for(ORUKEET_R3_GGUF_MODEL_ID);
+        assert_eq!(spec.hf_revision, "b59c13a733fce5cf193230d0fa317ee7f145a108");
+        assert_eq!(
+            spec.sha256,
+            "cad2f52ac91cad829279422301989687c2cf02e19157352ed25ea501b90dbb7e"
+        );
+        assert_eq!(spec.size_bytes, 739_508_608);
+        assert_eq!(spec.languages, &["en"]);
+        assert!(spec.offered_as_route);
+        assert!(route_model_options()
+            .iter()
+            .any(|option| option.id == ORUKEET_R3_GGUF_MODEL_ID));
+        assert_eq!(
+            auxiliary_specs_for(ORUKEET_R3_GGUF_MODEL_ID)
+                .iter()
+                .map(|aux| aux.local_file_name)
+                .collect::<Vec<_>>(),
+            vec!["orukeet-r3-LICENSE-WEIGHTS", "orukeet-r3-NOTICE.md"]
+        );
+
+        let info = TranscribeCppProvider::with_models_root(
+            Path::new("/models"),
+            Some(ORUKEET_R3_GGUF_MODEL_ID),
+        )
+        .model_info();
+        assert_eq!(info.name, "Orukeet r3 (GGUF Q8_0, experimental)");
+        assert_eq!(info.version, "r3-q8_0");
+        assert_eq!(info.parameters, "600M");
+        assert_eq!(
+            info.license,
+            "CC-BY-SA-4.0 weights; NVIDIA attribution applies"
+        );
+    }
+
+    #[test]
+    fn unified_en_is_a_pinned_english_batch_route_with_attribution() {
+        let spec = spec_for(PARAKEET_UNIFIED_EN_GGUF_MODEL_ID);
+        assert_eq!(spec.hf_revision, "7e948f21b7bdbac698d3318db9d350f1096f3b6c");
+        assert_eq!(
+            spec.sha256,
+            "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795"
+        );
+        assert_eq!(spec.size_bytes, 731_357_568);
+        assert_eq!(spec.languages, &["en"]);
+        assert_eq!(spec.license, "NVIDIA Open Model License");
+        assert!(spec.offered_as_route);
+        assert!(route_model_options()
+            .iter()
+            .any(|option| option.id == PARAKEET_UNIFIED_EN_GGUF_MODEL_ID));
+
+        let attribution = auxiliary_specs_for(PARAKEET_UNIFIED_EN_GGUF_MODEL_ID);
+        assert_eq!(attribution.len(), 2);
+        assert_eq!(
+            attribution[0].local_file_name,
+            "parakeet-unified-en-0.6b-NVIDIA-MODEL-CARD.md"
+        );
+        assert_eq!(
+            attribution[0].url(),
+            "https://huggingface.co/nvidia/parakeet-unified-en-0.6b/resolve/fe53cd885760c96b6a5f51a0bfd362cb4584a98b/README.md"
+        );
+        assert_eq!(
+            attribution[0].sha256,
+            "505590d4440b38ca33ed4d5b8af2a10c2391ecd8740c945bfdf82825e1a05fb3"
+        );
+        assert_eq!(
+            attribution[1].local_file_name,
+            "parakeet-unified-en-0.6b-NVIDIA-OPEN-MODEL-LICENSE.pdf"
+        );
+        assert_eq!(
+            attribution[1].url(),
+            "https://www.nvidia.com/content/dam/en-zz/Solutions/license-agreements/enterprise-software/nvidia-open-model-license-agreements-24-10-2025.pdf"
+        );
+        assert_eq!(
+            attribution[1].sha256,
+            "4d2fb590aa9b30c47f2058bff17291df7fa2aa0c1bd775a20703da9bb267cfab"
+        );
+        assert_eq!(
+            PARAKEET_UNIFIED_EN_ATTRIBUTION_NOTICE,
+            "Licensed by NVIDIA Corporation under the NVIDIA Open Model License"
+        );
+
+        assert_ne!(
+            TranscribeCppStreamingProvider::spec().model_id,
+            PARAKEET_UNIFIED_EN_GGUF_MODEL_ID,
+            "the Nemotron-only preview must not open Unified with the cache-aware extension"
+        );
+        assert!(!crate::asr_routing::meeting_route_is_dictation_only(
+            AsrProviderType::TranscribeCpp,
+            PARAKEET_UNIFIED_EN_GGUF_MODEL_ID,
+        ));
+    }
+
+    #[test]
+    fn optional_english_models_download_from_the_plainsong_release_with_credits() {
+        for (model_id, file, sha256, source, revision, credit, description) in [
+            (
+                FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+                "fluid-speech-mini-q8_0.gguf",
+                "15dbfb78d8f02d4618447fe25a60dde13f35ad12513842bac41e321ff0fa6219",
+                "FluidVoice-Labs/fluid-speech-mini-gguf",
+                "490bcd5de891f5efd0e732434dfb0a4b0899aead",
+                FLUID_SPEECH_MINI_ATTRIBUTION,
+                "English only. Fewer stray words when someone else talks nearby in our synthetic audio tests; can miss very short replies.",
+            ),
+            (
+                UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+                "underdog-bark-3.0-pro-q8_0.gguf",
+                "017193232ec9ca53f53800877cacd8f8c468040f4a8d377fc07e1e959808ac6f",
+                "ConwayResearch/Underdog-Bark-3.0-Pro",
+                "4b5c51e04aa8d16dda9ecdff71bc29f7360149e4",
+                UNDERDOG_BARK_PRO_ATTRIBUTION,
+                "English only. Did better on short distant-microphone meeting clips in our tests; dictation may lose capitals and punctuation.",
+            ),
+        ] {
+            let spec = spec_for(model_id);
+            assert_eq!(spec.model_id, model_id);
+            assert_eq!(spec.file_name, file);
+            assert!(spec.hosted_by_plainsong);
+            assert_eq!(
+                spec.url(),
+                format!(
+                    "https://github.com/JonathanRReed/Plainsong/releases/download/models-2026-10/{file}"
+                )
+            );
+            assert_eq!(spec.sha256, sha256);
+            assert_eq!(spec.size_bytes, 739_508_608);
+            assert_eq!(spec.hf_repo, source);
+            assert_eq!(spec.hf_revision, revision);
+            assert_eq!(spec.license, "CC-BY-4.0");
+            assert_eq!(spec.languages, &["en"]);
+            assert!(spec.offered_as_route);
+            assert_eq!(route_spec_for(model_id).model_id, model_id);
+            assert!(spec.label.contains("optional, English"), "{}", spec.label);
+            assert!(!spec.label.contains("experimental"), "{}", spec.label);
+
+            // The licence text and the credits are part of the download and of
+            // readiness, from the same release as the weights.
+            let stem = file.trim_end_matches("-q8_0.gguf");
+            let aux = auxiliary_specs_for(model_id);
+            assert_eq!(
+                aux.iter().map(|aux| aux.local_file_name).collect::<Vec<_>>(),
+                vec![format!("{stem}-LICENSE.txt"), format!("{stem}-NOTICE.txt")]
+            );
+            for aux in aux {
+                assert_eq!(
+                    aux.url(),
+                    format!("{PLAINSONG_MODEL_RELEASE_URL}/{}", aux.local_file_name)
+                );
+                assert_eq!(aux.sha256.len(), 64);
+            }
+            assert_eq!(
+                aux[0].sha256, "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411",
+                "the CC BY 4.0 legal code, byte for byte"
+            );
+
+            let provider =
+                TranscribeCppProvider::with_models_root(Path::new("/models"), Some(model_id));
+            assert_eq!(provider.description(), description);
+            let info = provider.model_info();
+            assert_eq!(info.name, spec.display_name);
+            assert!(info.name.contains(" by "), "{}", info.name);
+            assert_eq!(info.languages, vec!["en"]);
+            assert_eq!(info.parameters, "600M");
+            assert_eq!(fallback_result_language(spec), "en");
+            assert!(credit.contains("NVIDIA Parakeet TDT 0.6B v3"), "{credit}");
+            assert!(credit.contains("Moondream Parakeet Ultra"), "{credit}");
+            assert!(credit.starts_with(spec.display_name.trim_end_matches(" (GGUF Q8_0)")));
+
+            // Both serve dictation and meetings, through the chunked path.
+            assert!(!crate::asr_routing::meeting_route_is_dictation_only(
+                AsrProviderType::TranscribeCpp,
+                model_id,
+            ));
+            assert!(crate::asr_routing::meeting_model_is_supported(
+                AsrProviderType::TranscribeCpp,
+                model_id,
+            ));
+            assert_eq!(
+                crate::meeting_transcribe::meeting_transcription_chunk_seconds(
+                    AsrProviderType::TranscribeCpp
+                ),
+                90
+            );
+            assert!(crate::meeting_transcribe::whole_file_meeting_limits(
+                AsrProviderType::TranscribeCpp
+            )
+            .is_none());
+        }
+        assert_eq!(
+            FLUID_SPEECH_MINI_ATTRIBUTION,
+            "Fluid Speech Mini by FluidVoice. Built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra."
+        );
+        assert!(UNDERDOG_BARK_PRO_ATTRIBUTION
+            .contains("post-trained and compressed by Conway Research"));
+    }
+
+    #[test]
+    fn a_timestamp_free_result_never_becomes_a_timed_segment() {
+        let raw = [RawSegment {
+            start_ms: 0,
+            end_ms: 12_500,
+            text: "untimed text".to_string(),
+        }];
+        assert!(build_segments_for_timestamp_kind(
+            &raw,
+            "untimed text",
+            12.5,
+            0.91,
+            TimestampKind::None,
+        )
+        .is_empty());
+        assert_eq!(
+            build_segments_for_timestamp_kind(
+                &raw,
+                "untimed text",
+                12.5,
+                0.91,
+                TimestampKind::Segment,
+            )
+            .len(),
+            1
+        );
+    }
+
     /// Measured on 2026-09-03 and deliberately left out of the picker: both
     /// Voxtral tiers lost the dictation comparison by roughly an order of
     /// magnitude and emit no timestamps at all, so neither can serve meetings
@@ -1834,6 +4012,212 @@ mod tests {
             // A saved settings file naming one must fall back to a real route.
             assert!(route_spec_for(model_id).offered_as_route);
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires pinned Moonshine Medium bytes and explicitly bound public fixtures"]
+    async fn moonshine_streaming_production_provider_probe() {
+        let root = PathBuf::from(std::env::var("PLAINSONG_MOONSHINE_STREAM_EVAL_ROOT").unwrap());
+        let spec = spec_for(MOONSHINE_STREAM_MEDIUM_MODEL_ID);
+        let models = root.join("provider-models");
+        let directory = models.join(TRANSCRIBE_CPP_MODEL_DIR);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(spec.file_name);
+        if !path.exists() {
+            std::fs::hard_link(root.join(spec.file_name), &path).unwrap();
+        }
+        assert!(
+            crate::download::verify_or_record_model_integrity(&path, Some(spec.sha256))
+                .await
+                .unwrap()
+        );
+        let provider = TranscribeCppProvider::with_models_root(
+            &models,
+            Some(MOONSHINE_STREAM_MEDIUM_MODEL_ID),
+        );
+        assert_eq!(provider.model_info().parameters, "245M");
+        let inputs: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(root.join("inputs.json")).unwrap()).unwrap();
+        let mut results = Vec::new();
+        for input in inputs {
+            let result = provider
+                .transcribe(Path::new(input["path"].as_str().unwrap()))
+                .await
+                .unwrap();
+            assert_eq!(result.model_id, MOONSHINE_STREAM_MEDIUM_MODEL_ID);
+            assert!(!result.measured_word_timestamps);
+            if input["name"] == "silence" {
+                assert!(result.text.is_empty());
+            } else {
+                assert!(!result.text.is_empty());
+            }
+            results.push(serde_json::json!({"name":input["name"],"text":result.text,"processingMs":result.processing_time_ms,"measuredWordTimestamps":result.measured_word_timestamps}));
+            std::fs::write(
+                root.join("provider-results.json"),
+                serde_json::to_vec_pretty(&results).unwrap(),
+            )
+            .unwrap();
+        }
+        clear_cached_runtime();
+    }
+
+    #[test]
+    #[ignore = "requires a pinned Moonshine Streaming candidate and explicitly bound public audio"]
+    fn native_moonshine_streaming_candidate_probe() {
+        use sha2::{Digest, Sha256};
+        let root = PathBuf::from(std::env::var("PLAINSONG_MOONSHINE_STREAM_EVAL_ROOT").unwrap());
+        let binding: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("binding.json")).unwrap()).unwrap();
+        let path = root.join(binding["file"].as_str().unwrap());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            binding["size"].as_u64().unwrap()
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(std::fs::read(&path).unwrap())),
+            binding["lfs"]["sha256"].as_str().unwrap()
+        );
+        let model = Model::load_with(
+            &path,
+            &ModelOptions {
+                backend: Backend::Auto,
+                device: None,
+            },
+        )
+        .unwrap();
+        let caps = model.capabilities();
+        std::fs::write(root.join("runtime.json"), serde_json::to_vec_pretty(&serde_json::json!({"arch":model.arch(),"backend":model.backend().to_string(),"languages":caps.languages,"maxTimestampKind":format!("{:?}",caps.max_timestamp_kind)})).unwrap()).unwrap();
+        let inputs: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(root.join("inputs.json")).unwrap()).unwrap();
+        let mut results = Vec::new();
+        for input in inputs {
+            let path = PathBuf::from(input["path"].as_str().unwrap());
+            assert_eq!(
+                hex::encode(Sha256::digest(std::fs::read(&path).unwrap())),
+                input["sha256"].as_str().unwrap()
+            );
+            let pcm = crate::audio::utils::load_audio_file(&path).unwrap();
+            let mut session = model.session().unwrap();
+            let token = CancelToken::new();
+            session.set_cancel_token(&token);
+            let (done, wait) = std::sync::mpsc::channel();
+            let watchdog = std::thread::spawn(move || {
+                if wait.recv_timeout(Duration::from_secs(45)).is_err() {
+                    token.cancel();
+                }
+            });
+            let start = Instant::now();
+            let result = session.run(
+                &pcm,
+                &RunOptions {
+                    timestamps: caps.max_timestamp_kind,
+                    ..Default::default()
+                },
+            );
+            let _ = done.send(());
+            watchdog.join().unwrap();
+            let row = match result {
+                Ok(result) => {
+                    serde_json::json!({"name":input["name"],"text":result.text,"elapsedMs":start.elapsed().as_millis(),"timestampKind":format!("{:?}",result.timestamp_kind)})
+                }
+                Err(error) => {
+                    serde_json::json!({"name":input["name"],"error":error.to_string(),"elapsedMs":start.elapsed().as_millis()})
+                }
+            };
+            println!("{}", row);
+            results.push(row);
+            std::fs::write(
+                root.join("results.json"),
+                serde_json::to_vec_pretty(&results).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires explicitly selected public audio and cached pinned Nemotron weights"]
+    fn native_nemotron_english_hint_probe() {
+        use sha2::{Digest, Sha256};
+        let root = PathBuf::from(std::env::var("PLAINSONG_NEMOTRON_HINT_ROOT").unwrap());
+        let models = PathBuf::from(std::env::var("PLAINSONG_MODELS_ROOT").unwrap());
+        let model_path = models
+            .join(TRANSCRIBE_CPP_MODEL_DIR)
+            .join(spec_for(NEMOTRON_STREAMING_GGUF_MODEL_ID).file_name);
+        assert_eq!(
+            hex::encode(Sha256::digest(std::fs::read(&model_path).unwrap())),
+            spec_for(NEMOTRON_STREAMING_GGUF_MODEL_ID).sha256
+        );
+        let input: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("input.json")).unwrap()).unwrap();
+        let audio = PathBuf::from(input["path"].as_str().unwrap());
+        assert_eq!(
+            hex::encode(Sha256::digest(std::fs::read(&audio).unwrap())),
+            input["sha256"].as_str().unwrap()
+        );
+        let pcm = crate::audio::utils::load_audio_file(&audio).unwrap();
+        let model = Model::load_with(
+            &model_path,
+            &ModelOptions {
+                backend: backend_choice_from_env().to_backend(),
+                device: None,
+            },
+        )
+        .unwrap();
+        let caps = model.capabilities();
+        std::fs::write(
+            root.join("languages.json"),
+            serde_json::to_vec_pretty(&caps.languages).unwrap(),
+        )
+        .unwrap();
+        let mut session = model.session().unwrap();
+        let mut rows = Vec::new();
+        let english = caps
+            .languages
+            .iter()
+            .find(|language| language.starts_with("en"))
+            .cloned();
+        for language in [None, Some("en".to_string()), english] {
+            let options = RunOptions {
+                language: language.clone(),
+                timestamps: timestamp_request_for(caps.max_timestamp_kind),
+                ..RunOptions::default()
+            };
+            let row = match session.run(&pcm, &options) {
+                Ok(result) => {
+                    serde_json::json!({"hint":language,"text":result.text,"detectedLanguage":result.language})
+                }
+                Err(error) => serde_json::json!({"hint":language,"error":error.to_string()}),
+            };
+            rows.push(row);
+            std::fs::write(
+                root.join("results.json"),
+                serde_json::to_vec_pretty(&rows).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn english_batch_route_uses_an_advertised_locale_without_changing_other_models() {
+        let name = spec_for(NEMOTRON_STREAMING_GGUF_MODEL_ID).file_name;
+        let languages = vec![
+            "hi-IN".to_string(),
+            "en-US".to_string(),
+            "en-GB".to_string(),
+        ];
+        assert_eq!(
+            batch_language_for_model(name, &languages).unwrap(),
+            Some("en-US".into())
+        );
+        assert!(batch_language_for_model(name, &["hi-IN".into()]).is_err());
+        assert_eq!(
+            batch_language_for_model(
+                spec_for(PARAKEET_UNIFIED_EN_GGUF_MODEL_ID).file_name,
+                &languages
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1901,10 +4285,11 @@ mod tests {
         }
     }
 
-    /// Readiness is the integrity receipt, not the bytes. A file that is merely
-    /// present must not open a session.
+    /// Readiness does not hash. A file that does not match its pin is
+    /// refused when a session first verifies it, and from then on is not an
+    /// available engine.
     #[test]
-    fn a_present_but_unverified_gguf_is_not_an_available_streaming_engine() {
+    fn a_streaming_model_found_wrong_is_no_longer_an_available_engine() {
         let root = std::env::temp_dir()
             .join("plainsong-streaming-availability")
             .join(uuid::Uuid::new_v4().to_string());
@@ -1915,15 +4300,19 @@ mod tests {
         assert!(!provider.is_streaming_available(), "no file at all");
 
         std::fs::write(provider.model_path(), b"not really a gguf").expect("write");
+        assert!(provider.is_streaming_available(), "readiness does not hash");
+        let refused = open_verified_native_model(&provider.model_path())
+            .expect_err("bytes that do not match the pin must not load");
+        assert_eq!(refused.to_string(), MISSING_SPEECH_MODEL);
         assert!(
             !provider.is_streaming_available(),
-            "bytes without a trusted integrity receipt are not a usable engine"
+            "a file found wrong is not a usable engine"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn the_streaming_engine_names_the_model_the_route_catalog_refuses_to_offer() {
+    fn streaming_and_final_dictation_share_the_same_pinned_model() {
         let provider = TranscribeCppStreamingProvider::with_models_root(
             Path::new("/x"),
             DEFAULT_STREAMING_CHUNK_MS,
@@ -1932,11 +4321,11 @@ mod tests {
             provider.streaming_model_id(),
             NEMOTRON_STREAMING_GGUF_MODEL_ID
         );
-        // The whole point: it is a preview engine, never a transcription route.
+        // Preview and final dictation use one verified artifact.
         assert!(route_model_options()
             .iter()
-            .all(|option| option.id != NEMOTRON_STREAMING_GGUF_MODEL_ID));
-        assert!(!TranscribeCppStreamingProvider::spec().offered_as_route);
+            .any(|option| option.id == NEMOTRON_STREAMING_GGUF_MODEL_ID));
+        assert!(TranscribeCppStreamingProvider::spec().offered_as_route);
     }
 
     /// The real thing, when the weights happen to be installed on this machine.
@@ -1946,6 +4335,7 @@ mod tests {
     /// `benchmark-latency` is the measured version of the same path, and
     /// `artifacts/qa/streaming-partials-receipt-2026-09-02.md` is its receipt.
     #[test]
+    #[ignore = "loads the Nemotron streaming model installed in this Mac's Plainsong folder; pass --ignored"]
     fn an_installed_streaming_engine_transcribes_a_fed_tone_without_panicking() {
         let provider = TranscribeCppStreamingProvider::new();
         if !provider.is_streaming_available() {
@@ -1996,8 +4386,17 @@ mod tests {
                 spec.model_id
             );
             let url = spec.url();
-            assert!(url.starts_with("https://huggingface.co/"), "{url}");
-            assert!(url.contains(spec.hf_revision), "{url} is not pinned");
+            if spec.hosted_by_plainsong {
+                // A release asset under a dated tag; the digest is the pin,
+                // and `hf_revision` names the converted source.
+                assert!(
+                    url.starts_with(&format!("{PLAINSONG_MODEL_RELEASE_URL}/")),
+                    "{url}"
+                );
+            } else {
+                assert!(url.starts_with("https://huggingface.co/"), "{url}");
+                assert!(url.contains(spec.hf_revision), "{url} is not pinned");
+            }
             assert!(url.ends_with(spec.file_name), "{url}");
             assert!(spec.size_bytes > 0);
             assert!(spec.max_bytes() > spec.size_bytes);
@@ -2005,15 +4404,33 @@ mod tests {
     }
 
     #[test]
-    fn only_the_parakeet_route_is_offered_to_the_route_catalog() {
+    fn the_route_catalog_offers_only_explicit_batch_routes() {
         let options = route_model_options();
-        assert_eq!(options.len(), 1);
-        assert_eq!(options[0].id, PARAKEET_GGUF_MODEL_ID);
-        // The streaming model is pinned and verifiable but never a route:
-        // proving a batch decode is not shipping a streaming feature.
-        assert!(MODEL_SPECS.iter().any(
-            |spec| spec.model_id == NEMOTRON_STREAMING_GGUF_MODEL_ID && !spec.offered_as_route
-        ));
+        assert_eq!(options.len(), 9);
+        assert_eq!(
+            options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                PARAKEET_GGUF_MODEL_ID,
+                ORUKEET_R3_GGUF_MODEL_ID,
+                QWEN3_ASR_17_GGUF_MODEL_ID,
+                QWEN3_ASR_06_GGUF_MODEL_ID,
+                PARAKEET_UNIFIED_EN_GGUF_MODEL_ID,
+                NEMOTRON_STREAMING_GGUF_MODEL_ID,
+                MOONSHINE_STREAM_MEDIUM_MODEL_ID,
+                FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+                UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+            ]
+        );
+        // Batch selection is explicit and remains experimental.
+        assert!(
+            MODEL_SPECS
+                .iter()
+                .any(|spec| spec.model_id == NEMOTRON_STREAMING_GGUF_MODEL_ID
+                    && spec.offered_as_route)
+        );
     }
 
     #[test]
@@ -2029,7 +4446,12 @@ mod tests {
     #[test]
     fn integrity_artifacts_cover_every_pinned_file() {
         let artifacts = model_integrity_artifacts(Path::new("/models"));
-        assert_eq!(artifacts.len(), MODEL_SPECS.len());
+        let expected = MODEL_SPECS.len()
+            + MODEL_SPECS
+                .iter()
+                .map(|spec| auxiliary_specs_for(spec.model_id).len())
+                .sum::<usize>();
+        assert_eq!(artifacts.len(), expected);
         for (path, digest) in artifacts {
             assert!(path.starts_with("/models/transcribe_cpp"));
             assert_eq!(digest.len(), 64);
@@ -2114,6 +4536,103 @@ mod tests {
     }
 
     #[test]
+    fn moonshine_stream_rejects_a_successful_but_truncated_snapshot() {
+        let transcript = transcribe_cpp::Transcript {
+            text: "unfinished transcript".into(),
+            ..transcribe_cpp::Transcript::default()
+        };
+        let error = completed_moonshine_stream(transcript.clone(), true)
+            .expect_err("a truncated stream must not be saved as complete");
+        assert!(matches!(
+            error,
+            transcribe_cpp::Error::OutputTruncated { .. }
+        ));
+        let message = completed_native_transcript(
+            Err(error),
+            None,
+            MOONSHINE_STREAM_MEDIUM_MODEL_ID,
+            Duration::from_secs(180),
+            180.0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("incomplete"), "{message}");
+        assert!(!message.contains(&transcript.text), "{message}");
+        assert_eq!(
+            completed_moonshine_stream(transcript.clone(), false)
+                .unwrap()
+                .text,
+            transcript.text
+        );
+    }
+
+    #[test]
+    fn qwen_native_result_rejects_truncated_and_cancelled_partials() {
+        use transcribe_cpp::{Error, Transcript};
+
+        let partial = Transcript {
+            text: "private unfinished dictation".into(),
+            ..Transcript::default()
+        };
+        for model_id in [QWEN3_ASR_06_GGUF_MODEL_ID, QWEN3_ASR_17_GGUF_MODEL_ID] {
+            for (error, stop, expected) in [
+                (
+                    Error::OutputTruncated {
+                        message: partial.text.clone(),
+                        partial: Some(Box::new(partial.clone())),
+                    },
+                    None,
+                    "incomplete",
+                ),
+                (
+                    Error::Aborted {
+                        message: partial.text.clone(),
+                        partial: Some(Box::new(partial.clone())),
+                    },
+                    Some(DecodeStop::Cancelled),
+                    "cancelled",
+                ),
+                (
+                    Error::Aborted {
+                        message: partial.text.clone(),
+                        partial: Some(Box::new(partial.clone())),
+                    },
+                    Some(DecodeStop::DeadlineExceeded),
+                    "within its 180 s budget for 180.0 s of audio",
+                ),
+            ] {
+                let message = completed_native_transcript(
+                    Err(error),
+                    stop,
+                    model_id,
+                    Duration::from_secs(180),
+                    180.0,
+                )
+                .expect_err("partial output must not become a successful transcript")
+                .to_string();
+                assert!(message.contains(expected), "{message}");
+                assert!(message.contains(model_id), "{message}");
+                assert!(!message.contains(&partial.text), "{message}");
+            }
+        }
+        let complete = Transcript {
+            text: "complete dictation".into(),
+            ..Transcript::default()
+        };
+        assert_eq!(
+            completed_native_transcript(
+                Ok(complete.clone()),
+                None,
+                QWEN3_ASR_06_GGUF_MODEL_ID,
+                Duration::from_secs(180),
+                180.0,
+            )
+            .unwrap(),
+            complete
+        );
+    }
+
+    #[test]
     fn error_messages_name_the_next_action_and_never_carry_the_partial_transcript() {
         use transcribe_cpp::Error;
 
@@ -2131,10 +4650,7 @@ mod tests {
             PARAKEET_GGUF_MODEL_ID,
             &Error::ModelFileNotFound("whatever".into()),
         );
-        assert!(
-            missing.contains("Download the model from Settings"),
-            "{missing}"
-        );
+        assert_eq!(missing, MISSING_SPEECH_MODEL);
 
         let backend = describe_transcribe_error(
             PARAKEET_GGUF_MODEL_ID,
@@ -2252,16 +4768,27 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_selection_preserves_hidden_models_without_changing_routes() {
+        let benchmark = TranscribeCppProvider::for_benchmark(VOXTRAL_MINI_3B_GGUF_MODEL_ID)
+            .expect("pinned probe model");
+        assert_eq!(benchmark.spec().model_id, VOXTRAL_MINI_3B_GGUF_MODEL_ID);
+        let normal = TranscribeCppProvider::with_models_root(
+            Path::new("/models"),
+            Some(VOXTRAL_MINI_3B_GGUF_MODEL_ID),
+        );
+        assert_eq!(normal.spec().model_id, PARAKEET_GGUF_MODEL_ID);
+        assert!(TranscribeCppProvider::for_benchmark("unknown-probe-model").is_err());
+    }
+
+    #[test]
     fn only_a_model_the_catalog_offers_survives_normalization() {
-        // `spec_for` knows the streaming GGUF; the route lookup must not hand
-        // it back, or a saved settings file could point the route at weights
-        // the picker never lists and the app never downloads.
+        // Hidden Voxtral probes must not survive route normalization.
         assert_eq!(
-            spec_for(NEMOTRON_STREAMING_GGUF_MODEL_ID).model_id,
-            NEMOTRON_STREAMING_GGUF_MODEL_ID
+            spec_for(VOXTRAL_MINI_3B_GGUF_MODEL_ID).model_id,
+            VOXTRAL_MINI_3B_GGUF_MODEL_ID
         );
         assert_eq!(
-            route_spec_for(NEMOTRON_STREAMING_GGUF_MODEL_ID).model_id,
+            route_spec_for(VOXTRAL_MINI_3B_GGUF_MODEL_ID).model_id,
             PARAKEET_GGUF_MODEL_ID
         );
         assert_eq!(route_spec_for("").model_id, PARAKEET_GGUF_MODEL_ID);
@@ -2491,6 +5018,45 @@ mod tests {
     /// a blocking `lock()`, so a second request waited for as long as the first
     /// decode took, with no way to say so. Now the wait is bounded by the
     /// request's own budget.
+    /// With GGUF Parakeet as the dictation route, the re-decode live preview
+    /// and the final decode share this one runtime. The stop path drains the
+    /// preview first; a final decode that still finds a preview decode in
+    /// flight must wait for it and then run, not fail as busy.
+    #[test]
+    fn a_final_decode_gets_the_runtime_as_soon_as_a_preview_decode_lets_go() {
+        let _serialized = cache_test_lock();
+        clear_cached_runtime();
+
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let preview = std::thread::spawn(move || {
+            let _held = runtime_cache().lock().expect("preview holds the runtime");
+            held_tx.send(()).expect("signal held");
+            std::thread::sleep(Duration::from_millis(60));
+        });
+        held_rx.recv().expect("preview started");
+
+        let never_abandoned = AtomicBool::new(false);
+        let started = Instant::now();
+        let acquired = acquire_runtime(
+            &never_abandoned,
+            Instant::now() + Duration::from_secs(10),
+            "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+            Duration::from_secs(10),
+        );
+        let waited = started.elapsed();
+        assert!(acquired.is_ok(), "the final decode must get the runtime");
+        drop(acquired);
+        preview.join().expect("preview thread");
+        assert!(
+            waited >= Duration::from_millis(40),
+            "it waited for the preview, took {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(5),
+            "and only for as long as the preview held it, took {waited:?}"
+        );
+    }
+
     #[test]
     fn a_request_that_cannot_get_the_runtime_says_so_instead_of_blocking_forever() {
         let _serialized = cache_test_lock();
@@ -2546,10 +5112,11 @@ mod tests {
         std::fs::write(model_path, bytes).expect("write gguf");
     }
 
-    /// Readiness must follow the integrity receipt, not plausible bytes: a
-    /// swapped GGUF of the right shape would otherwise be loaded and decoded.
+    /// Readiness reads no bytes, but loading hashes them: a GGUF of the right
+    /// shape that does not match its pin is refused before any decode and
+    /// then reads as missing, which offers the download again.
     #[tokio::test]
-    async fn readiness_requires_an_integrity_receipt_not_just_a_plausible_gguf() {
+    async fn plausible_weights_are_refused_at_load_and_then_read_as_missing() {
         let root =
             std::env::temp_dir().join(format!("transcribe-cpp-trust-{}", uuid::Uuid::new_v4()));
         let provider = TranscribeCppProvider::with_models_root(&root, None);
@@ -2558,46 +5125,696 @@ mod tests {
 
         assert!(provider.has_required_file(), "structure check passes");
         assert_eq!(provider.download_status(), DownloadStatus::Downloaded);
-        assert!(!provider.is_available(), "no receipt, so not ready");
+        assert!(provider.is_available(), "readiness does not hash");
+
+        let refused = open_verified_native_model(&model_path)
+            .expect_err("weights that do not match their pin must not load");
+        assert_eq!(refused.to_string(), MISSING_SPEECH_MODEL);
+        for jargon in ["GGUF", "transcribe.cpp", "ONNX", "Metal"] {
+            assert!(!refused.to_string().contains(jargon), "{refused}");
+        }
+        assert!(!provider.has_trusted_required_file());
+        assert!(!provider.is_available(), "found wrong, so not ready");
+        let error = provider
+            .transcribe(&root.join("unused.wav"))
+            .await
+            .expect_err("rejected weights must not transcribe");
+        assert_eq!(error.to_string(), MISSING_SPEECH_MODEL);
         let error = provider
             .prewarm()
             .await
-            .expect_err("untrusted weights must not load");
+            .expect_err("rejected weights must not load");
         assert!(
-            error.to_string().contains("integrity verification")
-                || error.to_string().contains("not downloaded and verified"),
+            error.to_string().contains("not downloaded and verified"),
             "{error}"
         );
 
-        // The receipt the download path writes once the file's hash matched its
-        // pin is what makes the same bytes trusted.
-        crate::download::record_model_integrity_receipt_for_tests(
-            &model_path,
+        // A new file at the path is a new question.
+        std::fs::write(&model_path, vec![0x11u8; 4096]).expect("replace weights");
+        assert!(provider.is_available());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicitly staged Qwen 1.7B weights and frozen audio"]
+    async fn qwen17_production_provider_probe() {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                clear_cached_runtime();
+            }
+        }
+        let _cleanup = Cleanup;
+        let root = PathBuf::from(
+            std::env::var("PLAINSONG_QWEN17_EVAL_ROOT").expect("explicit qualification root"),
+        );
+        let backend = std::env::var(BACKEND_ENV_VAR).expect("explicit backend");
+        assert!(matches!(backend.as_str(), "cpu" | "metal"));
+        let source = root.join("model.gguf");
+        let spec = spec_for(QWEN3_ASR_17_GGUF_MODEL_ID);
+        assert_eq!(std::fs::metadata(&source).unwrap().len(), spec.size_bytes);
+        let mut file = std::fs::File::open(&source).unwrap();
+        let mut hash = Sha256::new();
+        let mut buffer = vec![0u8; 1024 * 1024];
+        loop {
+            let n = file.read(&mut buffer).unwrap();
+            if n == 0 {
+                break;
+            }
+            hash.update(&buffer[..n]);
+        }
+        assert_eq!(hex::encode(hash.finalize()), spec.sha256);
+        drop(buffer);
+        let provider = TranscribeCppProvider::with_models_root(
+            &root.join("production-models"),
+            Some(QWEN3_ASR_17_GGUF_MODEL_ID),
+        );
+        std::fs::create_dir_all(&provider.model_dir).unwrap();
+        if !provider.model_path().exists() {
+            std::fs::copy(&source, provider.model_path()).unwrap();
+        }
+        assert!(crate::download::verify_or_record_model_integrity(
+            &provider.model_path(),
+            Some(spec.sha256)
+        )
+        .await
+        .unwrap());
+        assert!(provider.is_available());
+        assert_eq!(provider.model_info().parameters, "1.7B");
+        provider
+            .prewarm()
+            .await
+            .expect("production prewarm must work");
+        let mut results = Vec::new();
+        for name in [
+            "correction.wav",
+            "finance.wav",
+            "finance-next.wav",
+            "silence.wav",
+        ] {
+            let result = provider
+                .transcribe(&root.join(name))
+                .await
+                .expect("production decode");
+            assert_eq!(result.model_id, QWEN3_ASR_17_GGUF_MODEL_ID);
+            assert_eq!(result.actual_provider, AsrProviderType::TranscribeCpp);
+            assert_eq!(
+                result.actual_engine.as_deref(),
+                Some(format!("transcribe_cpp_{backend}").as_str())
+            );
+            assert!(
+                result.segments.is_empty(),
+                "untimed output must not invent alignment"
+            );
+            assert!(result.speaker_turns.is_empty());
+            if name == "silence.wav" {
+                assert!(result.text.is_empty());
+            }
+            results.push(serde_json::json!({"file":name,"text":result.text,"modelId":result.model_id,"actualEngine":result.actual_engine,"processingMs":result.processing_time_ms,"segments":result.segments.len()}));
+        }
+        std::fs::write(root.join("provider-metadata.json"), serde_json::to_vec_pretty(&serde_json::json!({"modelOptions":route_model_options(),"modelInfo":provider.model_info(),"available":provider.is_available()})).unwrap()).unwrap();
+        crate::shutdown_for_sidecar().await;
+        std::fs::write(
+            root.join(format!("production-{backend}.json")),
+            serde_json::to_vec_pretty(&results).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn bounded_unified_cancelled_job_stops_before_model_loading() {
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let error = run_bounded_unified(
+            Path::new("must-not-load.gguf"),
+            BackendChoice::Cpu,
+            &vec![0.0; 61 * 16_000],
+            &cancelled,
+        )
+        .err()
+        .expect("cancelled job must fail");
+        assert!(error.to_string().contains("Cancelled"));
+    }
+
+    #[test]
+    fn bounded_unified_policy_keeps_short_captures_and_other_models_unchanged() {
+        assert!(!uses_bounded_unified(
+            PARAKEET_UNIFIED_EN_GGUF_MODEL_ID,
+            60 * 16_000
+        ));
+        assert!(uses_bounded_unified(
+            PARAKEET_UNIFIED_EN_GGUF_MODEL_ID,
+            60 * 16_000 + 1
+        ));
+        assert!(!uses_bounded_unified(
+            QWEN3_ASR_17_GGUF_MODEL_ID,
+            600 * 16_000
+        ));
+        assert!(!uses_bounded_unified(
+            QWEN3_ASR_06_GGUF_MODEL_ID,
+            180 * 16_000
+        ));
+        assert!(!uses_bounded_unified(
+            ORUKEET_R3_GGUF_MODEL_ID,
+            600 * 16_000
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires pinned Unified weights and frozen timing excerpts"]
+    async fn unified_measured_word_alignment_probe() {
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                clear_cached_runtime();
+            }
+        }
+        let _cleanup = Cleanup;
+        let root = PathBuf::from(
+            std::env::var("PLAINSONG_QWEN17_EVAL_ROOT").expect("explicit fixture root"),
+        );
+        let source = PathBuf::from(
+            std::env::var("PLAINSONG_UNIFIED_SOURCE_DIR").expect("explicit source model directory"),
+        );
+        let provider = TranscribeCppProvider::with_models_root(
+            &root.join("timing-production-models"),
+            Some(PARAKEET_UNIFIED_EN_GGUF_MODEL_ID),
+        );
+        std::fs::create_dir_all(&provider.model_dir).unwrap();
+        let mut assets = vec![(provider.spec().file_name, provider.spec().sha256)];
+        assets.extend(
+            auxiliary_specs_for(PARAKEET_UNIFIED_EN_GGUF_MODEL_ID)
+                .iter()
+                .map(|aux| (aux.local_file_name, aux.sha256)),
+        );
+        for (name, digest) in assets {
+            let path = provider.model_dir.join(name);
+            if !path.exists() {
+                std::fs::copy(source.join(name), &path).unwrap();
+            }
+            assert!(
+                crate::download::verify_or_record_model_integrity(&path, Some(digest))
+                    .await
+                    .unwrap()
+            );
+        }
+        let mut rows = Vec::new();
+        let mut analysis_rows = Vec::new();
+        let inputs = std::env::var("PLAINSONG_WORD_ALIGNMENT_AUDIO")
+            .map(|file| vec![file])
+            .unwrap_or_else(|_| vec!["finance.wav".into(), "finance-next.wav".into()]);
+        for name in inputs {
+            let started = std::time::Instant::now();
+            let r = provider.transcribe(&root.join(&name)).await.unwrap();
+            assert!(r.segments.len() > 20);
+            assert_eq!(
+                r.segments
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>(),
+                r.text.split_whitespace().collect::<Vec<_>>()
+            );
+            if name == "finance.wav" {
+                let price = r
+                    .segments
+                    .iter()
+                    .find(|s| s.text == "twenty")
+                    .expect("price word");
+                assert!((price.start_time - 29.52).abs() < 0.1);
+            }
+            let transcript_rows = r
+                .segments
+                .iter()
+                .enumerate()
+                .map(|(index, segment)| crate::models::TranscriptSegment {
+                    id: format!("{name}-word-{index}"),
+                    start_time: segment.start_time,
+                    end_time: segment.end_time,
+                    text: segment.text.clone(),
+                    speaker_id: None,
+                    confidence: 1.0,
+                })
+                .collect::<Vec<_>>();
+            let passages =
+                crate::analysis::group_transcript_segments_for_analysis(&name, &transcript_rows);
+            assert!(passages.len() < transcript_rows.len());
+            assert_eq!(
+                passages
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                transcript_rows
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            for passage in &passages {
+                let first = transcript_rows
+                    .iter()
+                    .find(|s| s.id == passage.segment_id)
+                    .unwrap();
+                assert_eq!(passage.start_time, first.start_time);
+                assert!(transcript_rows
+                    .iter()
+                    .any(|s| s.end_time == passage.end_time));
+            }
+            let passage_values = passages
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "segmentId":s.segment_id,"text":s.text,"start":s.start_time,"end":s.end_time
+                    })
+                })
+                .collect::<Vec<_>>();
+            analysis_rows.push(serde_json::json!({"file":name,"wordRows":transcript_rows.len(),"passages":passage_values,"speakerLabelsAssigned":false}));
+            rows.push(serde_json::json!({"file":name,"decodeMs":started.elapsed().as_millis(),"text":r.text,"segments":r.segments,"modelId":r.model_id,"actualEngine":r.actual_engine}));
+        }
+        std::fs::write(
+            root.join("production-analysis-passages.json"),
+            serde_json::to_vec_pretty(&analysis_rows).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("production-word-alignment.json"),
+            serde_json::to_vec_pretty(&rows).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Drives the production provider over the frozen public speech corpus.
+    /// The caller supplies a `/tmp` qualification root containing the pinned
+    /// GGUF. Test builds keep verification in memory, never the OS Keychain.
+    #[tokio::test]
+    #[ignore = "requires the pinned Orukeet GGUF and frozen public speech corpus"]
+    async fn orukeet_r3_production_provider_probe() {
+        use sha2::{Digest, Sha256};
+        use std::io::Cursor;
+
+        let qualification_root = PathBuf::from(
+            std::env::var("PLAINSONG_ORUKEET_TRANSCRIBE_CPP_EVAL_ROOT")
+                .expect("explicit Orukeet transcribe.cpp evaluation root"),
+        );
+        let backend = std::env::var(BACKEND_ENV_VAR)
+            .expect("production probe requires an explicit cpu or metal backend")
+            .trim()
+            .to_ascii_lowercase();
+        assert!(matches!(backend.as_str(), "cpu" | "metal"));
+        let expected_engine = format!("transcribe_cpp_{backend}");
+        assert!(
+            qualification_root.starts_with("/tmp")
+                || qualification_root.starts_with(std::env::temp_dir())
+        );
+        let corpus_root = PathBuf::from("/tmp/plainsong-human-asr-20261003");
+        let models_root = qualification_root.join("production-models");
+        let provider =
+            TranscribeCppProvider::with_models_root(&models_root, Some(ORUKEET_R3_GGUF_MODEL_ID));
+        let source = qualification_root.join(provider.spec().file_name);
+        let payload = std::fs::read(&source).expect("read pinned Orukeet GGUF");
+        assert_eq!(payload.len() as u64, provider.spec().size_bytes);
+        assert_eq!(
+            hex::encode(Sha256::digest(&payload)),
+            provider.spec().sha256
+        );
+        std::fs::create_dir_all(provider.model_path().parent().expect("model directory"))
+            .expect("create model directory");
+        std::fs::copy(&source, provider.model_path()).expect("stage pinned Orukeet GGUF");
+        crate::download::mark_model_verified_for_tests(
+            &provider.model_path(),
             provider.spec().sha256,
         )
         .await
-        .expect("receipt");
-        assert!(provider.has_trusted_required_file());
+        .expect("mark test model verified");
+        for aux in auxiliary_specs_for(ORUKEET_R3_GGUF_MODEL_ID) {
+            let source = qualification_root.join(format!("orukeet-{}", aux.source_file_name()));
+            let payload = std::fs::read(&source).expect("read pinned attribution file");
+            assert_eq!(payload.len() as u64, aux.size_bytes);
+            assert_eq!(hex::encode(Sha256::digest(&payload)), aux.sha256);
+            let destination = provider.model_dir.join(aux.local_file_name);
+            std::fs::copy(source, &destination).expect("stage pinned attribution file");
+            crate::download::mark_model_verified_for_tests(&destination, aux.sha256)
+                .await
+                .expect("mark test attribution verified");
+        }
         assert!(provider.is_available());
 
-        // Swapping the file invalidates the receipt: it is bound to the size
-        // and mtime of the bytes that were hashed, so a forgery of the right
-        // shape does not inherit the old receipt's trust.
-        std::fs::write(&model_path, vec![0x11u8; 4096]).expect("swap weights");
-        assert!(
-            !provider.is_available(),
-            "swapped weights must not stay trusted"
-        );
-        let error = provider
-            .transcribe(&model_path)
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(corpus_root.join("manifest.json")).expect("read public corpus manifest"),
+        )
+        .expect("parse public corpus manifest");
+        let clips = manifest["clips"].as_array().expect("clips array");
+        assert_eq!(clips.len(), 8);
+        let normalize_words = |text: &str| {
+            text.split(|character: char| !character.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>()
+        };
+        let mut reference_word_count = 0usize;
+        let mut observations = Vec::new();
+        for clip in clips {
+            let audio = std::fs::read(
+                corpus_root.join(clip["audioFile"].as_str().expect("audio filename")),
+            )
+            .expect("read public audio");
+            assert_eq!(
+                hex::encode(Sha256::digest(&audio)),
+                clip["wavSha256"].as_str().expect("audio digest")
+            );
+            let started = Instant::now();
+            let result = provider
+                .transcribe_bytes(&audio)
+                .await
+                .expect("transcribe clip");
+            assert_eq!(result.actual_provider, AsrProviderType::TranscribeCpp);
+            assert_eq!(result.model_id, ORUKEET_R3_GGUF_MODEL_ID);
+            assert!(!result.text.trim().is_empty());
+            let reference = clip["reference"].as_str().expect("reference transcript");
+            let reference_words = normalize_words(reference);
+            reference_word_count += reference_words.len();
+            assert_eq!(normalize_words(&result.text), reference_words);
+            assert_eq!(
+                result.actual_engine.as_deref(),
+                Some(expected_engine.as_str())
+            );
+            observations.push(serde_json::json!({
+                "scope": "public-speech",
+                "id": clip["id"],
+                "audioSha256": clip["wavSha256"],
+                "reference": reference,
+                "recognitionMs": started.elapsed().as_millis(),
+                "result": result,
+            }));
+        }
+        assert!(reference_word_count >= 200);
+
+        let silence_path = models_root.join("one-second-silence.wav");
+        let silence_spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut silence =
+            hound::WavWriter::create(&silence_path, silence_spec).expect("create silence fixture");
+        for _ in 0..16_000 {
+            silence.write_sample(0i16).expect("write silence sample");
+        }
+        silence.finalize().expect("finalize silence fixture");
+        let result = provider
+            .transcribe(&silence_path)
             .await
-            .expect_err("a swapped GGUF must be refused before any decode");
+            .expect("transcribe silence");
         assert!(
-            error.to_string().contains("integrity verification"),
-            "{error}"
+            result.text.trim().is_empty(),
+            "silence produced {:?}",
+            result.text
+        );
+        assert_eq!(
+            result.actual_engine.as_deref(),
+            Some(expected_engine.as_str())
+        );
+        observations.push(serde_json::json!({
+            "scope": "silence",
+            "audioSha256": hex::encode(Sha256::digest(std::fs::read(&silence_path).expect("read silence"))),
+            "result": result,
+        }));
+
+        let ami_path =
+            PathBuf::from("/tmp/plainsong-ami-eval-20261003/ES2004a.Mix-Headset.first600s.wav");
+        let ami_audio = std::fs::read(&ami_path).expect("read frozen public AMI excerpt");
+        let ami_sha256 = hex::encode(Sha256::digest(&ami_audio));
+        assert_eq!(
+            ami_sha256,
+            "54463cc2b337b9b47b6210de678cd0d9aa464d5b74b4f6c0099608dd60dde309"
+        );
+        let mut ami_reader = hound::WavReader::new(Cursor::new(ami_audio)).expect("open AMI wav");
+        let ami_spec = ami_reader.spec();
+        assert_eq!(
+            (
+                ami_spec.sample_rate,
+                ami_spec.channels,
+                ami_spec.bits_per_sample
+            ),
+            (16_000, 1, 16)
+        );
+        let ami_samples: Vec<i16> = ami_reader.samples::<i16>().map(Result::unwrap).collect();
+        assert_eq!(ami_samples.len(), 600 * 16_000);
+        for (index, chunk) in ami_samples.chunks(30 * 16_000).enumerate() {
+            let mut wav = Cursor::new(Vec::new());
+            {
+                let mut writer = hound::WavWriter::new(&mut wav, ami_spec).expect("open AMI chunk");
+                for sample in chunk {
+                    writer.write_sample(*sample).expect("write AMI sample");
+                }
+                writer.finalize().expect("finalize AMI chunk");
+            }
+            let started = Instant::now();
+            let result = provider
+                .transcribe_bytes(wav.get_ref())
+                .await
+                .expect("transcribe AMI chunk");
+            assert_eq!(
+                result.actual_engine.as_deref(),
+                Some(expected_engine.as_str())
+            );
+            observations.push(serde_json::json!({
+                "scope": "ami-30-second-chunk",
+                "sourceSha256": ami_sha256,
+                "startSeconds": index * 30,
+                "endSeconds": (index + 1) * 30,
+                "recognitionMs": started.elapsed().as_millis(),
+                "result": result,
+            }));
+        }
+        assert_eq!(observations.len(), 29);
+        let receipt_name = if backend == "cpu" {
+            "production-orukeet-transcribe-cpp-0.2.3.json".to_string()
+        } else {
+            format!("production-orukeet-transcribe-cpp-0.2.3-{backend}.json")
+        };
+        std::fs::write(
+            qualification_root.join(receipt_name),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "runtime": "transcribe-cpp 0.2.3",
+                "backend": backend,
+                "modelRevision": provider.spec().hf_revision,
+                "modelSha256": provider.spec().sha256,
+                "licenseSha256": ORUKEET_R3_AUXILIARY_SPECS[0].sha256,
+                "noticeSha256": ORUKEET_R3_AUXILIARY_SPECS[1].sha256,
+                "observations": observations,
+            }))
+            .expect("serialize production receipt"),
+        )
+        .expect("write production receipt");
+        crate::shutdown_for_sidecar().await;
+        assert!(
+            cached_model_load_ms().is_none(),
+            "the native model and session must be dropped before backend shutdown"
+        );
+    }
+
+    /// Exercises the exact Unified GGUF through the production batch provider.
+    /// Run once per backend by setting `PLAINSONG_TRANSCRIBE_CPP_BACKEND` to
+    /// `cpu` or `metal`. `PLAINSONG_UNIFIED_PROBE_FIRST_ONLY=1` limits the run
+    /// to the first public clip for a quick cross-backend comparison.
+    #[tokio::test]
+    #[ignore = "requires the pinned Unified GGUF, NVIDIA model card, and frozen public corpora"]
+    async fn parakeet_unified_en_production_batch_provider_probe() {
+        use sha2::{Digest, Sha256};
+        use std::io::Cursor;
+
+        let qualification_root = PathBuf::from("/tmp/plainsong-competitor-interface-20261003");
+        let corpus_root = PathBuf::from("/tmp/plainsong-human-asr-20261003");
+        let backend = std::env::var(BACKEND_ENV_VAR)
+            .expect("production probe requires an explicit cpu or metal backend")
+            .trim()
+            .to_ascii_lowercase();
+        assert!(matches!(backend.as_str(), "cpu" | "metal"));
+        let expected_engine = format!("transcribe_cpp_{backend}");
+        let first_only = std::env::var("PLAINSONG_UNIFIED_PROBE_FIRST_ONLY")
+            .is_ok_and(|value| value.trim() == "1");
+        let models_root = qualification_root.join(format!("unified-production-models-{backend}"));
+        let provider = TranscribeCppProvider::with_models_root(
+            &models_root,
+            Some(PARAKEET_UNIFIED_EN_GGUF_MODEL_ID),
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        let source = qualification_root.join(provider.spec().file_name);
+        let payload = std::fs::read(&source).expect("read pinned Unified GGUF");
+        assert_eq!(payload.len() as u64, provider.spec().size_bytes);
+        assert_eq!(
+            hex::encode(Sha256::digest(&payload)),
+            provider.spec().sha256
+        );
+        std::fs::create_dir_all(provider.model_path().parent().expect("model directory"))
+            .expect("create model directory");
+        std::fs::copy(&source, provider.model_path()).expect("stage pinned Unified GGUF");
+        crate::download::mark_model_verified_for_tests(
+            &provider.model_path(),
+            provider.spec().sha256,
+        )
+        .await
+        .expect("mark test model verified");
+        for aux in auxiliary_specs_for(PARAKEET_UNIFIED_EN_GGUF_MODEL_ID) {
+            let source = qualification_root.join(aux.local_file_name);
+            let payload = std::fs::read(&source).expect("read pinned NVIDIA model card");
+            assert_eq!(payload.len() as u64, aux.size_bytes);
+            assert_eq!(hex::encode(Sha256::digest(&payload)), aux.sha256);
+            let destination = provider.model_dir.join(aux.local_file_name);
+            std::fs::copy(source, &destination).expect("stage pinned NVIDIA model card");
+            crate::download::mark_model_verified_for_tests(&destination, aux.sha256)
+                .await
+                .expect("mark test attribution verified");
+        }
+        assert!(provider.is_available());
+
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(corpus_root.join("manifest.json")).expect("read public corpus manifest"),
+        )
+        .expect("parse public corpus manifest");
+        let clips = manifest["clips"].as_array().expect("clips array");
+        assert_eq!(clips.len(), 8);
+        let mut observations = Vec::new();
+        let clip_limit = if first_only { 1 } else { clips.len() };
+        for clip in clips.iter().take(clip_limit) {
+            let audio = std::fs::read(
+                corpus_root.join(clip["audioFile"].as_str().expect("audio filename")),
+            )
+            .expect("read public audio");
+            assert_eq!(
+                hex::encode(Sha256::digest(&audio)),
+                clip["wavSha256"].as_str().expect("audio digest")
+            );
+            let started = Instant::now();
+            let result = provider
+                .transcribe_bytes(&audio)
+                .await
+                .expect("transcribe public clip");
+            assert_eq!(result.actual_provider, AsrProviderType::TranscribeCpp);
+            assert_eq!(result.model_id, PARAKEET_UNIFIED_EN_GGUF_MODEL_ID);
+            assert_eq!(
+                result.actual_engine.as_deref(),
+                Some(expected_engine.as_str())
+            );
+            assert!(!result.text.trim().is_empty());
+            assert!(
+                !result.segments.is_empty(),
+                "Unified advertises token timestamps, so speech must retain timed segments"
+            );
+            observations.push(serde_json::json!({
+                "scope": "public-speech",
+                "id": clip["id"],
+                "audioSha256": clip["wavSha256"],
+                "reference": clip["reference"],
+                "recognitionMs": started.elapsed().as_millis(),
+                "result": result,
+            }));
+        }
+
+        if !first_only {
+            let silence_path = models_root.join("one-second-silence.wav");
+            let silence_spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut silence = hound::WavWriter::create(&silence_path, silence_spec)
+                .expect("create silence fixture");
+            for _ in 0..16_000 {
+                silence.write_sample(0i16).expect("write silence sample");
+            }
+            silence.finalize().expect("finalize silence fixture");
+            let result = provider
+                .transcribe(&silence_path)
+                .await
+                .expect("transcribe silence");
+            assert!(
+                result.text.trim().is_empty(),
+                "silence produced {:?}",
+                result.text
+            );
+            assert!(
+                result.segments.is_empty(),
+                "silence must not gain fake timed segments"
+            );
+            observations.push(serde_json::json!({"scope": "silence", "result": result}));
+
+            let ami_path =
+                PathBuf::from("/tmp/plainsong-ami-eval-20261003/ES2004a.Mix-Headset.first600s.wav");
+            let ami_audio = std::fs::read(&ami_path).expect("read frozen public AMI excerpt");
+            let ami_sha256 = hex::encode(Sha256::digest(&ami_audio));
+            assert_eq!(
+                ami_sha256,
+                "54463cc2b337b9b47b6210de678cd0d9aa464d5b74b4f6c0099608dd60dde309"
+            );
+            let mut ami_reader =
+                hound::WavReader::new(Cursor::new(ami_audio)).expect("open AMI wav");
+            let ami_spec = ami_reader.spec();
+            assert_eq!((ami_spec.sample_rate, ami_spec.channels), (16_000, 1));
+            let ami_samples: Vec<i16> = ami_reader.samples::<i16>().map(Result::unwrap).collect();
+            for (index, chunk) in ami_samples.chunks(30 * 16_000).take(20).enumerate() {
+                let mut wav = Cursor::new(Vec::new());
+                {
+                    let mut writer =
+                        hound::WavWriter::new(&mut wav, ami_spec).expect("open AMI chunk");
+                    for sample in chunk {
+                        writer.write_sample(*sample).expect("write AMI sample");
+                    }
+                    writer.finalize().expect("finalize AMI chunk");
+                }
+                let started = Instant::now();
+                let result = provider
+                    .transcribe_bytes(wav.get_ref())
+                    .await
+                    .expect("transcribe AMI chunk");
+                assert_eq!(result.actual_provider, AsrProviderType::TranscribeCpp);
+                assert_eq!(result.model_id, PARAKEET_UNIFIED_EN_GGUF_MODEL_ID);
+                assert_eq!(
+                    result.actual_engine.as_deref(),
+                    Some(expected_engine.as_str())
+                );
+                observations.push(serde_json::json!({
+                    "scope": "ami-30-second-chunk",
+                    "sourceSha256": ami_sha256,
+                    "startSeconds": index * 30,
+                    "endSeconds": (index + 1) * 30,
+                    "recognitionMs": started.elapsed().as_millis(),
+                    "result": result,
+                }));
+            }
+            assert_eq!(observations.len(), 29);
+        }
+
+        let receipt_name = if first_only {
+            format!("production-unified-transcribe-cpp-0.2.3-{backend}-first.json")
+        } else {
+            format!("production-unified-transcribe-cpp-0.2.3-{backend}.json")
+        };
+        std::fs::write(
+            qualification_root.join(receipt_name),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "runtime": "transcribe-cpp 0.2.3",
+                "backend": backend,
+                "modelRevision": provider.spec().hf_revision,
+                "modelSha256": provider.spec().sha256,
+                "attributionSha256": PARAKEET_UNIFIED_EN_AUXILIARY_SPECS[0].sha256,
+                "observations": observations,
+            }))
+            .expect("serialize production receipt"),
+        )
+        .expect("write production receipt");
+        crate::shutdown_for_sidecar().await;
+        assert!(
+            cached_model_load_ms().is_none(),
+            "the native model and session must be dropped before backend shutdown"
+        );
     }
 
     #[test]
@@ -2700,5 +5917,63 @@ mod tests {
             !body.contains("ready_rx.recv()"),
             "an unbounded recv on the ready channel is the wedge this replaced"
         );
+    }
+
+    /// Loads each optional English GGUF through the production provider, from
+    /// the files staged for the `models-2026-10` release, and transcribes one
+    /// clip. `PLAINSONG_OPTIONAL_ASR_STAGING_DIR` holds the GGUFs and their
+    /// LICENSE/NOTICE files; `PLAINSONG_OPTIONAL_ASR_PROBE_WAV` is a 16 kHz
+    /// mono WAV of English speech. Files are copied (APFS clones) into a
+    /// temporary models root, never the user's data directory.
+    #[tokio::test]
+    #[ignore = "requires the staged optional GGUFs and an English WAV"]
+    async fn optional_english_models_production_provider_probe() {
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                clear_cached_runtime();
+            }
+        }
+        let _cleanup = Cleanup;
+        let staging = PathBuf::from(
+            std::env::var("PLAINSONG_OPTIONAL_ASR_STAGING_DIR").expect("explicit staging dir"),
+        );
+        let wav = PathBuf::from(
+            std::env::var("PLAINSONG_OPTIONAL_ASR_PROBE_WAV").expect("explicit English WAV"),
+        );
+        let root = crate::test_fs::TempDir::new("optional-asr-probe");
+        for model_id in [
+            FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+            UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+        ] {
+            let provider = TranscribeCppProvider::with_models_root(root.path(), Some(model_id));
+            std::fs::create_dir_all(&provider.model_dir).unwrap();
+            let mut assets = vec![(provider.spec().file_name, provider.spec().sha256)];
+            assets.extend(
+                auxiliary_specs_for(model_id)
+                    .iter()
+                    .map(|aux| (aux.local_file_name, aux.sha256)),
+            );
+            for (name, digest) in assets {
+                let path = provider.model_dir.join(name);
+                std::fs::copy(staging.join(name), &path).unwrap();
+                assert!(
+                    crate::download::verify_or_record_model_integrity(&path, Some(digest))
+                        .await
+                        .unwrap(),
+                    "{name} does not match its pin"
+                );
+            }
+            assert!(provider.is_available());
+            let result = provider.transcribe(&wav).await.unwrap();
+            assert_eq!(result.model_id, model_id);
+            assert_eq!(result.language, "en");
+            assert!(
+                !result.text.trim().is_empty(),
+                "{model_id} returned no text"
+            );
+            assert!(!result.text.contains("<unk>"), "{}", result.text);
+            println!("{model_id}: {}", result.text);
+        }
     }
 }

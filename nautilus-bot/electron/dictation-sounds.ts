@@ -10,36 +10,49 @@
  * the start sound is over before the first word, and quiet (volume 0.25).
  */
 import { spawn } from "child_process";
+import { dictationDeliveryFeedback } from "./dictation-feedback";
 
-export type DictationSound = "start" | "done" | "error";
+export type DictationSound = "start" | NonNullable<ReturnType<typeof dictationDeliveryFeedback>["sound"]>;
 
-/** Outcomes where the words reached the user; others finish silently. */
-const DELIVERED_OUTCOMES = new Set([
-  "pasted",
-  "paste_dispatched",
-  "replaced",
-  "copied",
-  "copied_replacement",
-]);
-
-/** Which sound, if any, a phase change should play. */
+/**
+ * Which sound, if any, a phase change should play.
+ *
+ * The start sound means the microphone is delivering audio, so it plays on
+ * the "recording" event that carries `captureReady: true` (the sidecar sends
+ * it on the first captured sample), not on any earlier recording event.
+ */
 export function dictationSoundForTransition(
   previousPhase: string,
   nextPhase: string,
   outcome: unknown,
+  captureReady?: unknown,
 ): DictationSound | null {
   if (nextPhase === previousPhase) return null;
-  if (nextPhase === "recording") return "start";
+  if (nextPhase === "recording") return captureReady === true ? "start" : null;
   if (nextPhase === "done") {
-    return typeof outcome === "string" && DELIVERED_OUTCOMES.has(outcome) ? "done" : null;
+    return outcome == null ? null : dictationDeliveryFeedback(outcome).sound;
   }
   if (nextPhase === "error") return "error";
   return null;
 }
 
+/** Longest start-sound hold the sidecar may ask for. */
+const MAX_START_SOUND_DELAY_MS = 2_000;
+
+/**
+ * How long to hold the start sound: the sidecar's `startSoundDelayMs` for the
+ * input that opened (about 300 ms for AirPods, 1.2 s for other Bluetooth
+ * headsets, which swallow audio while they switch profile), bounded.
+ */
+export function dictationStartSoundDelayMs(delay: unknown): number {
+  if (typeof delay !== "number" || !Number.isFinite(delay) || delay <= 0) return 0;
+  return Math.min(Math.round(delay), MAX_START_SOUND_DELAY_MS);
+}
+
 const MACOS_SOUND_FILES: Record<DictationSound, string> = {
   start: "/System/Library/Sounds/Tink.aiff",
   done: "/System/Library/Sounds/Pop.aiff",
+  attention: "/System/Library/Sounds/Purr.aiff",
   error: "/System/Library/Sounds/Funk.aiff",
 };
 

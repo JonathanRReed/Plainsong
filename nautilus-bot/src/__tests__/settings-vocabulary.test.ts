@@ -28,6 +28,7 @@ const SETTINGS_SURFACE = [
   "src/components/local-tools-section.tsx",
   "src/components/remembered-voices-section.tsx",
   "src/components/meetings/calendar-settings-section.tsx",
+  "src/components/meetings/calendar-access-card.tsx",
   "src/components/settings/support-bundle-panel.tsx",
   "src/components/ui/settings-control.tsx",
   "src/components/update/BetaChannelToggle.tsx",
@@ -102,6 +103,8 @@ describe("settings vocabulary", () => {
       /\bdictation modes? prefers\b/i,
       /custom modes and dictation commands/i,
       /Ollama or a cloud provider/i,
+      /speaker separation model/i,
+      /native text engine/i,
     ];
     const offenders = userFacing
       .filter((pattern) => pattern.test(source))

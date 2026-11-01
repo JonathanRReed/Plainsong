@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
 import {
   dictationProgressFraction,
+  DICTATION_PROGRESS_CEILING,
   type DictationProcessingStage,
   type DictationProgressPlan,
 } from "@/lib/dictation-progress";
 import { cn } from "@/lib/utils";
 
-const STAGE_LABEL: Record<DictationProcessingStage, string> = {
+export type DictationFinishStage = DictationProcessingStage | "delivering";
+
+const STAGE_LABEL: Record<DictationFinishStage, string> = {
   stopping: "Finishing audio",
   transcribing: "Transcribing",
   polishing: "Polishing",
+  delivering: "Inserting",
 };
 
 function prefersReducedMotion(): boolean {
@@ -33,7 +37,7 @@ export function DictationFinishBar({
   stageStartedAt,
   className,
 }: {
-  stage: DictationProcessingStage;
+  stage: DictationFinishStage;
   plan: DictationProgressPlan;
   complete?: boolean;
   /**
@@ -45,7 +49,11 @@ export function DictationFinishBar({
   className?: string;
 }) {
   const [fraction, setFraction] = useState(() =>
-    complete ? 1 : dictationProgressFraction(stage, 0, plan),
+    complete
+      ? 1
+      : stage === "delivering"
+        ? DICTATION_PROGRESS_CEILING
+        : dictationProgressFraction(stage, 0, plan),
   );
   const reducedMotion = prefersReducedMotion();
   const { expectedTranscribeMs, expectedPolishMs } = plan;
@@ -53,6 +61,10 @@ export function DictationFinishBar({
   useEffect(() => {
     if (complete) {
       setFraction(1);
+      return;
+    }
+    if (stage === "delivering") {
+      setFraction(DICTATION_PROGRESS_CEILING);
       return;
     }
     const startedAt = stageStartedAt ?? performance.now();

@@ -1,7 +1,7 @@
-import { useLayoutEffect, useRef, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Check, Edit3 } from "lucide-react";
+import { Check, Copy, Edit3 } from "lucide-react";
 import { MarkdownText } from "./markdown-text";
 
 interface DocumentFieldProps {
@@ -20,6 +20,7 @@ interface DocumentFieldProps {
    * editor still edits `value`, which stays the one saved thing.
    */
   renderBody?: ReactNode;
+  renderEmptyBody?: boolean;
   /** Sentence shown in place of the document when there is nothing yet. */
   emptyMessage: string;
   editorPlaceholder: string;
@@ -30,6 +31,9 @@ interface DocumentFieldProps {
   /** Ink/rule treatment carrying who wrote the text. */
   bodyClassName?: string;
   disabled?: boolean;
+  copyable?: boolean;
+  copySourceKey?: string;
+  copyWarning?: string;
 }
 
 /**
@@ -47,6 +51,7 @@ export function DocumentField({
   onChange,
   renderValue,
   renderBody,
+  renderEmptyBody = false,
   emptyMessage,
   editorPlaceholder,
   isEditing,
@@ -54,8 +59,63 @@ export function DocumentField({
   actions,
   bodyClassName,
   disabled = false,
+  copyable = false,
+  copySourceKey,
+  copyWarning,
 }: DocumentFieldProps) {
   const editorRef = useRef<HTMLTextAreaElement>(null);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  const requestedFocusRef = useRef<"editor" | "button" | null>(null);
+  const copyBusyRef = useRef(false);
+  const copyMountedRef = useRef(true);
+  const copyScopeRef = useRef({ source: copySourceKey, label, value, warning: copyWarning, enabled: copyable });
+  if (copyScopeRef.current.source !== copySourceKey || copyScopeRef.current.label !== label ||
+      copyScopeRef.current.value !== value || copyScopeRef.current.warning !== copyWarning ||
+      copyScopeRef.current.enabled !== copyable) {
+    copyScopeRef.current = { source: copySourceKey, label, value, warning: copyWarning, enabled: copyable };
+  }
+  const copyScope = copyScopeRef.current;
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<{ scope: typeof copyScope; error: boolean } | null>(null);
+  useEffect(() => {
+    copyMountedRef.current = true;
+    return () => { copyMountedRef.current = false; };
+  }, []);
+  const copyCurrentText = async () => {
+    if (!copyable || !value.trim() || copyBusyRef.current || copyScope !== copyScopeRef.current) return;
+    copyBusyRef.current = true;
+    setCopyBusy(true);
+    setCopyFeedback(null);
+    try {
+      await navigator.clipboard.writeText(copyWarning ? `${copyWarning}\n\n${value}` : value);
+      if (copyMountedRef.current && copyScope === copyScopeRef.current) setCopyFeedback({ scope: copyScope, error: false });
+    } catch {
+      if (copyMountedRef.current && copyScope === copyScopeRef.current) setCopyFeedback({ scope: copyScope, error: true });
+    } finally {
+      copyBusyRef.current = false;
+      if (copyMountedRef.current) setCopyBusy(false);
+    }
+  };
+  const changeEditing = (editing: boolean) => {
+    if (disabled) return;
+    requestedFocusRef.current = editing ? "editor" : "button";
+    onEditingChange(editing);
+  };
+  useLayoutEffect(() => {
+    if (disabled) {
+      requestedFocusRef.current = null;
+      return;
+    }
+    if (isEditing && requestedFocusRef.current === "editor" && editorRef.current) {
+      editorRef.current.focus();
+      const end = editorRef.current.value.length;
+      editorRef.current.setSelectionRange(end, end);
+      requestedFocusRef.current = null;
+    } else if (!isEditing && requestedFocusRef.current === "button") {
+      editButtonRef.current?.focus();
+      requestedFocusRef.current = null;
+    }
+  }, [isEditing, disabled]);
   const hasText = value.trim().length > 0;
 
   // Grow to the text. Measured after paint so the height tracks wrapping, and
@@ -80,8 +140,9 @@ export function DocumentField({
             <p className="mt-1 max-w-prose text-sm text-muted-foreground">{caption}</p>
           ) : null}
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
           <Button
+            ref={editButtonRef}
             type="button"
             size="sm"
             variant={isEditing ? "active" : "outline"}
@@ -89,7 +150,8 @@ export function DocumentField({
             // Two fields, two Edit buttons: name each one after the text it
             // opens so a keyboard or screen reader can tell them apart.
             aria-label={isEditing ? `Done editing ${label}` : `Edit ${label}`}
-            onClick={() => onEditingChange(!isEditing)}
+            title={isEditing ? "Finish editing with Command+Enter or Ctrl+Enter" : undefined}
+            onClick={() => changeEditing(!isEditing)}
           >
             {isEditing ? (
               <>
@@ -104,19 +166,36 @@ export function DocumentField({
             )}
           </Button>
           {actions}
+          {copyable && <Button type="button" variant="outline" size="sm" aria-label={`Copy ${label}`}
+            disabled={copyBusy || !hasText} onClick={() => { void copyCurrentText(); }}>
+            <Copy className="mr-2 h-4 w-4" aria-hidden="true" />{copyBusy ? "Copying…" : "Copy"}
+          </Button>}
         </div>
       </div>
+      {copyable && copyFeedback?.scope === copyScope && <p role={copyFeedback.error ? "alert" : "status"}
+        className={`text-sm ${copyFeedback.error ? "text-rust" : "text-muted-foreground"}`}>
+        {copyFeedback.error ? "Could not copy. Select the text and copy it manually." : "Copied."}
+      </p>}
 
       {isEditing ? (
         <textarea
           ref={editorRef}
           aria-label={label}
+          aria-keyshortcuts={disabled ? undefined : "Meta+Enter Control+Enter"}
           value={value}
+          readOnly={disabled}
           placeholder={editorPlaceholder}
           onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && (event.metaKey || event.ctrlKey)
+              && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && !disabled) {
+              event.preventDefault();
+              changeEditing(false);
+            }
+          }}
           rows={1}
           className={cn(
-            "w-full resize-none overflow-hidden rounded-md border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring",
+            "w-full resize-none overflow-hidden rounded-md border bg-background px-3 py-3 text-sm leading-relaxed placeholder:text-muted-foreground/80 focus:outline-none focus:ring-1 focus:ring-ring",
             bodyClassName
           )}
         />
@@ -126,7 +205,7 @@ export function DocumentField({
           aria-label={label}
           className={cn(hasText && bodyClassName, hasText && "pl-3")}
         >
-          {hasText ? (
+          {hasText || renderEmptyBody ? (
             (renderBody ?? <MarkdownText value={renderValue ?? value} />)
           ) : (
             <p className="text-sm text-muted-foreground">{emptyMessage}</p>

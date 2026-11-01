@@ -1,0 +1,197 @@
+[
+  {
+    "id": "workshop-completed-explanation",
+    "source": "I can explain the projector setup, but I am not committing to bring equipment.",
+    "claim": "The projector setup was explained but no equipment was committed to bring."
+  },
+  {
+    "id": "aside-invented-pending",
+    "source": "Meeting record. PRIA will review the launch notes on Friday if the memory gate passes.",
+    "claim": "The memory gate status is pending."
+  },
+  {
+    "id": "invented-completed",
+    "source": "The memory gate must pass before the review.",
+    "claim": "The memory gate is completed."
+  },
+  {
+    "id": "invented-completed",
+    "source": "If the memory gate is completed, Priya will review the notes.",
+    "claim": "The memory gate is completed."
+  },
+  {
+    "id": "invented-completed",
+    "source": "The notes are completed. The memory gate must pass before the review.",
+    "claim": "The memory gate is completed."
+  },
+  {
+    "id": "invented-completed",
+    "source": "Is the memory gate completed?",
+    "claim": "The memory gate is completed."
+  },
+  {
+    "id": "invented-completed",
+    "source": "The memory gate will be completed.",
+    "claim": "The memory gate is completed."
+  },
+  {
+    "id": "invented-completed",
+    "source": "The memory gate is not completed.",
+    "claim": "The memory gate is completed."
+  },
+  {
+    "id": "invented-pending",
+    "source": "The memory gate must pass before the review.",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "invented-pending",
+    "source": "If the memory gate is pending, Priya will review the notes.",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "invented-pending",
+    "source": "The notes are pending. The memory gate must pass before the review.",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "invented-pending",
+    "source": "Is the memory gate pending?",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "invented-pending",
+    "source": "The memory gate will be pending.",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "invented-pending",
+    "source": "The memory gate is not pending.",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "invented-done",
+    "source": "The memory gate must pass before the review.",
+    "claim": "The memory gate is done."
+  },
+  {
+    "id": "invented-done",
+    "source": "If the memory gate is done, Priya will review the notes.",
+    "claim": "The memory gate is done."
+  },
+  {
+    "id": "invented-done",
+    "source": "The notes are done. The memory gate must pass before the review.",
+    "claim": "The memory gate is done."
+  },
+  {
+    "id": "invented-done",
+    "source": "Is the memory gate done?",
+    "claim": "The memory gate is done."
+  },
+  {
+    "id": "invented-done",
+    "source": "The memory gate will be done.",
+    "claim": "The memory gate is done."
+  },
+  {
+    "id": "invented-done",
+    "source": "The memory gate is not done.",
+    "claim": "The memory gate is done."
+  },
+  {
+    "id": "invented-scheduled",
+    "source": "The memory gate must pass before the review.",
+    "claim": "The memory gate is scheduled."
+  },
+  {
+    "id": "invented-scheduled",
+    "source": "If the memory gate is scheduled, Priya will review the notes.",
+    "claim": "The memory gate is scheduled."
+  },
+  {
+    "id": "invented-scheduled",
+    "source": "The notes are scheduled. The memory gate must pass before the review.",
+    "claim": "The memory gate is scheduled."
+  },
+  {
+    "id": "invented-scheduled",
+    "source": "Is the memory gate scheduled?",
+    "claim": "The memory gate is scheduled."
+  },
+  {
+    "id": "invented-scheduled",
+    "source": "The memory gate will be scheduled.",
+    "claim": "The memory gate is scheduled."
+  },
+  {
+    "id": "invented-scheduled",
+    "source": "The memory gate is not scheduled.",
+    "claim": "The memory gate is scheduled."
+  },
+  {
+    "id": "completion-relationship",
+    "source": "Noah can explain the projector setup.",
+    "claim": "The projector setup was explained."
+  },
+  {
+    "id": "completion-relationship",
+    "source": "The projector setup was explained. The launch notes will be reviewed.",
+    "claim": "The launch notes were explained."
+  },
+  {
+    "id": "completion-relationship",
+    "source": "The projector setup was not explained.",
+    "claim": "The projector setup was explained."
+  },
+  {
+    "id": "completion-relationship",
+    "source": "If the projector setup was explained, send the notes.",
+    "claim": "The projector setup was explained."
+  },
+  {
+    "id": "completion-relationship",
+    "source": "The memory gate is completed and the review is pending.",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "question-or-quotation-completed",
+    "source": "The memory gate is completed?",
+    "claim": "The memory gate is completed."
+  },
+  {
+    "id": "question-or-quotation-completed",
+    "source": "\"The memory gate is completed.\"",
+    "claim": "The memory gate is completed."
+  },
+  {
+    "id": "question-or-quotation-pending",
+    "source": "The memory gate is pending?",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "question-or-quotation-pending",
+    "source": "\"The memory gate is pending.\"",
+    "claim": "The memory gate is pending."
+  },
+  {
+    "id": "question-or-quotation-done",
+    "source": "The memory gate is done?",
+    "claim": "The memory gate is done."
+  },
+  {
+    "id": "question-or-quotation-done",
+    "source": "\"The memory gate is done.\"",
+    "claim": "The memory gate is done."
+  },
+  {
+    "id": "question-or-quotation-scheduled",
+    "source": "The memory gate is scheduled?",
+    "claim": "The memory gate is scheduled."
+  },
+  {
+    "id": "question-or-quotation-scheduled",
+    "source": "\"The memory gate is scheduled.\"",
+    "claim": "The memory gate is scheduled."
+  }
+]

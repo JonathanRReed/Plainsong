@@ -36,6 +36,13 @@ export async function invoke<T = unknown>(
   return window.electronAPI.invoke(cmd, args ?? {}) as Promise<T>;
 }
 
+export async function requestMicrophoneAccess(): Promise<boolean> {
+  if (!window.electronAPI?.requestMicrophoneAccess) return true;
+  const granted: unknown = await window.electronAPI.requestMicrophoneAccess();
+  if (typeof granted !== "boolean") throw new Error("Invalid microphone permission response");
+  return granted;
+}
+
 // ── listen ───────────────────────────────────────────────────────────────────
 
 let _listenerId = 0;
@@ -154,6 +161,7 @@ declare global {
       invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown>;
       on(event: string, handler: (payload: unknown) => void): number;
       off(event: string, subscriptionId: number): void;
+      requestMicrophoneAccess?(): Promise<boolean>;
       getWindowLabel(): Promise<string | null>;
       reportLaunchMilestone(name: string, rendererElapsedMs: number): void;
     };

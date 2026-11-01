@@ -179,7 +179,7 @@
   --brand-warm: oklch(70% 0.122 78); /* the gold accent (decorative) */
   --brand-warm-strong: oklch(60% 0.132 73); /* deeper gold / hover */
   --brand-warm-text: oklch(48% 0.13 70); /* AA-safe gold for TEXT on vellum */
-  --brand-rust: oklch(52% 0.16 33); /* rubric */
+  --brand-rust: oklch(48% 0.16 33); /* rubric and small warning text */
   --gold-ambient: oklch(64% 0.07 74); /* quieted bronze for secondary gold */
   --paper-rule: oklch(80% 0.024 82); /* chant-staff / hairline rules */
 
@@ -435,6 +435,33 @@
     text-transform: none;
     color: var(--foreground);
   }
+  /* Settings layout: a section is flat groups one hairline apart, and the
+     rows inside a group are separated by a fainter hairline. No box per row,
+     no card per group. */
+  .settings-section > * + * {
+    margin-top: 1.75rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid color-mix(in oklab, var(--border) 85%, transparent);
+  }
+  .settings-section > :empty {
+    display: none;
+  }
+  .settings-rows > * + * {
+    border-top: 1px solid color-mix(in oklab, var(--border) 55%, transparent);
+  }
+  /* A row reached from settings search or a deep link holds a quiet gold
+     wash for a moment, so the eye lands on it. */
+  .setting-flash {
+    animation: setting-flash 1.6s var(--ease-settle) 1;
+    border-radius: 0.375rem;
+  }
+  @keyframes setting-flash {
+    0%, 35% { background-color: color-mix(in oklab, var(--brand-warm) 14%, transparent); }
+    100% { background-color: transparent; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .setting-flash { animation: none; outline: 2px solid var(--ring); outline-offset: 4px; }
+  }
   /* Neume — a notation diamond (rotated square). FILLED gold = set down /
      local / on; HOLLOW = optional / not-yet / cloud. */
   .neume {
@@ -506,7 +533,9 @@
     0%, 100% { opacity: 1; }
     50% { opacity: 0.65; }
   }
-  .animate-pulse-subtle { animation: pulse-subtle 2s var(--ease-settle) infinite; }
+  /* A stalled readiness/download response must not keep the compositor awake.
+     The status and progress value remain visible after the motion settles. */
+  .animate-pulse-subtle { animation: pulse-subtle 2s var(--ease-settle) 4; }
 
   /* ── The "set down" vocabulary: craft & motion (all reduced-motion-safe) ── */
 
@@ -661,4 +690,24 @@
 .transcript-turn-deferred {
   content-visibility: auto;
   contain-intrinsic-size: auto 96px;
+}
+
+/* Use the pane's width rather than the window's width: a transcript rail can
+   be narrow even on a large desktop. Keep its text wide enough to read. */
+.transcript-viewer-layout {
+  container-type: inline-size;
+  container-name: transcript;
+}
+@container transcript (max-width: 28rem) {
+  .transcript-turn-layout {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .transcript-turn-meta {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    min-width: 0;
+    gap: 0.5rem;
+  }
 }

@@ -20,14 +20,22 @@ import {
 import { compareStrings } from "@/lib/format-locale";
 
 describe("ASR capability mappings", () => {
+  it("keeps Moonshine Streaming Medium experimental and English dictation only", () => {
+    const id = "moonshine-streaming-medium-q8_0";
+    expect(isMeetingEligibleModel("transcribe_cpp", id)).toBe(false);
+    expect(asrModelTier("transcribe_cpp", id)).toBe("more");
+    expect(resolveAsrLanguageBoundary("transcribe_cpp", id).kind).toBe("english_only");
+    expect(getAsrModelCapability("transcribe_cpp", id)?.tradeoff).toMatch(/check numbers/i);
+  });
+
+
   it("recognises only the engines this build can still run", () => {
     // 12 engines that shipped before September 2026, plus Deepgram, Gemini
     // Transcribe, Mistral Voxtral, xAI Grok and the offline Cohere Transcribe
     // route, plus `transcribe_cpp`, which only a sidecar built with
     // `--features asr-transcribe-cpp` ever reports. The renderer keeps a name
     // for that one so a developer build's route renders instead of silently
-    // vanishing from the picker; nothing in a release build sends it. The
-    // same holds for `plainsong_plus` (`--features plainsong-plus`).
+    // vanishing from the picker; nothing in a release build sends it.
     expect(ASR_PROVIDER_TYPES).toHaveLength(19);
     expect(isKnownAsrProvider("whisper")).toBe(true);
     expect(isKnownAsrProvider("parakeet")).toBe(true);
@@ -37,7 +45,9 @@ describe("ASR capability mappings", () => {
     expect(isKnownAsrProvider("mistral_voxtral")).toBe(true);
     expect(isKnownAsrProvider("xai_stt")).toBe(true);
     expect(isKnownAsrProvider("transcribe_cpp")).toBe(true);
-    expect(isKnownAsrProvider("plainsong_plus")).toBe(true);
+    // The removed paid-tier route (name built from parts so a repository
+    // search for it stays empty) is unknown, like any retired engine.
+    expect(isKnownAsrProvider(["plainsong", "plus"].join("_"))).toBe(false);
     expect(isKnownAsrProvider("cohere_local")).toBe(true);
   });
 
@@ -115,6 +125,7 @@ describe("ASR capability mappings", () => {
     expect(isSharedMeetingCompatible("distil_whisper", "distil-large-v3.5")).toBe(true);
     expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-0.6b-v3")).toBe(true);
     expect(isSharedMeetingCompatible("parakeet", "parakeet-tdt-0.6b-v2")).toBe(false);
+    expect(isSharedMeetingCompatible("parakeet", "orukeet-v0.1.0-int8")).toBe(false);
     expect(isSharedMeetingCompatible("whisper", "base.en")).toBe(false);
     expect(isSharedMeetingCompatible("whisper_candle", "whisper-large-v3-turbo")).toBe(false);
   });
@@ -150,6 +161,42 @@ describe("ASR capability mappings", () => {
 });
 
 describe("ASR model capability metadata", () => {
+  it("keeps native Qwen 0.6B scoped to experimental English dictation", () => {
+    const model = "qwen3-asr-0.6b-q6_k";
+    const capability = getAsrModelCapability("transcribe_cpp", model);
+    expect(capability).toMatchObject({
+      sizeMib: 658,
+      tier: "more",
+      pauseBehavior: "encoder_decoder",
+      languages: { englishOnly: true },
+      languageEvidence: { basis: "upstream_listed", verifiedLanguages: [] },
+    });
+    expect(capability?.tradeoff).toContain("Experimental, for short English dictation");
+    expect(isMeetingEligibleModel("transcribe_cpp", model)).toBe(false);
+    expect(resolveAsrLanguageBoundary("transcribe_cpp", model).kind).toBe("english_only");
+  });
+
+  it("offers Nemotron final dictation as an experimental English option", () => {
+    const model = "nemotron-3.5-asr-streaming-0.6b-q8_0";
+    expect(getAsrModelCapability("transcribe_cpp", model)?.languages.englishOnly).toBe(true);
+    expect(asrModelTier("transcribe_cpp", model)).toBe("more");
+    expect(isMeetingEligibleModel("transcribe_cpp", model)).toBe(false);
+    expect(resolveAsrLanguageBoundary("transcribe_cpp", model).kind).toBe("english_only");
+  });
+
+  it("offers Unified EN for experimental English meetings", () => {
+    const model = "parakeet-unified-en-0.6b-q8_0";
+    expect(getAsrModelCapability("transcribe_cpp", model)?.languages.englishOnly).toBe(true);
+    expect(asrModelTier("transcribe_cpp", model)).toBe("more");
+    expect(isMeetingEligibleModel("transcribe_cpp", model)).toBe(true);
+    expect(isMeetingEligibleModel("transcribe_cpp", "orukeet-r3-q8_0")).toBe(false);
+    expect(isMeetingEligibleModel("transcribe_cpp", "qwen3-asr-1.7b-q8_0")).toBe(false);
+    expect(getAsrModelCapability("transcribe_cpp", "qwen3-asr-1.7b-q8_0")?.languages.englishOnly).toBe(true);
+    expect(isMeetingEligibleModel("transcribe_cpp", "nemotron-3.5-asr-streaming-0.6b-q8_0")).toBe(false);
+    expect(isMeetingEligibleModel("transcribe_cpp", `${model}-unknown`)).toBe(false);
+    expect(resolveAsrLanguageBoundary("transcribe_cpp", model).kind).toBe("english_only");
+  });
+
   it("separates the English-only builds from the multilingual ones", () => {
     expect(getAsrModelCapability("whisper", "base.en")?.languages).toEqual({
       englishOnly: true,
@@ -162,6 +209,7 @@ describe("ASR model capability metadata", () => {
       englishOnly: false,
       count: 25,
       label: "25 European languages",
+      besidesEnglish: "24 other European languages",
     });
     expect(getAsrModelCapability("parakeet", "parakeet-tdt-ctc-110m")?.languages.englishOnly).toBe(
       true
@@ -197,17 +245,18 @@ describe("ASR model capability metadata", () => {
     expect(getAsrModelCapability("whisper", "large-v3")?.sizeMib).toBe(2900);
     expect(getAsrModelCapability("parakeet", "parakeet-tdt-0.6b-v3")?.sizeMib).toBe(639);
     expect(getAsrModelCapability("parakeet", "parakeet-tdt-0.6b-v2")?.sizeMib).toBe(631);
+    expect(getAsrModelCapability("parakeet", "orukeet-v0.1.0-int8")?.sizeMib).toBe(640);
     expect(getAsrModelCapability("distil_whisper", "distil-large-v3.5")?.sizeMib).toBe(2888);
   });
 
   it("states one size for base and base.en, which are the same size on disk", () => {
     // 147,964,211 bytes each: 141.1 MiB, or 148.0 MB. Carrying one entry in
-    // each unit is what made `base`'s "effectively the same size" tradeoff
-    // contradict the two numbers rendered beside it.
+    // each unit is what made `base`'s "same size" tradeoff contradict the two
+    // numbers rendered beside it.
     const base = getAsrModelCapability("whisper", "base");
     const baseEn = getAsrModelCapability("whisper", "base.en");
     expect(base?.sizeMib).toBe(baseEn?.sizeMib);
-    expect(base?.tradeoff).toContain("effectively the same size");
+    expect(base?.tradeoff).toContain("at the same size");
   });
 
   it("promotes exactly three routes", () => {
@@ -243,39 +292,62 @@ describe("ASR model capability metadata", () => {
     expect(describePauseBehavior("encoder_decoder")).toContain("invented words");
   });
 
-  it("renders binary units, because the stored numbers are binary units", () => {
-    expect(formatModelSize(142)).toBe("142 MiB");
-    expect(formatModelSize(639)).toBe("639 MiB");
-    // 1620 MiB is 1.58 GiB. Dividing by 1000 and printing "1.6 GB" understated
-    // the same file by ~5%, and did so for every entry in the table.
-    expect(formatModelSize(1620)).toBe("1.6 GiB");
-    expect(formatModelSize(2900)).toBe("2.8 GiB");
-    expect(formatModelSize(1023)).toBe("1023 MiB");
-    expect(formatModelSize(1024)).toBe("1.0 GiB");
+  it("converts the stored binary units to the decimal MB and GB Finder shows", () => {
+    // The table stores MiB. Relabelling 142 MiB as "142 MB" would understate
+    // the file by ~5%; converting gives the number Finder prints.
+    expect(formatModelSize(142)).toBe("149 MB");
+    expect(formatModelSize(639)).toBe("670 MB");
+    expect(formatModelSize(705)).toBe("739 MB");
+    expect(formatModelSize(1620)).toBe("1.7 GB");
+    expect(formatModelSize(2900)).toBe("3.0 GB");
+    expect(formatModelSize(953)).toBe("999 MB");
+    expect(formatModelSize(954)).toBe("1.0 GB");
     expect(formatModelSize(0)).toBe("size unknown");
   });
 
   it("describes a model in one sentence that names the downside", () => {
     const baseEn = describeAsrModel("whisper", "base.en");
-    expect(baseEn).toContain("142 MiB");
-    expect(baseEn).toContain("English only");
-    expect(baseEn).toContain("English verified in Plainsong");
-    expect(baseEn).toContain("Spanish");
+    expect(baseEn).toBe(
+      "149 MB. English only. Speak Spanish or German into it and it returns English-sounding nonsense rather than admitting it can't.",
+    );
 
+    // What Plainsong tested stays apart from what the model was built for.
     const turbo = describeAsrModel("whisper", "large-v3-turbo");
-    expect(turbo).toContain("1.6 GiB");
-    expect(turbo).toContain("listed upstream");
-    expect(turbo).toContain("not yet qualified");
+    expect(turbo).toContain("1.7 GB");
+    expect(turbo).toContain("Built for about 100 languages. Not yet tested in Plainsong.");
     expect(turbo).toContain("slower");
 
+    // ONNX Parakeet is only ever offered where it is the one Parakeet v3, so
+    // there is nothing to compare it with.
     const parakeet = describeAsrModel("parakeet", "parakeet-tdt-0.6b-v3");
-    expect(parakeet).toContain("25 European languages listed upstream");
-    expect(parakeet).toContain("English verified in Plainsong");
+    expect(parakeet).toContain("Tested in English. Also built for 24 other European languages.");
+    expect(parakeet).toContain("One download covers dictation and meetings.");
+    expect(parakeet).not.toMatch(/any Mac|Compatible|more mistakes|twice the memory/);
+    expect(describeAsrModel("transcribe_cpp", "parakeet-tdt-0.6b-v3-q8_0")).not.toMatch(
+      /Compatible|second copy/,
+    );
 
     const parakeetV2 = describeAsrModel("parakeet", "parakeet-tdt-0.6b-v2");
-    expect(parakeetV2).toContain("English only");
-    expect(parakeetV2).toContain("not yet qualified");
-    expect(parakeetV2).toContain("same-hardware");
+    expect(parakeetV2).toContain("English only. Not yet tested in Plainsong.");
+    expect(parakeetV2).toContain("hasn't compared");
+
+    const orukeet = describeAsrModel("parakeet", "orukeet-v0.1.0-int8");
+    expect(orukeet).toContain("English only.");
+    expect(orukeet).not.toContain("Not yet tested");
+    expect(orukeet).toContain("hasn't shown it does better than the recommended model");
+
+    // No build or hardware jargon in what a picker prints.
+    for (const [provider, model] of [
+      ["parakeet", "parakeet-tdt-0.6b-v3"],
+      ["transcribe_cpp", "parakeet-tdt-0.6b-v3-q8_0"],
+      ["qwen3_asr", "qwen3-asr-0.6b"],
+      ["cohere_local", "cohere-transcribe-03-2026-q4"],
+      ["whistle", "whistle-2.0.0"],
+    ] as const) {
+      expect(describeAsrModel(provider, model)).not.toMatch(
+        /\b(?:GPU|CPU|ONNX|GGUF|Metal|int[48]|upstream|weights|decodes?|runtime)\b/i,
+      );
+    }
   });
 
   it("returns null rather than inventing metadata for routes it has none for", () => {
@@ -293,11 +365,11 @@ describe("ASR model capability metadata", () => {
     expect(cap?.pauseBehavior).toBe("encoder_decoder");
     expect(cap?.tier).toBe("more");
     // English is the only language exercised with real audio in Plainsong;
-    // the copy must say so and must name the CPU cost, not hide it.
+    // the copy must say so and must name the speed cost, not hide it.
     expect(cap?.languageEvidence.verifiedLanguages).toEqual(["English"]);
     const summary = describeAsrModel("qwen3_asr", "qwen3-asr-0.6b");
-    expect(summary).toContain("English verified in Plainsong");
-    expect(summary).toContain("experimental");
+    expect(summary).toContain("Tested in English. Also built for 29 other languages and 22 Chinese dialects.");
+    expect(summary).toContain("Experimental");
     expect(summary).toContain("real time");
     expect(summary).not.toContain("gated");
   });

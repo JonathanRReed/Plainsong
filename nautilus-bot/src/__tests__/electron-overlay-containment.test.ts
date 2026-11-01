@@ -68,6 +68,7 @@ describe("overlay size containment", () => {
     // trusting a remembered number.
     const longText = "word ".repeat(600);
     let tallest = { width: 0, height: 0 };
+    let tallestCaptureOrProcessing = { width: 0, height: 0 };
 
     for (const displayMode of ["full", "compact", "minimal"] as const) {
       for (const phase of [
@@ -88,6 +89,19 @@ describe("overlay size containment", () => {
               height: Math.round(size.height),
             });
             if (size.height > tallest.height) tallest = size;
+            if (
+              displayMode !== "minimal" &&
+              [
+                "primed",
+                "recording",
+                "stopping",
+                "transcribing",
+                "delivering",
+              ].includes(phase) &&
+              size.height > tallestCaptureOrProcessing.height
+            ) {
+              tallestCaptureOrProcessing = size;
+            }
           }
         }
       }
@@ -105,21 +119,22 @@ describe("overlay size containment", () => {
     // Recorded so a layout change that outgrows the cap fails here with the
     // number, not as a clipped card in a packaged build.
     expect(tallest.height).toBeLessThanOrEqual(OVERLAY_MAX_SIZE.dictation.height);
-    expect(OVERLAY_MAX_SIZE.dictation.height - tallest.height).toBeGreaterThanOrEqual(
-      48,
-    );
+    expect(
+      OVERLAY_MAX_SIZE.dictation.height - tallestCaptureOrProcessing.height,
+    ).toBeGreaterThanOrEqual(48);
   });
 
   it("never clamps a size the recording chip actually asks for", () => {
-    // The three sizes recording-popup.tsx sets, collapsed through expanded.
+    // Fixed modes and the full range of measured compact heights.
     for (const size of [
-      { width: 170, height: 46 },
-      { width: 330, height: 126 },
-      { width: 470, height: 228 },
+      { width: 340, height: 46 },
+      { width: 330, height: 245 },
+      { width: 330, height: OVERLAY_MAX_SIZE.recording.height },
+      { width: 470, height: 650 },
     ]) {
       expect(clampOverlaySize("recording", size)).toEqual(size);
     }
-    expect(OVERLAY_MAX_SIZE.recording.height - 228).toBeGreaterThanOrEqual(48);
+    expect(OVERLAY_MAX_SIZE.recording.height - 650).toBeGreaterThanOrEqual(48);
   });
 
   it("falls back to the base size for values a typeof check lets through", () => {

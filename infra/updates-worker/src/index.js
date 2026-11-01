@@ -12,12 +12,18 @@ const CACHE_SECONDS = 600;
 const UA = "plainsong-updates-worker (+https://plainsong.jonathanrreed.com)";
 
 async function releasesFor(env, channel) {
-  const res = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/releases?per_page=20`, {
-    headers: { "User-Agent": UA, Accept: "application/vnd.github+json" },
-    cf: { cacheTtl: CACHE_SECONDS, cacheEverything: true },
-  });
-  if (!res.ok) return null;
-  const all = await res.json();
+  let all;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${env.GITHUB_REPO}/releases?per_page=20`, {
+      headers: { "User-Agent": UA, Accept: "application/vnd.github+json" },
+      cf: { cacheTtl: CACHE_SECONDS, cacheEverything: true },
+    });
+    if (!res.ok) return null;
+    all = await res.json();
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(all)) return null;
   const wanted = MANIFEST[channel];
   // newest first; a stable install must never be offered a pre-release
   return all.filter((r) => !r.draft && (channel === "beta" ? true : !r.prerelease) && r.assets.some((a) => a.name === wanted));
@@ -44,8 +50,17 @@ export default {
       if (hit) return hit;
     }
 
-    let releases = await releasesFor(env, channel);
-    let tag = releases && releases[0] ? releases[0].tag_name : null;
+    // Versioned beta ZIPs remain addressable when a cached manifest outlives
+    // the API listing or the configured fallback release.
+    const versionedZip = file.match(/^Plainsong-((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-beta\.(?:0|[1-9][0-9]*))?)-(?:arm64|x64)-mac\.zip(?:\.blockmap)?$/);
+    const immutableTag = channel === "beta" && versionedZip ? `v${versionedZip[1]}` : null;
+    const releases = immutableTag ? null : await releasesFor(env, channel);
+    // A cached manifest may name an older release while publication advances.
+    // Resolve its versioned asset from that release rather than the latest one.
+    const selected = file === MANIFEST[channel]
+      ? releases?.[0]
+      : releases?.find((release) => release.assets.some((asset) => asset.name === file));
+    let tag = immutableTag || (selected ? selected.tag_name : null);
     if (!tag && channel === "beta" && env.FALLBACK_BETA_TAG) tag = env.FALLBACK_BETA_TAG;
     if (!tag) return text(`no ${channel} release yet\n`, 404);
 

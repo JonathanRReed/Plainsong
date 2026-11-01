@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   findProfileProcessGroups,
   terminateProfileProcesses,
-} from "../../scripts/lib/launch-process-cleanup.mjs";
+} from "../../scripts/lib/launch-process-cleanup.ts";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 

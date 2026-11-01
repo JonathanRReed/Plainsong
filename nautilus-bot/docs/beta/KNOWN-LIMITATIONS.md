@@ -20,9 +20,17 @@ using sensitive content.
 
 - Plainsong currently supports Apple Silicon Macs on macOS 13 or later. Intel
   Macs and Windows are outside this beta.
-- Native Me + Them system-audio capture requires macOS 14.7 or later. Older
-  supported macOS versions require an already configured virtual loopback
-  device such as BlackHole, or should use microphone-only Meetings.
+- Me + Them without extra software requires macOS 14.7 or later. Older
+  supported macOS versions require an already configured audio routing app
+  such as BlackHole, or should use microphone-only Meetings. There is no
+  screen-recording fallback for older macOS: it would need the broader Screen
+  Recording permission.
+- On macOS 14.7 or later Me + Them records everything the Mac plays while the
+  meeting is recording, not only the meeting app.
+- Without headphones the microphone also hears the meeting audio. Plainsong
+  removes microphone lines that repeat what the other side just said (three
+  or more words, within two seconds). A short reply like "yes" that repeats
+  their words is kept, so it can occasionally appear under both sides.
 - Plainsong's interface is English only, and so is everything the window
   frame around it says. Menus that come from Chromium rather than from
   Plainsong — the right-click menu in a text field, the file picker, the
@@ -123,16 +131,19 @@ using sensitive content.
 - A Meeting interrupted before its first durable WAV checkpoint may be too
   short to recover. Relaunch reports that state as an error instead of
   promising a retry that cannot succeed.
-- Me + Them source labels distinguish microphone-side speech from captured
-  system audio. They are not a promise of perfect person-by-person speaker
+- Me + Them source labels distinguish microphone-side speech from the
+  recorded meeting audio. They are not a promise of perfect person-by-person speaker
   identification.
-- Speaker identification ("who said what") has no published accuracy number.
-  It groups voices by embedding similarity; it cannot represent two people
-  talking at once, and audio it cannot attribute is left without a speaker
-  rather than guessed. A measured comparison against a full pyannote pipeline
-  is in `artifacts/qa/diarization-speakrs-spike-2026-09-02.md`; that
-  alternative backend is a build-time experiment and is not in any build you
-  can install.
+- Speaker identification ("who said what") is measured only on five AMI
+  meetings, not on your recordings. The embedding models (ECAPA-TDNN and the
+  other three) group voices by similarity and cannot represent two people
+  talking at once; audio they cannot attribute is left without a speaker
+  rather than guessed. pyannote community-1 detects overlapping speech, but a
+  transcript word still gets one speaker: the one talking most at that
+  moment. It can merge two similar voices (on one far-field AMI meeting it
+  found two of four speakers). It needs about 0.8-1.0 GB of memory while it
+  runs, against 0.15-0.25 GB for ECAPA-TDNN, and in a build without the
+  Core ML execution provider it runs on the CPU, several times slower.
 - The CAM++ speaker model runs without ONNX graph optimization, because the
   ONNX Runtime this build links rewrites part of that model's graph
   incorrectly. Turning the rewrite off is what makes CAM++ match the runtime
@@ -228,21 +239,31 @@ using sensitive content.
   recorded anywhere. The saved file skips the gap and the transcript marks
   where it was. The transcript preview and both silence detectors stand
   still while paused, and the elapsed clock excludes paused time.
-- Remembered voices (Settings > General > Meetings) are off by default, and
+- Remembered voices (Settings > Meetings) are off by default, and
   what they can do is bounded in ways worth knowing before you turn them on.
-  The thresholds that decide whether two voices match were calibrated on
-  synthetic speech — six macOS `say` voices, six utterances each, no room, no
-  microphone, no crosstalk (the numbers are in
+  For the embedding models (ECAPA-TDNN and the other three) the thresholds
+  that decide whether two voices match were calibrated on synthetic speech —
+  six macOS `say` voices, six utterances each, no room, no microphone, no
+  crosstalk (the numbers are in
   `artifacts/qa/voiceprint-recalibration-2026-09-03.md`). Real meetings are
   harder than that in every direction, so the measured accuracy is an upper
-  bound, not a promise about your Mac. Matching also assumes one voice per
+  bound, not a promise about your Mac. pyannote community-1's thresholds were
+  calibrated on 16 people across 16 recorded AMI meetings
+  (`artifacts/qa/voiceprint-community1-2026-10-21.md`): about 1 in 100 pairs
+  of different people clear the threshold for a suggestion, none cleared the
+  one for applying a name unasked, and about 8 in 100 pairs of the same
+  person fall short of a suggestion (more when the microphone differs).
+  Sixteen people in four rooms is still a small sample. Matching also assumes one voice per
   speaker turn: where two people share a microphone, or talk over each other,
   the signature Plainsong stores describes neither of them well. A voice
   remembered under one speaker-separation model is never compared with
-  another, so changing the model in Settings > Transcription means later
+  another, so changing the model in Settings > Meetings > Speaker model means later
   meetings start over rather than matching against numbers from a different
   system — the old voices are kept, not deleted, and become live again if you
-  change back. Nothing is matched from a calendar or an attendee list: a
+  change back. Settings says how many stored voices the selected model cannot
+  match. They cannot be converted, because only the numbers are kept, not
+  the audio. Nemotron computes no signatures, so with it selected nothing is
+  remembered or recognised. Nothing is matched from a calendar or an attendee list: a
   suggestion always comes from the audio, and where a meeting has attendees
   they only decide which of several suggestions is shown first, never which
   voice matched. Suggestions for speakers you never named do not survive

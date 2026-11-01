@@ -174,13 +174,105 @@ fn abort_active_requests(
     count
 }
 
+fn cancel_active_request(active_requests: &ActiveRequests, request_key: &str) {
+    let handle = active_requests
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(request_key)
+        .cloned();
+    if let Some(handle) = handle {
+        // Keep ownership until Drop registers its cleanup. Shutdown snapshots
+        // these handles even when cancellation immediately precedes EOF.
+        handle.abort();
+    }
+}
+
+async fn abort_active_requests_and_wait(
+    active_requests: &ActiveRequests,
+    active_analysis_runs: &ActiveAnalysisRuns,
+    active_response_claims: &ActiveResponseClaims,
+) -> usize {
+    let mut handles: Vec<_> = active_requests
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    handles.extend(
+        active_analysis_runs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .map(|(handle, _, _)| handle.clone()),
+    );
+    let count = abort_active_requests(
+        active_requests,
+        active_analysis_runs,
+        active_response_claims,
+    );
+    if tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while handles.iter().any(|handle| !handle.is_finished()) {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        tracing::warn!("Aborted requests did not finish before shutdown cleanup deadline");
+    }
+    count
+}
+
+fn spawn_command<F>(
+    foreground: &tokio::runtime::Handle,
+    method: &str,
+    future: F,
+) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    if plainsong_lib::qos::is_interactive_command(method) {
+        foreground.spawn(future)
+    } else {
+        tokio::spawn(future)
+    }
+}
+
 fn main() -> ExitCode {
+    if let Some(status) =
+        plainsong_lib::audio_output_mute::private_entry(&std::env::args_os().collect::<Vec<_>>())
+    {
+        return ExitCode::from(status);
+    }
+    if std::env::args_os()
+        .skip(1)
+        .any(|argument| argument == "--embedding-helper")
+    {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(_) => return ExitCode::FAILURE,
+        };
+        return if runtime
+            .block_on(plainsong_lib::run_embedding_helper_stdio())
+            .is_ok()
+        {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     tracing_subscriber::fmt().with_writer(io::stderr).init();
+    tracing::info!("Sidecar process entered");
 
     if std::env::args_os()
         .skip(1)
         .any(|argument| argument == plainsong_lib::SYSTEM_AUDIO_TEST_WORKER_ARGUMENT)
     {
+        let _ = plainsong_lib::qos::WorkClass::Interactive.apply_to_current_thread();
         // The parent sidecar normally kills and reaps this helper after 75s.
         // Keep a second deadline inside the helper so quitting or crashing the
         // parent during a blocked Core Audio permission request cannot leave an
@@ -203,36 +295,105 @@ fn main() -> ExitCode {
         };
     }
 
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("[sidecar] Failed to create Tokio runtime: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let foreground =
+        match plainsong_lib::qos::command_runtime(plainsong_lib::qos::WorkClass::Interactive) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("[sidecar] Failed to create dictation runtime: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+    let foreground_handle = foreground.handle().clone();
+    let runtime =
+        match plainsong_lib::qos::command_runtime(plainsong_lib::qos::WorkClass::Background) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("[sidecar] Failed to create Tokio runtime: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
 
-    let result = runtime.block_on(run_sidecar());
-    // Abort and join runtime-owned tasks before Rust values and whisper.cpp's
-    // process-global Metal cleanup run. `std::process::exit` skipped those
-    // drops and could trigger a ggml residency-set assertion after a successful
-    // transcription.
-    runtime.shutdown_timeout(Duration::from_secs(2));
+    // The main thread stays free to answer promised pasteboard requests.
+    let result = plainsong_lib::run_with_main_run_loop(move || {
+        let result = runtime.block_on(run_sidecar(foreground_handle));
+        // Abort and join runtime-owned tasks before Rust values and whisper.cpp's
+        // process-global Metal cleanup run. `std::process::exit` skipped those
+        // drops and could trigger a ggml residency-set assertion after a successful
+        // transcription.
+        runtime.shutdown_timeout(Duration::from_secs(2));
+        result
+    });
 
+    foreground.shutdown_timeout(Duration::from_secs(2));
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(Ok(())) => ExitCode::SUCCESS,
         Err(error) => {
+            eprintln!("[sidecar] Failed to start the runtime thread: {error}");
+            ExitCode::FAILURE
+        }
+        Ok(Err(error)) => {
             eprintln!("[sidecar] {error}");
             ExitCode::FAILURE
         }
     }
 }
 
-async fn run_sidecar() -> Result<(), String> {
-    let state = match plainsong_lib::build_app_state().await {
+fn configure_qa_ephemeral_credentials() -> Result<(), String> {
+    if std::env::var("PLAINSONG_QA_EPHEMERAL_SECRETS")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return Ok(());
+    }
+    if std::env::var("PLAINSONG_QA_MODE").ok().as_deref() != Some("1") {
+        return Err("Ephemeral credentials require explicit QA mode".into());
+    }
+    let temporary_root = std::fs::canonicalize(std::env::temp_dir())
+        .map_err(|_| "Could not verify the QA temporary root")?;
+    for variable in ["PLAINSONG_DATA_DIR", "PLAINSONG_CONFIG_DIR"] {
+        let directory = std::env::var_os(variable)
+            .ok_or("Ephemeral QA credentials require isolated data and config directories")?;
+        let directory = std::fs::canonicalize(directory)
+            .map_err(|_| "QA directories must exist before startup")?;
+        if directory == temporary_root || !directory.starts_with(&temporary_root) {
+            return Err(
+                "Ephemeral QA credentials require directories beneath the temporary root".into(),
+            );
+        }
+    }
+    plainsong_lib::enable_ephemeral_credentials_for_sidecar();
+    Ok(())
+}
+
+fn startup_credential_access_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
+}
+
+async fn run_sidecar(foreground: tokio::runtime::Handle) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let mut stage_started = started;
+    let mut checkpoint = |stage: &'static str| {
+        tracing::info!(
+            stage,
+            elapsed_us = stage_started.elapsed().as_micros() as u64,
+            "Sidecar startup stage"
+        );
+        stage_started = std::time::Instant::now();
+    };
+    plainsong_lib::prime_available_memory_simulation();
+    configure_qa_ephemeral_credentials()?;
+    let allow_credential_access = startup_credential_access_enabled(
+        std::env::var_os("PLAINSONG_STARTUP_CREDENTIAL_ACCESS").as_deref(),
+    );
+    let state = match plainsong_lib::build_app_state_with_credential_access(allow_credential_access)
+        .await
+    {
         Ok(s) => Arc::new(s),
         Err(error) => return Err(format!("Failed to initialize state: {error}")),
     };
 
+    checkpoint("app_state");
     // A previous process that crashed mid-playback can leave decrypted audio
     // in the app-owned runtime directory. Nothing else owns those files, so
     // they go before the first command is read.
@@ -241,9 +402,24 @@ async fn run_sidecar() -> Result<(), String> {
         Ok(false) => {}
         Err(error) => tracing::warn!("Playback audio sweep at startup failed: {}", error),
     }
+    // A dictation the previous process stopped but never finished becomes the
+    // one "Recover last dictation" offers, before the first command is read.
+    plainsong_lib::prepare_dictation_checkpoint_at_startup();
 
+    checkpoint("playback_and_dictation_recovery");
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<String>();
     let handle = SidecarHandle::new(event_tx);
+    if !plainsong_lib::memory_pressure::start_monitor() && cfg!(target_os = "macos") {
+        tracing::warn!("Could not register memory-pressure notifications");
+    }
+    let pressure_handle = handle.clone();
+    let mut pressure = plainsong_lib::memory_pressure::events().subscribe();
+    tokio::spawn(async move {
+        while pressure.changed().await.is_ok() {
+            let level = *pressure.borrow_and_update();
+            pressure_handle.emit("memory-pressure", level);
+        }
+    });
     let active_requests: ActiveRequests = Arc::new(Mutex::new(HashMap::new()));
     let active_analysis_runs: ActiveAnalysisRuns = Arc::new(Mutex::new(HashMap::new()));
     let active_response_claims: ActiveResponseClaims = Arc::new(Mutex::new(HashSet::new()));
@@ -268,25 +444,41 @@ async fn run_sidecar() -> Result<(), String> {
         Err(error) => tracing::warn!("Recording audio backfill failed: {}", error),
     }
 
+    checkpoint("channels_and_recording_audio_backfill");
     // The database is opened before the event channel exists, so a vault
     // repair that ran at startup has had nowhere to say so until now.
     plainsong_lib::announce_vault_startup_migration(&state, &handle);
+    plainsong_lib::forward_speech_model_download_notices(&handle);
 
     // If hands-free dictation is enabled, start the idle-time monitor right away so
     // hands-free listening is live as soon as the app launches, not just after the
     // first settings save. No-op (stays stopped) if the setting is off.
     plainsong_lib::reconcile_hands_free_monitor_for_sidecar(&state, &handle).await;
 
+    checkpoint("notices_and_hands_free");
     // Mark recordings stranded mid-capture/mid-transcription by a previous
     // crash as errored, then start the daily storage retention schedule so
     // retention settings are honored without requiring new recordings.
     plainsong_lib::reconcile_interrupted_recordings_for_sidecar(&state, &handle).await;
     plainsong_lib::spawn_storage_retention_maintenance(Arc::clone(&state), handle.clone());
+    plainsong_lib::spawn_note_publishing(Arc::clone(&state));
+    plainsong_lib::spawn_waiting_notes_recovery(Arc::clone(&state), handle.clone());
 
     // Watch for a live call and offer to record it. It only ever emits
     // events; the recording itself waits for the user to accept the offer.
     plainsong_lib::spawn_meeting_call_detection(Arc::clone(&state), handle.clone());
 
+    // Keep the meaning-search index current in the background when the
+    // built-in route is selected and its model is on disk. It pauses for
+    // dictation and capture and goes through native admission.
+    plainsong_lib::spawn_semantic_index_worker(Arc::clone(&state), handle.clone());
+
+    tracing::info!(
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "Sidecar initialization complete"
+    );
+
+    checkpoint("recording_recovery_and_workers");
     // Signal readiness to Electron
     eprintln!("[sidecar] ready");
 
@@ -341,19 +533,6 @@ async fn run_sidecar() -> Result<(), String> {
         if request.method == "shutdown" {
             plainsong_lib::begin_sidecar_shutdown(&state);
             write_response(request.id.unwrap_or(Value::Null), Ok(Value::Null));
-            let aborted = abort_active_requests(
-                &active_requests,
-                &active_analysis_runs,
-                &active_response_claims,
-            );
-            if aborted > 0 {
-                tracing::info!("Cancelled {aborted} active request(s) during shutdown");
-            }
-            plainsong_lib::shutdown_for_sidecar().await;
-            if let Err(error) = plainsong_lib::sweep_runtime_playback_audio_for_sidecar() {
-                tracing::warn!("Playback audio sweep at shutdown failed: {}", error);
-            }
-            tracing::info!("Received shutdown command, exiting cleanly");
             break;
         }
 
@@ -363,13 +542,7 @@ async fn run_sidecar() -> Result<(), String> {
                 .as_ref()
                 .and_then(|id| response_key(id).map(|key| (id.clone(), key)))
             {
-                if let Some(abort_handle) = active_requests
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .remove(&cancelled_key)
-                {
-                    abort_handle.abort();
-                }
+                cancel_active_request(&active_requests, &cancelled_key);
                 active_analysis_runs
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -400,7 +573,7 @@ async fn run_sidecar() -> Result<(), String> {
                     active_requests
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .remove(&request_key);
+                        .insert(request_key.clone(), abort_handle);
                     if claim_response(&active_response_claims, &request_key) {
                         write_response(request_id, Err("Analysis cancelled".to_string()));
                     }
@@ -442,7 +615,8 @@ async fn run_sidecar() -> Result<(), String> {
         let request_key_for_task = request_key.clone();
         let analysis_run_id_for_task = analysis_run_id.clone();
         let (start_tx, start_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
+        let route = method.clone();
+        let task = spawn_command(&foreground, &route, async move {
             let _admission_lease = admission_lease;
             let _ = start_rx.await;
             let result = plainsong_lib::dispatch_command(&state, &handle, &method, params).await;
@@ -465,10 +639,13 @@ async fn run_sidecar() -> Result<(), String> {
             }
         });
         if let Some(request_key) = request_key {
-            active_requests
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(request_key.clone(), task.abort_handle());
+            {
+                let mut active = active_requests
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                active.retain(|_, handle| !handle.is_finished());
+                active.insert(request_key.clone(), task.abort_handle());
+            }
             active_response_claims
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -490,13 +667,122 @@ async fn run_sidecar() -> Result<(), String> {
         let _ = start_tx.send(());
     }
 
+    // EOF and stdin failure also drop in-flight requests. Drain their capture
+    // rollback before runtime teardown, just like an explicit shutdown.
+    plainsong_lib::begin_sidecar_shutdown(&state);
+    let aborted = abort_active_requests_and_wait(
+        &active_requests,
+        &active_analysis_runs,
+        &active_response_claims,
+    )
+    .await;
+    if aborted > 0 {
+        tracing::info!("Cancelled {aborted} active request(s) during shutdown");
+    }
+    plainsong_lib::shutdown_for_sidecar().await;
+    if let Err(error) = plainsong_lib::sweep_runtime_playback_audio_for_sidecar() {
+        tracing::warn!("Playback audio sweep at shutdown failed: {}", error);
+    }
+    tracing::info!("Sidecar shutdown cleanup finished");
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_credential_access_requires_exact_opt_in() {
+        use std::ffi::OsStr;
+
+        assert!(startup_credential_access_enabled(Some(OsStr::new("1"))));
+        assert!(!startup_credential_access_enabled(None));
+        assert!(!startup_credential_access_enabled(Some(OsStr::new("true"))));
+        assert!(!startup_credential_access_enabled(Some(OsStr::new("0"))));
+    }
     use std::io::Cursor;
+
+    #[tokio::test]
+    async fn cancel_then_shutdown_retains_the_handle_until_drop_registers_cleanup() {
+        struct RegisterCleanup {
+            tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+            finished: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl Drop for RegisterCleanup {
+            fn drop(&mut self) {
+                let finished = Arc::clone(&self.finished);
+                self.tasks.lock().unwrap().push(tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                    finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                }));
+            }
+        }
+        let cleanup_tasks = Arc::new(Mutex::new(Vec::new()));
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = RegisterCleanup {
+            tasks: Arc::clone(&cleanup_tasks),
+            finished: Arc::clone(&finished),
+        };
+        let (started_tx, started_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        let requests = Arc::new(Mutex::new(HashMap::from([(
+            "start-request".to_string(),
+            task.abort_handle(),
+        )])));
+        let analysis = Arc::new(Mutex::new(HashMap::new()));
+        let claims = Arc::new(Mutex::new(HashSet::new()));
+        cancel_active_request(&requests, "start-request");
+        // No yield between the cancellation and shutdown snapshot.
+        assert_eq!(
+            abort_active_requests_and_wait(&requests, &analysis, &claims).await,
+            1
+        );
+        let cleanup: Vec<_> = cleanup_tasks.lock().unwrap().drain(..).collect();
+        assert_eq!(cleanup.len(), 1);
+        for task in cleanup {
+            task.await.unwrap();
+        }
+        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_request_guards_to_drop_before_library_cleanup() {
+        struct Released(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Released {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = Arc::clone(&released);
+        let (started_tx, started_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = Released(marker);
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        let requests = Arc::new(Mutex::new(HashMap::from([(
+            "start-request".to_string(),
+            task.abort_handle(),
+        )])));
+        let analysis = Arc::new(Mutex::new(HashMap::new()));
+        let claims = Arc::new(Mutex::new(HashSet::from(["start-request".to_string()])));
+        assert_eq!(
+            abort_active_requests_and_wait(&requests, &analysis, &claims).await,
+            1
+        );
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(claims.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn oversized_json_rpc_line_is_drained_without_hiding_the_next_request() {
@@ -595,5 +881,49 @@ mod tests {
 
         assert!(claim_response(&claims, &key));
         assert!(!claim_response(&claims, &key));
+    }
+}
+
+#[cfg(test)]
+mod responsiveness_tests {
+    use super::*;
+
+    #[test]
+    fn slow_jobs_do_not_block_dictation_start_ack() {
+        let runtime = || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let background = runtime();
+        let foreground = runtime();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        for _ in 0..2 {
+            let barrier = barrier.clone();
+            let release = release.clone();
+            background.spawn(async move {
+                barrier.wait();
+                let (lock, signal) = &*release;
+                let mut ready = lock.lock().unwrap();
+                while !*ready {
+                    ready = signal.wait(ready).unwrap();
+                }
+            });
+        }
+        barrier.wait();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let entered = background.enter();
+        spawn_command(foreground.handle(), "start_dictation", async move {
+            tx.send("start acknowledged").unwrap();
+        });
+        drop(entered);
+        let ack = rx.recv_timeout(Duration::from_millis(250));
+        let (lock, signal) = &*release;
+        *lock.lock().unwrap() = true;
+        signal.notify_all();
+        assert_eq!(ack.unwrap(), "start acknowledged");
     }
 }

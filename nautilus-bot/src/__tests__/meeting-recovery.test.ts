@@ -66,6 +66,39 @@ describe("readMeetingIntegrity", () => {
 });
 
 describe("describeIncompleteTranscript", () => {
+  it.each([null, "2026-03-07T09:00:00Z"])(
+    "keeps known capture loss explicit when acknowledgement is %s",
+    (acknowledgedAt) => {
+      const notice = describeIncompleteTranscript(
+        readMeetingIntegrity(recording({
+          transcriptComplete: false,
+          transcriptDegradedReason: "Part of the conversation was not saved.",
+          captureDegradedSummary: "Part of the conversation was not saved.",
+          transcriptIncompleteAcknowledgedAt: acknowledgedAt,
+        })),
+      );
+      expect(notice?.message).toContain("cannot restore");
+      expect(notice?.message).not.toMatch(/complete record/i);
+      expect(notice?.audioHeld).toBe(acknowledgedAt === null);
+      if (!acknowledgedAt) expect(notice?.title).toContain("Partial audio kept");
+    },
+  );
+
+  it("keeps a raw chunk error out of the incomplete-transcript note", () => {
+    const notice = describeIncompleteTranscript(
+      readMeetingIntegrity(
+        recording({
+          transcriptComplete: false,
+          transcriptDegradedReason:
+            "Chunk 3 failed at 180.0s: NVIDIA Parakeet failed: Could not verify native memory headroom",
+        }),
+      ),
+    );
+
+    expect(notice?.message).not.toMatch(/headroom|chunk 3|parakeet failed/i);
+    expect(notice?.message).toMatch(/never transcribed/);
+  });
+
   it("says the audio is being held back, and why", () => {
     const notice = describeIncompleteTranscript(
       readMeetingIntegrity(
@@ -82,7 +115,8 @@ describe("describeIncompleteTranscript", () => {
     );
     expect(notice?.audioHeld).toBe(true);
     expect(notice?.message).toContain("2 of 10");
-    expect(notice?.message).toMatch(/only complete record/i);
+    expect(notice?.message).toMatch(/may contain words/i);
+    expect(notice?.message).not.toMatch(/complete record/i);
   });
 
   it("changes what it promises once the reader has acknowledged", () => {
@@ -123,6 +157,20 @@ describe("describeCaptureDegradation", () => {
 
     expect(caveat?.message).toContain("240s");
     expect(caveat?.message).toMatch(/not in the recording or the transcript/i);
+  });
+
+  it("drops a bracketed audio-system detail that names internals", () => {
+    const caveat = describeCaptureDegradation(
+      readMeetingIntegrity(
+        recording({
+          captureDegradedSummary:
+            "A capture stream stopped sending audio during this meeting, so the recording ends early. Audio captured before that point was saved. (Core Audio status -10851)",
+        }),
+      ),
+    );
+
+    expect(caveat?.message).toContain("ends early");
+    expect(caveat?.message).not.toMatch(/core audio|-10851/i);
   });
 });
 

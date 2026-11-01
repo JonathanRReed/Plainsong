@@ -8,8 +8,11 @@ import { ESCAPE_NATIVE_BINDING_ID } from "./dictation-bindings";
  * with the reserved id `escape`.
  */
 export type NativeShortcutRawEvent = {
-  event: "down" | "up";
+  event: "down" | "up" | "cancel";
   bindingId: string;
+  pressEpochMs?: number;
+  occurrenceEpochMs?: number;
+  modifierArmDelayMs?: number;
 };
 
 type NativeShortcutSignal = "pressed" | "released" | "cancelled";
@@ -26,6 +29,7 @@ export type NativeShortcutStatus = {
 
 export type NativeShortcutController = {
   status: NativeShortcutStatus;
+  setSessionActive: (active: boolean) => void;
   dispose: () => void;
 };
 
@@ -50,16 +54,19 @@ export function isNativeShortcutRawEvent(value: unknown): value is NativeShortcu
   }
   const event = value as Partial<NativeShortcutRawEvent>;
   return (
-    (event.event === "down" || event.event === "up") &&
+    (event.event === "down" || event.event === "up" || event.event === "cancel") &&
     typeof event.bindingId === "string" &&
-    event.bindingId.length > 0
+    event.bindingId.length > 0 &&
+    (event.occurrenceEpochMs === undefined || (typeof event.occurrenceEpochMs === "number" && Number.isFinite(event.occurrenceEpochMs) && event.occurrenceEpochMs >= 0)) &&
+    (event.pressEpochMs === undefined || (typeof event.pressEpochMs === "number" && Number.isFinite(event.pressEpochMs))) &&
+    (event.modifierArmDelayMs === undefined || (typeof event.modifierArmDelayMs === "number" && Number.isFinite(event.modifierArmDelayMs) && event.modifierArmDelayMs >= 0 && event.modifierArmDelayMs <= 1000))
   );
 }
 
 export function normalizeNativeShortcutEvent(
   event: NativeShortcutRawEvent,
 ): NativeShortcutEvent {
-  if (event.event === "down" && event.bindingId === ESCAPE_NATIVE_BINDING_ID) {
+  if (event.event === "cancel" || (event.event === "down" && event.bindingId === ESCAPE_NATIVE_BINDING_ID)) {
     return { signal: "cancelled", bindingId: event.bindingId };
   }
 
@@ -232,13 +239,37 @@ export function trackNativeShortcutDownBindings(
   return next;
 }
 
-/**
- * The `up` events a dying helper will never send. Fed back through the same
- * handler a real release takes, so a hold that was in progress when the
- * helper was replaced stops the session instead of running to the watchdog.
- */
-export function synthesizeNativeShortcutRelease(
-  down: ReadonlySet<string>,
-): NativeShortcutRawEvent[] {
-  return [...down].map((bindingId) => ({ event: "up" as const, bindingId }));
+export function dictationSessionCanCancel(phase: string): boolean {
+  return ["preparing", "primed", "recording", "stopping", "transcribing"].includes(phase);
+}
+
+export function createDictationEscapeFallback(deps: {
+  register: (accelerator: string, callback: () => void) => boolean;
+  unregister: (accelerator: string) => void;
+  cancel: (sessionId: number) => Promise<unknown>;
+  onError: (error: unknown) => void;
+}) {
+  let sessionId: number | null = null;
+  let cancelledSessionId: number | null = null;
+  let registered = false;
+  return {
+    sync(nextSessionId: number | null, helperAvailable: boolean): void {
+      sessionId = helperAvailable ? null : nextSessionId;
+      if (sessionId === null) {
+        if (registered) deps.unregister("Escape");
+        registered = false;
+        return;
+      }
+      if (registered) return;
+      registered = deps.register("Escape", () => {
+        const owner = sessionId;
+        if (owner === null || owner === cancelledSessionId) return;
+        cancelledSessionId = owner;
+        void deps.cancel(owner).catch((error) => {
+          if (cancelledSessionId === owner) cancelledSessionId = null;
+          deps.onError(error);
+        });
+      });
+    },
+  };
 }

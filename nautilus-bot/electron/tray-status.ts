@@ -22,6 +22,10 @@ export type TrayStatusInput = {
   meetingPhase: string | null;
   /** When the current meeting started recording, or null. */
   meetingStartedAt: number | null;
+  /** Whether the recording meeting is paused (capture held, frames dropped). */
+  meetingPaused?: boolean;
+  /** Paused time so far, including the current pause, in milliseconds. */
+  meetingPausedMs?: number;
   now: number;
 };
 
@@ -44,7 +48,6 @@ export type TrayStatus = {
   meetingControl: "start" | "stop" | "busy";
 };
 
-const LIVE_PHASES = new Set(["primed", "recording"]);
 const FINISHING_PHASES = new Set(["stopping", "transcribing", "delivering"]);
 const MEETING_FINISHING_PHASES = new Set(["stopping", "processing", "transcribing"]);
 
@@ -63,8 +66,18 @@ export function formatTrayClock(ms: number): string {
 
 export function describeTrayStatus(input: TrayStatusInput): TrayStatus {
   const { dictationPhase, dictationStartedAt, meetingPhase, meetingStartedAt, now } = input;
+  const meetingPausedMs = Math.max(0, input.meetingPausedMs ?? 0);
   const meetingControl = meetingControlFor(meetingPhase);
-  if (LIVE_PHASES.has(dictationPhase)) {
+  if (dictationPhase === "primed") {
+    return {
+      title: "…",
+      tooltip: "Plainsong is opening the microphone",
+      statusLine: "Opening microphone…",
+      ticking: false,
+      meetingControl,
+    };
+  }
+  if (dictationPhase === "recording") {
     const clock = formatTrayClock(now - (dictationStartedAt ?? now));
     return {
       title: `● ${clock}`,
@@ -83,8 +96,19 @@ export function describeTrayStatus(input: TrayStatusInput): TrayStatus {
       meetingControl,
     };
   }
+  if (meetingPhase === "recording" && input.meetingPaused) {
+    // Same clock as the app's: recorded time only, frozen while paused.
+    const clock = formatTrayClock(now - (meetingStartedAt ?? now) - meetingPausedMs);
+    return {
+      title: `❚❚ ${clock}`,
+      tooltip: "The meeting recording is paused",
+      statusLine: "Meeting paused",
+      ticking: false,
+      meetingControl,
+    };
+  }
   if (meetingPhase === "recording") {
-    const clock = formatTrayClock(now - (meetingStartedAt ?? now));
+    const clock = formatTrayClock(now - (meetingStartedAt ?? now) - meetingPausedMs);
     return {
       title: `● ${clock}`,
       tooltip: "Plainsong is recording a meeting",
@@ -121,4 +145,18 @@ export function describeTrayStatus(input: TrayStatusInput): TrayStatus {
     ticking: false,
     meetingControl,
   };
+}
+export function nextTrayRecoveryResults(
+  current: Array<{ text: string }>,
+  eventName: string,
+  payload: unknown,
+): Array<{ text: string }> {
+  if (eventName !== "dictation-recovery-results-changed") return current;
+  if (!payload || typeof payload !== "object" || !("results" in payload) || !Array.isArray(payload.results) || payload.results.length > 3) return [];
+  const results: Array<{ text: string }> = [];
+  for (const result of payload.results) {
+    if (!result || typeof result !== "object" || !("text" in result) || typeof result.text !== "string" || !result.text.trim()) return [];
+    results.push({ text: result.text });
+  }
+  return results;
 }

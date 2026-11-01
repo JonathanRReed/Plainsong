@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const harnessPath = resolve(
   process.cwd(),
-  "scripts/capture-packaged-macos-dictation-hotkey.mjs",
+  "scripts/capture-packaged-macos-dictation-hotkey.ts",
 );
 const driverPath = resolve(process.cwd(), "scripts/native-macos-key-hold-driver.swift");
 

@@ -19,16 +19,17 @@ Current product note:
 
 ## Manual Exports to a Synced Folder
 
-1. Open **Settings → Storage**.
-2. Set **Export root** to an absolute folder inside your provider's local sync
-   directory:
+1. Open **Settings > Privacy & data > Export folder**.
+2. Press **Choose export folder** and pick a folder inside your provider's
+   local sync directory. macOS hands Plainsong the folder through its own
+   picker; a typed path is not accepted:
    - iCloud: `/Users/you/Library/Mobile Documents/com~apple~CloudDocs/Plainsong`
    - Dropbox: `/Users/you/Dropbox/Plainsong`
    - Google Drive: `/Users/you/Google Drive/My Drive/Plainsong`
 3. Open a recording or the Exports view, choose the destination under that
    root, and export it.
-4. Repeat the export when the transcript or notes change. The export-root
-   setting is a path boundary, not an automatic export service.
+4. Repeat the export when the transcript or notes change. The export folder
+   is a boundary, not an automatic export service.
 
 > **Encryption note**: every export — Markdown, Word, JSON, text, and
 > subtitles — is a readable file.
@@ -43,10 +44,10 @@ you press a Sync button:
 
 1. Install and configure `rclone` for Google Drive, OneDrive, or Proton Drive.
    iCloud Drive uses a direct filesystem path and does not require `rclone`.
-2. Open **Settings → Storage → Backup**.
-3. Enable **Manual cloud sync**, select the provider, and configure the cloud
-   folder and remote name.
-4. Run **Setup Checks** and **Verify Cloud Connection**.
+2. Open **Settings > Privacy & data > Backups**.
+3. Turn on **Allow uploading to cloud storage**, choose the **Cloud storage
+   service**, and set the cloud folder and rclone remote name.
+4. Run **Run setup checks** and **Test the connection**.
 5. Create a settings snapshot or full backup.
 6. Press the matching **Sync Latest** button.
 

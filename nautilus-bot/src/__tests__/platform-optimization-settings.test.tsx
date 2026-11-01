@@ -4,7 +4,7 @@ import { AsrProviderManager } from "@/components/asr-provider-manager";
 
 const invokeMock = vi.fn();
 const getSettingsMock = vi.fn();
-const saveSettingsMock = vi.fn();
+const updateSettingsMock = vi.fn();
 const getPermissionDiagnosticsMock = vi.fn();
 
 vi.mock("@/lib/electron", () => ({
@@ -17,7 +17,7 @@ vi.mock("@/lib/backend", () => ({
   repairLocalModelCache: vi.fn(async () => ({ repairedCount: 0, removedPaths: [], notes: [] })),
   getAsrProviderInventory: vi.fn(async () => invokeMock("get_asr_provider_inventory")),
   getSettings: (...args: unknown[]) => getSettingsMock(...args),
-  saveSettings: (...args: unknown[]) => saveSettingsMock(...args),
+  updateSettings: (...args: unknown[]) => updateSettingsMock(...args),
   getPermissionDiagnostics: (...args: unknown[]) => getPermissionDiagnosticsMock(...args),
   openPermissionSettings: vi.fn(async () => {}),
   openInstalledPlainsongApp: vi.fn(async () => {}),
@@ -218,7 +218,7 @@ describe("Platform optimization settings", () => {
         },
       },
     });
-    saveSettingsMock.mockResolvedValue(undefined);
+    updateSettingsMock.mockResolvedValue(undefined);
     getPermissionDiagnosticsMock.mockResolvedValue({
       microphoneReady: true,
       speechRecognitionReady: false,
@@ -241,16 +241,16 @@ describe("Platform optimization settings", () => {
    * returns a Windows engine -- behind `cfg(target_os = "windows")`, on a
    * product whose own KNOWN-LIMITATIONS puts Windows outside the beta. The
    * settings keys still load; only the controls that could not do anything
-   * were removed. See docs/settings-inventory-2026-09-03.md.
+   * were removed. See docs/settings-inventory-2026-10-22.md.
    */
   it("offers no platform-tuning controls that cannot change anything", async () => {
     render(<AsrProviderManager />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Show tools" }));
+    fireEvent.click(await screen.findByText("Repair speech models"));
     // The repair tool is real and still there, so this is not asserting that
     // the advanced panel failed to open.
     expect(
-      await screen.findByRole("button", { name: "Repair local cache" }),
+      await screen.findByRole("button", { name: "Repair" }),
     ).toBeInTheDocument();
 
     expect(screen.queryByText("Compatibility & Runtime Tuning")).toBeNull();
@@ -271,7 +271,7 @@ describe("Platform optimization settings", () => {
   it("no longer offers a second meetings-engine picker on the diagnostics card", async () => {
     render(<AsrProviderManager />);
 
-    await screen.findByText("Engine status");
+    await screen.findByText("Speech model status");
     expect(
       screen.queryByRole("combobox", { name: /meeting quality policy/i }),
     ).toBeNull();
@@ -312,7 +312,7 @@ describe("Platform optimization settings", () => {
 
     expect(await screen.findByText("Apple Speech setup")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show tools" }));
+    fireEvent.click(screen.getByText("Repair speech models"));
 
     expect(screen.queryByText("macOS Apple Speech engine")).not.toBeInTheDocument();
     expect(screen.queryByText("Windows SDK dictation engine")).not.toBeInTheDocument();

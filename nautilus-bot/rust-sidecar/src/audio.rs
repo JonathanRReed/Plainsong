@@ -1,13 +1,14 @@
-pub mod enhance;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_system_tap;
 pub mod mel;
 pub mod preroll;
+mod realtime;
 pub mod silero_vad;
 pub mod system_capture;
 pub mod utils;
 pub mod vad;
 pub mod waveform;
 
-use crate::audio::enhance::AudioPreprocessor;
 use crate::audio::preroll::{
     PreRollBuffer, PRE_ROLL_MAX_AGE_MS, PRE_ROLL_SECONDS, PRE_ROLL_SPEECH_LEAD_SECONDS,
 };
@@ -17,11 +18,12 @@ use crate::audio::system_capture::{
     SourceSilenceWatchdog, SystemAudioCapability, MIC_SILENCE_PROFILE,
 };
 use crate::audio::vad::{VadBackendKind, VadConfig, VadEdge, VadGate};
+use crate::meeting_asides::{AsideSink, AsideSpan, MeetingMicTap, MeetingMicrophone};
 use crate::models::RecordingOptions;
 use crate::recording_audio::{
-    available_space_bytes, create_new_file, sync_file, sync_parent_directory,
-    validate_plaintext_wav, RecordingAudioRole, RecordingAudioValidation, RecordingCapturePlan,
-    ValidatedRecordingAudio,
+    available_space_bytes, create_new_file, repair_plaintext_wav_header, sync_file,
+    sync_parent_directory, validate_plaintext_wav, RecordingAudioRole, RecordingAudioValidation,
+    RecordingCapturePlan, ValidatedRecordingAudio,
 };
 use crate::recording_pause::{PauseLedger, PauseSpan};
 use crate::settings;
@@ -63,11 +65,19 @@ use std::time::{Duration, Instant};
 /// live, `is_dictating` has not been flipped) without parking a runtime thread
 /// or the mutex.
 pub(crate) const DICTATION_STOP_CAPTURE_TAIL_MS: u64 = 120;
-/// Core Audio can take longer than 1.5 seconds to construct its first input
+/// Core Audio can take just over three seconds to construct its first input
 /// stream after launch, especially while the audio server is waking. This is
 /// only a failure deadline; successful stream starts still return immediately.
 /// Keep it bounded because the platform construction call is not cancellable.
+#[cfg(target_os = "macos")]
+const MICROPHONE_STREAM_PREPARATION_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(target_os = "macos"))]
 const MICROPHONE_STREAM_PREPARATION_TIMEOUT: Duration = Duration::from_secs(3);
+/// Longest wait for the first capture callback before the start command
+/// returns. "Listening" itself waits for the first sample however long it
+/// takes (`dictation_session::publish_dictation_listening`); this bound only
+/// keeps a slow device from holding the start command.
+const FIRST_CAPTURE_CALLBACK_WAIT: Duration = Duration::from_millis(750);
 const DICTATION_MIN_CAPTURE_SECONDS: f32 = 0.35;
 const DICTATION_SHORT_CAPTURE_PEAK_THRESHOLD: f32 = 0.008;
 const DICTATION_SHORT_CAPTURE_RMS_THRESHOLD: f32 = 0.002;
@@ -211,12 +221,33 @@ pub struct RecordingCaptureHealth {
     /// Whether the user has paused capture. Frames are being dropped on
     /// purpose, so nothing below may be read as a fault or as silence.
     pub paused: bool,
+    /// Audio forwarded to the WAV file, excluding paused frames.
+    pub recorded_seconds: f64,
     /// How long each captured source has carried nothing audible.
     pub inactivity: SourceInactivity,
     /// Seconds since frames last started flowing on purpose: activation, or
     /// the most recent resume. A silence fuse must never be shorter than this,
     /// or a meeting resumed into a quiet room would end at once.
     pub seconds_since_activity_epoch: f32,
+    /// Whether this is a Me + Them session, which rebuilds a failed source and
+    /// reports it on its own channel.
+    pub mixed: bool,
+}
+
+/// Whether a mic-only meeting's microphone has stopped: the OS reported the
+/// input stream failed and no new audio reached the file since the last check.
+///
+/// A mic-only session has nothing else recording and no rebuild, and its
+/// silence and length fuses both count captured audio, so without this the
+/// meeting kept "recording" nothing until the person pressed Stop.
+pub fn microphone_lost(
+    health: &RecordingCaptureHealth,
+    previous_recorded_seconds: Option<f64>,
+) -> bool {
+    health.capture_failure.is_some()
+        && !health.mixed
+        && !health.paused
+        && previous_recorded_seconds.is_some_and(|previous| health.recorded_seconds <= previous)
 }
 
 /// The pause state of the active meeting, as the renderer needs it.
@@ -247,6 +278,45 @@ pub fn silence_auto_stop_due(health: &RecordingCaptureHealth, silence_minutes: u
         return false;
     }
     every_source_quiet_for(health, silence_minutes as f32 * 60.0)
+}
+
+/// Captured audio, rather than elapsed wall time, governs this optional limit.
+pub fn duration_auto_stop_due(health: &RecordingCaptureHealth, minutes: u32) -> bool {
+    minutes > 0
+        && !health.paused
+        && health.recorded_seconds.is_finite()
+        && health.recorded_seconds >= f64::from(minutes) * 60.0
+}
+
+pub fn duration_auto_stop_warning_due(health: &RecordingCaptureHealth, minutes: u32) -> bool {
+    let limit_seconds = f64::from(minutes) * 60.0;
+    let warning_seconds = 300.0_f64.min(limit_seconds / 2.0);
+    minutes > 0
+        && !health.paused
+        && health.recorded_seconds.is_finite()
+        && health.recorded_seconds >= limit_seconds - warning_seconds
+        && health.recorded_seconds < limit_seconds
+}
+
+/// Warn once at the current limit, and rearm when the user changes it.
+#[derive(Default)]
+pub struct MeetingDurationWarning {
+    configured_minutes: u32,
+    reported: bool,
+}
+
+impl MeetingDurationWarning {
+    pub fn take_due(&mut self, health: &RecordingCaptureHealth, minutes: u32) -> bool {
+        if self.configured_minutes != minutes {
+            self.configured_minutes = minutes;
+            self.reported = false;
+        }
+        if !self.reported && duration_auto_stop_warning_due(health, minutes) {
+            self.reported = true;
+            return true;
+        }
+        false
+    }
 }
 
 /// Whether every captured source has been inactive for `seconds`, and frames
@@ -525,6 +595,31 @@ pub struct ResolvedAudioInputDevice {
     pub advisory: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeetingMicrophoneInput {
+    pub requested_name: Option<String>,
+    pub resolved_name: String,
+    pub used_fallback: bool,
+    pub advisory: Option<String>,
+}
+
+impl MeetingMicrophoneInput {
+    fn from_resolved(resolved: &ResolvedAudioInputDevice, requested_name: Option<&str>) -> Self {
+        Self {
+            requested_name: requested_name.map(str::to_string),
+            resolved_name: resolved.device_name.clone(),
+            used_fallback: resolved.used_fallback,
+            advisory: resolved.advisory.clone(),
+        }
+    }
+}
+
+pub struct PreparedMeetingRecording {
+    pub recording_id: String,
+    pub microphone_input: Option<MeetingMicrophoneInput>,
+}
+
 /// Snapshot of the configuration a running hands-free monitor was started
 /// with, so `reconcile_hands_free_monitor` (lib.rs) can detect when settings
 /// changed out from under a running monitor (VAD backend selected, Silero
@@ -553,12 +648,8 @@ pub struct AudioCapture {
     /// Keep the long-lived sidecar from leaking another blocked worker on every
     /// retry; Electron recycles the sidecar after surfacing the first error.
     microphone_preparation_stalled: bool,
-    /// Audio preprocessor for noise suppression
-    preprocessor: Option<AudioPreprocessor>,
-    /// Enable noise suppression
-    noise_suppression_enabled: bool,
-    /// Current audio level (0.0 to 1.0) for visualization
-    dictation_audio_level: Arc<std::sync::atomic::AtomicU32>,
+    /// Recent audio level for visualization.
+    dictation_audio_level: Arc<DictationLevelMeter>,
     /// Number of callback invocations observed for the active dictation stream
     dictation_callback_count: Arc<AtomicU64>,
     /// Stop flag owned by the *current* dictation capture session's thread and
@@ -581,6 +672,11 @@ pub struct AudioCapture {
     /// the ceiling is announced exactly once and `stop_dictation` can explain the
     /// truncation instead of silently returning a clipped recording.
     dictation_max_duration_reached: Arc<AtomicBool>,
+    /// Limit requested for the next session. Starting capture consumes and
+    /// resets it, so provider-specific limits cannot leak into later sessions.
+    dictation_next_max_session_seconds: u64,
+    /// Limit used by the active or most recently ended session, for warnings.
+    dictation_last_max_session_seconds: u64,
     /// UI-only accumulator of mono dictation samples for streaming partials.
     /// Never feeds the final transcription; only read by the partial-decode task.
     dictation_partial_buffer: Arc<std::sync::Mutex<DictationPartialBuffer>>,
@@ -622,17 +718,30 @@ pub struct AudioCapture {
     /// Configuration the currently running hands-free monitor was started
     /// with (see [`HandsFreeMonitorConfig`]); `None` when it isn't running.
     hands_free_monitor_config: Option<HandsFreeMonitorConfig>,
-    /// Rolling pre-roll of the last couple of seconds the hands-free idle
-    /// monitor heard (see [`PreRollBuffer`]). `None` until a monitor has run.
-    /// Drained by `start_dictation` so a hands-free session starts with the
-    /// words the user already spoke instead of from the moment the fresh
-    /// capture stream happened to open.
-    dictation_pre_roll: Arc<std::sync::Mutex<Option<PreRollBuffer>>>,
+    /// What the latest hands-free monitor run feeds (see [`HandsFreeTap`]).
+    /// Replaced on every monitor start, so a stream already handed to a
+    /// session keeps its own tap.
+    hands_free_tap: Arc<std::sync::Mutex<HandsFreeTap>>,
     /// Microseconds from `start_dictation` entry to the first sample the
     /// capture callback delivered, or 0 while none has arrived yet. This is
     /// the number that moves when microphone cold-open cost changes, so it is
     /// measured rather than assumed.
     dictation_first_sample_us: Arc<AtomicU64>,
+    /// Microseconds from `start_dictation` entry to the latest capture
+    /// callback. A healthy device calls back every few milliseconds, so a
+    /// long silence here means the microphone went away mid-session.
+    dictation_last_callback_us: Arc<AtomicU64>,
+    /// Set by the stream's error callback (disconnect, format change).
+    dictation_stream_failed: Arc<AtomicBool>,
+    dictation_capture_started_at: Option<std::time::Instant>,
+    /// The meeting tap the current dictation takes its frames from, when it
+    /// is an aside. Held here rather than looked up through the recording,
+    /// so stop and abort can detach it even after the meeting has ended.
+    dictation_aside_tap: Option<Arc<MeetingMicTap>>,
+    dictation_capture_checkpoint:
+        Arc<std::sync::Mutex<Option<crate::dictation_checkpoint::CaptureCheckpoint>>>,
+    #[cfg(test)]
+    dictation_checkpoint_root: Option<crate::test_fs::TempDir>,
 }
 
 /// Bounded UI-only audio plus an absolute sample watermark. The watermark is
@@ -643,6 +752,374 @@ pub struct AudioCapture {
 pub(crate) struct DictationPartialBuffer {
     pub(crate) samples: Vec<f32>,
     pub(crate) total_samples: u64,
+}
+
+/// Loudest capture-callback RMS over the last one to two windows.
+///
+/// A callback covers ~10 ms while the UI polls every 90-120 ms, so storing the
+/// latest callback made the meter jitter and miss quiet syllables. Readers
+/// cannot reset a peak either: the popup and the main window poll on their own
+/// timers, and whichever read second would see an empty window. So the capture
+/// callback, the only writer, rotates the window instead.
+#[derive(Default)]
+struct DictationLevelMeter {
+    current: AtomicU32,
+    previous: AtomicU32,
+    window_started_us: AtomicU64,
+}
+
+impl DictationLevelMeter {
+    const WINDOW_US: u64 = 120_000;
+
+    fn record(&self, rms: f32, now_us: u64) {
+        let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
+        let rotate = now_us
+            .checked_sub(self.window_started_us.load(Ordering::Relaxed))
+            .is_none_or(|elapsed| elapsed >= Self::WINDOW_US);
+        if rotate {
+            let finished = self.current.swap(level, Ordering::Relaxed);
+            self.previous.store(finished, Ordering::Relaxed);
+            self.window_started_us.store(now_us, Ordering::Relaxed);
+        } else {
+            self.current.fetch_max(level, Ordering::Relaxed);
+        }
+    }
+
+    fn read(&self) -> f32 {
+        let level = self
+            .current
+            .load(Ordering::Relaxed)
+            .max(self.previous.load(Ordering::Relaxed));
+        level as f32 / u32::MAX as f32
+    }
+
+    fn reset(&self) {
+        self.current.store(0, Ordering::Relaxed);
+        self.previous.store(0, Ordering::Relaxed);
+        self.window_started_us.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Where one dictation session's audio goes, shared by whichever stream feeds
+/// it: a stream opened for the session, or the hands-free monitor's stream
+/// handed over to it.
+struct DictationCaptureSink {
+    session_id: u64,
+    session_max_seconds: u64,
+    /// Ceiling for the *transcription* buffer, in mono samples at the session
+    /// rate. Unlike the partial buffer this one may not slide: dropping the
+    /// oldest audio would silently rewrite what the user said. It stops
+    /// instead, and says so.
+    max_session_samples: u64,
+    /// Sliding window for the UI-only partial buffer, so the per-tick clone
+    /// (taken under a lock this callback also holds) and the partial re-decode
+    /// stay O(window), not O(session length). Trimmed lazily (only past 2x the
+    /// window) so the front-drain memmove happens roughly once per window.
+    max_partial_samples: usize,
+    capture_started_at: Instant,
+    capture_stop: Arc<AtomicBool>,
+    callback_count: Arc<AtomicU64>,
+    buffer: Arc<crossbeam::queue::SegQueue<f32>>,
+    buffered_samples: Arc<AtomicU64>,
+    max_duration_reached: Arc<AtomicBool>,
+    audio_level: Arc<DictationLevelMeter>,
+    partial_buffer: Arc<std::sync::Mutex<DictationPartialBuffer>>,
+    streaming_active: Arc<AtomicBool>,
+    vad_gate: Arc<std::sync::Mutex<Option<Box<dyn VadGate + Send>>>>,
+    vad_session_id: Arc<AtomicU64>,
+    vad_gate_active: Arc<AtomicBool>,
+    first_sample_us: Arc<AtomicU64>,
+    last_callback_us: Arc<AtomicU64>,
+    stream_failed: Arc<AtomicBool>,
+    realtime: realtime::RealtimeSamples,
+    checkpoint: Arc<std::sync::Mutex<Option<crate::dictation_checkpoint::CaptureCheckpoint>>>,
+    event_handle: Option<SidecarHandle>,
+}
+
+impl DictationCaptureSink {
+    /// The realtime body of a dictation capture callback.
+    fn ingest<T>(&self, data: &[T], num_channels: usize)
+    where
+        T: Sample,
+        f32: FromSample<T>,
+    {
+        if !self.capture_stop.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // First sample of this session: record how long the microphone took
+        // to actually deliver audio, so the cold-open cost is measurable
+        // rather than assumed.
+        if self.first_sample_us.load(Ordering::Relaxed) == 0 {
+            let _ = self.first_sample_us.compare_exchange(
+                0,
+                (self.capture_started_at.elapsed().as_micros() as u64).max(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+
+        self.callback_count.fetch_add(1, Ordering::Relaxed);
+        let now_us = self.capture_started_at.elapsed().as_micros() as u64;
+        self.last_callback_us.store(now_us, Ordering::Relaxed);
+        if self.realtime.push(data, num_channels) > 0 {
+            self.stream_failed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn process_pending(&self) {
+        let mut samples = Vec::new();
+        self.realtime.drain(&mut samples);
+        let dropped = self.realtime.take_dropped();
+        if dropped > 0 {
+            tracing::warn!(
+                dropped_samples = dropped,
+                "Dictation capture worker fell behind"
+            );
+        }
+        if !samples.is_empty() {
+            self.process_samples(&samples, 1);
+        }
+    }
+
+    /// Runs on the capture worker, including the final drain after stream stop.
+    fn process_samples<T>(&self, data: &[T], num_channels: usize)
+    where
+        T: Sample,
+        f32: FromSample<T>,
+    {
+        let now_us = self.last_callback_us.load(Ordering::Relaxed);
+        let streaming = self.streaming_active.load(Ordering::Relaxed);
+        let vad_active = self.vad_gate_active.load(Ordering::Relaxed)
+            && self.vad_session_id.load(Ordering::SeqCst) == self.session_id;
+        let checkpoint_active = self
+            .checkpoint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let need_mono_scratch = streaming || vad_active || checkpoint_active;
+        let capacity = if num_channels <= 1 {
+            data.len()
+        } else {
+            data.len() / num_channels
+        };
+        let mut mono_scratch = if need_mono_scratch {
+            Vec::with_capacity(capacity)
+        } else {
+            Vec::new()
+        };
+        let mut sum_sq = 0.0_f64;
+        let mut mono_len = 0_usize;
+
+        // Admit one worker drain at a time and commit its sample count once.
+        let admission = admit_dictation_samples(
+            self.buffered_samples.load(Ordering::Relaxed),
+            capacity as u64,
+            self.max_session_samples,
+        );
+        let mut accepted_remaining = admission.accepted;
+
+        for_each_mono_sample(data, num_channels, |sample| {
+            if accepted_remaining > 0 {
+                self.buffer.push(sample);
+                accepted_remaining -= 1;
+            }
+            if need_mono_scratch {
+                mono_scratch.push(sample);
+            }
+            sum_sq += (sample as f64) * (sample as f64);
+            mono_len += 1;
+        });
+
+        if checkpoint_active {
+            let mut checkpoint = self.checkpoint.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(checkpoint) = checkpoint.as_mut() {
+                if let Err(error) = checkpoint.append(&mono_scratch[..admission.accepted as usize])
+                {
+                    tracing::error!("Could not checkpoint aside capture: {error}");
+                    self.stream_failed.store(true, Ordering::SeqCst);
+                    self.capture_stop.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+
+        if admission.accepted > 0 {
+            self.buffered_samples
+                .fetch_add(admission.accepted, Ordering::Relaxed);
+        }
+
+        if admission.ceiling_reached && !self.max_duration_reached.swap(true, Ordering::SeqCst) {
+            // End capture here rather than letting the mic run on producing
+            // audio that can no longer be stored. Announced once;
+            // `stop_dictation` also reports it, so the user is never handed a
+            // silently truncated transcript.
+            tracing::warn!(
+                "Dictation session {} reached the {}s maximum length; capture stopped",
+                self.session_id,
+                self.session_max_seconds
+            );
+            self.capture_stop.store(false, Ordering::SeqCst);
+            if let Some(handle) = self.event_handle.as_ref() {
+                handle.emit(
+                    "dictation-vad-signal",
+                    serde_json::json!({
+                        "signal": "max_duration_stop",
+                        "sessionId": self.session_id,
+                        "maxDurationSeconds": self.session_max_seconds,
+                    }),
+                );
+            }
+        }
+
+        if streaming {
+            if let Ok(mut shared) = self.partial_buffer.lock() {
+                shared.total_samples = shared
+                    .total_samples
+                    .saturating_add(mono_scratch.len() as u64);
+                shared.samples.extend_from_slice(&mono_scratch);
+                if shared.samples.len() > self.max_partial_samples * 2 {
+                    let overflow = shared.samples.len() - self.max_partial_samples;
+                    shared.samples.drain(0..overflow);
+                }
+            }
+        }
+
+        let rms = (sum_sq / mono_len.max(1) as f64).sqrt() as f32;
+        self.audio_level.record(rms, now_us);
+
+        if vad_active {
+            drive_dictation_auto_stop_gate(
+                &mono_scratch,
+                self.session_id,
+                &self.vad_gate,
+                &self.vad_session_id,
+                self.event_handle.as_ref(),
+            );
+        }
+    }
+
+    /// Put audio heard before this session owned the stream at the head of
+    /// its buffer. Not fed to the live preview or the auto-stop gate, matching
+    /// how a freshly opened stream is seeded.
+    fn seed(&self, samples: Vec<f32>) {
+        if samples.is_empty() {
+            return;
+        }
+        tracing::info!("Seeding dictation with {} pre-roll samples", samples.len());
+        let seeded = samples.len() as u64;
+        for sample in samples {
+            self.buffer.push(sample);
+        }
+        self.buffered_samples.fetch_add(seeded, Ordering::SeqCst);
+    }
+}
+
+/// An aside's dictation is fed by the meeting's capture worker, block by
+/// block, exactly as the hands-free monitor feeds a session it handed over.
+impl AsideSink for DictationCaptureSink {
+    fn push_frames(&self, frames: &[f32]) {
+        self.ingest(frames, 1);
+        self.process_pending();
+    }
+
+    fn source_dropped(&self) {
+        self.stream_failed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// What one hands-free monitor run's stream feeds: the pre-roll while it is
+/// listening for speech, then the dictation session it was handed to.
+#[derive(Default)]
+struct HandsFreeTap {
+    input_session_id: Arc<AtomicU64>,
+    pre_roll: Option<PreRollBuffer>,
+    /// Set while a start this monitor signalled is in flight, so a second
+    /// burst cannot move the pre-roll's onset mark or signal again.
+    held: bool,
+    /// Device and format the monitor stream runs on. A session takes the
+    /// stream over only when it would have opened exactly this.
+    device_id: String,
+    sample_rate: u32,
+    channels: u16,
+    session: Option<Arc<DictationCaptureSink>>,
+}
+
+impl HandsFreeTap {
+    /// Whether the monitor thread must keep its stream open for a session.
+    fn session_running(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.capture_stop.load(Ordering::SeqCst))
+    }
+}
+
+/// Whether this monitor still owns incoming audio.
+fn monitor_accepts_audio(
+    monitoring: bool,
+    dictating: bool,
+    input_session_id: u64,
+    active_session_id: u64,
+) -> bool {
+    if input_session_id == 0 {
+        monitoring
+    } else {
+        dictating && input_session_id == active_session_id
+    }
+}
+
+/// Process a drained buffer on the monitor worker, preserving pre-roll order
+/// when the stream is handed to a dictation session.
+fn feed_hands_free_monitor<T>(
+    data: &[T],
+    num_channels: usize,
+    tap: &std::sync::Mutex<HandsFreeTap>,
+    running: &AtomicBool,
+    gate: &std::sync::Mutex<Box<dyn VadGate + Send>>,
+    handle: &SidecarHandle,
+    speech_onset_lookback: usize,
+) where
+    T: Sample,
+    f32: FromSample<T>,
+{
+    let Ok(mut slot) = tap.lock() else {
+        return;
+    };
+    if let Some(session) = slot.session.clone() {
+        drop(slot);
+        session.ingest(data, num_channels);
+        session.process_pending();
+        return;
+    }
+    if !running.load(Ordering::SeqCst) {
+        return;
+    }
+    let mono = downmix_to_mono(data, num_channels);
+    if let Some(pre_roll) = slot.pre_roll.as_mut() {
+        pre_roll.push(&mono);
+    }
+    if slot.held {
+        return;
+    }
+    drop(slot);
+
+    let edge = match gate.lock() {
+        Ok(mut gate) => gate.push_samples(&mono),
+        Err(_) => return,
+    };
+    if edge != VadEdge::SpeechStarted {
+        return;
+    }
+    handle.emit(
+        "dictation-vad-signal",
+        serde_json::json!({ "signal": "hands_free_start" }),
+    );
+    // The gate latches well after speech began; mark where it actually did so
+    // the hand-off is the user's opening words, not the whole ring.
+    if let Ok(mut slot) = tap.lock() {
+        if let Some(pre_roll) = slot.pre_roll.as_mut() {
+            pre_roll.mark_speech_onset(speech_onset_lookback);
+        }
+    }
 }
 
 static SYSTEM_AUDIO_TEST_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -673,6 +1150,29 @@ enum RecordingActivation {
         activated_rx: crossbeam::channel::Receiver<std::result::Result<(), String>>,
     },
     Mixed(crate::audio::system_capture::MixedAudioCaptureStart),
+}
+
+// A block may still be queued when an aside ends during a pause. It must
+// remain outside the recording even though the tap is already detached.
+fn forward_meeting_microphone(
+    tap: &MeetingMicTap,
+    frames: &[f32],
+    paused: bool,
+    asides_enabled: bool,
+) -> Option<bool> {
+    let written = if asides_enabled {
+        !paused
+    } else {
+        !(paused && tap.is_attached())
+    };
+    let aside = tap.forward(frames, written, false);
+    written.then_some(aside)
+}
+
+struct AsideMarker;
+impl AsideSink for AsideMarker {
+    fn push_frames(&self, _frames: &[f32]) {}
+    fn source_dropped(&self) {}
 }
 
 struct ActiveRecordingSession {
@@ -709,6 +1209,10 @@ struct ActiveRecordingSession {
     /// lifecycle loop polls this so the failure surfaces while there is still a
     /// meeting to salvage.
     writer_failure: Arc<std::sync::Mutex<Option<String>>>,
+    /// Tracks of a Me + Them meeting that stopped accepting writes while the
+    /// others kept recording. Read at stop to save what each track got and to
+    /// say which source failed.
+    track_write_failures: TrackWriteFailures,
     /// Set while the user has paused the meeting. Both capture paths read it
     /// on every callback or drain and drop the frames instead of forwarding
     /// them, so the streams stay open and resume is instant.
@@ -721,8 +1225,18 @@ struct ActiveRecordingSession {
     /// and publish whole seconds of inactivity here; mixed sessions publish
     /// through `MixedAudioCapture` instead.
     mic_inactive_seconds: Option<Arc<AtomicU32>>,
+    /// Mic-only sessions' live microphone loudness, published by the capture
+    /// callback; mixed sessions publish through `MixedAudioCapture`.
+    mic_level: Option<Arc<AtomicU32>>,
     /// When frames last started flowing on purpose: activation or resume.
     activity_epoch: Instant,
+    /// Offers the microphone frames to a dictation started during the
+    /// meeting, and counts the Me track so that aside's span is exact.
+    aside_tap: Arc<MeetingMicTap>,
+    /// Whether this meeting writes a Me track at all. A system-audio-only
+    /// meeting leaves the microphone to an ordinary dictation.
+    captures_microphone: bool,
+    microphone_device_id: Option<String>,
 }
 
 impl ActiveRecordingSession {
@@ -790,6 +1304,14 @@ pub struct RecordingStopResult {
     /// Every pause of this meeting, the last one closed by the stop if it was
     /// still open.
     pub pause_spans: Vec<PauseSpan>,
+    /// Every dictation taken from this meeting's microphone, on its Me track.
+    pub aside_spans: Vec<AsideSpan>,
+    /// Tracks that stopped accepting writes before Stop. What each of them
+    /// saved is in `validated_assets` unless it is also unreadable.
+    pub failed_tracks: Vec<RecordingAudioRole>,
+    /// Failed separate tracks (never the primary) that saved nothing readable.
+    /// The caller removes them so the meeting is processed from what was saved.
+    pub unreadable_tracks: Vec<RecordingAudioRole>,
 }
 
 /// Feed this callback's mono samples through the active dictation auto-stop VAD
@@ -878,6 +1400,122 @@ fn infer_transport_type(device_name: &str) -> String {
     }
 }
 
+/// Core Audio's transport type for an input device (`kAudioDevicePropertyTransportType`),
+/// looked up by the device UID cpal reports. `None` when the device cannot be
+/// matched or Core Audio does not say.
+#[cfg(target_os = "macos")]
+fn coreaudio_transport_type(device: &cpal::Device) -> Option<&'static str> {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::CFString;
+    use core_foundation_sys::string::CFStringRef;
+    use objc2_core_audio::{
+        kAudioDevicePropertyTransportType, kAudioDeviceTransportTypeAggregate,
+        kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE,
+        kAudioDeviceTransportTypeBuiltIn, kAudioDeviceTransportTypeUSB,
+        kAudioDeviceTransportTypeVirtual, kAudioHardwarePropertyTranslateUIDToDevice,
+        kAudioObjectPropertyElementMain, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+        AudioObjectGetPropertyData, AudioObjectID, AudioObjectPropertyAddress,
+    };
+    use std::ptr::NonNull;
+
+    let id = device.id().ok()?;
+    let uid = CFString::new(id.id());
+    let uid_ref: CFStringRef = uid.as_concrete_TypeRef();
+    let translate = AudioObjectPropertyAddress {
+        mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut device_id: AudioObjectID = 0;
+    let mut size = std::mem::size_of::<AudioObjectID>() as u32;
+    // SAFETY: the qualifier is a live CFStringRef and the output is an
+    // AudioObjectID-sized buffer, as the property requires.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            kAudioObjectSystemObject as AudioObjectID,
+            NonNull::from(&translate),
+            std::mem::size_of::<CFStringRef>() as u32,
+            (&uid_ref as *const CFStringRef).cast(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut device_id).cast(),
+        )
+    };
+    if status != 0 || device_id == 0 {
+        return None;
+    }
+    let transport_address = AudioObjectPropertyAddress {
+        mSelector: kAudioDevicePropertyTransportType,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain,
+    };
+    let mut transport: u32 = 0;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: the transport type is a UInt32 property.
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            device_id,
+            NonNull::from(&transport_address),
+            0,
+            std::ptr::null(),
+            NonNull::from(&mut size),
+            NonNull::from(&mut transport).cast(),
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    if transport == kAudioDeviceTransportTypeBluetooth
+        || transport == kAudioDeviceTransportTypeBluetoothLE
+    {
+        Some("bluetooth")
+    } else if transport == kAudioDeviceTransportTypeBuiltIn {
+        Some("builtin")
+    } else if transport == kAudioDeviceTransportTypeUSB {
+        Some("usb")
+    } else if transport == kAudioDeviceTransportTypeVirtual
+        || transport == kAudioDeviceTransportTypeAggregate
+    {
+        Some("virtual")
+    } else {
+        None
+    }
+}
+
+/// The input's transport: what Core Audio reports when it can be read, else
+/// a guess from the device name.
+fn device_transport_type(device: &cpal::Device, device_name: &str) -> String {
+    #[cfg(target_os = "macos")]
+    if let Some(transport) = coreaudio_transport_type(device) {
+        return transport.to_string();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = device;
+    infer_transport_type(device_name)
+}
+
+/// How long to hold the dictation start sound for this input.
+///
+/// A Bluetooth headset switches profile when its microphone opens, and the
+/// switch swallows audio played in the meantime, so a start sound played at
+/// once is often never heard. AirPods switch in about 300 ms; other headsets
+/// can take over a second. Wired and built-in inputs play it at once.
+pub(crate) fn dictation_start_sound_delay_ms(
+    transport_type: Option<&str>,
+    device_name: &str,
+) -> u64 {
+    let transport = match transport_type {
+        Some(value) if value != "unknown" => value.to_string(),
+        _ => infer_transport_type(device_name),
+    };
+    if transport != "bluetooth" {
+        0
+    } else if device_name.to_ascii_lowercase().contains("airpods") {
+        300
+    } else {
+        1200
+    }
+}
+
 fn bluetooth_advisory_for_device(
     device_name: &str,
     transport_type: Option<&str>,
@@ -912,7 +1550,7 @@ fn build_audio_input_device_info(
         return None;
     }
     let config = device.default_input_config().ok();
-    let transport_type = infer_transport_type(&device_name);
+    let transport_type = device_transport_type(device, &device_name);
     Some(AudioInputDeviceInfo {
         device_id: format!("input-{}-{}", index, device_name.to_ascii_lowercase()),
         device_name: device_name.clone(),
@@ -941,18 +1579,30 @@ fn resolve_device_preference<'a>(
         .map(|(device, info)| (device, info))
 }
 
+fn default_capture_data_directory() -> Option<PathBuf> {
+    #[cfg(test)]
+    {
+        Some(std::env::temp_dir().join(format!("plainsong-capture-tests-{}", std::process::id())))
+    }
+    #[cfg(not(test))]
+    {
+        dirs::data_dir()
+    }
+}
+
 impl AudioCapture {
     pub fn new() -> Self {
-        let recordings_dir = crate::paths::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Plainsong")
-            .join("recordings");
+        let recordings_dir = crate::paths::directory_with_override(
+            "PLAINSONG_DATA_DIR",
+            default_capture_data_directory,
+        )
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Plainsong")
+        .join("recordings");
 
         std::fs::create_dir_all(&recordings_dir).ok();
 
         let host = cpal::default_host();
-
-        let preprocessor = AudioPreprocessor::new(16000);
 
         Self {
             is_dictating: Arc::new(AtomicBool::new(false)),
@@ -964,21 +1614,14 @@ impl AudioCapture {
             host,
             active_recording: None,
             microphone_preparation_stalled: false,
-            preprocessor: Some(preprocessor),
-            // Off for dictation. The gate calibrated its noise floor on the
-            // first half-second of every capture -- which, with push-to-talk,
-            // is usually speech -- then closed within a sample on any quiet
-            // stretch, cutting soft consonants and word endings by 70%.
-            // Current ASR models are trained on noisy audio and do better
-            // with it than with gated audio; loudness is handled by
-            // `normalize_dictation_loudness` instead.
-            noise_suppression_enabled: false,
-            dictation_audio_level: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            dictation_audio_level: Arc::new(DictationLevelMeter::default()),
             dictation_callback_count: Arc::new(AtomicU64::new(0)),
             dictation_capture_stop: None,
             dictation_capture_session_id: None,
             dictation_buffered_samples: Arc::new(AtomicU64::new(0)),
             dictation_max_duration_reached: Arc::new(AtomicBool::new(false)),
+            dictation_next_max_session_seconds: DICTATION_MAX_SESSION_SECONDS,
+            dictation_last_max_session_seconds: DICTATION_MAX_SESSION_SECONDS,
             dictation_partial_buffer: Arc::new(std::sync::Mutex::new(
                 DictationPartialBuffer::default(),
             )),
@@ -989,8 +1632,15 @@ impl AudioCapture {
             hands_free_monitor_active: Arc::new(AtomicBool::new(false)),
             hands_free_monitor_thread: None,
             hands_free_monitor_config: None,
-            dictation_pre_roll: Arc::new(std::sync::Mutex::new(None)),
+            hands_free_tap: Arc::new(std::sync::Mutex::new(HandsFreeTap::default())),
             dictation_first_sample_us: Arc::new(AtomicU64::new(0)),
+            dictation_last_callback_us: Arc::new(AtomicU64::new(0)),
+            dictation_stream_failed: Arc::new(AtomicBool::new(false)),
+            dictation_capture_started_at: None,
+            dictation_aside_tap: None,
+            dictation_capture_checkpoint: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            dictation_checkpoint_root: None,
         }
     }
 
@@ -1078,6 +1728,7 @@ impl AudioCapture {
                     .collect::<Vec<_>>(),
             ),
             paused: session.paused.load(Ordering::Relaxed),
+            recorded_seconds: session.recorded_seconds(),
             inactivity: match session.mixed_capture.as_ref() {
                 Some(mixed) => mixed.source_inactivity(),
                 None => SourceInactivity {
@@ -1089,6 +1740,7 @@ impl AudioCapture {
                 },
             },
             seconds_since_activity_epoch: session.activity_epoch.elapsed().as_secs_f32(),
+            mixed: session.mixed_capture.is_some(),
         })
     }
 
@@ -1202,7 +1854,7 @@ impl AudioCapture {
             .and_then(|device| device_name(&device).ok());
         let default_device_info = self.host.default_input_device().and_then(|device| {
             let name = device_name(&device).ok()?;
-            let transport_type = infer_transport_type(&name);
+            let transport_type = device_transport_type(&device, &name);
             Some(ResolvedAudioInputDevice {
                 device_id: format!("default-{}", name.to_ascii_lowercase()),
                 device_name: name.clone(),
@@ -1252,7 +1904,7 @@ impl AudioCapture {
                 .description()
                 .map(|description| description.name().to_string())
                 .unwrap_or_else(|_| "Default microphone".to_string());
-            let transport_type = infer_transport_type(&name);
+            let transport_type = device_transport_type(&default_device, &name);
             let advisory = match preference {
                 Some(saved) => Some(format!(
                     "{} is unavailable, so Plainsong fell back to {}.",
@@ -1316,12 +1968,15 @@ impl AudioCapture {
     /// event channel when the gate detects sustained silence after speech.
     ///
     /// `seed_from_pre_roll` must be true ONLY when this start came from the
-    /// hands-free monitor's own `hands_free_start` signal. Every other
-    /// activation path (hotkey, native helper, the popup's "Start again") means
-    /// "begin now", and the caller stops the monitor immediately before calling
-    /// in — so the ring is always fresh and the age guard could never reject it.
-    /// Draining it unconditionally would splice the seconds *before* the user
-    /// pressed the key onto the head of their transcript.
+    /// hands-free monitor's own `hands_free_start` signal. Such a start takes
+    /// over the monitor's running stream when it is on the same device (see
+    /// `hand_monitor_stream_to_session`), and otherwise seeds a new stream with
+    /// the pre-roll. Every other activation path (hotkey, native helper, the
+    /// popup's "Start again") means "begin now", and the caller stops the
+    /// monitor immediately before calling in — so the ring is always fresh and
+    /// the age guard could never reject it. Draining it unconditionally would
+    /// splice the seconds *before* the user pressed the key onto the head of
+    /// their transcript.
     pub fn start_dictation(
         &mut self,
         preference: Option<&settings::AudioInputDevicePreference>,
@@ -1333,20 +1988,21 @@ impl AudioCapture {
         if self.is_dictating.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("Dictation already in progress"));
         }
-        if self.is_recording() {
+        if self.is_recording()
+            && self
+                .dictation_aside_tap
+                .as_ref()
+                .and_then(|tap| tap.attached_session())
+                != Some(session_id)
+        {
             return Err(anyhow::anyhow!(
                 "Cannot start dictation while a meeting recording is active"
             ));
         }
 
-        while self.dictation_buffer.pop().is_some() {}
-        self.dictation_buffered_samples.store(0, Ordering::SeqCst);
-        self.dictation_max_duration_reached
-            .store(false, Ordering::SeqCst);
-        if let Ok(mut partial) = self.dictation_partial_buffer.lock() {
-            partial.samples.clear();
-            partial.total_samples = 0;
-        }
+        let session_max_seconds = self.activate_dictation_session_limit();
+
+        self.reset_dictation_sample_storage();
 
         let (device, resolved_device) = self.resolve_input_device(preference)?;
 
@@ -1356,21 +2012,6 @@ impl AudioCapture {
         self.dictation_sample_rate = sample_rate;
         self.dictation_channels = channels;
 
-        let pre_roll_samples = self.resolve_dictation_seed_samples(sample_rate, seed_from_pre_roll);
-        if !pre_roll_samples.is_empty() {
-            tracing::info!(
-                "Seeding dictation with {} pre-roll samples ({:.0}ms)",
-                pre_roll_samples.len(),
-                pre_roll_samples.len() as f32 / sample_rate.max(1) as f32 * 1000.0
-            );
-            let seeded = pre_roll_samples.len() as u64;
-            for sample in pre_roll_samples {
-                self.dictation_buffer.push(sample);
-            }
-            self.dictation_buffered_samples
-                .fetch_add(seeded, Ordering::SeqCst);
-        }
-
         tracing::info!(
             "Starting dictation capture on '{}' : {} channels, {} Hz, format: {:?}",
             resolved_device.device_name,
@@ -1379,6 +2020,208 @@ impl AudioCapture {
             config.sample_format()
         );
 
+        let (capture_stop, sink) = self.begin_dictation_capture_session(
+            session_id,
+            session_max_seconds,
+            sample_rate,
+            &auto_stop,
+            event_handle,
+        );
+
+        if self.dictation_aside_tap.is_some() {
+            if let Err(error) = self.begin_aside_capture_checkpoint(session_id, sample_rate) {
+                self.abort_dictation();
+                return Err(anyhow::anyhow!(error));
+            }
+        }
+
+        if seed_from_pre_roll
+            && self.hand_monitor_stream_to_session(&sink, &resolved_device, sample_rate, channels)
+        {
+            tracing::info!("Dictation took over the hands-free monitor stream");
+            return Ok(resolved_device);
+        }
+        // The monitor and a session must never both hold the microphone.
+        self.stop_hands_free_monitor();
+        sink.seed(self.resolve_dictation_seed_samples(sample_rate, seed_from_pre_roll));
+
+        // Latched by `guard_audio_callback` if this session's realtime callback
+        // ever panics, so the stream goes quiet instead of aborting the process.
+        let callback_poisoned = Arc::new(AtomicBool::new(false));
+        let callback_count = Arc::clone(&self.dictation_callback_count);
+        let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
+
+        let capture_handle = std::thread::spawn(move || {
+            let _ = crate::qos::WorkClass::Interactive.apply_to_current_thread();
+            let capture_flag = Arc::clone(&capture_stop);
+            let device = device;
+            let preparation_started_at = std::time::Instant::now();
+            tracing::info!(
+                session_id,
+                stage = "input_config",
+                "Dictation microphone preparation started"
+            );
+            let config = match device.default_input_config() {
+                Ok(config) => config,
+                Err(e) => {
+                    let _ = startup_tx.send(Err(format!(
+                        "Failed to fetch dictation input config: {}",
+                        e
+                    )));
+                    tracing::error!("Failed to fetch dictation input config: {}", e);
+                    return;
+                }
+            };
+            let num_channels = config.channels() as usize;
+            let sample_format = config.sample_format();
+            let stream_config = config.config();
+
+            macro_rules! build_dictation_stream {
+                ($sample_type:ty) => {{
+                    let callback_poisoned = Arc::clone(&callback_poisoned);
+                    let sink = Arc::clone(&sink);
+                    let stream_failed = Arc::clone(&sink.stream_failed);
+
+                    device.build_input_stream(
+                        stream_config.clone(),
+                        move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
+                            guard_audio_callback(&callback_poisoned, "Dictation", || {
+                                sink.ingest(data, num_channels)
+                            });
+                        },
+                        move |err| {
+                            stream_failed.store(true, Ordering::SeqCst);
+                            tracing::error!("Dictation stream error: {}", err);
+                        },
+                        None,
+                    )
+                }};
+            }
+
+            tracing::info!(
+                session_id,
+                stage = "stream_build",
+                elapsed_ms = preparation_started_at.elapsed().as_millis() as u64,
+                "Dictation microphone preparation advanced"
+            );
+            let stream_result = match sample_format {
+                cpal::SampleFormat::I8 => build_dictation_stream!(i8),
+                cpal::SampleFormat::I16 => build_dictation_stream!(i16),
+                cpal::SampleFormat::I24 => build_dictation_stream!(cpal::I24),
+                cpal::SampleFormat::I32 => build_dictation_stream!(i32),
+                cpal::SampleFormat::I64 => build_dictation_stream!(i64),
+                cpal::SampleFormat::U8 => build_dictation_stream!(u8),
+                cpal::SampleFormat::U16 => build_dictation_stream!(u16),
+                cpal::SampleFormat::U24 => build_dictation_stream!(cpal::U24),
+                cpal::SampleFormat::U32 => build_dictation_stream!(u32),
+                cpal::SampleFormat::U64 => build_dictation_stream!(u64),
+                cpal::SampleFormat::F32 => build_dictation_stream!(f32),
+                cpal::SampleFormat::F64 => build_dictation_stream!(f64),
+                format => {
+                    let _ = startup_tx.send(Err(format!(
+                        "Unsupported sample format for dictation: {:?}",
+                        format
+                    )));
+                    tracing::error!("Unsupported sample format for dictation: {:?}", format);
+                    return;
+                }
+            };
+
+            let Ok(stream) = stream_result else {
+                let _ = startup_tx.send(Err(
+                    "Failed to build dictation microphone input stream".to_string()
+                ));
+                tracing::error!("Failed to build dictation stream");
+                return;
+            };
+
+            tracing::info!(
+                session_id,
+                stage = "stream_play",
+                elapsed_ms = preparation_started_at.elapsed().as_millis() as u64,
+                "Dictation microphone preparation advanced"
+            );
+            if let Err(e) = stream.play() {
+                let _ = startup_tx.send(Err(format!(
+                    "Failed to start dictation microphone stream: {}",
+                    e
+                )));
+                tracing::error!("Failed to start dictation stream: {}", e);
+                return;
+            }
+
+            // "Listening" must mean audio is arriving: Bluetooth and some USB
+            // devices deliver their first buffer hundreds of milliseconds
+            // after play(), and people start talking when the HUD says so.
+            // A device that stays silent past the bound still starts; the
+            // session then publishes "Listening" when its first sample lands.
+            let first_callback_deadline = std::time::Instant::now() + FIRST_CAPTURE_CALLBACK_WAIT;
+            while callback_count.load(Ordering::Relaxed) == 0
+                && capture_flag.load(Ordering::SeqCst)
+                && std::time::Instant::now() < first_callback_deadline
+            {
+                sink.process_pending();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let _ = startup_tx.send(Ok(()));
+            tracing::info!(
+                session_id,
+                elapsed_ms = preparation_started_at.elapsed().as_millis() as u64,
+                "Dictation audio stream started successfully"
+            );
+
+            while capture_flag.load(Ordering::SeqCst) {
+                sink.process_pending();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+
+            tracing::info!("Dictation audio stream stopping");
+            drop(stream);
+            sink.process_pending();
+        });
+        self.dictation_thread = Some(capture_handle);
+
+        // Wait for the audio stream to actually start. Core Audio stream
+        // construction can stall inside the platform call, so every failure
+        // path must retire the worker with a bounded join. An unbounded join
+        // here would prevent the command from ever returning its timeout to
+        // Electron, leaving the UI stuck on "Getting ready".
+        match startup_rx.recv_timeout(MICROPHONE_STREAM_PREPARATION_TIMEOUT) {
+            Ok(Ok(())) => {
+                tracing::info!("Dictation started (stream confirmed live)");
+            }
+            Ok(Err(error)) => {
+                self.retire_dictation_preparation_thread();
+                return Err(anyhow::anyhow!(error));
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                self.retire_dictation_preparation_thread();
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for dictation microphone stream to start. Plainsong is restarting audio capture automatically; retry in a moment."
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.retire_dictation_preparation_thread();
+                return Err(anyhow::anyhow!(
+                    "Dictation microphone stream preparation stopped unexpectedly"
+                ));
+            }
+        }
+
+        Ok(resolved_device)
+    }
+
+    /// The per-session state every dictation capture starts from, whichever
+    /// stream feeds it: the auto-stop gate, the counters, the session's own
+    /// stop flag and the sink its audio goes to.
+    fn begin_dictation_capture_session(
+        &mut self,
+        session_id: u64,
+        session_max_seconds: u64,
+        sample_rate: u32,
+        auto_stop: &DictationAutoStopConfig,
+        event_handle: Option<SidecarHandle>,
+    ) -> (Arc<AtomicBool>, Arc<DictationCaptureSink>) {
         // Scope the auto-stop VAD gate to this session *before* the capture callback
         // can observe it: set the session id first, then install (or clear) the
         // gate, so there's no window where a stale gate could be read under the
@@ -1426,7 +2269,10 @@ impl AudioCapture {
 
         self.is_dictating.store(true, Ordering::SeqCst);
         self.dictation_callback_count.store(0, Ordering::SeqCst);
+        self.dictation_audio_level.reset();
         self.dictation_first_sample_us.store(0, Ordering::SeqCst);
+        self.dictation_last_callback_us.store(0, Ordering::SeqCst);
+        self.dictation_stream_failed.store(false, Ordering::SeqCst);
 
         // Per-session stop flag: this session's capture thread and callbacks
         // park/act on this Arc, NOT on the shared `is_dictating`, so a
@@ -1436,280 +2282,283 @@ impl AudioCapture {
         self.dictation_capture_stop = Some(Arc::clone(&capture_stop));
         self.dictation_capture_session_id = Some(session_id);
 
-        let buffer = Arc::clone(&self.dictation_buffer);
-        let buffered_samples = Arc::clone(&self.dictation_buffered_samples);
-        let max_duration_reached = Arc::clone(&self.dictation_max_duration_reached);
-        // Latched by `guard_audio_callback` if this session's realtime callback
-        // ever panics, so the stream goes quiet instead of aborting the process.
-        let callback_poisoned = Arc::new(AtomicBool::new(false));
-        let callback_count = Arc::clone(&self.dictation_callback_count);
-        let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
-        let audio_level = Arc::clone(&self.dictation_audio_level);
-        let partial_buffer = Arc::clone(&self.dictation_partial_buffer);
-        let streaming_active = Arc::clone(&self.dictation_streaming_active);
-        let vad_gate = Arc::clone(&self.dictation_vad_gate);
-        let vad_session_id = Arc::clone(&self.dictation_vad_session_id);
-        let vad_gate_active = Arc::clone(&self.dictation_vad_gate_active);
-        let vad_event_handle = event_handle;
-        let first_sample_us = Arc::clone(&self.dictation_first_sample_us);
         let capture_started_at = std::time::Instant::now();
+        self.dictation_capture_started_at = Some(capture_started_at);
+        let sink = self.dictation_capture_sink(
+            session_id,
+            session_max_seconds,
+            sample_rate,
+            &capture_stop,
+            capture_started_at,
+            event_handle,
+        );
+        (capture_stop, sink)
+    }
 
-        let capture_handle = std::thread::spawn(move || {
-            let capture_flag = Arc::clone(&capture_stop);
-            let device = device;
-            let config = match device.default_input_config() {
-                Ok(config) => config,
-                Err(e) => {
-                    let _ = startup_tx.send(Err(format!(
-                        "Failed to fetch dictation input config: {}",
-                        e
-                    )));
-                    tracing::error!("Failed to fetch dictation input config: {}", e);
-                    return;
-                }
-            };
-            let num_channels = config.channels() as usize;
-            // Cap the UI-only partial buffer to a sliding window of recent audio
-            // so the per-tick clone (taken under a lock the RT callback also holds)
-            // and the partial re-decode stay O(window), not O(session length).
-            // Trim lazily (only past 2x the window) so the front-drain memmove is
-            // amortized to roughly once per window rather than every callback.
-            let max_partial_samples = (config.sample_rate() as usize).saturating_mul(30);
-            // Ceiling for the *transcription* buffer, in mono samples at this
-            // device's real rate. Unlike the partial buffer above this one may
-            // not slide: dropping the oldest audio would silently rewrite what
-            // the user said. It stops instead, and says so.
-            let max_session_samples = u64::from(config.sample_rate())
-                .saturating_mul(DICTATION_MAX_SESSION_SECONDS)
-                .max(1);
-            let sample_format = config.sample_format();
-            let stream_config = config.config();
+    /// Whether a recording meeting holds the microphone, for the dictation
+    /// start route (`meeting_asides::dictation_audio_route`).
+    pub(crate) fn meeting_microphone(&self) -> MeetingMicrophone {
+        match self.active_recording.as_ref() {
+            None => MeetingMicrophone::Idle,
+            Some(session) => MeetingMicrophone::Recording {
+                captures_microphone: session.captures_microphone,
+                stopping: session.aside_tap.is_closed(),
+            },
+        }
+    }
 
-            macro_rules! build_dictation_stream {
-                ($sample_type:ty) => {{
-                    let capture_stop = Arc::clone(&capture_stop);
-                    let callback_poisoned = Arc::clone(&callback_poisoned);
-                    let callback_count = Arc::clone(&callback_count);
-                    let buffer = Arc::clone(&buffer);
-                    let buffered_samples = Arc::clone(&buffered_samples);
-                    let max_duration_reached = Arc::clone(&max_duration_reached);
-                    let limit_event_handle = vad_event_handle.clone();
-                    let audio_level = Arc::clone(&audio_level);
-                    let partial_buffer = Arc::clone(&partial_buffer);
-                    let streaming_active = Arc::clone(&streaming_active);
-                    let vad_gate = Arc::clone(&vad_gate);
-                    let vad_session_id = Arc::clone(&vad_session_id);
-                    let vad_gate_active = Arc::clone(&vad_gate_active);
-                    let vad_event_handle = vad_event_handle.clone();
-                    let first_sample_us = Arc::clone(&first_sample_us);
+    /// The meeting has begun to stop: refuse new asides. One already running
+    /// keeps the meeting's frames until its dictation stops.
+    pub(crate) fn refuse_new_meeting_asides(&self) {
+        if let Some(session) = self.active_recording.as_ref() {
+            session.aside_tap.refuse_new();
+        }
+    }
 
-                    device.build_input_stream(
-                        stream_config.clone(),
-                        move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
-                          guard_audio_callback(&callback_poisoned, "Dictation", || {
-                            if !capture_stop.load(Ordering::SeqCst) {
-                                return;
-                            }
+    /// The dictation session taking the recording meeting's microphone
+    /// frames right now, if any.
+    pub(crate) fn meeting_aside_session(&self) -> Option<u64> {
+        self.active_recording
+            .as_ref()
+            .and_then(|session| session.aside_tap.attached_session())
+    }
 
-                            // First sample of this session: record how long the
-                            // microphone took to actually deliver audio, so the
-                            // cold-open cost is measurable rather than assumed.
-                            if first_sample_us.load(Ordering::Relaxed) == 0 {
-                                let _ = first_sample_us.compare_exchange(
-                                    0,
-                                    (capture_started_at.elapsed().as_micros() as u64).max(1),
-                                    Ordering::Relaxed,
-                                    Ordering::Relaxed,
-                                );
-                            }
-
-                            callback_count.fetch_add(1, Ordering::Relaxed);
-                            let streaming = streaming_active.load(Ordering::Relaxed);
-                            let vad_active = vad_gate_active.load(Ordering::Relaxed)
-                                && vad_session_id.load(Ordering::SeqCst) == session_id;
-                            let need_mono_scratch = streaming || vad_active;
-                            let capacity = if num_channels <= 1 {
-                                data.len()
-                            } else {
-                                data.len() / num_channels
-                            };
-                            let mut mono_scratch = if need_mono_scratch {
-                                Vec::with_capacity(capacity)
-                            } else {
-                                Vec::new()
-                            };
-                            let mut sum_sq = 0.0_f64;
-                            let mut mono_len = 0_usize;
-
-                            // Room left under this session's ceiling. Decided
-                            // once per callback and committed with a single
-                            // atomic add: a per-sample atomic on the realtime
-                            // thread would cost more than the push it guards.
-                            let admission = admit_dictation_samples(
-                                buffered_samples.load(Ordering::Relaxed),
-                                capacity as u64,
-                                max_session_samples,
-                            );
-                            let mut accepted_remaining = admission.accepted;
-
-                            for_each_mono_sample(data, num_channels, |sample| {
-                                if accepted_remaining > 0 {
-                                    buffer.push(sample);
-                                    accepted_remaining -= 1;
-                                }
-                                if need_mono_scratch {
-                                    mono_scratch.push(sample);
-                                }
-                                sum_sq += (sample as f64) * (sample as f64);
-                                mono_len += 1;
-                            });
-
-                            if admission.accepted > 0 {
-                                buffered_samples
-                                    .fetch_add(admission.accepted, Ordering::Relaxed);
-                            }
-
-                            if admission.ceiling_reached
-                                && !max_duration_reached.swap(true, Ordering::SeqCst)
-                            {
-                                // End capture here rather than letting the mic
-                                // run on producing audio that can no longer be
-                                // stored. Announced once; `stop_dictation` also
-                                // reports it, so the user is never handed a
-                                // silently truncated transcript.
-                                tracing::warn!(
-                                    "Dictation session {} reached the {}s maximum length; capture stopped",
-                                    session_id,
-                                    DICTATION_MAX_SESSION_SECONDS
-                                );
-                                capture_stop.store(false, Ordering::SeqCst);
-                                if let Some(handle) = limit_event_handle.as_ref() {
-                                    handle.emit(
-                                        "dictation-vad-signal",
-                                        serde_json::json!({
-                                            "signal": "max_duration_stop",
-                                            "sessionId": session_id,
-                                            "maxDurationSeconds": DICTATION_MAX_SESSION_SECONDS,
-                                        }),
-                                    );
-                                }
-                            }
-
-                            if streaming {
-                                if let Ok(mut shared) = partial_buffer.lock() {
-                                    shared.total_samples = shared
-                                        .total_samples
-                                        .saturating_add(mono_scratch.len() as u64);
-                                    shared.samples.extend_from_slice(&mono_scratch);
-                                    if shared.samples.len() > max_partial_samples * 2 {
-                                        let overflow = shared.samples.len() - max_partial_samples;
-                                        shared.samples.drain(0..overflow);
-                                    }
-                                }
-                            }
-
-                            let rms = (sum_sq / mono_len.max(1) as f64).sqrt() as f32;
-                            let level = (rms.clamp(0.0, 1.0) * u32::MAX as f32) as u32;
-                            audio_level.store(level, Ordering::SeqCst);
-
-                            if vad_active {
-                                drive_dictation_auto_stop_gate(
-                                    &mono_scratch,
-                                    session_id,
-                                    &vad_gate,
-                                    &vad_session_id,
-                                    vad_event_handle.as_ref(),
-                                );
-                            }
-                          });
-                        },
-                        |err| tracing::error!("Dictation stream error: {}", err),
-                        None,
-                    )
-                }};
-            }
-
-            let stream_result = match sample_format {
-                cpal::SampleFormat::I8 => build_dictation_stream!(i8),
-                cpal::SampleFormat::I16 => build_dictation_stream!(i16),
-                cpal::SampleFormat::I24 => build_dictation_stream!(cpal::I24),
-                cpal::SampleFormat::I32 => build_dictation_stream!(i32),
-                cpal::SampleFormat::I64 => build_dictation_stream!(i64),
-                cpal::SampleFormat::U8 => build_dictation_stream!(u8),
-                cpal::SampleFormat::U16 => build_dictation_stream!(u16),
-                cpal::SampleFormat::U24 => build_dictation_stream!(cpal::U24),
-                cpal::SampleFormat::U32 => build_dictation_stream!(u32),
-                cpal::SampleFormat::U64 => build_dictation_stream!(u64),
-                cpal::SampleFormat::F32 => build_dictation_stream!(f32),
-                cpal::SampleFormat::F64 => build_dictation_stream!(f64),
-                format => {
-                    let _ = startup_tx.send(Err(format!(
-                        "Unsupported sample format for dictation: {:?}",
-                        format
-                    )));
-                    tracing::error!("Unsupported sample format for dictation: {:?}", format);
-                    return;
-                }
-            };
-
-            let Ok(stream) = stream_result else {
-                let _ = startup_tx.send(Err(
-                    "Failed to build dictation microphone input stream".to_string()
-                ));
-                tracing::error!("Failed to build dictation stream");
-                return;
-            };
-
-            if let Err(e) = stream.play() {
-                let _ = startup_tx.send(Err(format!(
-                    "Failed to start dictation microphone stream: {}",
-                    e
-                )));
-                tracing::error!("Failed to start dictation stream: {}", e);
-                return;
-            }
-
-            // Signal that the audio stream is now live
-            let _ = startup_tx.send(Ok(()));
-            tracing::info!("Dictation audio stream started successfully");
-
-            while capture_flag.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-
-            tracing::info!("Dictation audio stream stopping");
-            drop(stream);
-        });
-        self.dictation_thread = Some(capture_handle);
-
-        // Wait for the audio stream to actually start. Core Audio stream
-        // construction can stall inside the platform call, so every failure
-        // path must retire the worker with a bounded join. An unbounded join
-        // here would prevent the command from ever returning its timeout to
-        // Electron, leaving the UI stuck on "Getting ready".
-        match startup_rx.recv_timeout(MICROPHONE_STREAM_PREPARATION_TIMEOUT) {
-            Ok(Ok(())) => {
-                tracing::info!("Dictation started (stream confirmed live)");
-            }
-            Ok(Err(error)) => {
-                self.retire_dictation_preparation_thread();
-                return Err(anyhow::anyhow!(error));
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                self.retire_dictation_preparation_thread();
+    /// Start a dictation fed by the recording meeting's microphone frames (an
+    /// aside) instead of a stream of its own. The session state, the sink and
+    /// everything downstream of it are the ones `start_dictation` sets up;
+    /// only the source differs, so delivery and fidelity cannot.
+    pub(crate) fn start_dictation_aside(
+        &mut self,
+        session_id: u64,
+        auto_stop: DictationAutoStopConfig,
+        event_handle: Option<SidecarHandle>,
+        preference: Option<&settings::AudioInputDevicePreference>,
+        journal: impl FnOnce(&str, &crate::meeting_asides::AsideTicket, u32) -> Result<(), String>,
+    ) -> Result<ResolvedAudioInputDevice> {
+        if self.is_dictating.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("Dictation already in progress"));
+        }
+        let separate_input = if let Some(preference) = preference {
+            let (_, resolved) = self.resolve_input_device(Some(preference))?;
+            self.active_recording.as_ref().is_some_and(|meeting| {
+                meeting.microphone_device_id.as_deref() != Some(&resolved.device_id)
+            })
+        } else {
+            false
+        };
+        let (tap, sample_rate, recording_id) = match self.active_recording.as_ref() {
+            Some(session) if session.captures_microphone => (
+                Arc::clone(&session.aside_tap),
+                session.sample_rate,
+                session.id.clone(),
+            ),
+            Some(_) => {
                 return Err(anyhow::anyhow!(
-                    "Timed out waiting for dictation microphone stream to start. Plainsong is restarting audio capture automatically; retry in a moment."
-                ));
+                    "This meeting does not record the microphone"
+                ))
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                self.retire_dictation_preparation_thread();
-                return Err(anyhow::anyhow!(
-                    "Dictation microphone stream preparation stopped unexpectedly"
-                ));
-            }
+            None => return Err(anyhow::anyhow!("No meeting is recording")),
+        };
+        if tap.is_closed() {
+            return Err(anyhow::anyhow!("The meeting is stopping"));
         }
 
-        Ok(resolved_device)
+        if separate_input {
+            // Journal and mask the meeting mic before opening a different device.
+            let marker = Arc::new(AsideMarker);
+            tap.attach_journaled(session_id, sample_rate, marker, unix_now_ms(), |ticket| {
+                journal(&recording_id, ticket, sample_rate)
+            })
+            .map_err(|e| anyhow::anyhow!("Could not save aside: {e:?}"))?;
+            self.dictation_aside_tap = Some(Arc::clone(&tap));
+            let result =
+                self.start_dictation(preference, session_id, auto_stop, event_handle, false);
+            if result.is_err() {
+                self.detach_dictation_aside(Some(session_id));
+            }
+            return result;
+        }
+        let session_max_seconds = self.activate_dictation_session_limit();
+        self.reset_dictation_sample_storage();
+        // The meeting's worker hands over mono frames at the track rate.
+        self.dictation_sample_rate = sample_rate;
+        self.dictation_channels = 1;
+        tracing::info!(
+            "Starting dictation {} from the meeting's microphone at {} Hz",
+            session_id,
+            sample_rate
+        );
+        let (_capture_stop, sink) = self.begin_dictation_capture_session(
+            session_id,
+            session_max_seconds,
+            sample_rate,
+            &auto_stop,
+            event_handle,
+        );
+        if let Err(error) = self.begin_aside_capture_checkpoint(session_id, sample_rate) {
+            self.abort_dictation();
+            return Err(anyhow::anyhow!(error));
+        }
+        let ticket =
+            match tap.attach_journaled(session_id, sample_rate, sink, unix_now_ms(), |ticket| {
+                journal(&recording_id, ticket, sample_rate)
+            }) {
+                Ok(ticket) => ticket,
+                Err(error) => {
+                    self.abort_dictation();
+                    return Err(anyhow::anyhow!(
+                        "The meeting's microphone is not available to dictation ({error:?})"
+                    ));
+                }
+            };
+        tracing::info!(
+            "Aside {} attached at Me-track frame {} ({} ms)",
+            ticket.aside_id,
+            ticket.attached_at_frame,
+            ticket.attached_at_ms
+        );
+        // The stream is the meeting's and stays its: there is no capture
+        // thread of the dictation's own to join at stop.
+        self.dictation_thread = None;
+        self.dictation_aside_tap = Some(tap);
+        Ok(ResolvedAudioInputDevice {
+            device_id: "meeting-microphone".to_string(),
+            device_name: "the meeting's microphone".to_string(),
+            transport_type: None,
+            is_default: false,
+            is_bluetooth_like: false,
+            used_fallback: false,
+            advisory: None,
+        })
+    }
+
+    fn begin_aside_capture_checkpoint(&mut self, session_id: u64, rate: u32) -> Result<(), String> {
+        #[cfg(not(test))]
+        let directory = crate::dictation_checkpoint::dictation_checkpoint_directory()?;
+        #[cfg(test)]
+        let directory = self
+            .dictation_checkpoint_root
+            .get_or_insert_with(|| crate::test_fs::TempDir::new("aside-checkpoint"))
+            .path()
+            .to_owned();
+        let checkpoint =
+            crate::dictation_checkpoint::CaptureCheckpoint::begin(&directory, session_id, rate)?;
+        *self
+            .dictation_capture_checkpoint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(checkpoint);
+        Ok(())
+    }
+
+    pub(crate) fn capture_checkpoint_completion(
+        &self,
+        session_id: u64,
+    ) -> crate::dictation_checkpoint::CaptureCheckpointCompletion {
+        crate::dictation_checkpoint::CaptureCheckpointCompletion::new(
+            Arc::clone(&self.dictation_capture_checkpoint),
+            session_id,
+        )
+    }
+
+    /// Remove capture audio only after a durable post-stop checkpoint exists,
+    /// or on explicit cancellation. Session ownership prevents stale cleanup.
+    pub(crate) fn discard_capture_checkpoint(&mut self, session_id: u64) {
+        let mut slot = self
+            .dictation_capture_checkpoint
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(checkpoint) = slot.take() {
+            *slot = checkpoint.discard(session_id);
+        }
+    }
+
+    pub(crate) fn meeting_aside_spans(&self) -> Option<(String, Vec<AsideSpan>)> {
+        self.active_recording
+            .as_ref()
+            .map(|session| (session.id.clone(), session.aside_tap.spans()))
+    }
+
+    pub(crate) fn is_meeting_aside(&self) -> bool {
+        self.dictation_aside_tap.is_some()
+    }
+
+    pub(crate) fn aside_tail_clock(&self) -> Option<(Arc<MeetingMicTap>, u64, u64)> {
+        if self.dictation_thread.is_some() {
+            return None;
+        }
+        let tap = self.dictation_aside_tap.as_ref()?;
+        let rate = self.active_recording.as_ref()?.sample_rate;
+        Some((
+            Arc::clone(tap),
+            tap.forwarded_frames(),
+            u64::from(rate) * DICTATION_STOP_CAPTURE_TAIL_MS / 1000,
+        ))
+    }
+
+    /// End an aside's claim on the meeting's frames, so nothing more reaches
+    /// its buffer. Returns the closed span, if the aside wrote any frame.
+    fn detach_dictation_aside(&mut self, session_id: Option<u64>) -> Option<AsideSpan> {
+        let tap = self.dictation_aside_tap.take()?;
+        let span = tap.detach(session_id?, unix_now_ms());
+        if let Some(span) = span.as_ref() {
+            tracing::info!(
+                "Aside {} ended: Me-track frames {}..{:?} at {} Hz",
+                span.aside_id,
+                span.start_frame,
+                span.end_frame,
+                span.sample_rate
+            );
+        }
+        span
+    }
+
+    // A retired worker may still drain after the bounded join expires. Give
+    // each new session its own storage so that drain cannot enter its audio.
+    fn reset_dictation_sample_storage(&mut self) {
+        self.dictation_capture_checkpoint = Arc::new(std::sync::Mutex::new(None));
+        self.dictation_buffer = Arc::new(crossbeam::queue::SegQueue::new());
+        self.dictation_buffered_samples = Arc::new(AtomicU64::new(0));
+        self.dictation_max_duration_reached = Arc::new(AtomicBool::new(false));
+        self.dictation_partial_buffer =
+            Arc::new(std::sync::Mutex::new(DictationPartialBuffer::default()));
+        self.dictation_audio_level = Arc::new(DictationLevelMeter::default());
+    }
+
+    fn dictation_capture_sink(
+        &self,
+        session_id: u64,
+        session_max_seconds: u64,
+        sample_rate: u32,
+        capture_stop: &Arc<AtomicBool>,
+        capture_started_at: Instant,
+        event_handle: Option<SidecarHandle>,
+    ) -> Arc<DictationCaptureSink> {
+        Arc::new(DictationCaptureSink {
+            session_id,
+            session_max_seconds,
+            max_session_samples: u64::from(sample_rate)
+                .saturating_mul(session_max_seconds)
+                .max(1),
+            max_partial_samples: (sample_rate as usize).saturating_mul(30),
+            capture_started_at,
+            checkpoint: Arc::clone(&self.dictation_capture_checkpoint),
+            capture_stop: Arc::clone(capture_stop),
+            callback_count: Arc::clone(&self.dictation_callback_count),
+            buffer: Arc::clone(&self.dictation_buffer),
+            buffered_samples: Arc::clone(&self.dictation_buffered_samples),
+            max_duration_reached: Arc::clone(&self.dictation_max_duration_reached),
+            audio_level: Arc::clone(&self.dictation_audio_level),
+            partial_buffer: Arc::clone(&self.dictation_partial_buffer),
+            streaming_active: Arc::clone(&self.dictation_streaming_active),
+            vad_gate: Arc::clone(&self.dictation_vad_gate),
+            vad_session_id: Arc::clone(&self.dictation_vad_session_id),
+            vad_gate_active: Arc::clone(&self.dictation_vad_gate_active),
+            first_sample_us: Arc::clone(&self.dictation_first_sample_us),
+            last_callback_us: Arc::clone(&self.dictation_last_callback_us),
+            stream_failed: Arc::clone(&self.dictation_stream_failed),
+            realtime: realtime::RealtimeSamples::new(sample_rate as usize * 2),
+            event_handle,
+        })
     }
 
     fn retire_dictation_preparation_thread(&mut self) {
@@ -1761,11 +2610,11 @@ impl AudioCapture {
     /// Either way the ring is emptied, so a pre-roll is never handed to two
     /// sessions.
     fn take_dictation_pre_roll(&self, sample_rate: u32) -> Vec<f32> {
-        let mut slot = match self.dictation_pre_roll.lock() {
+        let mut slot = match self.hands_free_tap.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let Some(pre_roll) = slot.as_mut() else {
+        let Some(pre_roll) = slot.pre_roll.as_mut() else {
             return Vec::new();
         };
 
@@ -1796,11 +2645,76 @@ impl AudioCapture {
     /// pre-roll is exactly what that session needs -- so nothing the monitor
     /// heard outlives the feature the user turned off.
     pub fn clear_dictation_pre_roll(&self) {
-        let mut slot = match self.dictation_pre_roll.lock() {
+        let mut slot = match self.hands_free_tap.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        *slot = None;
+        slot.pre_roll = None;
+    }
+
+    /// Hand the running hands-free monitor stream to a starting session instead
+    /// of closing it and opening another: a reopen costs a stream build plus
+    /// the device's first-buffer latency while the user is mid-sentence. The
+    /// pre-roll is moved into the session buffer and the stream's callbacks
+    /// switch to the session under the same lock, so nothing between them is
+    /// dropped or duplicated, and no staleness guard is needed.
+    ///
+    /// Returns false, changing nothing, unless the monitor is live on the
+    /// device and format this session would otherwise have opened.
+    fn hand_monitor_stream_to_session(
+        &mut self,
+        sink: &Arc<DictationCaptureSink>,
+        device: &ResolvedAudioInputDevice,
+        sample_rate: u32,
+        channels: u16,
+    ) -> bool {
+        {
+            let mut tap = match self.hands_free_tap.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            // Checked under the tap lock, which the monitor's error callback
+            // also takes, so a stream that just died is never handed over.
+            if !self.hands_free_monitor_active.load(Ordering::SeqCst)
+                || tap.session.is_some()
+                || tap.device_id != device.device_id
+                || tap.sample_rate != sample_rate
+                || tap.channels != channels
+            {
+                return false;
+            }
+            sink.seed(
+                tap.pre_roll
+                    .take()
+                    .map(|mut pre_roll| pre_roll.take())
+                    .unwrap_or_default(),
+            );
+            tap.input_session_id
+                .store(sink.session_id, Ordering::SeqCst);
+            tap.session = Some(Arc::clone(sink));
+        }
+        // The thread now lives as long as the session's capture, not the monitor.
+        self.hands_free_monitor_active
+            .store(false, Ordering::SeqCst);
+        self.hands_free_monitor_config = None;
+        self.dictation_thread = self.hands_free_monitor_thread.take();
+        true
+    }
+
+    /// Stop (or resume) the monitor's start detection while it keeps filling
+    /// the pre-roll. Held while a start it signalled is in flight, so a second
+    /// burst of speech cannot move the onset mark past the user's first words.
+    pub fn hold_hands_free_monitor(&self, held: bool) {
+        if let Ok(mut tap) = self.hands_free_tap.lock() {
+            tap.held = held;
+        }
+    }
+
+    /// The flag behind `dictation_first_sample_latency_ms`: non-zero once the
+    /// current session's first sample has arrived. Cloned out so the start
+    /// path can wait for it without holding the capture lock.
+    pub fn dictation_first_sample_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.dictation_first_sample_us)
     }
 
     /// Milliseconds from `start_dictation` entry to the first sample the
@@ -1837,6 +2751,9 @@ impl AudioCapture {
         }
 
         tracing::info!("Stopping dictation capture...");
+        // An aside stops taking the meeting's frames first, under the tap's
+        // lock, so no block can reach the buffer while it is being drained.
+        self.detach_dictation_aside(self.dictation_capture_session_id);
         self.is_dictating.store(false, Ordering::SeqCst);
         self.signal_capture_stop();
         self.dictation_capture_session_id = None;
@@ -1851,6 +2768,7 @@ impl AudioCapture {
                 let _ = done_tx.send(());
             });
             if done_rx.recv_timeout(Duration::from_millis(500)).is_err() {
+                self.dictation_stream_failed.store(true, Ordering::SeqCst);
                 tracing::warn!(
                     "Timed out waiting for dictation capture thread to join; continuing stop path"
                 );
@@ -1920,26 +2838,18 @@ impl AudioCapture {
             ));
         }
 
-        // Apply noise suppression before encoding if enabled
-        if self.noise_suppression_enabled {
-            if let Some(preprocessor) = &mut self.preprocessor {
-                preprocessor.auto_calibrate(&samples, self.dictation_sample_rate);
-                if let Err(e) = preprocessor.process(&mut samples) {
-                    tracing::warn!("Noise suppression failed, using raw audio: {}", e);
-                }
-            }
-        }
-
-        normalize_dictation_loudness(&mut samples, self.dictation_sample_rate);
-        ensure_min_duration(&mut samples, self.dictation_sample_rate, 0.7);
+        // No noise suppression before recognition. A noise gate here once cut
+        // soft consonants and word endings by 70%. On 2026-10-20 a spectral
+        // denoiser in front of Parakeet lowered word errors under steady hiss
+        // (18.3% -> 12.8%) but raised them with background voices
+        // (12.8% -> 15.6%); the recognizer handles mixed noise better alone.
+        let wav_data = encode_dictation_recognition_wav(&mut samples, self.dictation_sample_rate)?;
 
         tracing::info!(
             "Dictation stopped: {} mono samples at {} Hz (after processing)",
             samples.len(),
             self.dictation_sample_rate
         );
-
-        let wav_data = encode_wav(&samples, self.dictation_sample_rate, 1)?;
 
         tracing::info!("WAV data size: {} bytes", wav_data.len());
 
@@ -1957,6 +2867,10 @@ impl AudioCapture {
     }
 
     pub fn abort_dictation(&mut self) {
+        if let Some(session_id) = self.dictation_capture_session_id {
+            self.discard_capture_checkpoint(session_id);
+        }
+        self.detach_dictation_aside(self.dictation_capture_session_id);
         self.dictation_capture_session_id = None;
         self.is_dictating.store(false, Ordering::SeqCst);
         self.signal_capture_stop();
@@ -1985,6 +2899,7 @@ impl AudioCapture {
     /// Abort only when the caller still owns the live capture. Returns false
     /// for stale cleanup so a replacement session remains untouched.
     pub fn abort_dictation_for_session(&mut self, expected_session_id: u64) -> bool {
+        self.discard_capture_checkpoint(expected_session_id);
         if self.dictation_capture_session_id != Some(expected_session_id) {
             return false;
         }
@@ -1999,6 +2914,38 @@ impl AudioCapture {
         self.dictation_max_duration_reached.load(Ordering::SeqCst)
     }
 
+    /// Whether the microphone failed or stopped delivering audio before the
+    /// session ended. Call before stopping capture, while callbacks still run.
+    pub fn dictation_capture_interrupted(&self) -> bool {
+        let Some(started_at) = self.dictation_capture_started_at else {
+            return false;
+        };
+        if !self.is_dictating.load(Ordering::SeqCst) {
+            return self.dictation_stream_failed.load(Ordering::SeqCst);
+        }
+        capture_interrupted(
+            self.dictation_stream_failed.load(Ordering::SeqCst),
+            self.dictation_callback_count.load(Ordering::SeqCst),
+            self.dictation_last_callback_us.load(Ordering::SeqCst),
+            started_at.elapsed(),
+        )
+    }
+
+    pub fn set_next_dictation_max_session_seconds(&mut self, seconds: u64) {
+        self.dictation_next_max_session_seconds = seconds.max(1);
+    }
+
+    fn activate_dictation_session_limit(&mut self) -> u64 {
+        let limit = self.dictation_next_max_session_seconds.max(1);
+        self.dictation_last_max_session_seconds = limit;
+        self.dictation_next_max_session_seconds = DICTATION_MAX_SESSION_SECONDS;
+        limit
+    }
+
+    pub fn dictation_last_max_session_seconds(&self) -> u64 {
+        self.dictation_last_max_session_seconds
+    }
+
     /// Longest single dictation session, in seconds, before capture is stopped.
     pub fn dictation_max_session_seconds() -> u64 {
         DICTATION_MAX_SESSION_SECONDS
@@ -2007,8 +2954,7 @@ impl AudioCapture {
     /// Get the current audio level for dictation (0.0 to 1.0)
     /// Uses power scaling to make normal speech levels more visible
     pub fn get_dictation_audio_level(&self) -> f32 {
-        let level = self.dictation_audio_level.load(Ordering::SeqCst);
-        let raw = level as f32 / u32::MAX as f32;
+        let raw = self.dictation_audio_level.read();
         // Apply power curve: sqrt makes low levels more visible
         // Normal speech RMS ~0.01-0.15, after sqrt: 0.1-0.39
         // Louder speech RMS ~0.1-0.5, after sqrt: 0.32-0.71
@@ -2025,7 +2971,7 @@ impl AudioCapture {
         preferred_input_device: Option<&settings::AudioInputDevicePreference>,
         event_handle: Option<SidecarHandle>,
         vault_enabled: bool,
-    ) -> Result<String> {
+    ) -> Result<PreparedMeetingRecording> {
         self.ensure_microphone_preparation_retry_is_safe(options.mic)?;
         if self.active_recording.is_some() {
             return Err(anyhow::anyhow!("A recording session is already active"));
@@ -2061,6 +3007,7 @@ impl AudioCapture {
         let system_audio_path = plan.system_path.clone();
         let writer_failure: Arc<std::sync::Mutex<Option<String>>> =
             Arc::new(std::sync::Mutex::new(None));
+        let track_write_failures: TrackWriteFailures = Arc::new(std::sync::Mutex::new(Vec::new()));
         // One slot for both capture paths. The mixed path used to build its own
         // and never write it, so only a mic-only meeting could report an input
         // stream that died mid-session.
@@ -2071,6 +3018,9 @@ impl AudioCapture {
             Arc::new(crossbeam::queue::ArrayQueue::new(256));
         let paused = Arc::new(AtomicBool::new(false));
         let recorded_frames = Arc::new(AtomicU64::new(0));
+        let aside_tap = Arc::new(MeetingMicTap::default());
+        let mut microphone_input = None;
+        let mut microphone_device_id = None;
         let preferred_mic_device = if options.mic {
             let (device, resolved_input) = match preferred_input_device {
                 Some(preference) => self.resolve_input_device(Some(preference))?,
@@ -2083,6 +3033,11 @@ impl AudioCapture {
             {
                 handle.emit_event("audio-input-advisory", advisory.to_string());
             }
+            microphone_device_id = Some(resolved_input.device_id.clone());
+            microphone_input = Some(MeetingMicrophoneInput::from_resolved(
+                &resolved_input,
+                preferred_input_device.map(|preference| preference.device_name.as_str()),
+            ));
             Some(device)
         } else {
             None
@@ -2111,6 +3066,7 @@ impl AudioCapture {
                     }),
                     Arc::clone(&paused),
                     Arc::clone(&recorded_frames),
+                    Arc::clone(&aside_tap),
                 )
                 .context("Failed to prepare mixed audio capture")?;
             let sample_rate = capture_start.sample_rate;
@@ -2129,9 +3085,16 @@ impl AudioCapture {
             };
             let writer_log_path = audio_path.clone();
             let writer_failure_for_thread = Arc::clone(&writer_failure);
+            let track_failures_for_thread = Arc::clone(&track_write_failures);
             let writer_handle = std::thread::spawn(move || {
+                let _ = crate::qos::WorkClass::Interactive.apply_to_current_thread();
                 run_wav_writer_thread(writer_failure_for_thread, || {
-                    write_aligned_wav_files(prepared_writers, writer_receiver, &writer_log_path)
+                    write_aligned_wav_files(
+                        prepared_writers,
+                        writer_receiver,
+                        &writer_log_path,
+                        &track_failures_for_thread,
+                    )
                 })
             });
 
@@ -2152,11 +3115,16 @@ impl AudioCapture {
                 dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
                 capture_failure,
                 writer_failure,
+                track_write_failures: Arc::clone(&track_write_failures),
                 paused,
                 recorded_frames,
                 pause_ledger: PauseLedger::default(),
                 mic_inactive_seconds: None,
+                mic_level: None,
                 activity_epoch: Instant::now(),
+                aside_tap: Arc::clone(&aside_tap),
+                microphone_device_id: microphone_device_id.clone(),
+                captures_microphone: options.mic,
             });
         } else {
             let device = preferred_mic_device
@@ -2175,6 +3143,7 @@ impl AudioCapture {
             let writer_log_path = audio_path.clone();
             let writer_failure_for_thread = Arc::clone(&writer_failure);
             let writer_handle = std::thread::spawn(move || {
+                let _ = crate::qos::WorkClass::Interactive.apply_to_current_thread();
                 run_wav_writer_thread(writer_failure_for_thread, || {
                     write_wav_file(prepared_writer, samples_receiver, &writer_log_path)
                 })
@@ -2197,72 +3166,101 @@ impl AudioCapture {
             let recorded_frames_for_callback = Arc::clone(&recorded_frames);
             let mic_inactive_seconds = Arc::new(AtomicU32::new(0));
             let mic_inactive_for_callback = Arc::clone(&mic_inactive_seconds);
+            let mic_level = Arc::new(AtomicU32::new(0));
+            let mic_level_for_callback = Arc::clone(&mic_level);
+            let aside_tap_for_capture = Arc::clone(&aside_tap);
             let (ready_tx, ready_rx) = bounded::<Result<(), String>>(1);
             let (activation_tx, activation_rx) = bounded::<()>(1);
             let (activated_tx, activated_rx) = bounded::<Result<(), String>>(1);
 
             let capture_handle = std::thread::spawn(move || {
+                let _ = crate::qos::WorkClass::Interactive.apply_to_current_thread();
+                let realtime = Arc::new(realtime::RealtimeSamples::new(sample_rate as usize * 2));
+                let mut pending = Vec::new();
+                let mut watchdog = SourceSilenceWatchdog::new(sample_rate, &MIC_SILENCE_PROFILE);
+                let mut level_meter = system_capture::SourceLevelMeter::new(
+                    sample_rate,
+                    Arc::clone(&mic_level_for_callback),
+                );
+                let mut process_pending = || {
+                    realtime.drain(&mut pending);
+                    let dropped = realtime.take_dropped();
+                    if dropped > 0 {
+                        tracing::warn!(
+                            dropped_samples = dropped,
+                            "Meeting capture worker fell behind"
+                        );
+                    }
+                    if pending.is_empty() {
+                        return;
+                    }
+                    // Without an aside the callback keeps paused frames out,
+                    // so every drained frame is written. An aside keeps the
+                    // callback forwarding through a pause, and then only the
+                    // aside takes them.
+                    let Some(aside) = forward_meeting_microphone(
+                        &aside_tap_for_capture,
+                        &pending,
+                        paused_for_callback.load(Ordering::Relaxed),
+                        crate::meeting_asides::MEETING_ASIDES_ENABLED,
+                    ) else {
+                        return;
+                    };
+                    let chunk = pending.clone();
+                    watchdog.observe(&chunk, 0);
+                    level_meter.observe(&chunk);
+                    mic_inactive_for_callback
+                        .store(watchdog.inactive_seconds() as u32, Ordering::Relaxed);
+                    recorded_frames_for_callback.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+
+                    if let Ok(mut waveform) = wf_buffer.lock() {
+                        for &sample in chunk.iter().step_by(chunk.len() / 100 + 1).take(100) {
+                            waveform.push(sample);
+                        }
+                        if waveform.len() > 4410 {
+                            let drop_count = waveform.len() - 4410;
+                            waveform.drain(0..drop_count);
+                        }
+                    }
+
+                    // The live transcript hears silence where a dictation
+                    // took the frames.
+                    let live = if aside {
+                        vec![0.0; chunk.len()]
+                    } else {
+                        chunk.clone()
+                    };
+                    if stream_queue_clone.force_push(live).is_some() {
+                        dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    let chunk_frames = chunk.len() as u64;
+                    match samples_sender.try_send(chunk) {
+                        Ok(()) => {
+                            aside_tap_for_capture.writer_accepted(chunk_frames);
+                        }
+                        Err(TrySendError::Full(chunk)) => {
+                            dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
+                            aside_tap_for_capture.writer_dropped(chunk.len() as u64);
+                        }
+                        Err(TrySendError::Disconnected(_)) => {}
+                    }
+                };
                 macro_rules! build_recording_stream {
                     ($sample_type:ty) => {{
-                        let stream_queue = Arc::clone(&stream_queue_clone);
                         let callback_poisoned = Arc::clone(&callback_poisoned);
-                        let waveform_buffer = Arc::clone(&wf_buffer);
-                        let samples_sender = samples_sender.clone();
-                        let dropped_stream_chunks = Arc::clone(&dropped_stream_chunks);
-                        let dropped_writer_chunks = Arc::clone(&dropped_writer_chunks);
+                        let realtime = Arc::clone(&realtime);
                         let paused = Arc::clone(&paused_for_callback);
-                        let recorded_frames = Arc::clone(&recorded_frames_for_callback);
-                        let mic_inactive = Arc::clone(&mic_inactive_for_callback);
-                        // The same watchdog the mixed path runs, owned by this
-                        // callback: one RMS pass per chunk, no lock, and its
-                        // inactivity readout feeds the silence auto-stop.
-                        let mut watchdog =
-                            SourceSilenceWatchdog::new(sample_rate, &MIC_SILENCE_PROFILE);
-
+                        let aside_tap = Arc::clone(&aside_tap_for_capture);
+                        let dropped = Arc::clone(&dropped_writer_chunks);
                         device.build_input_stream(
                             stream_config.clone(),
                             move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
                                 guard_audio_callback(&callback_poisoned, "Recording", || {
-                                    // Paused: the stream keeps running so
-                                    // resume is instant, but nothing from this
-                                    // callback reaches the file, the preview,
-                                    // the waveform, or the watchdog.
-                                    if paused.load(Ordering::Relaxed) {
-                                        return;
-                                    }
-                                    let chunk = downmix_to_mono(data, num_channels);
-                                    watchdog.observe(&chunk, 0);
-                                    mic_inactive.store(
-                                        watchdog.inactive_seconds() as u32,
-                                        Ordering::Relaxed,
-                                    );
-                                    recorded_frames
-                                        .fetch_add(chunk.len() as u64, Ordering::Relaxed);
-
-                                    if let Ok(mut waveform) = waveform_buffer.lock() {
-                                        for &sample in
-                                            chunk.iter().step_by(chunk.len() / 100 + 1).take(100)
-                                        {
-                                            waveform.push(sample);
-                                        }
-                                        if waveform.len() > 4410 {
-                                            let drop_count = waveform.len() - 4410;
-                                            waveform.drain(0..drop_count);
-                                        }
-                                    }
-
-                                    if stream_queue.push(chunk.clone()).is_err() {
-                                        let _ = stream_queue.pop();
-                                        let _ = stream_queue.push(chunk.clone());
-                                        dropped_stream_chunks.fetch_add(1, Ordering::Relaxed);
-                                    }
-
-                                    match samples_sender.try_send(chunk) {
-                                        Ok(()) => {}
-                                        Err(TrySendError::Full(_)) => {
-                                            dropped_writer_chunks.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                        Err(TrySendError::Disconnected(_)) => {}
+                                    if (!paused.load(Ordering::Relaxed) || aside_tap.is_attached())
+                                        && realtime.push(data, num_channels) > 0
+                                    {
+                                        dropped.fetch_add(1, Ordering::Relaxed);
                                     }
                                 });
                             },
@@ -2323,8 +3321,11 @@ impl AudioCapture {
                 let _ = activated_tx.send(Ok(()));
 
                 while capture_flag.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(10));
+                    process_pending();
+                    std::thread::sleep(Duration::from_millis(5));
                 }
+                drop(stream);
+                process_pending();
 
                 let dropped_stream = dropped_stream_chunks.load(Ordering::Relaxed);
                 let dropped_writer = dropped_writer_chunks.load(Ordering::Relaxed);
@@ -2335,7 +3336,6 @@ impl AudioCapture {
                         dropped_writer
                     );
                 }
-                drop(stream);
             });
 
             match ready_rx.recv_timeout(MICROPHONE_STREAM_PREPARATION_TIMEOUT) {
@@ -2391,16 +3391,24 @@ impl AudioCapture {
                 dropped_writer_chunks: dropped_writer_chunks_for_session,
                 capture_failure: capture_failure_for_session,
                 writer_failure,
+                track_write_failures: Arc::clone(&track_write_failures),
                 paused,
                 recorded_frames,
                 pause_ledger: PauseLedger::default(),
                 mic_inactive_seconds: Some(mic_inactive_seconds),
+                mic_level: Some(mic_level),
                 activity_epoch: Instant::now(),
+                aside_tap,
+                microphone_device_id: microphone_device_id.clone(),
+                captures_microphone: true,
             });
         }
 
         tracing::info!("Recording prepared: {}", id);
-        Ok(id)
+        Ok(PreparedMeetingRecording {
+            recording_id: id,
+            microphone_input,
+        })
     }
 
     pub fn activate_recording(&mut self, recording_id: &str) -> Result<()> {
@@ -2471,6 +3479,7 @@ impl AudioCapture {
                 tracing::warn!("{}", error);
             }
         }
+        session.aside_tap.close(unix_now_ms());
         for handle in session.writer_handles.drain(..) {
             if let Err(error) = join_writer_with_timeout(
                 handle,
@@ -2480,6 +3489,18 @@ impl AudioCapture {
                 tracing::warn!("{}", error);
             }
         }
+    }
+
+    pub(crate) fn abort_recording_if_matches(&mut self, recording_id: &str) -> bool {
+        if self
+            .active_recording
+            .as_ref()
+            .is_none_or(|session| session.id != recording_id)
+        {
+            return false;
+        }
+        self.abort_prepared_recording();
+        true
     }
 
     pub fn stop_recording(&mut self, recording_id: &str) -> Result<RecordingStopResult> {
@@ -2541,10 +3562,34 @@ impl AudioCapture {
                 session.sample_rate,
             ));
         }
-
-        for handle in session.writer_handles.drain(..) {
-            join_writer_with_timeout(handle, Duration::from_secs(20), "wav writer thread")?;
+        // Every frame the streams delivered has been forwarded by now, so an
+        // aside whose dictation did not finish first ends at the last one.
+        if let Some(session_id) = session.aside_tap.close(unix_now_ms()) {
+            tracing::warn!(
+                "Recording {} stopped before dictation {} finished; its capture ends here",
+                recording_id,
+                session_id
+            );
         }
+        let aside_spans = session.aside_tap.spans();
+
+        // A writer that is still running after the timeout may still be
+        // appending, so its files cannot be judged; that stays a stop failure.
+        // A writer that finished with an error has left whatever it saved on
+        // disk, and that is kept below rather than failing the meeting.
+        let mut writer_thread_failure = None;
+        for handle in session.writer_handles.drain(..) {
+            if let Some(error) =
+                join_finished_writer(handle, Duration::from_secs(20), "wav writer thread")?
+            {
+                writer_thread_failure.get_or_insert(error);
+            }
+        }
+        let track_write_failures = session
+            .track_write_failures
+            .lock()
+            .map(|slot| slot.clone())
+            .unwrap_or_default();
 
         let capture_failure = session
             .capture_failure
@@ -2582,8 +3627,7 @@ impl AudioCapture {
         let system_audio_path = session.system_audio_path;
         tracing::info!("Recording saved to: {:?}", path);
 
-        let mut validated_assets = Vec::new();
-        for (role, asset_path) in [
+        let planned_tracks: Vec<(RecordingAudioRole, &Path)> = [
             Some((RecordingAudioRole::Primary, path.as_path())),
             mic_audio_path
                 .as_deref()
@@ -2594,11 +3638,57 @@ impl AudioCapture {
         ]
         .into_iter()
         .flatten()
-        {
+        .collect();
+        let failed_tracks = failed_track_roles(
+            &planned_tracks
+                .iter()
+                .map(|(role, _)| *role)
+                .collect::<Vec<_>>(),
+            &track_write_failures,
+            writer_thread_failure.is_some(),
+        );
+        if let Some(error) = writer_thread_failure.as_deref() {
+            tracing::error!(
+                "Recording '{}' writer stopped before Stop; keeping what it saved: {}",
+                recording_id,
+                error
+            );
+        }
+
+        let mut validated_assets = Vec::new();
+        let mut unreadable_tracks = Vec::new();
+        for (role, asset_path) in planned_tracks {
             sync_file(asset_path)?;
+            let failed = failed_tracks.contains(&role);
+            if failed {
+                // The writer stopped without stamping a final header, so the
+                // header may describe less audio than the file holds.
+                if let Err(error) = repair_plaintext_wav_header(asset_path) {
+                    tracing::warn!(
+                        "Could not repair the {} track header of '{}': {:#}",
+                        role.as_str(),
+                        recording_id,
+                        error
+                    );
+                }
+            }
             match validate_plaintext_wav(asset_path) {
                 RecordingAudioValidation::Ready(metadata) => {
                     validated_assets.push((role, metadata));
+                }
+                RecordingAudioValidation::Missing(error)
+                | RecordingAudioValidation::Failed(error)
+                    if failed && role != RecordingAudioRole::Primary =>
+                {
+                    // A separate track that failed before saving anything
+                    // readable. The combined recording still holds that side.
+                    tracing::warn!(
+                        "Recording '{}' {} track saved nothing readable: {}",
+                        recording_id,
+                        role.as_str(),
+                        error
+                    );
+                    unreadable_tracks.push(role);
                 }
                 RecordingAudioValidation::Missing(error)
                 | RecordingAudioValidation::Failed(error) => {
@@ -2637,6 +3727,9 @@ impl AudioCapture {
             capture_failure,
             source_degradation,
             pause_spans,
+            aside_spans,
+            failed_tracks,
+            unreadable_tracks,
         })
     }
 
@@ -2651,6 +3744,29 @@ impl AudioCapture {
             return None;
         }
         Some((Arc::clone(&session.streaming_queue), session.sample_rate))
+    }
+
+    /// The live loudness of each source of the active meeting, for the
+    /// meeting window's "You" and "Meeting audio" meters.
+    pub fn get_meeting_source_levels(
+        &self,
+        recording_id: &str,
+    ) -> Option<system_capture::SourceLevels> {
+        let session = self.active_recording.as_ref()?;
+        if session.id != recording_id {
+            return None;
+        }
+        Some(match session.mixed_capture.as_ref() {
+            Some(mixed) => mixed.source_levels(),
+            None => system_capture::SourceLevels {
+                mic: session
+                    .mic_level
+                    .as_deref()
+                    .map(system_capture::read_source_level),
+                system: None,
+                system_unverified: false,
+            },
+        })
     }
 
     pub fn get_waveform_data(&self, recording_id: &str) -> Option<Vec<f32>> {
@@ -2717,9 +3833,10 @@ impl AudioCapture {
     /// gate (see `drive_dictation_auto_stop_gate`): that gate only runs once a
     /// dictation session's own capture stream is already open, whereas this monitor is the
     /// thing that runs *instead*, while idle, purely to decide when to call the existing
-    /// start-dictation path. It never appends to `dictation_buffer` (it fills a
-    /// bounded pre-roll ring that `start_dictation` drains instead), never touches
-    /// `is_dictating`/`dictation_thread`, and never itself calls into `start_dictation` — it
+    /// start-dictation path. While it monitors it never appends to `dictation_buffer` (it
+    /// fills a bounded pre-roll ring instead) and never touches `is_dictating`; a
+    /// hands-free-triggered `start_dictation` may take its stream over (see
+    /// `hand_monitor_stream_to_session`). It never itself calls into `start_dictation` — it
     /// only emits a `dictation-vad-signal` event (`signal: "hands_free_start"`) for the caller
     /// (electron/main.ts) to route through the exact same `start_dictation` command every
     /// other activation path (hotkey, native helper) already uses, so it passes through the
@@ -2761,7 +3878,7 @@ impl AudioCapture {
             device_name: preference.map(|p| p.device_name.clone()),
         };
 
-        let (device, _resolved_device) = self.resolve_input_device(preference)?;
+        let (device, resolved_device) = self.resolve_input_device(preference)?;
         let config = device.default_input_config()?;
         let sample_rate = config.sample_rate();
         let num_channels = config.channels() as usize;
@@ -2776,18 +3893,20 @@ impl AudioCapture {
             .round()
             .max(1.0) as usize;
 
-        // A fresh pre-roll ring per monitor run, sized for this stream's sample
-        // rate. `start_dictation` drains it, so the words spoken while the gate
-        // was still deciding "that's speech" survive the hand-off instead of
-        // being downmixed and dropped.
-        {
-            let mut slot = match self.dictation_pre_roll.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            *slot = Some(PreRollBuffer::new(sample_rate, PRE_ROLL_SECONDS));
-        }
-        let pre_roll = Arc::clone(&self.dictation_pre_roll);
+        // A fresh tap and pre-roll ring per monitor run, sized for this
+        // stream's sample rate. `start_dictation` drains the ring, so the words
+        // spoken while the gate was still deciding "that's speech" survive the
+        // hand-off instead of being downmixed and dropped.
+        let input_session_id = Arc::new(AtomicU64::new(0));
+        let tap = Arc::new(std::sync::Mutex::new(HandsFreeTap {
+            input_session_id: Arc::clone(&input_session_id),
+            pre_roll: Some(PreRollBuffer::new(sample_rate, PRE_ROLL_SECONDS)),
+            device_id: resolved_device.device_id,
+            sample_rate,
+            channels: config.channels(),
+            ..HandsFreeTap::default()
+        }));
+        self.hands_free_tap = Arc::clone(&tap);
 
         // How far back the gate's `SpeechStarted` edge actually sits: it only
         // latches after `DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS` of sustained
@@ -2802,7 +3921,11 @@ impl AudioCapture {
         let monitor_active = Arc::clone(&self.hands_free_monitor_active);
         let (startup_tx, startup_rx) = bounded::<Result<(), String>>(1);
 
+        let monitor_failed = Arc::clone(&self.dictation_stream_failed);
+        let active_session_id = Arc::clone(&self.dictation_vad_session_id);
+        let is_dictating = Arc::clone(&self.is_dictating);
         let capture_handle = std::thread::spawn(move || {
+            let _ = crate::qos::WorkClass::Interactive.apply_to_current_thread();
             let device = device;
             let config = match device.default_input_config() {
                 Ok(config) => config,
@@ -2840,80 +3963,54 @@ impl AudioCapture {
                     silero_model_path.as_deref(),
                 )));
 
-            /// Returns the edge the gate reported so the caller can mark the
-            /// pre-roll's speech onset; `NoChange` whenever the gate was not
-            /// consulted at all.
-            fn handle_frame(
-                mono: &[f32],
-                gate: &std::sync::Mutex<Box<dyn VadGate + Send>>,
-                running: &AtomicBool,
-                handle: &SidecarHandle,
-            ) -> VadEdge {
-                if !running.load(Ordering::SeqCst) {
-                    return VadEdge::NoChange;
-                }
-                let Ok(mut gate) = gate.lock() else {
-                    return VadEdge::NoChange;
-                };
-                let edge = gate.push_samples(mono);
-                if edge == VadEdge::SpeechStarted {
-                    handle.emit(
-                        "dictation-vad-signal",
-                        serde_json::json!({ "signal": "hands_free_start" }),
-                    );
-                }
-                edge
-            }
-
             // Latched if this monitor's realtime callback ever panics, so it
             // goes inert instead of aborting the process.
             let callback_poisoned = Arc::new(AtomicBool::new(false));
             let sample_format = config.sample_format();
             let stream_config = config.config();
 
+            let realtime = Arc::new(realtime::RealtimeSamples::new(sample_rate as usize * 2));
             macro_rules! build_hands_free_stream {
                 ($sample_type:ty) => {{
-                    let running = Arc::clone(&monitor_active);
+                    let realtime = Arc::clone(&realtime);
+                    let monitor_failed = Arc::clone(&monitor_failed);
+                    let input_session_id = Arc::clone(&input_session_id);
+                    let active_session_id = Arc::clone(&active_session_id);
+                    let is_dictating = Arc::clone(&is_dictating);
+                    let monitoring = Arc::clone(&monitor_active);
                     let callback_poisoned = Arc::clone(&callback_poisoned);
-                    let gate = Arc::clone(&gate);
-                    let handle = event_handle.clone();
                     let err_active = Arc::clone(&monitor_active);
-                    let pre_roll = Arc::clone(&pre_roll);
+                    let err_tap = Arc::clone(&tap);
 
                     device.build_input_stream(
                         stream_config.clone(),
                         move |data: &[$sample_type], _: &cpal::InputCallbackInfo| {
                             guard_audio_callback(&callback_poisoned, "Hands-free monitor", || {
-                                if !running.load(Ordering::SeqCst) {
+                                if !monitor_accepts_audio(
+                                    monitoring.load(Ordering::SeqCst),
+                                    is_dictating.load(Ordering::SeqCst),
+                                    input_session_id.load(Ordering::SeqCst),
+                                    active_session_id.load(Ordering::SeqCst),
+                                ) {
                                     return;
                                 }
-                                let mono = downmix_to_mono(data, num_channels);
-                                // The frame is already downmixed for the gate; keep
-                                // it in the ring instead of dropping it, so the
-                                // session this monitor is about to trigger starts
-                                // with the user's opening words.
-                                if let Ok(mut slot) = pre_roll.lock() {
-                                    if let Some(buffer) = slot.as_mut() {
-                                        buffer.push(&mono);
-                                    }
-                                }
-                                // Mark where speech actually began (the gate latches
-                                // well after the fact) so the hand-off is the user's
-                                // opening words, not the whole ring.
-                                if handle_frame(&mono, &gate, &running, &handle)
-                                    == VadEdge::SpeechStarted
-                                {
-                                    if let Ok(mut slot) = pre_roll.lock() {
-                                        if let Some(buffer) = slot.as_mut() {
-                                            buffer.mark_speech_onset(speech_onset_lookback);
-                                        }
-                                    }
+                                if realtime.push(data, num_channels) > 0 {
+                                    monitor_failed.store(true, Ordering::SeqCst);
                                 }
                             });
                         },
                         move |err| {
                             tracing::error!("Hands-free monitor stream error: {}", err);
-                            err_active.store(false, Ordering::SeqCst);
+                            let tap = match err_tap.lock() {
+                                Ok(guard) => guard,
+                                Err(poisoned) => poisoned.into_inner(),
+                            };
+                            match tap.session.as_ref() {
+                                Some(session) => {
+                                    session.stream_failed.store(true, Ordering::SeqCst)
+                                }
+                                None => err_active.store(false, Ordering::SeqCst),
+                            }
                         },
                         None,
                     )
@@ -2960,12 +4057,48 @@ impl AudioCapture {
             let _ = startup_tx.send(Ok(()));
             tracing::info!("Hands-free idle monitor stream started");
 
-            while monitor_active.load(Ordering::SeqCst) {
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            // A hand-off installs the session before it clears the monitor
+            // flag, so the stream stays open across the switch.
+            let mut pending = Vec::new();
+            while monitor_active.load(Ordering::SeqCst)
+                || tap.lock().is_ok_and(|tap| tap.session_running())
+            {
+                realtime.drain(&mut pending);
+                if !pending.is_empty() {
+                    feed_hands_free_monitor(
+                        &pending,
+                        1,
+                        &tap,
+                        &monitor_active,
+                        &gate,
+                        &event_handle,
+                        speech_onset_lookback,
+                    );
+                }
+                let dropped = realtime.take_dropped();
+                if dropped > 0 {
+                    if let Ok(slot) = tap.lock() {
+                        if let Some(session) = &slot.session {
+                            session.stream_failed.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    tracing::warn!(
+                        dropped_samples = dropped,
+                        "Hands-free capture worker fell behind"
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
 
             tracing::info!("Hands-free idle monitor stream stopping");
             drop(stream);
+            realtime.drain(&mut pending);
+            if let Ok(slot) = tap.lock() {
+                if let Some(session) = &slot.session {
+                    session.process_samples(&pending, 1);
+                    session.process_pending();
+                }
+            }
         });
 
         self.hands_free_monitor_thread = Some(capture_handle);
@@ -3019,6 +4152,18 @@ impl AudioCapture {
     }
 }
 
+/// The whole transform from captured dictation samples to the WAV the final
+/// decode reads. Loudness gain is measured over the entire capture, so every
+/// output sample depends on audio that arrives after it.
+pub(crate) fn encode_dictation_recognition_wav(
+    samples: &mut Vec<f32>,
+    sample_rate: u32,
+) -> Result<Vec<u8>> {
+    normalize_dictation_loudness(samples, sample_rate);
+    ensure_min_duration(samples, sample_rate, 0.7);
+    encode_wav(samples, sample_rate, 1)
+}
+
 fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8>> {
     let mut buffer = Vec::new();
 
@@ -3055,6 +4200,10 @@ fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8
 }
 
 type MeetingWavWriter = hound::WavWriter<std::io::BufWriter<std::fs::File>>;
+
+#[cfg(test)]
+#[path = "audio_meeting_durability_tests.rs"]
+mod meeting_durability_tests;
 
 struct PreparedAlignedWavWriters {
     mixed: MeetingWavWriter,
@@ -3115,6 +4264,11 @@ fn prepare_aligned_wav_writers(
 }
 
 fn write_wav_samples(writer: &mut MeetingWavWriter, mut samples: Vec<f32>) -> Result<()> {
+    // The mono 16-bit writer uses a 32-bit RIFF size, including 36 header bytes.
+    let resulting_samples = u64::from(writer.len()).saturating_add(samples.len() as u64);
+    if resulting_samples > u64::from((u32::MAX - 36) / 2) {
+        anyhow::bail!("This recording reached the audio file size limit. Earlier audio is kept.");
+    }
     boost_quiet_audio(&mut samples);
     for sample in samples {
         writer.write_sample((sample.clamp(-1.0, 1.0) * 32767.0) as i16)?;
@@ -3122,15 +4276,79 @@ fn write_wav_samples(writer: &mut MeetingWavWriter, mut samples: Vec<f32>) -> Re
     Ok(())
 }
 
-fn checkpoint_aligned_writers(writers: &mut PreparedAlignedWavWriters) -> Result<()> {
-    writers.mixed.flush()?;
-    if let Some(writer) = writers.mic.as_mut() {
-        writer.flush()?;
+/// One track of a Me + Them meeting whose file stopped accepting writes while
+/// the other tracks kept recording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrackWriteFailure {
+    pub role: RecordingAudioRole,
+    pub error: String,
+}
+
+type TrackWriteFailures = Arc<std::sync::Mutex<Vec<TrackWriteFailure>>>;
+
+/// One aligned meeting track and whether it can still be written.
+///
+/// A Me + Them meeting writes three files from one thread. Before this, an
+/// error on any of them ended the thread, so a failing microphone file also
+/// stopped the combined recording and the meeting audio, and Stop then failed
+/// the whole meeting. A track that fails is now closed on its own, with its
+/// header stamped where it stopped, and the others keep recording.
+struct AlignedTrack {
+    role: RecordingAudioRole,
+    writer: Option<MeetingWavWriter>,
+}
+
+impl AlignedTrack {
+    fn fail(&mut self, error: anyhow::Error, failures: &TrackWriteFailures) {
+        // Dropping the writer stamps the header over what reached the file,
+        // best effort; the stop path repairs it from the file length anyway.
+        drop(self.writer.take());
+        tracing::error!(
+            "Meeting {} track stopped saving: {error:#}",
+            self.role.as_str()
+        );
+        if let Ok(mut slot) = failures.lock() {
+            slot.push(TrackWriteFailure {
+                role: self.role,
+                error: format!("{error:#}"),
+            });
+        }
     }
-    if let Some(writer) = writers.system.as_mut() {
-        writer.flush()?;
+
+    fn write(&mut self, samples: Vec<f32>, failures: &TrackWriteFailures) {
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        if let Err(error) = write_wav_samples(writer, samples) {
+            self.fail(error, failures);
+        }
     }
-    Ok(())
+
+    fn checkpoint(&mut self, failures: &TrackWriteFailures) {
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        if let Err(error) = writer.flush() {
+            self.fail(error.into(), failures);
+        }
+    }
+
+    fn finish(&mut self, failures: &TrackWriteFailures) {
+        let Some(writer) = self.writer.take() else {
+            return;
+        };
+        if let Err(error) = writer.finalize() {
+            self.fail(error.into(), failures);
+        }
+    }
+}
+
+fn first_track_failure(failures: &TrackWriteFailures) -> String {
+    failures
+        .lock()
+        .ok()
+        .and_then(|slot| slot.first().map(|failure| failure.error.clone()))
+        .unwrap_or_else(|| "unknown error".to_string())
 }
 
 /// How long a writer waits for the next chunk before checking whether a
@@ -3143,59 +4361,86 @@ const WAV_WRITER_IDLE_POLL: Duration = Duration::from_secs(1);
 const WAV_WRITER_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
 
 fn write_aligned_wav_files(
-    mut writers: PreparedAlignedWavWriters,
+    writers: PreparedAlignedWavWriters,
     receiver: Receiver<MixedAudioChunk>,
     log_path: &Path,
+    failures: &TrackWriteFailures,
 ) -> Result<()> {
+    let PreparedAlignedWavWriters { mixed, mic, system } = writers;
+    let expects_mic = mic.is_some();
+    let expects_system = system.is_some();
+    let mut mixed = AlignedTrack {
+        role: RecordingAudioRole::Primary,
+        writer: Some(mixed),
+    };
+    let mut mic = AlignedTrack {
+        role: RecordingAudioRole::Mic,
+        writer: mic,
+    };
+    let mut system = AlignedTrack {
+        role: RecordingAudioRole::System,
+        writer: system,
+    };
+    let every_track_failed = |mixed: &AlignedTrack, mic: &AlignedTrack, system: &AlignedTrack| {
+        mixed.writer.is_none() && mic.writer.is_none() && system.writer.is_none()
+    };
     let mut last_checkpoint = Instant::now();
     loop {
         let chunk = match receiver.recv_timeout(WAV_WRITER_IDLE_POLL) {
-            Ok(chunk) => chunk,
-            Err(RecvTimeoutError::Timeout) => {
-                if last_checkpoint.elapsed() >= WAV_WRITER_CHECKPOINT_INTERVAL {
-                    checkpoint_aligned_writers(&mut writers)?;
-                    last_checkpoint = Instant::now();
-                }
-                continue;
-            }
+            Ok(chunk) => Some(chunk),
+            Err(RecvTimeoutError::Timeout) => None,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let frames = chunk.mixed.len();
-        if chunk
-            .mic
-            .as_ref()
-            .is_some_and(|samples| samples.len() != frames)
-            || chunk
-                .system
+        if let Some(chunk) = chunk {
+            let frames = chunk.mixed.len();
+            if chunk
+                .mic
                 .as_ref()
                 .is_some_and(|samples| samples.len() != frames)
-            || writers.mic.is_some() != chunk.mic.is_some()
-            || writers.system.is_some() != chunk.system.is_some()
-        {
-            return Err(anyhow::anyhow!(
-                "Aligned meeting audio chunk had mismatched track lengths"
-            ));
-        }
+                || chunk
+                    .system
+                    .as_ref()
+                    .is_some_and(|samples| samples.len() != frames)
+                || expects_mic != chunk.mic.is_some()
+                || expects_system != chunk.system.is_some()
+            {
+                return Err(anyhow::anyhow!(
+                    "Aligned meeting audio chunk had mismatched track lengths"
+                ));
+            }
 
-        write_wav_samples(&mut writers.mixed, chunk.mixed)?;
-        if let (Some(writer), Some(samples)) = (writers.mic.as_mut(), chunk.mic) {
-            write_wav_samples(writer, samples)?;
-        }
-        if let (Some(writer), Some(samples)) = (writers.system.as_mut(), chunk.system) {
-            write_wav_samples(writer, samples)?;
+            mixed.write(chunk.mixed, failures);
+            if let Some(samples) = chunk.mic {
+                mic.write(samples, failures);
+            }
+            if let Some(samples) = chunk.system {
+                system.write(samples, failures);
+            }
         }
         if last_checkpoint.elapsed() >= WAV_WRITER_CHECKPOINT_INTERVAL {
-            checkpoint_aligned_writers(&mut writers)?;
+            mixed.checkpoint(failures);
+            mic.checkpoint(failures);
+            system.checkpoint(failures);
             last_checkpoint = Instant::now();
+        }
+        if every_track_failed(&mixed, &mic, &system) {
+            return Err(anyhow::anyhow!(
+                "Every meeting track stopped saving: {}",
+                first_track_failure(failures)
+            ));
         }
     }
 
-    writers.mixed.finalize()?;
-    if let Some(writer) = writers.mic {
-        writer.finalize()?;
-    }
-    if let Some(writer) = writers.system {
-        writer.finalize()?;
+    mixed.finish(failures);
+    mic.finish(failures);
+    system.finish(failures);
+    let failed = failures.lock().map(|slot| slot.len()).unwrap_or_default();
+    let planned = 1 + usize::from(expects_mic) + usize::from(expects_system);
+    if failed >= planned {
+        return Err(anyhow::anyhow!(
+            "Every meeting track stopped saving: {}",
+            first_track_failure(failures)
+        ));
     }
     tracing::info!("Aligned meeting WAV files written: {:?}", log_path);
     Ok(())
@@ -3273,6 +4518,44 @@ fn retire_recording_preparation_threads(
     ) {
         tracing::warn!("{}", error);
     }
+}
+
+/// Which tracks of a stopped meeting did not save to the end: the ones the
+/// writer closed on their own, or every track when the writer itself died.
+fn failed_track_roles(
+    planned: &[RecordingAudioRole],
+    track_failures: &[TrackWriteFailure],
+    writer_thread_failed: bool,
+) -> Vec<RecordingAudioRole> {
+    planned
+        .iter()
+        .copied()
+        .filter(|role| {
+            writer_thread_failed || track_failures.iter().any(|failure| failure.role == *role)
+        })
+        .collect()
+}
+
+/// Join a writer thread that is expected to finish. `Err` means it is still
+/// running after `timeout`; `Ok(Some(error))` means it finished with an error
+/// or panicked, so its files are no longer being written.
+fn join_finished_writer(
+    handle: JoinHandle<Result<()>>,
+    timeout: Duration,
+    label: &str,
+) -> Result<Option<String>> {
+    let started_at = Instant::now();
+    while !handle.is_finished() {
+        if started_at.elapsed() >= timeout {
+            return Err(anyhow::anyhow!("Timed out waiting for {}", label));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(match handle.join() {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(format!("{label} failed: {error:#}")),
+        Err(_) => Some(format!("{label} panicked")),
+    })
 }
 
 fn join_writer_with_timeout(
@@ -3398,6 +4681,71 @@ fn ensure_min_duration(samples: &mut Vec<f32>, sample_rate: u32, min_seconds: f3
     }
 
     samples.resize(min_samples, 0.0);
+}
+
+/// A device that called back at least once and then went quiet for longer
+/// than this stopped delivering audio; healthy streams call back every ~10 ms.
+const CAPTURE_STALL: Duration = Duration::from_millis(1_500);
+
+fn capture_interrupted(
+    stream_failed: bool,
+    callbacks: u64,
+    last_callback_us: u64,
+    elapsed: Duration,
+) -> bool {
+    stream_failed
+        || (callbacks > 0
+            && elapsed.saturating_sub(Duration::from_micros(last_callback_us)) > CAPTURE_STALL)
+}
+
+#[cfg(test)]
+mod capture_interruption_tests {
+    use super::*;
+
+    #[test]
+    fn a_device_that_errors_or_goes_quiet_is_reported() {
+        let at = Duration::from_secs;
+        assert!(capture_interrupted(true, 500, 9_990_000, at(10)));
+        assert!(capture_interrupted(false, 200, 4_000_000, at(10)));
+        assert!(!capture_interrupted(false, 900, 9_990_000, at(10)));
+        assert!(!capture_interrupted(false, 0, 0, at(10)));
+    }
+}
+
+#[cfg(test)]
+mod start_sound_delay_tests {
+    use super::dictation_start_sound_delay_ms;
+
+    #[test]
+    fn bluetooth_inputs_hold_the_start_sound_until_the_profile_switch() {
+        // Core Audio's transport type decides when it is known.
+        assert_eq!(
+            dictation_start_sound_delay_ms(Some("bluetooth"), "Jonathan's AirPods Pro"),
+            300
+        );
+        assert_eq!(
+            dictation_start_sound_delay_ms(Some("bluetooth"), "WH-1000XM5"),
+            1200
+        );
+        assert_eq!(
+            dictation_start_sound_delay_ms(Some("builtin"), "AirPods"),
+            0
+        );
+        assert_eq!(
+            dictation_start_sound_delay_ms(Some("usb"), "Yeti Stereo Microphone"),
+            0
+        );
+        // Otherwise the name has to do.
+        assert_eq!(dictation_start_sound_delay_ms(None, "AirPods Max"), 300);
+        assert_eq!(
+            dictation_start_sound_delay_ms(Some("unknown"), "Bose Bluetooth Headset"),
+            1200
+        );
+        assert_eq!(
+            dictation_start_sound_delay_ms(None, "MacBook Pro Microphone"),
+            0
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3599,7 +4947,7 @@ mod recording_capture_health_tests {
     use super::{
         meeting_headroom_bytes, meeting_space_pressure, meeting_space_pressure_with_vault_reserve,
         meeting_start_space_shortfall, meeting_start_space_shortfall_with_vault_reserve,
-        meeting_vault_staging_bytes, run_wav_writer_thread, silence_auto_stop_due,
+        meeting_vault_staging_bytes, microphone_lost, run_wav_writer_thread, silence_auto_stop_due,
         silence_auto_stop_warning_due, silence_auto_stop_warning_minutes, write_aligned_wav_files,
         MeetingSpacePressure, RecordingCaptureHealth, SourceInactivity,
         MEETING_CRITICAL_SPACE_STOP_SECONDS, MEETING_LOW_SPACE_WARN_SECONDS,
@@ -3655,7 +5003,7 @@ mod recording_capture_health_tests {
 
         let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         run_wav_writer_thread(Arc::clone(&slot), || {
-            write_aligned_wav_files(writers, receiver, &path)
+            write_aligned_wav_files(writers, receiver, &path, &Arc::new(Mutex::new(Vec::new())))
         })
         .expect("an empty but well-formed session finalizes cleanly");
 
@@ -3824,12 +5172,87 @@ mod recording_capture_health_tests {
             track_count: 1,
             vault_staging_bytes: 0,
             paused: false,
+            recorded_seconds: 0.0,
             inactivity: SourceInactivity {
                 mic_seconds: mic,
                 system_seconds: system,
             },
             seconds_since_activity_epoch: since_epoch,
+            mixed: false,
         }
+    }
+
+    #[test]
+    fn a_mic_only_meeting_whose_stream_failed_and_stopped_is_reported() {
+        let mut health = quiet_health(Some(0.0), None, 30.0);
+        health.recorded_seconds = 12.0;
+        // Healthy: no failure.
+        assert!(!microphone_lost(&health, Some(12.0)));
+        health.capture_failure = Some("The requested device is no longer available.".to_string());
+        // The first look has nothing to compare against.
+        assert!(!microphone_lost(&health, None));
+        // Still delivering after a transient error report: not lost.
+        health.recorded_seconds = 17.0;
+        assert!(!microphone_lost(&health, Some(12.0)));
+        // No new audio since the last look: lost.
+        assert!(microphone_lost(&health, Some(17.0)));
+        // A pause stops frames on purpose.
+        health.paused = true;
+        assert!(!microphone_lost(&health, Some(17.0)));
+        health.paused = false;
+        // Me + Them rebuilds its own sources and says so itself.
+        health.mixed = true;
+        assert!(!microphone_lost(&health, Some(17.0)));
+    }
+
+    #[test]
+    fn recording_duration_limit_uses_finite_captured_audio_and_skips_pauses() {
+        let mut health = quiet_health(None, None, 0.0);
+        for (seconds, warning, stop) in [
+            (0.0, false, false),
+            (899.0, false, false),
+            (900.0, true, false),
+            (1199.0, true, false),
+            (1200.0, false, true),
+            (1201.0, false, true),
+            (-1.0, false, false),
+            (f64::NAN, false, false),
+            (f64::INFINITY, false, false),
+            (f64::NEG_INFINITY, false, false),
+        ] {
+            health.recorded_seconds = seconds;
+            assert_eq!(super::duration_auto_stop_warning_due(&health, 20), warning);
+            assert_eq!(super::duration_auto_stop_due(&health, 20), stop);
+            assert!(!super::duration_auto_stop_warning_due(&health, 0));
+            assert!(!super::duration_auto_stop_due(&health, 0));
+            health.paused = true;
+            assert!(!super::duration_auto_stop_warning_due(&health, 20));
+            assert!(!super::duration_auto_stop_due(&health, 20));
+            health.paused = false;
+        }
+        health.recorded_seconds = 29.0;
+        assert!(!super::duration_auto_stop_warning_due(&health, 1));
+        health.recorded_seconds = 30.0;
+        assert!(super::duration_auto_stop_warning_due(&health, 1));
+    }
+
+    #[test]
+    fn recording_duration_warning_rearms_only_for_changed_limits() {
+        let mut health = quiet_health(None, None, 0.0);
+        health.recorded_seconds = 900.0;
+        let mut warning = super::MeetingDurationWarning::default();
+        assert!(warning.take_due(&health, 20));
+        assert!(!warning.take_due(&health, 20));
+        health.paused = true;
+        assert!(!warning.take_due(&health, 18));
+        health.paused = false;
+        assert!(warning.take_due(&health, 18));
+        assert!(!warning.take_due(&health, 18));
+        assert!(!warning.take_due(&health, 0));
+        assert!(warning.take_due(&health, 20));
+        assert!(!warning.take_due(&health, 40));
+        health.recorded_seconds = 2100.0;
+        assert!(warning.take_due(&health, 40));
     }
 
     #[test]
@@ -4056,6 +5479,239 @@ mod recording_preparation_timeout_tests {
             started_at.elapsed() < Duration::from_secs(1),
             "retiring stalled dictation preparation must remain bounded"
         );
+    }
+}
+
+#[cfg(test)]
+mod recording_cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn scoped_abort_stops_prepared_and_activated_sessions_but_preserves_another_id() {
+        for prepared in [true, false] {
+            let mut audio = AudioCapture::new();
+            let running = Arc::new(AtomicBool::new(true));
+            let (activation_tx, _activation_rx) = crossbeam::channel::bounded(1);
+            let (_activated_tx, activated_rx) = crossbeam::channel::bounded(1);
+            audio.active_recording = Some(ActiveRecordingSession {
+                id: "capture-B".to_string(),
+                audio_path: PathBuf::new(),
+                mic_audio_path: None,
+                system_audio_path: None,
+                writer_handles: Vec::new(),
+                activation: prepared.then_some(RecordingActivation::Microphone {
+                    activation_tx,
+                    activated_rx,
+                }),
+                capture_stop_flag: Arc::clone(&running),
+                capture_handle: None,
+                mixed_capture: None,
+                waveform_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
+                streaming_queue: Arc::new(crossbeam::queue::ArrayQueue::new(1)),
+                sample_rate: 48_000,
+                dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
+                dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
+                capture_failure: Arc::new(std::sync::Mutex::new(None)),
+                writer_failure: Arc::new(std::sync::Mutex::new(None)),
+                track_write_failures: Arc::new(std::sync::Mutex::new(Vec::new())),
+                paused: Arc::new(AtomicBool::new(false)),
+                recorded_frames: Arc::new(AtomicU64::new(0)),
+                pause_ledger: PauseLedger::default(),
+                mic_inactive_seconds: None,
+                mic_level: None,
+                activity_epoch: Instant::now(),
+                aside_tap: Arc::default(),
+                microphone_device_id: None,
+                captures_microphone: true,
+            });
+            assert!(!audio.abort_recording_if_matches("capture-A"));
+            assert!(audio.is_recording());
+            assert!(running.load(Ordering::SeqCst));
+            assert!(audio.abort_recording_if_matches("capture-B"));
+            assert!(!audio.is_recording());
+            assert!(!running.load(Ordering::SeqCst));
+            assert!(!audio.abort_recording_if_matches("capture-B"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod track_write_failure_tests {
+    use super::*;
+    use crate::audio::system_capture::MixedAudioChunk;
+
+    const RATE: u32 = 16_000;
+
+    /// A writer whose file accepts no bytes: the header and the first samples
+    /// sit in its buffer, and the first time the buffer reaches the file the
+    /// write fails, as a file on a failing volume does.
+    fn failing_writer(path: &Path) -> MeetingWavWriter {
+        std::fs::write(path, b"").unwrap();
+        let read_only = std::fs::File::open(path).unwrap();
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: RATE,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        hound::WavWriter::new(std::io::BufWriter::new(read_only), spec).unwrap()
+    }
+
+    fn chunk(frames: usize) -> MixedAudioChunk {
+        let tone: Vec<f32> = (0..frames)
+            .map(|index| ((index % 80) as f32 / 80.0 - 0.5) * 0.6)
+            .collect();
+        MixedAudioChunk {
+            mixed: tone.clone(),
+            mic: Some(tone.clone()),
+            system: Some(tone),
+        }
+    }
+
+    /// One second of aligned audio, then the channel closes as Stop does.
+    fn one_second_of_chunks() -> Receiver<MixedAudioChunk> {
+        let (sender, receiver) = bounded(64);
+        for _ in 0..10 {
+            sender.send(chunk(1_600)).unwrap();
+        }
+        drop(sender);
+        receiver
+    }
+
+    #[test]
+    fn a_failing_microphone_file_does_not_stop_the_other_tracks() {
+        let dir = crate::test_fs::TempDir::new("track-write-failure");
+        let mixed = dir.path().join("meeting.wav");
+        let mic = dir.path().join("meeting-mic.wav");
+        let system = dir.path().join("meeting-system.wav");
+        let writers = PreparedAlignedWavWriters {
+            mixed: new_mono_wav_writer(&mixed, RATE).unwrap(),
+            mic: Some(failing_writer(&mic)),
+            system: Some(new_mono_wav_writer(&system, RATE).unwrap()),
+        };
+        let failures: TrackWriteFailures = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        write_aligned_wav_files(writers, one_second_of_chunks(), &mixed, &failures)
+            .expect("one failed track is not a failed meeting");
+
+        let failures = failures.lock().unwrap().clone();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].role, RecordingAudioRole::Mic);
+        for path in [&mixed, &system] {
+            assert_eq!(hound::WavReader::open(path).unwrap().duration(), 16_000);
+        }
+    }
+
+    #[test]
+    fn the_writer_fails_only_when_every_track_has_failed() {
+        let dir = crate::test_fs::TempDir::new("track-write-failure-all");
+        let writers = PreparedAlignedWavWriters {
+            mixed: failing_writer(&dir.path().join("meeting.wav")),
+            mic: Some(failing_writer(&dir.path().join("meeting-mic.wav"))),
+            system: Some(failing_writer(&dir.path().join("meeting-system.wav"))),
+        };
+        let failures: TrackWriteFailures = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let error = write_aligned_wav_files(
+            writers,
+            one_second_of_chunks(),
+            &dir.path().join("meeting.wav"),
+            &failures,
+        )
+        .expect_err("nothing left to save is a writer failure");
+        assert!(error
+            .to_string()
+            .contains("Every meeting track stopped saving"));
+        assert_eq!(failures.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_dead_writer_marks_every_track_and_a_track_failure_marks_only_its_own() {
+        let planned = [
+            RecordingAudioRole::Primary,
+            RecordingAudioRole::Mic,
+            RecordingAudioRole::System,
+        ];
+        let system_failed = [TrackWriteFailure {
+            role: RecordingAudioRole::System,
+            error: "disk error".to_string(),
+        }];
+        assert_eq!(
+            failed_track_roles(&planned, &system_failed, false),
+            vec![RecordingAudioRole::System]
+        );
+        assert_eq!(failed_track_roles(&planned, &[], true), planned.to_vec());
+        assert!(failed_track_roles(&planned, &[], false).is_empty());
+    }
+
+    #[test]
+    fn stop_saves_the_good_tracks_when_one_track_failed() {
+        let dir = crate::test_fs::TempDir::new("track-write-failure-stop");
+        let mixed = dir.path().join("meeting.wav");
+        let mic = dir.path().join("meeting-mic.wav");
+        let system = dir.path().join("meeting-system.wav");
+        let writers = PreparedAlignedWavWriters {
+            mixed: new_mono_wav_writer(&mixed, RATE).unwrap(),
+            mic: Some(failing_writer(&mic)),
+            system: Some(new_mono_wav_writer(&system, RATE).unwrap()),
+        };
+        let track_write_failures: TrackWriteFailures = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer_failures = Arc::clone(&track_write_failures);
+        let receiver = one_second_of_chunks();
+        let log_path = mixed.clone();
+        let writer_handle = std::thread::spawn(move || {
+            let _ = crate::qos::WorkClass::Interactive.apply_to_current_thread();
+            write_aligned_wav_files(writers, receiver, &log_path, &writer_failures)
+        });
+
+        let mut audio = AudioCapture::new();
+        audio.active_recording = Some(ActiveRecordingSession {
+            id: "me-and-them".to_string(),
+            audio_path: mixed.clone(),
+            mic_audio_path: Some(mic.clone()),
+            system_audio_path: Some(system.clone()),
+            writer_handles: vec![writer_handle],
+            activation: None,
+            capture_stop_flag: Arc::new(AtomicBool::new(true)),
+            capture_handle: None,
+            mixed_capture: None,
+            waveform_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
+            streaming_queue: Arc::new(crossbeam::queue::ArrayQueue::new(1)),
+            sample_rate: RATE,
+            dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
+            dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
+            capture_failure: Arc::new(std::sync::Mutex::new(None)),
+            writer_failure: Arc::new(std::sync::Mutex::new(None)),
+            track_write_failures,
+            paused: Arc::new(AtomicBool::new(false)),
+            recorded_frames: Arc::new(AtomicU64::new(0)),
+            pause_ledger: PauseLedger::default(),
+            mic_inactive_seconds: None,
+            mic_level: None,
+            activity_epoch: Instant::now(),
+            aside_tap: Arc::default(),
+            microphone_device_id: None,
+            captures_microphone: true,
+        });
+
+        let result = audio
+            .stop_recording("me-and-them")
+            .expect("a meeting with one failed track still saves");
+
+        let saved: Vec<_> = result
+            .validated_assets
+            .iter()
+            .map(|(role, metadata)| (*role, metadata.duration_seconds))
+            .collect();
+        assert_eq!(
+            saved,
+            vec![
+                (RecordingAudioRole::Primary, 1),
+                (RecordingAudioRole::System, 1)
+            ]
+        );
+        assert_eq!(result.failed_tracks, vec![RecordingAudioRole::Mic]);
+        assert_eq!(result.unreadable_tracks, vec![RecordingAudioRole::Mic]);
     }
 }
 
@@ -4291,6 +5947,31 @@ mod dictation_capture_lifecycle_tests {
     }
 
     #[test]
+    fn provider_specific_session_limit_is_consumed_then_resets_to_default() {
+        let mut audio = AudioCapture::new();
+        audio.set_next_dictation_max_session_seconds(30);
+
+        assert_eq!(audio.activate_dictation_session_limit(), 30);
+        assert_eq!(audio.dictation_last_max_session_seconds(), 30);
+        assert_eq!(
+            audio.activate_dictation_session_limit(),
+            AudioCapture::dictation_max_session_seconds()
+        );
+        assert_eq!(
+            audio.dictation_last_max_session_seconds(),
+            AudioCapture::dictation_max_session_seconds()
+        );
+    }
+
+    #[test]
+    fn thirty_second_limit_uses_the_existing_partial_callback_admission() {
+        let max_samples = 48_000_u64 * 30;
+        let admission = admit_dictation_samples(max_samples - 200, 480, max_samples);
+        assert_eq!(admission.accepted, 200);
+        assert!(admission.ceiling_reached);
+    }
+
+    #[test]
     fn a_fresh_dictation_session_clears_the_previous_ceiling_flag() {
         // The truncation notice is per session. A session that hit the ceiling
         // must not make the next one report truncation it never suffered.
@@ -4337,6 +6018,46 @@ mod dictation_capture_lifecycle_tests {
         audio.abort_dictation();
         assert!(audio.dictation_vad_gate.lock().unwrap().is_none());
         assert!(!audio.dictation_vad_gate_active.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod dictation_level_meter_tests {
+    use super::DictationLevelMeter;
+
+    fn assert_level(meter: &DictationLevelMeter, expected: f32) {
+        let actual = meter.read();
+        assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
+    }
+
+    #[test]
+    fn the_meter_reports_the_loudest_callback_between_polls_and_reads_do_not_reset_it() {
+        let meter = DictationLevelMeter::default();
+        meter.record(0.1, 1_000);
+        meter.record(0.3, 11_000);
+        meter.record(0.02, 51_000);
+
+        assert_level(&meter, 0.3);
+        // A second poller reading right after the first sees the same level.
+        assert_level(&meter, 0.3);
+
+        // The window rotates; the finished one still counts for one more.
+        meter.record(0.05, 125_000);
+        assert_level(&meter, 0.3);
+        meter.record(0.01, 250_000);
+        assert_level(&meter, 0.05);
+    }
+
+    #[test]
+    fn a_new_session_starts_from_silence_on_its_own_clock() {
+        let meter = DictationLevelMeter::default();
+        meter.record(0.4, 900_000);
+        meter.reset();
+        assert_level(&meter, 0.0);
+
+        meter.record(0.2, 2_000);
+        meter.record(0.1, 12_000);
+        assert_level(&meter, 0.2);
     }
 }
 
@@ -4435,7 +6156,7 @@ mod hands_free_monitor_tests {
     fn install_pre_roll(audio: &AudioCapture, sample_rate: u32, samples: &[f32]) {
         let mut ring = crate::audio::preroll::PreRollBuffer::new(sample_rate, 2.0);
         ring.push(samples);
-        *audio.dictation_pre_roll.lock().unwrap() = Some(ring);
+        audio.hands_free_tap.lock().unwrap().pre_roll = Some(ring);
     }
 
     /// The hand-off the whole pre-roll exists for: the monitor stops, the real
@@ -4480,7 +6201,7 @@ mod hands_free_monitor_tests {
 
         audio.clear_dictation_pre_roll();
 
-        assert!(audio.dictation_pre_roll.lock().unwrap().is_none());
+        assert!(audio.hands_free_tap.lock().unwrap().pre_roll.is_none());
         assert!(audio.take_dictation_pre_roll(48_000).is_empty());
     }
 
@@ -4502,7 +6223,7 @@ mod hands_free_monitor_tests {
         );
         // And the unused ring is dropped rather than left resident for the next
         // start to pick up.
-        assert!(audio.dictation_pre_roll.lock().unwrap().is_none());
+        assert!(audio.hands_free_tap.lock().unwrap().pre_roll.is_none());
 
         install_pre_roll(&audio, 48_000, &[0.1, 0.2, 0.3]);
         assert_eq!(
@@ -4542,6 +6263,151 @@ mod hands_free_monitor_tests {
         let from_preview: crate::models::DictationStartOptions =
             serde_json::from_value(serde_json::json!({ "deliveryMode": "preview" })).unwrap();
         assert_eq!(from_preview.delivery_mode, DictationDeliveryMode::Preview);
+    }
+
+    const RATE: u32 = 16_000;
+
+    /// 10 ms frames; 5 frames of speech latch it.
+    fn quick_gate() -> std::sync::Mutex<Box<dyn crate::audio::vad::VadGate + Send>> {
+        std::sync::Mutex::new(Box::new(crate::audio::vad::EnergyThresholdVadGate::new(
+            &crate::audio::vad::VadConfig {
+                frame_size: 160,
+                sample_rate: RATE,
+                threshold_db: Some(-40.0),
+                min_speech_duration: 0.05,
+                min_silence_duration: 0.05,
+                padding_seconds: 0.0,
+            },
+        )))
+    }
+
+    fn running_monitor(audio: &mut AudioCapture, device_id: &str) {
+        audio.hands_free_tap = std::sync::Arc::new(std::sync::Mutex::new(super::HandsFreeTap {
+            pre_roll: Some(crate::audio::preroll::PreRollBuffer::new(RATE, 2.0)),
+            device_id: device_id.to_string(),
+            sample_rate: RATE,
+            channels: 1,
+            ..super::HandsFreeTap::default()
+        }));
+        audio
+            .hands_free_monitor_active
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn device(device_id: &str) -> super::ResolvedAudioInputDevice {
+        super::ResolvedAudioInputDevice {
+            device_id: device_id.to_string(),
+            device_name: device_id.to_string(),
+            transport_type: None,
+            is_default: true,
+            is_bluetooth_like: false,
+            used_fallback: false,
+            advisory: None,
+        }
+    }
+
+    fn session_sink(
+        audio: &AudioCapture,
+        capture_stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::sync::Arc<super::DictationCaptureSink> {
+        audio.dictation_capture_sink(7, 600, RATE, capture_stop, std::time::Instant::now(), None)
+    }
+
+    fn drain(audio: &AudioCapture) -> Vec<f32> {
+        std::iter::from_fn(|| audio.dictation_buffer.pop()).collect()
+    }
+
+    /// The reason for the hand-off: the stream the monitor heard the opening
+    /// words on keeps running into the session, so the buffer is the pre-roll
+    /// followed directly by what came next, with nothing lost to a reopen.
+    #[test]
+    fn a_hands_free_start_takes_over_the_monitor_stream_without_a_gap() {
+        let mut audio = AudioCapture::new();
+        running_monitor(&mut audio, "mic");
+        let tap = std::sync::Arc::clone(&audio.hands_free_tap);
+        let running = std::sync::Arc::clone(&audio.hands_free_monitor_active);
+        let gate = quick_gate();
+        let handle = test_handle();
+        let feed = |samples: &[f32]| {
+            super::feed_hands_free_monitor(samples, 1, &tap, &running, &gate, &handle, 0)
+        };
+
+        feed(&[0.001, 0.002]);
+        let capture_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sink = session_sink(&audio, &capture_stop);
+        assert!(audio.hand_monitor_stream_to_session(&sink, &device("mic"), RATE, 1));
+        assert!(
+            !audio.is_hands_free_monitor_active(),
+            "reconcile must not see a monitor while the session owns the stream"
+        );
+        feed(&[0.003, 0.004]);
+
+        assert_eq!(drain(&audio), vec![0.001, 0.002, 0.003, 0.004]);
+        assert_eq!(audio.dictation_buffered_samples.load(Ordering::SeqCst), 4);
+        assert!(tap.lock().unwrap().session_running());
+
+        // Stop, cancel and the length ceiling all end capture through this
+        // flag; the stream then goes quiet and its thread lets it close.
+        capture_stop.store(false, Ordering::SeqCst);
+        feed(&[0.005]);
+        assert!(drain(&audio).is_empty());
+        assert!(!tap.lock().unwrap().session_running());
+    }
+
+    #[test]
+    fn a_monitor_on_another_device_or_format_is_not_taken_over() {
+        let mut audio = AudioCapture::new();
+        running_monitor(&mut audio, "mic");
+        audio
+            .hands_free_tap
+            .lock()
+            .unwrap()
+            .pre_roll
+            .as_mut()
+            .unwrap()
+            .push(&[0.1]);
+        let capture_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sink = session_sink(&audio, &capture_stop);
+
+        assert!(!audio.hand_monitor_stream_to_session(&sink, &device("usb"), RATE, 1));
+        assert!(!audio.hand_monitor_stream_to_session(&sink, &device("mic"), 48_000, 1));
+        assert!(!audio.hand_monitor_stream_to_session(&sink, &device("mic"), RATE, 2));
+        audio
+            .hands_free_monitor_active
+            .store(false, Ordering::SeqCst);
+        assert!(!audio.hand_monitor_stream_to_session(&sink, &device("mic"), RATE, 1));
+
+        let tap = audio.hands_free_tap.lock().unwrap();
+        assert!(tap.session.is_none());
+        assert_eq!(tap.pre_roll.as_ref().map(|ring| ring.len()), Some(1));
+        drop(tap);
+        assert!(drain(&audio).is_empty());
+    }
+
+    /// While a start it signalled is in flight the monitor keeps recording the
+    /// pre-roll but must not signal again or move the onset mark.
+    #[test]
+    fn a_held_monitor_keeps_listening_without_signalling() {
+        let mut audio = AudioCapture::new();
+        running_monitor(&mut audio, "mic");
+        let tap = std::sync::Arc::clone(&audio.hands_free_tap);
+        let running = std::sync::Arc::clone(&audio.hands_free_monitor_active);
+        let gate = quick_gate();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = SidecarHandle::new(tx);
+        let speech = vec![0.5_f32; 160 * 10];
+
+        audio.hold_hands_free_monitor(true);
+        super::feed_hands_free_monitor(&speech, 1, &tap, &running, &gate, &handle, 0);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            tap.lock().unwrap().pre_roll.as_ref().map(|ring| ring.len()),
+            Some(speech.len())
+        );
+
+        audio.hold_hands_free_monitor(false);
+        super::feed_hands_free_monitor(&speech, 1, &tap, &running, &gate, &handle, 0);
+        assert!(rx.try_recv().unwrap().contains("hands_free_start"));
     }
 }
 
@@ -4622,5 +6488,766 @@ mod dictation_loudness_tests {
         let mut faint = tone(0.004, 1.0, 16_000);
         normalize_dictation_loudness(&mut faint, 16_000);
         assert!(rms(&faint) <= 0.004 * 10.0 / 2f32.sqrt() + 1e-4);
+    }
+}
+
+#[cfg(test)]
+mod meeting_microphone_input_tests {
+    use super::*;
+
+    #[test]
+    fn meeting_microphone_input_uses_actual_resolver_fallback() {
+        let resolved = ResolvedAudioInputDevice {
+            device_id: "actual".into(),
+            device_name: "Built-in Microphone".into(),
+            transport_type: None,
+            is_default: true,
+            is_bluetooth_like: false,
+            used_fallback: true,
+            advisory: Some("Saved microphone is unavailable".into()),
+        };
+        let input = MeetingMicrophoneInput::from_resolved(&resolved, Some("Desk microphone"));
+        assert_eq!(input.requested_name.as_deref(), Some("Desk microphone"));
+        assert_eq!(input.resolved_name, "Built-in Microphone");
+        assert!(input.used_fallback);
+        let wire = serde_json::to_value(input).unwrap();
+        assert_eq!(wire["resolvedName"], "Built-in Microphone");
+        assert!(wire.get("deviceId").is_none());
+    }
+
+    #[test]
+    fn meeting_microphone_input_does_not_invent_requested_device() {
+        let resolved = ResolvedAudioInputDevice {
+            device_id: "actual".into(),
+            device_name: "Built-in Microphone".into(),
+            transport_type: None,
+            is_default: true,
+            is_bluetooth_like: false,
+            used_fallback: false,
+            advisory: None,
+        };
+        let input = MeetingMicrophoneInput::from_resolved(&resolved, None);
+        assert!(input.requested_name.is_none());
+        assert!(!input.used_fallback);
+    }
+}
+
+#[cfg(test)]
+mod responsiveness_tests {
+    use super::*;
+    #[test]
+    fn responsiveness_hands_free_ingress_stops_and_cannot_be_rearmed_by_a_new_session() {
+        assert!(monitor_accepts_audio(true, false, 0, 0));
+        assert!(monitor_accepts_audio(false, true, 7, 7));
+        assert!(!monitor_accepts_audio(false, true, 0, 1));
+        assert!(!monitor_accepts_audio(false, false, 7, 7));
+        assert!(!monitor_accepts_audio(false, true, 7, 8));
+    }
+
+    #[test]
+    fn responsiveness_unit_capture_defaults_never_use_the_live_profile() {
+        assert!(default_capture_data_directory()
+            .unwrap()
+            .starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn responsiveness_an_intentionally_stopped_stream_does_not_become_stale_during_encoding() {
+        let mut audio = AudioCapture::new();
+        audio.dictation_capture_started_at = Some(Instant::now() - Duration::from_secs(10));
+        audio.dictation_callback_count.store(1, Ordering::SeqCst);
+        assert!(!audio.dictation_capture_interrupted());
+    }
+
+    #[test]
+    fn responsiveness_stop_reports_a_worker_that_missed_the_drain_deadline() {
+        let mut audio = AudioCapture::new();
+        audio.is_dictating.store(true, Ordering::SeqCst);
+        audio.dictation_capture_started_at = Some(Instant::now());
+        audio.dictation_callback_count.store(1, Ordering::SeqCst);
+        let (release, blocked) = bounded::<()>(1);
+        audio.dictation_thread = Some(std::thread::spawn(move || {
+            let _ = blocked.recv();
+        }));
+        let _ = audio.stop_dictation();
+        let interrupted = audio.dictation_capture_interrupted();
+        release.send(()).unwrap();
+        assert!(
+            interrupted,
+            "a timed-out capture drain must be reported as interrupted"
+        );
+    }
+
+    #[test]
+    fn accepted_audio_drains_after_stop_but_cannot_enter_a_replacement_session() {
+        let mut audio = AudioCapture::new();
+        let running = Arc::new(AtomicBool::new(true));
+        let sink = audio.dictation_capture_sink(1, 1, 2, &running, Instant::now(), None);
+        sink.ingest(&[0.1_f32, 0.2], 1);
+        running.store(false, Ordering::SeqCst);
+        sink.process_pending();
+        assert_eq!(audio.dictation_buffer.pop(), Some(0.1));
+        assert_eq!(audio.dictation_buffer.pop(), Some(0.2));
+        running.store(true, Ordering::SeqCst);
+        sink.ingest(&[0.3_f32], 1);
+        running.store(false, Ordering::SeqCst);
+        audio.reset_dictation_sample_storage();
+        sink.process_pending();
+        assert!(audio.dictation_buffer.is_empty());
+        assert_eq!(audio.dictation_buffered_samples.load(Ordering::SeqCst), 0);
+        assert!(!audio.dictation_hit_max_duration());
+    }
+
+    #[test]
+    fn overflow_marks_dictation_as_interrupted_without_discarding_accepted_audio() {
+        let audio = AudioCapture::new();
+        let running = Arc::new(AtomicBool::new(true));
+        let sink = audio.dictation_capture_sink(1, 600, 10, &running, Instant::now(), None);
+        sink.ingest(&[0.1_f32; 25], 1);
+        assert!(audio.dictation_stream_failed.load(Ordering::SeqCst));
+        sink.process_pending();
+        assert_eq!(audio.dictation_buffer.len(), 20);
+        assert_eq!(audio.dictation_buffered_samples.load(Ordering::SeqCst), 20);
+    }
+
+    #[test]
+    fn dictation_callback_does_not_wait_for_the_preview_lock() {
+        let audio = AudioCapture::new();
+        let running = Arc::new(AtomicBool::new(true));
+        let sink = audio.dictation_capture_sink(1, 600, 48_000, &running, Instant::now(), None);
+        sink.streaming_active.store(true, Ordering::Relaxed);
+        let lock = audio.dictation_partial_buffer.lock().unwrap();
+        let (done_tx, done_rx) = bounded(1);
+        let worker = std::thread::spawn(move || {
+            sink.ingest(&[0.1_f32; 480], 1);
+            done_tx.send(()).unwrap();
+        });
+        let completed = done_rx.recv_timeout(Duration::from_millis(100));
+        drop(lock);
+        worker.join().unwrap();
+        assert!(
+            completed.is_ok(),
+            "audio callback waited for the preview lock"
+        );
+    }
+}
+
+#[cfg(test)]
+mod meeting_aside_capture_tests {
+    use super::*;
+
+    const RATE: u32 = 48_000;
+
+    fn auto_stop_off() -> DictationAutoStopConfig {
+        DictationAutoStopConfig {
+            enabled: false,
+            silence_timeout_seconds: 0.0,
+            vad_backend: VadBackendKind::EnergyThreshold,
+            silero_model_path: None,
+        }
+    }
+
+    /// A recording meeting with no device behind it; each test plays the
+    /// capture worker by forwarding blocks to the tap itself.
+    fn recording_meeting(
+        audio: &mut AudioCapture,
+        captures_microphone: bool,
+    ) -> Arc<MeetingMicTap> {
+        let tap = Arc::new(MeetingMicTap::default());
+        audio.active_recording = Some(ActiveRecordingSession {
+            id: "meeting".to_string(),
+            audio_path: PathBuf::new(),
+            mic_audio_path: None,
+            system_audio_path: None,
+            writer_handles: Vec::new(),
+            activation: None,
+            capture_stop_flag: Arc::new(AtomicBool::new(true)),
+            capture_handle: None,
+            mixed_capture: None,
+            waveform_buffer: Arc::new(std::sync::Mutex::new(Vec::new())),
+            streaming_queue: Arc::new(crossbeam::queue::ArrayQueue::new(1)),
+            sample_rate: RATE,
+            dropped_stream_chunks: Arc::new(AtomicU64::new(0)),
+            dropped_writer_chunks: Arc::new(AtomicU64::new(0)),
+            capture_failure: Arc::new(std::sync::Mutex::new(None)),
+            writer_failure: Arc::new(std::sync::Mutex::new(None)),
+            track_write_failures: Arc::new(std::sync::Mutex::new(Vec::new())),
+            paused: Arc::new(AtomicBool::new(false)),
+            recorded_frames: Arc::new(AtomicU64::new(0)),
+            pause_ledger: PauseLedger::default(),
+            mic_inactive_seconds: None,
+            mic_level: None,
+            activity_epoch: Instant::now(),
+            aside_tap: Arc::clone(&tap),
+            captures_microphone,
+            microphone_device_id: None,
+        });
+        tap
+    }
+
+    /// One second of a voiced tone in the 10 ms blocks a worker drains.
+    fn speech_blocks() -> Vec<Vec<f32>> {
+        let samples: Vec<f32> = (0..RATE as usize)
+            .map(|index| {
+                let t = index as f32 / RATE as f32;
+                0.2 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                    + 0.05 * (2.0 * std::f32::consts::PI * 660.0 * t).sin()
+            })
+            .collect();
+        samples.chunks(480).map(<[f32]>::to_vec).collect()
+    }
+
+    #[test]
+    fn the_disabled_gate_preserves_the_existing_pause_drain_policy() {
+        let tap = MeetingMicTap::default();
+        assert_eq!(
+            forward_meeting_microphone(&tap, &[0.1; 20], true, false),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn paused_aside_crash_recovery_acceptance() {
+        aside_capture_recovery_acceptance(true, false);
+    }
+
+    #[test]
+    fn open_aside_crash_recovery_acceptance() {
+        aside_capture_recovery_acceptance(false, false);
+    }
+
+    #[test]
+    fn different_microphone_aside_crash_recovery_acceptance() {
+        aside_capture_recovery_acceptance(false, true);
+    }
+
+    fn aside_capture_recovery_acceptance(paused: bool, separate_input: bool) {
+        let root = crate::test_fs::TempDir::new("aside-capture-crash");
+        let source = root.path().join("meeting.wav");
+        let mut writer = hound::WavWriter::create(
+            &source,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: RATE,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for _ in 0..RATE {
+            writer.write_sample(0i16).unwrap();
+        }
+        let journal_path = root.path().join("meeting.db");
+        let mut db = crate::db::Database::open_at_path(&journal_path, None).unwrap();
+        let recording = serde_json::from_value(serde_json::json!({"id":"meeting","title":"Synthetic meeting","projectId":"default","duration":1,"createdAt":"2026-10-27T00:00:00Z","updatedAt":"2026-10-27T00:00:00Z","sourceType":"meeting","audioPath":source,"status":"recording"})).unwrap();
+        db.create_recording(&recording).unwrap();
+        let mut capture = AudioCapture::new();
+        let tap = recording_meeting(&mut capture, true);
+        tap.forward(&[0.0; RATE as usize], true, false);
+        tap.writer_accepted(u64::from(RATE));
+        let sink = if separate_input {
+            // The same marker + own sink path, without opening a device.
+            tap.attach_journaled(1, RATE, Arc::new(AsideMarker), unix_now_ms(), |ticket| {
+                db.insert_pending_aside("meeting", ticket, 1, RATE)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+            capture.dictation_aside_tap = Some(Arc::clone(&tap));
+            capture.dictation_sample_rate = 24_000;
+            let (_, sink) =
+                capture.begin_dictation_capture_session(1, 600, 24_000, &auto_stop_off(), None);
+            capture.begin_aside_capture_checkpoint(1, 24_000).unwrap();
+            Some(sink)
+        } else {
+            capture
+                .start_dictation_aside(
+                    1,
+                    auto_stop_off(),
+                    None,
+                    None,
+                    |recording_id, ticket, rate| {
+                        db.insert_pending_aside(recording_id, ticket, 1, rate)
+                            .map_err(|e| e.to_string())
+                    },
+                )
+                .unwrap();
+            None
+        };
+        let blocks = speech_blocks();
+        for block in &blocks {
+            let meeting_block = if separate_input {
+                vec![0.0; block.len()]
+            } else {
+                block.clone()
+            };
+            tap.forward(&meeting_block, !paused, false);
+            if !paused {
+                for sample in &meeting_block {
+                    writer
+                        .write_sample((*sample * i16::MAX as f32) as i16)
+                        .unwrap();
+                }
+            }
+            if let Some(sink) = &sink {
+                sink.ingest(block, 1);
+                sink.process_pending();
+            }
+        }
+        writer.finalize().unwrap();
+        assert!(capture.dictation_buffered_samples.load(Ordering::SeqCst) > 0);
+        // Keep test storage through the simulated restart. The killed-writer
+        // test separately proves recovery without WavWriter's destructor.
+        let checkpoint_root = capture.dictation_checkpoint_root.take().unwrap();
+        drop(sink);
+        drop(capture);
+        drop(tap);
+        drop(db);
+        let db = crate::db::Database::open_at_path(&journal_path, None).unwrap();
+        let spans = db.unrecovered_aside_spans("meeting").unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].end_frame, None);
+        let original_frames = hound::WavReader::open(&source).unwrap().duration();
+        if paused {
+            assert_eq!(original_frames, RATE);
+        }
+        let now = std::time::SystemTime::now();
+        crate::dictation_checkpoint::promote_leftover_dictation_checkpoint(
+            checkpoint_root.path(),
+            now,
+        );
+        let recovered =
+            crate::dictation_checkpoint::pending_dictation_recovery(checkpoint_root.path(), now)
+                .expect("capture audio survives independently of the meeting track");
+        let mut reader = hound::WavReader::open(&recovered.path).unwrap();
+        assert_eq!(
+            reader.spec().sample_rate,
+            if separate_input { 24_000 } else { RATE }
+        );
+        assert_eq!(
+            reader
+                .samples::<f32>()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            blocks.concat()
+        );
+        let masked = root.path().join("masked.wav");
+        crate::meeting_aside_audio::copy_wav(&source, &masked, &spans, false).unwrap();
+        let samples = hound::WavReader::open(masked)
+            .unwrap()
+            .samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(samples.iter().all(|sample| *sample == 0));
+        assert_eq!(
+            hound::WavReader::open(&source).unwrap().duration(),
+            original_frames
+        );
+    }
+
+    #[test]
+    fn cancelling_an_aside_after_capture_stops_discards_its_capture_checkpoint() {
+        let mut capture = AudioCapture::new();
+        let tap = recording_meeting(&mut capture, true);
+        capture
+            .start_dictation_aside(7, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .unwrap();
+        for block in speech_blocks() {
+            tap.forward(&block, false, false);
+        }
+        capture.stop_dictation().unwrap();
+        assert!(!capture.abort_dictation_for_session(7));
+        let root = capture.dictation_checkpoint_root.as_ref().unwrap();
+        let now = std::time::SystemTime::now();
+        crate::dictation_checkpoint::promote_leftover_dictation_checkpoint(root.path(), now);
+        assert!(
+            crate::dictation_checkpoint::pending_dictation_recovery(root.path(), now).is_none()
+        );
+    }
+
+    #[test]
+    fn queued_aside_frames_are_discarded_if_detach_races_a_pause() {
+        let mut capture = AudioCapture::new();
+        let tap = recording_meeting(&mut capture, true);
+        capture
+            .start_dictation_aside(1, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .unwrap();
+        tap.forward(&[0.2; 480], true, false);
+        capture.abort_dictation_for_session(1);
+        assert_eq!(
+            forward_meeting_microphone(&tap, &[0.2; 480], true, true),
+            None
+        );
+        capture
+            .start_dictation_aside(2, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .unwrap();
+        tap.forward(&[0.1; 20], true, false);
+        capture.abort_dictation_for_session(2);
+        assert_eq!(tap.spans()[1].start_frame, 480);
+    }
+
+    #[test]
+    fn failed_journal_never_attaches_or_keeps_dictation_running() {
+        let mut audio = AudioCapture::new();
+        let tap = recording_meeting(&mut audio, true);
+        assert!(audio
+            .start_dictation_aside(1, auto_stop_off(), None, None, |_, _, _| Err(
+                "disk full".into()
+            ))
+            .is_err());
+        assert!(!audio.is_dictating());
+        assert!(!tap.is_attached());
+        assert!(!tap.forward(&[0.2; 480], true, false));
+    }
+
+    /// Real models, isolated profile, no device or insertion. The measured
+    /// interval is stop request through capture tail, WAV encode, ASR and local
+    /// formatting. Optional AI formatting and Electron delivery are excluded.
+    #[tokio::test]
+    #[ignore = "requires isolated profile, pinned models and corpus; writes a paired latency receipt"]
+    async fn measure_aside_dictation_pairs() {
+        use crate::dictation_pipeline::{apply_dictation_pipeline, DictationPipelineInput};
+        use crate::text::format::DictationAppCategory;
+        use std::io::Write;
+        crate::meeting_eval::require_isolated_profile().unwrap();
+        let manifest = std::env::var("PLAINSONG_ASIDE_PAIRS_MANIFEST").unwrap();
+        let paths: Vec<String> = serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+        let provider = crate::asr::AsrProviderType::Whisper;
+        let model = "base.en";
+        let options = crate::meeting_eval::MeetingEvalOptions {
+            audio: paths[0].clone().into(),
+            provider,
+            model_id: model.into(),
+            asr_mode: crate::meeting_eval::MeetingEvalAsrMode::MeetingChunks,
+            diarization_model_id: None,
+            transcript_from: None,
+            refinement: crate::diarization::DEFAULT_CLUSTER_REFINEMENT,
+            source_tracks: None,
+            aside_spans: vec![],
+            canaries: vec![],
+        };
+        crate::meeting_eval::verify_models(&options).await.unwrap();
+        let manager = Arc::new(crate::asr::AsrManager::new());
+        let directory = crate::paths::data_dir().unwrap().join("Plainsong");
+        let mut journal = crate::db::Database::open_at_path(
+            &directory.join(format!("aside-pairs-{}.db", uuid::Uuid::new_v4())),
+            None,
+        )
+        .unwrap();
+        let recording = serde_json::from_value(serde_json::json!({"id":"meeting","title":"Synthetic meeting","projectId":"default","duration":0,"createdAt":"2026-10-27T00:00:00Z","updatedAt":"2026-10-27T00:00:00Z","sourceType":"meeting","audioPath":"","status":"recording"})).unwrap();
+        journal.create_recording(&recording).unwrap();
+        let checkpoint_directory =
+            crate::dictation_checkpoint::dictation_checkpoint_directory().unwrap();
+        let mut output =
+            std::fs::File::create(std::env::var("PLAINSONG_ASIDE_PAIRS_OUT").unwrap()).unwrap();
+        // Warm the chosen provider before either timed arm.
+        manager
+            .transcribe_bytes_for_dictation(
+                provider,
+                &std::fs::read(&paths[0]).unwrap(),
+                Some(model),
+            )
+            .await
+            .unwrap();
+        for (index, path) in paths.iter().enumerate() {
+            let (samples, rate) =
+                crate::meeting_transcribe::read_track_frames(Path::new(path), &(0..u64::MAX))
+                    .unwrap();
+            assert_eq!(rate, RATE);
+            let mut pair = Vec::new();
+            for aside in if index % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                // Timing admission is outside the measured stop clock. The
+                // external guard records host load and other build-slot owners.
+                if let Ok(guard) = std::env::var("PLAINSONG_ASIDE_TIMING_HOST_GUARD") {
+                    assert!(std::process::Command::new("python3")
+                        .arg(guard)
+                        .arg(path)
+                        .arg(aside.to_string())
+                        .status()
+                        .unwrap()
+                        .success());
+                }
+                let stream = crate::streaming::StreamingTranscriber::new(Arc::clone(&manager));
+                let meeting_guard = aside.then(crate::llm::speech_priority::meeting_speech);
+                let (stream_id, mut stream_rx) = stream
+                    .start_session(provider, RATE, model.into())
+                    .await
+                    .unwrap();
+                let receiver =
+                    tokio::spawn(async move { while stream_rx.recv().await.is_some() {} });
+                // Seed a real live decode before capture; asides hold new chunks.
+                if aside {
+                    let seed: Vec<f32> = samples
+                        .iter()
+                        .copied()
+                        .cycle()
+                        .take(RATE as usize * 10)
+                        .collect();
+                    stream.feed_audio(&stream_id, &seed).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+                let mut capture = AudioCapture::new();
+                let mut standalone_sink = None;
+                let tap = if aside {
+                    let tap = recording_meeting(&mut capture, true);
+                    capture
+                        .start_dictation_aside(
+                            1,
+                            auto_stop_off(),
+                            None,
+                            None,
+                            |recording_id, ticket, rate| {
+                                journal
+                                    .insert_pending_aside(recording_id, ticket, 1, rate)
+                                    .map_err(|e| e.to_string())
+                            },
+                        )
+                        .unwrap();
+                    Some(tap)
+                } else {
+                    capture.dictation_sample_rate = RATE;
+                    capture.dictation_channels = 1;
+                    let max = capture.activate_dictation_session_limit();
+                    let (_, sink) = capture.begin_dictation_capture_session(
+                        1,
+                        max,
+                        RATE,
+                        &auto_stop_off(),
+                        None,
+                    );
+                    standalone_sink = Some(sink);
+                    None
+                };
+                crate::llm::speech_priority::set_dictation_active(true);
+                for block in samples.chunks(4800) {
+                    if let Some(tap) = &tap {
+                        tap.forward(block, true, false);
+                    }
+                    if let Some(sink) = &standalone_sink {
+                        sink.ingest(block, 1);
+                        sink.process_pending();
+                    }
+                    if aside {
+                        stream
+                            .feed_audio(&stream_id, &vec![0.0; block.len()])
+                            .await
+                            .unwrap();
+                    }
+                    if aside {
+                        tokio::time::sleep(Duration::from_secs_f64(
+                            block.len() as f64 / f64::from(RATE),
+                        ))
+                        .await;
+                    }
+                }
+                let started = Instant::now();
+                let tail =
+                    vec![0.0; RATE as usize * DICTATION_STOP_CAPTURE_TAIL_MS as usize / 1000];
+                if let Some(tap) = &tap {
+                    tap.forward(&tail, true, false);
+                }
+                if let Some(sink) = &standalone_sink {
+                    sink.ingest(&tail, 1);
+                    sink.process_pending();
+                }
+                tokio::time::sleep(Duration::from_millis(DICTATION_STOP_CAPTURE_TAIL_MS)).await;
+                let tail_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let stage = Instant::now();
+                let wav = capture.stop_dictation().unwrap();
+                let encode_ms = stage.elapsed().as_secs_f64() * 1000.0;
+                let stage = Instant::now();
+                if let Some(tap) = &tap {
+                    journal
+                        .finish_dictation_aside("meeting", 1, &tap.spans())
+                        .unwrap();
+                }
+                let journal_ms = stage.elapsed().as_secs_f64() * 1000.0;
+                let stage = Instant::now();
+                let checkpoint = crate::dictation_checkpoint::DictationCheckpoint::write(
+                    &checkpoint_directory,
+                    &wav,
+                )
+                .unwrap();
+                capture.discard_capture_checkpoint(1);
+                let checkpoint_ms = stage.elapsed().as_secs_f64() * 1000.0;
+                let stage = Instant::now();
+                let waiting = crate::llm::local_model_load::user_waiting_decode();
+                let asr_stages = crate::asr::stage_timing::Stages::default();
+                let decoded = crate::asr::stage_timing::CURRENT
+                    .scope(
+                        Arc::clone(&asr_stages),
+                        manager.transcribe_bytes_for_dictation(provider, &wav, Some(model)),
+                    )
+                    .await;
+                let asr_ms = stage.elapsed().as_secs_f64() * 1000.0;
+                let stage = Instant::now();
+                let result = decoded.map(|decoded| {
+                    apply_dictation_pipeline(DictationPipelineInput {
+                        text: &decoded.text,
+                        spoken_language: None,
+                        dictionary_entries: &[],
+                        snippets: &[],
+                        app_target: None,
+                        mode_preset: "voice",
+                        smart_formatting_enabled: true,
+                        clean_disfluencies: true,
+                        numbers_as_digits: true,
+                        recent_inserted_text: None,
+                        command_mode_enabled: false,
+                        destination_category: DictationAppCategory::Other,
+                        structured_layout: false,
+                    })
+                    .text
+                });
+                let format_ms = stage.elapsed().as_secs_f64() * 1000.0;
+                let ms = started.elapsed().as_secs_f64() * 1000.0;
+                drop(checkpoint);
+                drop(waiting);
+                crate::llm::speech_priority::set_dictation_active(false);
+                // Drain any live decode before the next arm uses the provider.
+                stream.finalize_session(&stream_id).await.ok();
+                receiver.abort();
+                drop(meeting_guard);
+                let error = result.as_ref().err().map(|e| format!("{e:#}"));
+                writeln!(output, "{}", serde_json::json!({"clip": path, "aside": aside, "stopToLocalTextMs": ms, "stagesMs": {"tail": tail_ms, "encode": encode_ms, "journal": journal_ms, "checkpoint": checkpoint_ms, "asr": asr_ms, "format": format_ms}, "asrStagesMs": *asr_stages.lock().unwrap(), "asrRoute": "whisper_in_process_no_helper_ipc", "text": result.as_ref().ok(), "error": error, "scope": "capture_tail_encode_journal_checkpoint_asr_local_format", "simulatedPhysicalMemoryGb": std::env::var("PLAINSONG_SIMULATE_PHYSICAL_MEMORY_GB").ok()})).unwrap();
+                output.flush().unwrap();
+                pair.push((aside, result.unwrap()));
+            }
+            assert_eq!(pair[0].1, pair[1].1, "different final text for {path}");
+        }
+        drop(manager);
+        crate::shutdown_for_sidecar().await;
+    }
+
+    #[test]
+    fn an_aside_hands_the_recognizer_exactly_what_standalone_capture_would() {
+        let blocks = speech_blocks();
+
+        // The aside: the meeting's worker forwards each block it writes.
+        let mut meeting = AudioCapture::new();
+        let tap = recording_meeting(&mut meeting, true);
+        tap.forward(&[0.0; 4_800], true, false);
+        meeting
+            .start_dictation_aside(5, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .expect("aside starts");
+        assert_eq!(meeting.meeting_aside_session(), Some(5));
+        assert!(meeting.is_dictating());
+        assert_eq!(meeting.dictation_sample_rate(), RATE);
+        for block in &blocks {
+            assert!(tap.forward(block, true, false));
+        }
+        let aside_wav = meeting.stop_dictation().expect("aside stops");
+        assert_eq!(meeting.meeting_aside_session(), None);
+        // The meeting keeps recording, and its frames are its own again.
+        assert!(!tap.forward(&blocks[0], true, false));
+
+        // Standalone: the same session setup and sink, fed the way a stream
+        // callback and its worker feed it.
+        let mut standalone = AudioCapture::new();
+        standalone.dictation_sample_rate = RATE;
+        standalone.dictation_channels = 1;
+        let session_max_seconds = standalone.activate_dictation_session_limit();
+        let (_stop, sink) = standalone.begin_dictation_capture_session(
+            6,
+            session_max_seconds,
+            RATE,
+            &auto_stop_off(),
+            None,
+        );
+        for block in &blocks {
+            sink.ingest(block, 1);
+            sink.process_pending();
+        }
+        let standalone_wav = standalone.stop_dictation().expect("standalone stops");
+
+        assert_eq!(aside_wav, standalone_wav);
+
+        // The span names exactly the Me-track frames the dictation took.
+        let spans = tap.spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].start_frame, 4_800);
+        assert_eq!(spans[0].end_frame, Some(4_800 + u64::from(RATE)));
+        assert_eq!(spans[0].dictation_session_id, 5);
+    }
+
+    #[test]
+    fn no_meeting_or_a_system_audio_only_meeting_offers_no_aside() {
+        let mut audio = AudioCapture::new();
+        assert_eq!(audio.meeting_microphone(), MeetingMicrophone::Idle);
+        assert!(audio
+            .start_dictation_aside(1, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .is_err());
+        assert!(!audio.is_dictating());
+
+        recording_meeting(&mut audio, false);
+        assert_eq!(
+            audio.meeting_microphone(),
+            MeetingMicrophone::Recording {
+                captures_microphone: false,
+                stopping: false
+            }
+        );
+        assert!(audio
+            .start_dictation_aside(1, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .is_err());
+        assert!(!audio.is_dictating());
+    }
+
+    #[test]
+    fn a_stopping_meeting_refuses_a_new_aside_and_leaves_dictation_idle() {
+        let mut audio = AudioCapture::new();
+        recording_meeting(&mut audio, true);
+        audio.refuse_new_meeting_asides();
+        assert_eq!(
+            audio.meeting_microphone(),
+            MeetingMicrophone::Recording {
+                captures_microphone: true,
+                stopping: true
+            }
+        );
+        assert!(audio
+            .start_dictation_aside(2, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .is_err());
+        assert!(!audio.is_dictating());
+        assert_eq!(audio.dictation_capture_session_id, None);
+    }
+
+    #[test]
+    fn a_cancelled_aside_detaches_and_its_frames_stay_out_of_the_meeting() {
+        let mut audio = AudioCapture::new();
+        let tap = recording_meeting(&mut audio, true);
+        audio
+            .start_dictation_aside(3, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .expect("aside starts");
+        tap.forward(&[0.1; 480], true, false);
+        assert!(audio.abort_dictation_for_session(3));
+        assert_eq!(audio.meeting_aside_session(), None);
+        assert!(!tap.is_attached());
+        assert!(audio.stop_dictation().is_err());
+        // Cancelling the dictation does not hand its words to the meeting.
+        assert_eq!(tap.spans().len(), 1);
+    }
+
+    #[test]
+    fn a_meeting_that_ends_under_an_aside_leaves_the_dictation_its_audio_and_says_so() {
+        let mut audio = AudioCapture::new();
+        let tap = recording_meeting(&mut audio, true);
+        audio
+            .start_dictation_aside(4, auto_stop_off(), None, None, |_, _, _| Ok(()))
+            .expect("aside starts");
+        for block in speech_blocks() {
+            tap.forward(&block, true, false);
+        }
+        assert!(!audio.dictation_capture_interrupted());
+        assert_eq!(tap.close(10), Some(4));
+        assert!(audio.dictation_capture_interrupted());
+        let wav = audio
+            .stop_dictation()
+            .expect("the dictation keeps its audio");
+        assert!(!wav.is_empty());
+        assert!(audio.dictation_capture_interrupted());
     }
 }

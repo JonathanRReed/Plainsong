@@ -87,6 +87,243 @@ impl Default for Settings {
     }
 }
 
+impl Settings {
+    /// What an install with no settings file starts with.
+    ///
+    /// `Settings::default()` plus the platform's local speech default for
+    /// dictation and meetings. Kept apart from `Default` on purpose: serde
+    /// fills every key an existing file lacks from `Default`, so a
+    /// platform-specific default there would silently move an older file's
+    /// routes. Only a new install (and an explicit settings reset) starts here.
+    pub(crate) fn fresh_install() -> Self {
+        let mut settings = Self::default();
+        apply_fresh_install_route(&mut settings.transcription, fresh_install_dictation_route());
+        settings.transcription.memory_search_mode = fresh_install_memory_search_mode().to_string();
+        if let Some(model_id) = fresh_install_diarization_model() {
+            settings.transcription.diarization_model_id = Some(model_id.to_string());
+        }
+        settings
+    }
+}
+
+/// How a new install's Ask finds past recordings: meaning search with the
+/// built-in model when this build can run it, word search otherwise. Existing
+/// settings files keep "fts" (the serde default) until the user opts in.
+///
+/// Measured over 98 hours of AMI meetings with 124 hand-written questions:
+/// the default built-in model put an answering passage in the top five for
+/// 75% of questions against 53% for word search, and needed about 6 seconds
+/// of model time per hour of meeting (18 passages a second on the test Mac,
+/// nothing else running). In the app it indexes in the background, four
+/// passages per batch, each batch waiting for 3 quiet seconds of dictation,
+/// capture, meeting processing and foreground text work, and not at all in
+/// Low Power Mode or below 20% battery. Receipts:
+/// `artifacts/continuation-2026-10-20/opus-embeddings/`.
+pub(crate) fn fresh_install_memory_search_mode() -> &'static str {
+    if crate::llm::builtin_embeddings::runtime_compiled() {
+        crate::semantic_index::MODE_BUILT_IN
+    } else {
+        crate::semantic_index::MODE_WORDS
+    }
+}
+
+/// The speaker model a new install separates meeting speakers with, when it
+/// differs from the ECAPA-TDNN default an unset `diarization_model_id` means.
+///
+/// On Apple Silicon builds with the Core ML execution provider, new installs
+/// start on pyannote community-1. Measured through the product's merge and
+/// word-owner rule against the ECAPA-TDNN default, as words with the right /
+/// wrong / no speaker and cpWER: five AMI meetings on the headset mix 93.2 /
+/// 6.3 / 0.5 / 28.5% against 92.7 / 6.7 / 0.7 / 29.5%, eleven held-out
+/// headset meetings 92.5 / 6.9 / 0.5 / 28.6% against 92.6 / 6.8 / 0.6 /
+/// 29.1%, and the five far-field 91.5 / 8.0 / 0.5 / 34.1% against 90.0 / 9.0
+/// / 1.0 / 36.4%. A ten-second guest in a 75-minute meeting keeps a label of
+/// its own; on one far-field meeting (TS3003a) it merged two voices. The pass
+/// ran 28-48 times faster than real time on an M4 Pro under load from other
+/// work, at a 0.73-0.87 GiB peak footprint against ECAPA's 0.15-0.25 GB.
+/// Receipts: `artifacts/continuation-2026-10-20/opus-pyannote-c1/deeprec/`.
+///
+/// Everywhere else the embeddings would run on the CPU (7-8 times faster than
+/// real time on the same machine, against 28-48 on the GPU), so those
+/// installs keep ECAPA-TDNN. Existing installs keep their
+/// choice: this applies only where `fresh_install` does.
+pub(crate) fn fresh_install_diarization_model() -> Option<&'static str> {
+    #[cfg(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "diarization",
+        feature = "ort-coreml-ep"
+    ))]
+    {
+        Some(crate::download::COMMUNITY1_MODEL_ID)
+    }
+    #[cfg(not(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "diarization",
+        feature = "ort-coreml-ep"
+    )))]
+    {
+        None
+    }
+}
+
+/// The local speech route a new install dictates and records meetings on,
+/// when it differs from the ONNX Parakeet route
+/// `TranscriptionSettings::default()` names.
+///
+/// On Apple Silicon builds with the transcribe.cpp runtime, both lanes start
+/// on Parakeet TDT 0.6B v3, so one download covers dictation and meetings:
+/// the Core ML build for the language (about 735 MB with the vocabulary
+/// model) where the Mac runs it on the Neural Engine, otherwise the 739 MB
+/// Q8_0 GGUF on Metal (`transcribe_cpp::parakeet_download_bytes`).
+///
+/// Dictation, measured against the ONNX int8 route on the same synthetic
+/// speech on an M4 Pro: 7.1% vs 11.6% word errors over 750 short clips, 7.9%
+/// vs 13.4% in the hard conditions, no empty outputs against 10, 87 vs 144 ms
+/// median decode, and about 1.0 GB against 2.1 GB peak memory. It decodes one
+/// recording at a time, and it produced more stray text on background babble
+/// with no foreground speech.
+///
+/// Meetings, measured on five AMI meetings (14-39 minutes, about 131 minutes)
+/// through the product's ninety-second chunked path: pooled word errors 23.0%
+/// against 30.4% (headset mix) and 28.0% against 37.6% (far-field
+/// microphone), lower on every meeting in both conditions, mostly because
+/// the ONNX int8 route drops whole sentences. Peak memory 1.0-1.1 GB against
+/// 2.0-2.2 GB, flat over a 75-minute meeting. Meetings on this route always
+/// use the chunked path (`whole_file_meeting_limits` has no entry for it).
+/// Receipts: `artifacts/continuation-2026-10-20/opus-meeting/report.md`.
+///
+/// Everywhere else (Intel, Windows, a build without the feature) both lanes
+/// keep the ONNX default.
+pub(crate) fn fresh_install_dictation_route() -> Option<(&'static str, &'static str)> {
+    #[cfg(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "asr-transcribe-cpp"
+    ))]
+    {
+        Some((
+            "transcribe_cpp",
+            crate::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
+        ))
+    }
+    #[cfg(not(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "asr-transcribe-cpp"
+    )))]
+    {
+        None
+    }
+}
+
+/// Point the dictation and meeting slots at `route`, leaving the shared
+/// default on ONNX Parakeet. The lanes keep their own selections rather than
+/// the shared one, so the shared default stays the nearest substitute when
+/// the GGUF model is missing (`preferred_meeting_provider_candidates`), and a
+/// later change to one lane does not move the other.
+fn apply_fresh_install_route(
+    transcription: &mut TranscriptionSettings,
+    route: Option<(&str, &str)>,
+) {
+    let Some((provider, model_id)) = route else {
+        return;
+    };
+    transcription.use_shared_asr_selection = false;
+    transcription.dictation_provider = provider.to_string();
+    transcription.dictation_model_id = model_id.to_string();
+    transcription.meeting_provider = provider.to_string();
+    transcription.meeting_model_id = model_id.to_string();
+}
+
+/// The ONNX build of Parakeet TDT 0.6B v3, which every older settings file
+/// names by default (`TranscriptionSettings::default`).
+const ONNX_PARAKEET_ROUTE: (&str, &str) = ("parakeet", "parakeet-tdt-0.6b-v3");
+
+/// Which lanes `upgrade_onnx_parakeet_slots` moved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ParakeetUpgrade {
+    pub dictation: bool,
+    pub meeting: bool,
+}
+
+impl ParakeetUpgrade {
+    pub(crate) fn moved_any(self) -> bool {
+        self.dictation || self.meeting
+    }
+}
+
+/// Move the dictation and meeting slots that use ONNX Parakeet v3 to
+/// `route`, the GGUF build of the same model, once that build is on this Mac
+/// and has passed its integrity check (`gguf_ready`).
+///
+/// Where the GGUF build can run, the pickers offer only it, so an older
+/// install still on the ONNX build would otherwise keep the slower route with
+/// no way to see why. This runs once: `parakeet_upgrade_applied` is set the
+/// first time it finds the GGUF build ready, whether or not a slot moved, so
+/// a later deliberate choice is never undone. Slots on any other model are
+/// left exactly as they are, and so is the shared default, which stays the
+/// ONNX build as the sidecar's nearest substitute (the same shape
+/// `apply_fresh_install_route` writes). `route` is `None` where the GGUF
+/// build can't run (Intel, Windows, a build without the runtime), and then
+/// nothing changes.
+///
+/// Returns which lanes moved; `parakeet_upgrade_notice_pending` is set when
+/// any did.
+pub(crate) fn upgrade_onnx_parakeet_slots(
+    transcription: &mut TranscriptionSettings,
+    route: Option<(&str, &str)>,
+    gguf_ready: bool,
+) -> ParakeetUpgrade {
+    let mut upgrade = ParakeetUpgrade::default();
+    let Some((provider, model_id)) = route else {
+        return upgrade;
+    };
+    if transcription.parakeet_upgrade_applied || !gguf_ready {
+        return upgrade;
+    }
+    let is_onnx = |slot_provider: &str, slot_model: &str| {
+        (slot_provider.trim(), slot_model.trim()) == ONNX_PARAKEET_ROUTE
+    };
+    if transcription.use_shared_asr_selection {
+        // Both lanes read the shared pair; split them only if it is ONNX
+        // Parakeet, so a shared choice of any other model stays shared.
+        if is_onnx(
+            &transcription.default_provider,
+            &transcription.selected_model_id,
+        ) {
+            upgrade = ParakeetUpgrade {
+                dictation: true,
+                meeting: true,
+            };
+            transcription.use_shared_asr_selection = false;
+        }
+    } else {
+        upgrade.dictation = is_onnx(
+            &transcription.dictation_provider,
+            &transcription.dictation_model_id,
+        );
+        upgrade.meeting = is_onnx(
+            &transcription.meeting_provider,
+            &transcription.meeting_model_id,
+        );
+    }
+    if upgrade.dictation {
+        transcription.dictation_provider = provider.to_string();
+        transcription.dictation_model_id = model_id.to_string();
+    }
+    if upgrade.meeting {
+        transcription.meeting_provider = provider.to_string();
+        transcription.meeting_model_id = model_id.to_string();
+    }
+    transcription.parakeet_upgrade_applied = true;
+    if upgrade.moved_any() {
+        transcription.parakeet_upgrade_notice_pending = true;
+    }
+    upgrade
+}
+
 /// What the first-run wizard recorded, kept where "has this install been set
 /// up" actually belongs: next to the rest of the install's state, in
 /// settings.json.
@@ -315,6 +552,17 @@ pub struct AudioInputDevicePreference {
     pub transport_type: Option<String>,
 }
 
+/// A click-through acceptance of the terms a built-in search model comes
+/// under: which model, the terms shown, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingTermsAcceptance {
+    pub model_id: String,
+    pub terms_url: String,
+    /// RFC 3339, UTC.
+    pub accepted_at: String,
+}
+
 /// Transcription settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -364,6 +612,8 @@ pub struct TranscriptionSettings {
     /// Dictation, hold-to-talk only: a quick tap locks the mic on until the
     /// next press (read by the Electron shortcut controller).
     pub dictation_tap_to_lock: bool,
+    #[serde(default)]
+    pub dictation_double_tap_to_lock: bool,
     /// Dictation: fit spacing and casing to the text around the caret
     /// (`text::cursor_fit`), from characters read at insert time and never
     /// stored.
@@ -374,6 +624,12 @@ pub struct TranscriptionSettings {
     pub dictation_route_override_enabled: bool,
     /// Dictation: `on` pre-warms the model at session start, `off` skips it.
     pub dictation_keep_warm: String,
+    /// How long the speech model stays loaded after its last use ("Keep
+    /// speech model ready for"): `auto` follows the Mac's tier (2, 5 or 10
+    /// minutes), or `2m`, `5m`, `10m`, `30m`, `1h`, `always`. Only `always`
+    /// loads it at startup; otherwise it loads when dictation or a meeting
+    /// starts. See `asr::speech_residency`.
+    pub speech_model_keep_ready: String,
     /// Dictation: show live partial text in popup/inline surfaces.
     pub dictation_live_preview_enabled: bool,
     /// Dictation: which engine draws that live preview.
@@ -417,10 +673,25 @@ pub struct TranscriptionSettings {
     pub dictation_custom_modes: Vec<DictationCustomMode>,
     /// Dictation context source: none, clipboard, selected_text, application_context
     pub dictation_context_source: String,
+    /// Off by default. Read nearby visible AX text for local spelling only.
+    pub dictation_nearby_spelling: bool,
+    /// Off by default. Names from Contacts help spell people's names. The
+    /// app reads them (only after the user turns this on and macOS allows
+    /// it) and hands them to the sidecar, which holds them in memory only.
+    pub dictation_contact_names: bool,
+    /// Off by default. Calendar spelling hints stay in session memory.
+    pub dictation_calendar_names: bool,
     /// Dictation: Command mode toggle (e.g. "command newline")
     pub dictation_command_mode_enabled: bool,
     /// One-time marker proving the old enabled-by-default value was reset.
     pub dictation_command_mode_opt_in_migrated: bool,
+    /// One-time marker: the startup check that moves dictation and meeting
+    /// slots off the ONNX Parakeet v3 route, once the GGUF build is on this
+    /// Mac and verified, has run. See `upgrade_onnx_parakeet_slots`.
+    pub parakeet_upgrade_applied: bool,
+    /// Set when that check moved a slot, so the app can say so once; the
+    /// renderer clears it after showing the notice.
+    pub parakeet_upgrade_notice_pending: bool,
     /// Dictation: Prefix used to activate command mode
     pub dictation_command_prefix: String,
     /// Dictation insertion mode: auto (insert at cursor) or clipboard_only.
@@ -467,6 +738,8 @@ pub struct TranscriptionSettings {
     pub meeting_audio_storage_mode: String,
     /// Meeting retention policy.
     pub meeting_retention_preset: String,
+    /// Audio deletion is paused until the owner confirms the policy.
+    pub meeting_retention_confirmed: bool,
     /// Meeting retention custom duration in months.
     pub meeting_retention_custom_months: u32,
     /// Meeting retention delete mode: audio_only or audio_and_transcript.
@@ -480,10 +753,23 @@ pub struct TranscriptionSettings {
     /// back to "energy_threshold" if it isn't -- see
     /// `crate::audio::silero_vad::build_vad_gate`).
     pub dictation_vad_backend: String,
-    /// Memory search mode: "fts" (default) or "ollama_embeddings"
+    /// How Ask finds past recordings: "fts" (word search, the default for
+    /// existing settings files), "builtin" (meaning search with a model
+    /// Plainsong downloads and runs itself; new installs start here when the
+    /// build has the runtime) or "ollama_embeddings" (meaning search through
+    /// a model the user runs in Ollama).
     pub memory_search_mode: String,
-    /// Ollama embedding model name (e.g. "nomic-embed-text")
+    /// Ollama embedding model name (e.g. "nomic-embed-text"), used only by
+    /// the "ollama_embeddings" mode.
     pub embedding_model: String,
+    /// Which built-in search model the "builtin" mode uses. An id this build
+    /// does not list falls back to the default.
+    pub builtin_embedding_model: String,
+    /// Terms the user accepted before a built-in search model whose licence
+    /// asks for it could download. Written only by
+    /// `record_embedding_terms_acceptance`; a whole-settings save keeps the
+    /// stored list.
+    pub builtin_embedding_terms_acceptances: Vec<EmbeddingTermsAcceptance>,
     /// Auto-run Plainsong-style summary + action items after recording transcription
     pub enable_auto_analysis: bool,
     /// Platform-specific ASR optimization policy and engine preferences.
@@ -578,6 +864,11 @@ impl Default for TranscriptionSettings {
             // (An earlier default routed through a 756M Candle model on CPU
             // in F32 -- multi-second latency on the dictation hot path --
             // which whisper.cpp base.en replaced before this change.)
+            //
+            // This is also what serde fills a key missing from an existing
+            // settings file with, so it stays the ONNX route everywhere. A
+            // new install on Apple Silicon moves its dictation and meeting
+            // slots to GGUF Parakeet: see `fresh_install_dictation_route`.
             default_provider: "parakeet".to_string(),
             selected_model_id: "parakeet-tdt-0.6b-v3".to_string(),
             use_shared_asr_selection: true,
@@ -615,10 +906,12 @@ impl Default for TranscriptionSettings {
             dictation_push_to_talk: false,
             dictation_hands_free_enabled: false,
             dictation_tap_to_lock: true,
+            dictation_double_tap_to_lock: false,
             dictation_match_surrounding_text: true,
             dictation_route_preference: "local".to_string(),
             dictation_route_override_enabled: true,
             dictation_keep_warm: "on".to_string(),
+            speech_model_keep_ready: "auto".to_string(),
             dictation_live_preview_enabled: true,
             dictation_live_preview_engine: "auto".to_string(),
             dictation_ai_formatting: false,
@@ -629,10 +922,15 @@ impl Default for TranscriptionSettings {
             dictation_selected_custom_mode_id: None,
             dictation_custom_modes: Vec::new(),
             dictation_context_source: "none".to_string(),
+            dictation_nearby_spelling: false,
+            dictation_contact_names: false,
+            dictation_calendar_names: false,
             // Spoken commands are opt-in because ASR output is untrusted and
             // some commands can modify another application's document.
             dictation_command_mode_enabled: false,
             dictation_command_mode_opt_in_migrated: true,
+            parakeet_upgrade_applied: false,
+            parakeet_upgrade_notice_pending: false,
             dictation_command_prefix: "command".to_string(),
             dictation_insertion_mode: "auto".to_string(),
             dictation_active_languages: Vec::new(),
@@ -650,13 +948,16 @@ impl Default for TranscriptionSettings {
             dictation_retention_custom_hours: 24,
             dictation_keep_audio: false,
             meeting_audio_storage_mode: "always".to_string(),
-            meeting_retention_preset: "never".to_string(),
+            meeting_retention_preset: "3m".to_string(),
+            meeting_retention_confirmed: false,
             meeting_retention_custom_months: 1,
             meeting_retention_delete_mode: "audio_only".to_string(),
             dictation_silence_timeout_seconds: 0.0,
             dictation_vad_backend: "energy_threshold".to_string(),
             memory_search_mode: "fts".to_string(),
             embedding_model: "nomic-embed-text".to_string(),
+            builtin_embedding_model: crate::llm::builtin_embeddings::DEFAULT_MODEL_ID.to_string(),
+            builtin_embedding_terms_acceptances: Vec::new(),
             enable_auto_analysis: true,
             platform_optimization: PlatformOptimizationSettings::default(),
             dictation_category_formatting_enabled: true,
@@ -795,10 +1096,20 @@ pub struct AiLaneSettings {
     pub model_id: Option<String>,
 }
 
+/// Fresh profiles use the built-in notes model where its helper runs on the
+/// GPU (Apple silicon). Existing explicit and legacy provider choices are
+/// preserved by migration.
+pub const DEFAULT_MEETINGS_AI_PROVIDER: &str =
+    if cfg!(feature = "local-llm") && cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "native_text"
+    } else {
+        "ollama"
+    };
+
 impl Default for AiLaneSettings {
     fn default() -> Self {
         Self {
-            provider: "ollama".to_string(),
+            provider: DEFAULT_MEETINGS_AI_PROVIDER.to_string(),
             model_id: None,
         }
     }
@@ -846,9 +1157,9 @@ pub struct PrivacySettings {
 ///
 /// Dictation cleanup defaults to the bundled on-device model: it is the only
 /// route that works on a fresh install with nothing installed and no key
-/// pasted, which is the whole point of shipping it. Meetings stay on Ollama,
-/// because the bundled model is a dictation normalizer and cannot write a
-/// summary (see `Provider::supports_meeting_analysis`).
+/// pasted, which is the whole point of shipping it. On accelerated native
+/// builds, meetings use a separate general instruction model with a managed
+/// download. S1-mini remains a dictation normalizer.
 ///
 /// `#[serde(default)]` on the container means a settings file with no
 /// `privacy` section at all lands here. A file that *has* a `privacy` section
@@ -926,8 +1237,9 @@ pub enum DictationBindingTrigger {
 /// starts (or stops) a dictation session: `mode_id` is `None` for "whichever
 /// mode is selected", a built-in preset id, or a saved custom mode id, used for
 /// that session only; `behavior` is `toggle`, `hold`, or `inherit` (follow the
-/// activation setting). `CycleMode` moves the selected mode to the next one;
-/// `Cancel` discards a running session, the same as Escape.
+/// activation setting); `submit_after_insert` asks for one Return once the
+/// text is confirmed in the same field. `CycleMode` moves the selected mode to
+/// the next one; `Cancel` discards a running session, the same as Escape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum DictationBindingAction {
@@ -937,6 +1249,12 @@ pub enum DictationBindingAction {
         mode_id: Option<String>,
         #[serde(default = "default_dictation_binding_behavior")]
         behavior: String,
+        #[serde(
+            default,
+            deserialize_with = "deserialize_submit_after_insert",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        submit_after_insert: bool,
     },
     CycleMode,
     Cancel,
@@ -944,6 +1262,15 @@ pub enum DictationBindingAction {
 
 fn default_dictation_binding_behavior() -> String {
     "inherit".to_string()
+}
+
+/// Only a literal `true` turns Return on. Anything else reads as off rather
+/// than failing the row, which would drop a working binding with it.
+fn deserialize_submit_after_insert<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(serde_json::Value::deserialize(deserializer)? == serde_json::Value::Bool(true))
 }
 
 /// One entry of the dictation binding table (roadmap item B4). The first
@@ -1049,6 +1376,7 @@ fn primary_dictation_binding(accelerator: &str) -> DictationBinding {
         action: DictationBindingAction::Dictation {
             mode_id: None,
             behavior: "inherit".to_string(),
+            submit_after_insert: false,
         },
     }
 }
@@ -1061,7 +1389,15 @@ fn is_primary_dictation_binding(binding: &DictationBinding) -> bool {
         )
 }
 
-const SHORTCUT_MODIFIER_TOKENS: &[&str] = &["cmd", "ctrl", "alt", "shift", "fn"];
+const SHORTCUT_MODIFIER_TOKENS: &[&str] = &[
+    "cmd",
+    "ctrl",
+    "alt",
+    "shift",
+    "fn",
+    "rightcommand",
+    "rightoption",
+];
 
 /// Chords macOS itself owns, as `(sorted modifiers, key)` in the canonical
 /// spelling `dictation_binding_trigger_key` produces. Binding one either does
@@ -1193,6 +1529,15 @@ pub(crate) fn validate_dictation_bindings(bindings: &[DictationBinding]) -> Resu
                 if accelerator.trim().is_empty() || (modifiers.is_empty() && keys.is_empty()) {
                     return Err("A key binding needs at least one key.".to_string());
                 }
+                if modifiers
+                    .split('+')
+                    .any(|token| ["rightcommand", "rightoption"].contains(&token))
+                    && (!keys.is_empty() || modifiers.contains('+'))
+                {
+                    return Err(
+                        "RightCommand and RightOption must be used on their own.".to_string()
+                    );
+                }
                 if keys.contains('+') {
                     return Err(format!(
                         "'{}' names more than one non-modifier key.",
@@ -1200,15 +1545,9 @@ pub(crate) fn validate_dictation_bindings(bindings: &[DictationBinding]) -> Resu
                     ));
                 }
                 if keys.is_empty() {
-                    // A modifier on its own. Only Fn is offered and only Fn is
-                    // safe: the helper matches `.maskCommand` (either Cmd key)
-                    // and arms after 150 ms with nothing else pressed, so a
-                    // lone Cmd would start dictation from an ordinary pause
-                    // mid-chord. Fn is the one modifier nothing else on macOS
-                    // treats as a hold.
-                    if modifiers != "fn" {
+                    if !["fn", "rightcommand", "rightoption"].contains(&modifiers) {
                         return Err(format!(
-                            "'{}' cannot be a trigger on its own. Fn is the only modifier that can.",
+                            "'{}' cannot be a trigger on its own. Choose Fn, RightCommand, or RightOption.",
                             accelerator
                         ));
                     }
@@ -1404,7 +1743,10 @@ fn reconcile_keyboard_shortcuts(
         if let DictationBindingTrigger::Key { accelerator } = &mut binding.trigger {
             *accelerator = accelerator.trim().to_string();
         }
-        if let DictationBindingAction::Dictation { mode_id, behavior } = &mut binding.action {
+        if let DictationBindingAction::Dictation {
+            mode_id, behavior, ..
+        } = &mut binding.action
+        {
             *mode_id = mode_id
                 .as_deref()
                 .map(str::trim)
@@ -1476,6 +1818,7 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         "groq" => "groq".to_string(),
         "cohere_transcribe" => "cohere_transcribe".to_string(),
         "cohere_local" => "cohere_local".to_string(),
+        "whistle" => "whistle".to_string(),
         "qwen3_asr" => "qwen3_asr".to_string(),
         "deepgram" => "deepgram".to_string(),
         "gemini_transcribe" => "gemini_transcribe".to_string(),
@@ -1486,8 +1829,6 @@ fn normalize_transcription_provider_value(provider: &str) -> String {
         // fallback below rather than become a ghost route in the settings file.
         #[cfg(feature = "asr-transcribe-cpp")]
         "transcribe_cpp" => "transcribe_cpp".to_string(),
-        #[cfg(feature = "plainsong-plus")]
-        "plainsong_plus" => "plainsong_plus".to_string(),
         _ => "whisper".to_string(),
     }
 }
@@ -1500,7 +1841,9 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             _ => "base.en".to_string(),
         },
         "parakeet" => match model_id.trim() {
-            "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" => model_id.trim().to_string(),
+            "parakeet-tdt-0.6b-v2" | "parakeet-tdt-0.6b-v3" | "orukeet-v0.1.0-int8" => {
+                model_id.trim().to_string()
+            }
             "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => "parakeet-tdt-ctc-110m".to_string(),
             _ => "parakeet-tdt-0.6b-v3".to_string(),
         },
@@ -1543,6 +1886,7 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
             }
             value => value.to_string(),
         },
+        "whistle" => crate::asr::whistle::MODEL_ID.to_string(),
         "qwen3_asr" => match model_id.trim() {
             "" | "qwen3-asr-0.6b" => "qwen3-asr-0.6b".to_string(),
             value => value.to_string(),
@@ -1578,8 +1922,6 @@ fn normalize_transcription_model_id(provider: &str, model_id: &str) -> String {
         "transcribe_cpp" => crate::asr::transcribe_cpp::route_spec_for(model_id)
             .model_id
             .to_string(),
-        #[cfg(feature = "plainsong-plus")]
-        "plainsong_plus" => crate::asr::plainsong_plus::PLUS_STT_MODEL_ID.to_string(),
         _ => "base.en".to_string(),
     }
 }
@@ -1693,7 +2035,7 @@ pub fn dictation_supported_languages(
         // Distil-Whisper's shipped builds are English-only.
         "distil_whisper" => Some(ENGLISH_ONLY_LANGUAGES),
         "parakeet" => {
-            if model.contains("v3") {
+            if model.contains("v3") && !model.starts_with("orukeet-") {
                 Some(PARAKEET_V3_LANGUAGES)
             } else {
                 // The TDT/CTC 110m and v2 builds are English-only.
@@ -1701,6 +2043,19 @@ pub fn dictation_supported_languages(
             }
         }
         "moonshine" => Some(ENGLISH_ONLY_LANGUAGES),
+        // transcribe.cpp routes whose pinned spec claims English alone
+        // (Fluid Speech Mini, Underdog Bark 3.0 Pro, Orukeet r3, Unified EN,
+        // ...). The multilingual GGUF default keeps imposing no local list,
+        // as before.
+        #[cfg(feature = "asr-transcribe-cpp")]
+        "transcribe_cpp"
+            if matches!(
+                crate::asr::transcribe_cpp::route_spec_for(&model).languages,
+                ["en"]
+            ) =>
+        {
+            Some(ENGLISH_ONLY_LANGUAGES)
+        }
         "qwen3_asr" => Some(QWEN3_ASR_LANGUAGES),
         "cohere_local" => Some(COHERE_LOCAL_LANGUAGES),
         // Cloud and platform routes follow their own service/OS language list,
@@ -1869,18 +2224,18 @@ fn raw_settings_carry_dead_whisper_meeting_slot(raw: &serde_json::Value) -> bool
 pub(crate) const DICTATION_NUMBERS_AS_DIGITS_MODES: &[&str] =
     &["voice", "messages", "email", "notes", "meeting_follow_up"];
 
+const DEFAULT_VOICE_NUMBERS_AS_DIGITS: bool = true;
+
 /// Whether a mode preset writes spoken numbers as digits when the user has
 /// not said otherwise.
 ///
-/// On for the drafting presets, where "$12.50" and "3:30 pm" are what the
-/// text is going to have to say anyway. Off for the plain Voice preset,
-/// whose promise is that it keeps your words as spoken -- the Settings copy
-/// in `src/lib/dictation-numbers.ts` has to say the same thing.
+/// Missing overrides inherit this default, including settings saved before
+/// Voice used digits. An explicit false continues to select words.
+/// Mirrors `defaultNumbersAsDigits` in `src/lib/dictation-numbers.ts`.
 pub fn default_dictation_numbers_as_digits(mode_preset: &str) -> bool {
     match mode_preset.trim() {
+        "voice" => DEFAULT_VOICE_NUMBERS_AS_DIGITS,
         "messages" | "email" | "notes" | "meeting_follow_up" => true,
-        // "voice", "custom" and anything unrecognized take the conservative
-        // reading.
         _ => false,
     }
 }
@@ -1926,6 +2281,8 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
 
     transcription.dictation_keep_warm =
         normalize_dictation_keep_warm(&transcription.dictation_keep_warm);
+    transcription.speech_model_keep_ready =
+        crate::asr::speech_residency::normalize_keep_ready(&transcription.speech_model_keep_ready);
     transcription.dictation_live_preview_engine =
         normalize_dictation_live_preview_engine(&transcription.dictation_live_preview_engine);
     transcription.dictation_active_languages = normalize_dictation_active_languages(
@@ -1950,6 +2307,17 @@ fn normalize_loaded_transcription_settings(transcription: &mut TranscriptionSett
 
         if let Some(provider) = mode.dictation_provider.as_mut() {
             *provider = normalize_transcription_provider_value(provider);
+        }
+
+        // A profile naming a cleanup provider this build cannot route to
+        // (one from the removed paid-tier groundwork, say) inherits the
+        // dictation lane instead of failing every cleanup; its model id
+        // belonged to that provider, so it goes too.
+        if mode.ai_provider.as_deref().is_some_and(|provider| {
+            !KNOWN_AI_PROVIDERS.contains(&canonical_ai_provider(provider).as_str())
+        }) {
+            mode.ai_provider = None;
+            mode.ai_model_id = None;
         }
 
         if let Some(model_id) = mode.dictation_model_id.as_mut() {
@@ -2233,51 +2601,56 @@ pub const DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION: &str = "ollama";
 /// every summary with a refusal the user cannot act on from that screen, so
 /// load-time normalization moves the meetings lane back to Ollama. The
 /// dictation lane is left exactly as written.
-const DICTATION_ONLY_AI_PROVIDERS: [&str; 2] = ["bundled_local", "apple_language_model"];
+const DICTATION_ONLY_AI_PROVIDERS: [&str; 1] = ["bundled_local"];
 
 /// Every provider the sidecar can route to. Kept in sync with
 /// `llm::Provider::from_settings_value`, which is the enforcing copy: a
 /// provider missing here is normalized away at load rather than failing at
 /// the first dictation.
-const KNOWN_AI_PROVIDERS: [&str; 8] = [
+const KNOWN_AI_PROVIDERS: [&str; 10] = [
+    "native_text",
     "bundled_local",
     "apple_language_model",
     "ollama",
     "openai",
+    "chatgpt_plan",
     "anthropic",
     "gemini",
     "deepseek",
     "ollama-cloud",
 ];
 
-/// Plus is known only to a build that compiled it in; any other build resets
-/// a lane naming it, like any other unknown provider.
-fn is_known_ai_provider(provider: &str) -> bool {
-    KNOWN_AI_PROVIDERS.contains(&provider)
-        || (cfg!(feature = "plainsong-plus") && provider == "plainsong-plus")
+/// Trim, lowercase and accept the hyphenated spelling of the snake_case ids,
+/// so a hand-edited settings file is repaired rather than reset.
+fn canonical_ai_provider(provider: &str) -> String {
+    match provider.trim().to_lowercase().as_str() {
+        "bundled-local" => "bundled_local".to_string(),
+        "apple-language-model" => "apple_language_model".to_string(),
+        "chatgpt-plan" => "chatgpt_plan".to_string(),
+        "native-text" => "native_text".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn normalize_ai_lane_settings(lane: &mut AiLaneSettings, which: AiLane) {
     // Normalize LLM provider to ensure it's a valid value
-    lane.provider = lane.provider.trim().to_lowercase();
-    // Accept the hyphenated spelling of the two snake_case ids so a
-    // hand-edited settings file is repaired rather than reset.
-    if lane.provider == "bundled-local" {
-        lane.provider = "bundled_local".to_string();
-    }
-    if lane.provider == "apple-language-model" {
-        lane.provider = "apple_language_model".to_string();
-    }
+    lane.provider = canonical_ai_provider(&lane.provider);
 
     let fallback = match which {
         AiLane::Dictation => DEFAULT_DICTATION_AI_PROVIDER,
-        AiLane::Meetings => "ollama",
+        AiLane::Meetings => DEFAULT_MEETINGS_AI_PROVIDER,
     };
-    if lane.provider.is_empty() || !is_known_ai_provider(&lane.provider) {
+    if lane.provider.is_empty() {
         lane.provider = fallback.to_string();
+    } else if !KNOWN_AI_PROVIDERS.contains(&lane.provider.as_str()) {
+        lane.provider = fallback.to_string();
+        // The model id belonged to a provider this build cannot route to (a
+        // retired one, say); carried over, it would name a model the
+        // fallback does not have.
+        lane.model_id = None;
     }
     if which == AiLane::Meetings && DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str()) {
-        lane.provider = "ollama".to_string();
+        lane.provider = DEFAULT_MEETINGS_AI_PROVIDER.to_string();
         lane.model_id = None;
     }
 
@@ -2291,7 +2664,9 @@ fn normalize_ai_lane_settings(lane: &mut AiLaneSettings, which: AiLane) {
 
     // The two on-device providers serve exactly one model each, so a stale
     // model id left over from a previous provider must not travel with them.
-    if DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str()) {
+    if DICTATION_ONLY_AI_PROVIDERS.contains(&lane.provider.as_str())
+        || lane.provider == "apple_language_model"
+    {
         lane.model_id = None;
     }
 }
@@ -2358,11 +2733,12 @@ impl Default for UpdateSettings {
 /// Longest silence auto-stop a user can configure, in minutes. Four hours is
 /// past any meeting; beyond it the setting is a typo, not an intent.
 pub const MEETING_AUTO_STOP_SILENCE_MINUTES_MAX: u32 = 240;
+pub const MEETING_RECORDING_DURATION_MINUTES_MAX: u32 = 240;
 
 /// Meeting behaviours that live around a capture. Mirrors `MeetingsSettings`
 /// in `src/types/settings.ts`; every field has a runtime reader
 /// (`meeting_detect.rs` for detection, the meeting capture monitor in lib.rs
-/// for the two auto-stops).
+/// for capture auto-stops).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct MeetingsSettings {
@@ -2376,6 +2752,9 @@ pub struct MeetingsSettings {
     /// End a running meeting after this many minutes with nothing audible on
     /// any captured source. `0` turns it off.
     pub auto_stop_after_silence_minutes: u32,
+    /// End after this many minutes of captured audio, excluding pauses.
+    /// `0` disables the limit.
+    pub max_recording_minutes: u32,
     /// Keep a numeric voice signature per speaker on this Mac, so a voice
     /// named once can be suggested in later meetings.
     ///
@@ -2399,6 +2778,12 @@ pub struct MeetingsSettings {
     /// local model returns speaker labels, so those meetings always use
     /// Plainsong's diarizer whatever this is set to.
     pub prefer_provider_diarization: bool,
+    /// The reader turned off "Suggest meetings from your calendar". Until they
+    /// turn it back on, the Electron main process answers every calendar read
+    /// without running the calendar helper, and the renderer stops polling.
+    /// macOS keeps its permission either way; this is Plainsong's own switch.
+    /// Read by `electron/macos-calendar-runtime.ts`.
+    pub calendar_disconnected: bool,
 }
 
 impl Default for MeetingsSettings {
@@ -2407,9 +2792,11 @@ impl Default for MeetingsSettings {
             call_detection_enabled: true,
             auto_stop_when_call_app_quits: true,
             auto_stop_after_silence_minutes: 15,
+            max_recording_minutes: 0,
             remember_voices: false,
             auto_apply_confident_voices: false,
             prefer_provider_diarization: true,
+            calendar_disconnected: false,
         }
     }
 }
@@ -2442,6 +2829,9 @@ fn normalize_loaded_meetings_settings(meetings: &mut MeetingsSettings) {
     meetings.auto_stop_after_silence_minutes = meetings
         .auto_stop_after_silence_minutes
         .min(MEETING_AUTO_STOP_SILENCE_MINUTES_MAX);
+    meetings.max_recording_minutes = meetings
+        .max_recording_minutes
+        .min(MEETING_RECORDING_DURATION_MINUTES_MAX);
     // Auto-apply is a refinement of remembering, not an independent switch. A
     // hand-edited file that turns it on while remembering is off would
     // otherwise describe a state the code cannot produce.
@@ -2657,6 +3047,17 @@ fn migrate_legacy_ai_lane_settings(raw: &serde_json::Value, privacy: &mut Privac
         return;
     };
 
+    for (key, lane) in [
+        ("dictationAi", &mut privacy.dictation_ai),
+        ("meetingsAi", &mut privacy.meetings_ai),
+    ] {
+        if let Some(raw_lane) = raw_privacy.get(key).and_then(serde_json::Value::as_object) {
+            if !raw_lane.contains_key("provider") && raw_lane.contains_key("modelId") {
+                lane.provider = "ollama".to_string();
+            }
+        }
+    }
+
     let legacy_provider = raw_privacy
         .get("llmProvider")
         .and_then(serde_json::Value::as_str);
@@ -2683,6 +3084,10 @@ fn migrate_legacy_ai_lane_settings(raw: &serde_json::Value, privacy: &mut Privac
         }
         if let Some(provider) = legacy_provider {
             lane.provider = provider.to_string();
+        } else if legacy_model_id.is_some() {
+            // The pre-lane schema defaulted to Ollama. A model-only choice
+            // must not be reinterpreted as the new embedded model.
+            lane.provider = "ollama".to_string();
         }
         if let Some(model_id) = legacy_model_id.as_ref() {
             lane.model_id = model_id.clone();
@@ -2807,7 +3212,10 @@ impl SettingsManager {
                 }
             }
         } else {
-            Settings::default()
+            // No file at all is a new install. An unreadable file above is an
+            // existing install that lost its settings, so it keeps the
+            // conservative shared default rather than a new engine.
+            Settings::fresh_install()
         };
         if command_mode_opt_in_migration_required {
             settings.transcription.dictation_command_mode_enabled = false;
@@ -2863,6 +3271,47 @@ impl SettingsManager {
         Ok(())
     }
 
+    /// Run the one-time move of ONNX Parakeet v3 slots to the GGUF build
+    /// (`upgrade_onnx_parakeet_slots`) and save when it changed anything.
+    ///
+    /// Called at startup with `gguf_ready` answered by the GGUF provider
+    /// itself: the pinned files of a copy it serves from (the GGUF, or the
+    /// Core ML build where this Mac runs it) are present and this session
+    /// has not found them wrong. Their bytes are verified when the model first loads. Where
+    /// this build can't run the GGUF route nothing changes.
+    pub(crate) fn apply_parakeet_upgrade(&mut self, gguf_ready: bool) -> ParakeetUpgrade {
+        self.apply_parakeet_upgrade_for_route(fresh_install_dictation_route(), gguf_ready)
+    }
+
+    fn apply_parakeet_upgrade_for_route(
+        &mut self,
+        route: Option<(&str, &str)>,
+        gguf_ready: bool,
+    ) -> ParakeetUpgrade {
+        let was_applied = self.settings.transcription.parakeet_upgrade_applied;
+        let upgrade =
+            upgrade_onnx_parakeet_slots(&mut self.settings.transcription, route, gguf_ready);
+        if upgrade.moved_any() {
+            tracing::info!(
+                "Moved {} from ONNX Parakeet v3 to the downloaded and verified GGUF build",
+                match (upgrade.dictation, upgrade.meeting) {
+                    (true, true) => "dictation and meetings",
+                    (true, false) => "dictation",
+                    _ => "meetings",
+                }
+            );
+        }
+        if was_applied != self.settings.transcription.parakeet_upgrade_applied {
+            if let Err(error) = self.save() {
+                tracing::warn!(
+                    "Failed to save settings after the Parakeet v3 upgrade check: {}",
+                    error
+                );
+            }
+        }
+        upgrade
+    }
+
     /// Get settings reference
     pub fn settings(&self) -> &Settings {
         &self.settings
@@ -2876,8 +3325,83 @@ impl SettingsManager {
     /// Save settings to disk atomically (write to a temp file, then rename) so
     /// a crash or power loss mid-write can never leave a truncated settings file.
     pub fn save(&self) -> Result<()> {
+        self.write_candidate(&self.settings)
+    }
+
+    pub(crate) fn commit_candidate(&mut self, candidate: Settings) -> Result<()> {
+        self.write_candidate(&candidate)?;
+        self.settings = candidate;
+        Ok(())
+    }
+
+    pub(crate) fn commit_whole_settings(
+        &mut self,
+        mut candidate: Settings,
+        preserve_saved_prompts: bool,
+    ) -> Result<()> {
+        if preserve_saved_prompts {
+            candidate.ai.saved_prompts = self.settings.ai.saved_prompts.clone();
+        }
+        candidate
+            .transcription
+            .dictation_learn_from_external_corrections = self
+            .settings
+            .transcription
+            .dictation_learn_from_external_corrections;
+        candidate.transcription.builtin_embedding_terms_acceptances = self
+            .settings
+            .transcription
+            .builtin_embedding_terms_acceptances
+            .clone();
+        self.commit_candidate(candidate)
+    }
+
+    /// Record that the user accepted `terms_url` for a built-in search model,
+    /// replacing any earlier acceptance for that model.
+    pub(crate) fn record_embedding_terms_acceptance(
+        &mut self,
+        model_id: &str,
+        terms_url: &str,
+    ) -> Result<()> {
+        let mut candidate = self.settings.clone();
+        let acceptances = &mut candidate.transcription.builtin_embedding_terms_acceptances;
+        acceptances.retain(|entry| entry.model_id != model_id);
+        acceptances.push(EmbeddingTermsAcceptance {
+            model_id: model_id.to_string(),
+            terms_url: terms_url.to_string(),
+            accepted_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        });
+        self.commit_candidate(candidate)
+    }
+
+    pub(crate) fn set_dictation_external_correction_learning(
+        &mut self,
+        enabled: bool,
+    ) -> Result<bool> {
+        let mut candidate = self.settings.clone();
+        candidate
+            .transcription
+            .dictation_learn_from_external_corrections = enabled;
+        self.commit_candidate(candidate)?;
+        Ok(self
+            .settings
+            .transcription
+            .dictation_learn_from_external_corrections)
+    }
+
+    pub(crate) fn set_saved_prompts(
+        &mut self,
+        prompts: Vec<SavedPrompt>,
+    ) -> Result<Vec<SavedPrompt>> {
+        let mut candidate = self.settings.clone();
+        candidate.ai.saved_prompts = sanitize_saved_prompts(prompts);
+        self.commit_candidate(candidate)?;
+        Ok(self.settings.ai.saved_prompts.clone())
+    }
+
+    fn write_candidate(&self, candidate: &Settings) -> Result<()> {
         let json =
-            serde_json::to_string_pretty(&self.settings).context("Failed to serialize settings")?;
+            serde_json::to_string_pretty(candidate).context("Failed to serialize settings")?;
 
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent).context("Failed to create settings directory")?;
@@ -2904,7 +3428,7 @@ impl SettingsManager {
 
     /// Reset to defaults
     pub fn reset(&mut self) {
-        self.settings = Settings::default();
+        self.settings = Settings::fresh_install();
     }
 
     /// Load settings from file, also returning the raw JSON value so the
@@ -3125,9 +3649,115 @@ mod tests {
         }
     }
 
-    /// The Nemotron streaming GGUF is loadable (the benchmark proves the
-    /// runtime path with it) but is not a route: `model_options()` never offers
-    /// it, so normalization must not persist it either.
+    /// Plainsong once carried groundwork for a paid hosted tier behind a Cargo
+    /// feature no release enabled. A settings.json written by a build that had
+    /// it can still name its speech route, its cleanup provider and extra
+    /// keys. The file must load, every slot naming the tier must land on a
+    /// local route, and the models chosen for it must not travel along.
+    #[test]
+    fn settings_naming_the_removed_paid_tier_load_onto_local_routes() {
+        // Built from parts so a repository search for the removed tier's
+        // name comes back empty.
+        let speech_route = ["plainsong", "plus"].join("_");
+        let cleanup_provider = ["plainsong", "plus"].join("-");
+        let written = serde_json::json!({
+            "plus": { "signedIn": true, "serviceUrl": "https://example.invalid" },
+            "transcription": {
+                "defaultProvider": speech_route,
+                "dictationProvider": speech_route,
+                "meetingProvider": speech_route,
+                "selectedModelId": "hosted-stt",
+                "dictationModelId": "hosted-stt",
+                "meetingModelId": "hosted-stt",
+                "providerModelIds": { speech_route.clone(): "hosted-stt" },
+                "dictationCustomModes": [{
+                    "id": "hosted",
+                    "name": "Hosted",
+                    "dictationProvider": speech_route,
+                    "dictationModelId": "hosted-stt",
+                    "aiProvider": cleanup_provider,
+                    "aiModelId": "hosted-fast"
+                }, {
+                    "id": "local",
+                    "name": "Local",
+                    "aiProvider": "Ollama",
+                    "aiModelId": "qwen3.5:4b"
+                }]
+            },
+            "privacy": {
+                "dictationAi": { "provider": cleanup_provider, "modelId": "hosted-fast" },
+                "meetingsAi": { "provider": cleanup_provider, "modelId": "hosted-quality" }
+            }
+        });
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("plainsong-settings-paid-tier-{suffix}"));
+        let settings_path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("create settings test directory");
+        fs::write(
+            &settings_path,
+            serde_json::to_string(&written).expect("serialize"),
+        )
+        .expect("write settings");
+
+        let manager = SettingsManager::load_from_path(settings_path)
+            .expect("a file naming the removed tier must still load");
+        let _ = fs::remove_dir_all(&root);
+        let settings = manager.settings();
+
+        let transcription = &settings.transcription;
+        assert_eq!(transcription.default_provider, "whisper");
+        assert_eq!(transcription.selected_model_id, "base.en");
+        assert_eq!(transcription.dictation_provider, "whisper");
+        assert_eq!(transcription.dictation_model_id, "base.en");
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
+        assert!(!transcription.provider_model_ids.contains_key(&speech_route));
+        for provider in [
+            &transcription.default_provider,
+            &transcription.dictation_provider,
+            &transcription.meeting_provider,
+        ] {
+            let route = crate::asr_provider_from_settings_value(provider)
+                .expect("the fallback is a route this build has");
+            assert!(!route.is_remote(), "'{provider}' must be a local route");
+        }
+
+        let hosted = &transcription.dictation_custom_modes[0];
+        assert_eq!(hosted.dictation_provider.as_deref(), Some("whisper"));
+        assert_eq!(hosted.dictation_model_id.as_deref(), Some("base.en"));
+        assert_eq!(hosted.ai_provider, None, "the profile inherits the lane");
+        assert_eq!(hosted.ai_model_id, None);
+        let local = &transcription.dictation_custom_modes[1];
+        assert_eq!(local.ai_provider.as_deref(), Some("Ollama"));
+        assert_eq!(local.ai_model_id.as_deref(), Some("qwen3.5:4b"));
+
+        let dictation_ai = &settings.privacy.dictation_ai;
+        assert!(
+            [
+                DEFAULT_DICTATION_AI_PROVIDER,
+                DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION
+            ]
+            .contains(&dictation_ai.provider.as_str()),
+            "dictation lane landed on '{}'",
+            dictation_ai.provider
+        );
+        assert_eq!(dictation_ai.model_id, None);
+        let meetings_ai = &settings.privacy.meetings_ai;
+        assert_eq!(meetings_ai.provider, super::DEFAULT_MEETINGS_AI_PROVIDER);
+        assert_eq!(meetings_ai.model_id, None);
+        for lane in [dictation_ai, meetings_ai] {
+            let provider = crate::llm::Provider::from_settings_value(&lane.provider)
+                .expect("the fallback is a provider this build has");
+            assert!(!provider.is_remote(), "'{}' must be local", lane.provider);
+        }
+        assert!(crate::llm::Provider::from_settings_value(&cleanup_provider).is_err());
+        assert!(crate::asr_provider_from_settings_value(&speech_route).is_none());
+    }
+
+    /// Hidden Voxtral runtime probes remain outside the route catalog.
     #[cfg(feature = "asr-transcribe-cpp")]
     #[test]
     fn a_settings_file_cannot_pin_the_route_to_a_model_the_picker_never_offers() {
@@ -3135,9 +3765,9 @@ mod tests {
             default_provider: "transcribe_cpp".to_string(),
             dictation_provider: "transcribe_cpp".to_string(),
             meeting_provider: "transcribe_cpp".to_string(),
-            selected_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
-            dictation_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
-            meeting_model_id: "nemotron-3.5-asr-streaming-0.6b-q8_0".to_string(),
+            selected_model_id: "voxtral-mini-3b-2507-q4_k_m".to_string(),
+            dictation_model_id: "voxtral-mini-3b-2507-q4_k_m".to_string(),
+            meeting_model_id: "voxtral-mini-3b-2507-q4_k_m".to_string(),
             ..Default::default()
         };
         normalize_loaded_transcription_settings(&mut settings);
@@ -3149,7 +3779,7 @@ mod tests {
         ] {
             assert_eq!(
                 model_id, "parakeet-tdt-0.6b-v3-q8_0",
-                "the streaming GGUF must not survive normalization"
+                "a hidden runtime probe must not survive normalization"
             );
             assert!(
                 crate::asr::AsrProviderType::TranscribeCpp
@@ -3159,6 +3789,26 @@ mod tests {
                 "normalization must land on a model the picker offers"
             );
         }
+    }
+
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn experimental_nemotron_dictation_survives_settings_normalization() {
+        let model = crate::asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID;
+        let mut settings = TranscriptionSettings {
+            default_provider: "transcribe_cpp".into(),
+            dictation_provider: "transcribe_cpp".into(),
+            selected_model_id: model.into(),
+            dictation_model_id: model.into(),
+            ..Default::default()
+        };
+        normalize_loaded_transcription_settings(&mut settings);
+        assert_eq!(settings.selected_model_id, model);
+        assert_eq!(settings.dictation_model_id, model);
+        assert!(!crate::asr_routing::meeting_model_is_supported(
+            crate::asr::AsrProviderType::TranscribeCpp,
+            model
+        ));
     }
 
     #[test]
@@ -3244,6 +3894,7 @@ mod tests {
                 "cohere_transcribe",
                 crate::asr::AsrProviderType::CohereTranscribe,
             ),
+            ("whistle", crate::asr::AsrProviderType::Whistle),
             ("qwen3_asr", crate::asr::AsrProviderType::Qwen3Asr),
         ];
 
@@ -3293,6 +3944,7 @@ mod tests {
                 "cohere_transcribe",
                 crate::asr::AsrProviderType::CohereTranscribe,
             ),
+            ("whistle", crate::asr::AsrProviderType::Whistle),
             ("qwen3_asr", crate::asr::AsrProviderType::Qwen3Asr),
         ];
 
@@ -3719,6 +4371,26 @@ mod tests {
     }
 
     #[test]
+    fn recording_duration_limit_defaults_migrates_and_caps() {
+        assert_eq!(MeetingsSettings::default().max_recording_minutes, 0);
+        let migrated: MeetingsSettings =
+            serde_json::from_str(r#"{"autoStopAfterSilenceMinutes":20}"#).unwrap();
+        assert_eq!(migrated.max_recording_minutes, 0);
+        for (configured, expected) in [(0, 0), (90, 90), (240, 240), (10_000, 240)] {
+            let mut meetings: MeetingsSettings = serde_json::from_value(serde_json::json!({
+                "maxRecordingMinutes": configured,
+            }))
+            .unwrap();
+            super::normalize_loaded_meetings_settings(&mut meetings);
+            assert_eq!(meetings.max_recording_minutes, expected);
+            assert_eq!(
+                serde_json::to_value(meetings).unwrap()["maxRecordingMinutes"],
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn silence_auto_stop_minutes_are_capped_on_load() {
         let mut meetings = MeetingsSettings {
             auto_stop_after_silence_minutes: 10_000,
@@ -3859,8 +4531,8 @@ mod tests {
     }
 
     #[test]
-    fn numbers_as_digits_defaults_are_off_only_for_voice() {
-        assert!(!default_dictation_numbers_as_digits("voice"));
+    fn numbers_as_digits_defaults_are_on_for_all_presets() {
+        assert!(default_dictation_numbers_as_digits("voice"));
         assert!(default_dictation_numbers_as_digits("messages"));
         assert!(default_dictation_numbers_as_digits("email"));
         assert!(default_dictation_numbers_as_digits("notes"));
@@ -3901,13 +4573,16 @@ mod tests {
     /// write a summary. Existing settings files are untouched: this default
     /// only reaches a file that has no `dictationAi` key at all.
     #[test]
-    fn dictation_defaults_to_the_bundled_model_and_meetings_to_ollama() {
+    fn fresh_profiles_use_the_embedded_meeting_default_when_available() {
         let privacy = PrivacySettings::default();
         assert_eq!(
             privacy.dictation_ai,
             lane(DEFAULT_DICTATION_AI_PROVIDER, None)
         );
-        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.meetings_ai,
+            lane(super::DEFAULT_MEETINGS_AI_PROVIDER, None)
+        );
     }
 
     /// The zero-setup default is only honest where the route is fast enough.
@@ -3923,7 +4598,10 @@ mod tests {
             lane(DICTATION_AI_PROVIDER_WITHOUT_ACCELERATION, None)
         );
         // The meetings lane is not this decision's business.
-        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.meetings_ai,
+            lane(super::DEFAULT_MEETINGS_AI_PROVIDER, None)
+        );
     }
 
     #[test]
@@ -3953,7 +4631,13 @@ mod tests {
 
     #[test]
     fn a_lane_pointing_somewhere_else_is_never_touched_by_the_backend_check() {
-        for existing in ["ollama", "openai", "apple_language_model", "anthropic"] {
+        for existing in [
+            "ollama",
+            "openai",
+            "chatgpt_plan",
+            "apple_language_model",
+            "anthropic",
+        ] {
             let mut privacy = PrivacySettings {
                 dictation_ai: lane(existing, Some("their-model")),
                 ..PrivacySettings::default()
@@ -4003,6 +4687,7 @@ mod tests {
         for existing in [
             "ollama",
             "openai",
+            "chatgpt_plan",
             "anthropic",
             "gemini",
             "deepseek",
@@ -4055,16 +4740,32 @@ mod tests {
 
     #[test]
     fn a_dictation_only_provider_never_survives_on_the_meetings_lane() {
-        // Neither on-device provider can write a summary. A settings file
-        // that names one for meetings would otherwise fail every analysis
-        // with a refusal the Meetings screen cannot act on.
-        for dictation_only in ["bundled_local", "apple_language_model"] {
+        // S1-mini only normalizes dictation.
+        {
+            let dictation_only = "bundled_local";
             let mut privacy = PrivacySettings {
                 meetings_ai: lane(dictation_only, Some("whatever")),
                 ..PrivacySettings::default()
             };
             normalize_loaded_privacy_settings(&mut privacy);
-            assert_eq!(privacy.meetings_ai, lane("ollama", None));
+            assert_eq!(
+                privacy.meetings_ai,
+                lane(super::DEFAULT_MEETINGS_AI_PROVIDER, None)
+            );
+        }
+    }
+
+    #[test]
+    fn apple_notes_and_explicit_native_tiers_survive_normalization() {
+        for provider in ["apple_language_model", "native_text"] {
+            let model =
+                (provider == "native_text").then_some(crate::llm::native_text::BEST_MODEL_ID);
+            let mut privacy = PrivacySettings {
+                meetings_ai: lane(provider, model),
+                ..PrivacySettings::default()
+            };
+            normalize_loaded_privacy_settings(&mut privacy);
+            assert_eq!(privacy.meetings_ai, lane(provider, model));
         }
     }
 
@@ -4216,7 +4917,10 @@ mod tests {
             privacy.dictation_ai,
             lane(DEFAULT_DICTATION_AI_PROVIDER, None)
         );
-        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.meetings_ai,
+            lane(super::DEFAULT_MEETINGS_AI_PROVIDER, None)
+        );
 
         migrate_legacy_ai_lane_settings(
             &serde_json::json!({ "privacy": { "remoteProcessingEnabled": true } }),
@@ -4226,7 +4930,10 @@ mod tests {
             privacy.dictation_ai,
             lane(DEFAULT_DICTATION_AI_PROVIDER, None)
         );
-        assert_eq!(privacy.meetings_ai, lane("ollama", None));
+        assert_eq!(
+            privacy.meetings_ai,
+            lane(super::DEFAULT_MEETINGS_AI_PROVIDER, None)
+        );
     }
 
     /// The retired keys go through the same rewrite that strips every other
@@ -4377,7 +5084,10 @@ mod tests {
         assert_eq!(privacy.dictation_ai, lane("ollama", None));
         assert_eq!(
             privacy.meetings_ai,
-            lane("ollama", Some("Claude-Sonnet-4-5")),
+            lane(
+                super::DEFAULT_MEETINGS_AI_PROVIDER,
+                Some("Claude-Sonnet-4-5")
+            ),
             "a blank provider falls back to the default, and a model id keeps its case"
         );
     }
@@ -4990,6 +5700,41 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn english_only_transcribe_cpp_routes_reject_other_languages() {
+        for model in [
+            crate::asr::transcribe_cpp::FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+            crate::asr::transcribe_cpp::UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+        ] {
+            assert_eq!(
+                dictation_supported_languages("transcribe_cpp", model),
+                Some(ENGLISH_ONLY_LANGUAGES)
+            );
+            let error = validate_dictation_active_languages(
+                "transcribe_cpp",
+                model,
+                &["en".to_string(), "de".to_string()],
+            )
+            .expect_err("an English-only model must refuse German");
+            assert!(error.contains("de") && error.contains(model), "{error}");
+            assert_eq!(
+                normalize_dictation_active_languages(
+                    "transcribe_cpp",
+                    model,
+                    &["en".to_string(), "fr".to_string()],
+                ),
+                vec!["en".to_string()]
+            );
+        }
+        // The multilingual default is unchanged: no local list imposed.
+        assert!(dictation_supported_languages(
+            "transcribe_cpp",
+            crate::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+        )
+        .is_none());
+    }
+
     #[test]
     fn parakeet_v3_accepts_its_documented_european_set_only() {
         assert_eq!(
@@ -5591,5 +6336,825 @@ mod tests {
                 "dictation_model".to_string()
             ]
         );
+    }
+    #[test]
+    fn native_default_does_not_replace_an_explicit_ollama_meeting_choice() {
+        let raw = serde_json::json!({"privacy":{"meetingsAi":{"provider":"ollama","modelId":"my-local:tag"}}});
+        let mut privacy: PrivacySettings = serde_json::from_value(raw["privacy"].clone()).unwrap();
+        migrate_legacy_ai_lane_settings(&raw, &mut privacy);
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.meetings_ai, lane("ollama", Some("my-local:tag")));
+    }
+
+    #[test]
+    fn native_default_keeps_a_legacy_model_only_choice_on_ollama() {
+        let raw = serde_json::json!({"privacy":{"llmModelId":"my-local:tag"}});
+        let mut privacy = PrivacySettings::default();
+        migrate_legacy_ai_lane_settings(&raw, &mut privacy);
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.meetings_ai, lane("ollama", Some("my-local:tag")));
+    }
+
+    #[test]
+    fn native_default_keeps_a_modern_model_only_choice_on_ollama() {
+        let raw = serde_json::json!({"privacy":{"meetingsAi":{"modelId":"my-local:tag"}}});
+        let mut privacy: PrivacySettings = serde_json::from_value(raw["privacy"].clone()).unwrap();
+        migrate_legacy_ai_lane_settings(&raw, &mut privacy);
+        normalize_loaded_privacy_settings(&mut privacy);
+        assert_eq!(privacy.meetings_ai, lane("ollama", Some("my-local:tag")));
+    }
+}
+
+#[cfg(test)]
+mod saved_prompt_write_tests {
+    use super::*;
+
+    fn prompt(id: &str) -> SavedPrompt {
+        SavedPrompt {
+            id: id.into(),
+            name: "  Question  ".into(),
+            prompt: "  Answer me  ".into(),
+            scope: "invalid".into(),
+            built_in: true,
+            hidden: false,
+        }
+    }
+
+    fn manager() -> (SettingsManager, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "plainsong-prompt-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        (
+            SettingsManager {
+                settings: Settings::default(),
+                config_path: root.join("settings.json"),
+            },
+            root,
+        )
+    }
+
+    #[test]
+    fn setter_sanitizes_and_persists_canonical_library() {
+        let (mut manager, root) = manager();
+        let canonical = manager
+            .set_saved_prompts(vec![prompt("mine"), prompt("mine"), prompt("")])
+            .unwrap();
+        assert_eq!(canonical.len(), 1);
+        assert_eq!(canonical[0].name, "Question");
+        assert_eq!(canonical[0].prompt, "Answer me");
+        assert_eq!(canonical[0].scope, "both");
+        assert!(!canonical[0].built_in);
+        let (stored, _) = SettingsManager::load_from_file(&manager.config_path).unwrap();
+        assert_eq!(
+            serde_json::to_value(stored.ai).unwrap(),
+            serde_json::to_value(manager.settings().ai.clone()).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn both_commit_orders_keep_unrelated_settings_and_library() {
+        for prompt_first in [false, true] {
+            let (mut manager, root) = manager();
+            let mut stale = manager.settings().clone();
+            stale.ui.always_on_top = !stale.ui.always_on_top;
+            let expected_ui = stale.ui.always_on_top;
+            if prompt_first {
+                manager.set_saved_prompts(vec![prompt("new")]).unwrap();
+                manager.commit_whole_settings(stale, true).unwrap();
+            } else {
+                manager.commit_whole_settings(stale, true).unwrap();
+                manager.set_saved_prompts(vec![prompt("new")]).unwrap();
+            }
+            assert_eq!(manager.settings().ui.always_on_top, expected_ui);
+            assert_eq!(manager.settings().ai.saved_prompts[0].id, "new");
+            let (stored, _) = SettingsManager::load_from_file(&manager.config_path).unwrap();
+            assert_eq!(stored.ui.always_on_top, expected_ui);
+            assert_eq!(stored.ai.saved_prompts[0].id, "new");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn search_model_terms_acceptance_is_recorded_and_survives_whole_saves() {
+        let (mut manager, root) = manager();
+        let stale = manager.settings().clone();
+        manager
+            .record_embedding_terms_acceptance(
+                "embeddinggemma-300m",
+                "https://ai.google.dev/gemma/terms",
+            )
+            .unwrap();
+        manager
+            .record_embedding_terms_acceptance(
+                "embeddinggemma-300m",
+                "https://ai.google.dev/gemma/terms",
+            )
+            .unwrap();
+        // A renderer save from before the acceptance, or one that names an
+        // acceptance of its own, cannot change the stored list.
+        manager.commit_whole_settings(stale.clone(), false).unwrap();
+        let mut forged = stale;
+        forged
+            .transcription
+            .builtin_embedding_terms_acceptances
+            .push(EmbeddingTermsAcceptance {
+                model_id: "other".into(),
+                terms_url: "https://example.com".into(),
+                accepted_at: "2026-01-01T00:00:00Z".into(),
+            });
+        manager.commit_whole_settings(forged, false).unwrap();
+        let (stored, _) = SettingsManager::load_from_file(&manager.config_path).unwrap();
+        let acceptances = &stored.transcription.builtin_embedding_terms_acceptances;
+        assert_eq!(acceptances.len(), 1);
+        assert_eq!(acceptances[0].model_id, "embeddinggemma-300m");
+        assert_eq!(
+            acceptances[0].terms_url,
+            "https://ai.google.dev/gemma/terms"
+        );
+        assert!(chrono::DateTime::parse_from_rfc3339(&acceptances[0].accepted_at).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn whole_commit_preserves_external_correction_consent_in_both_directions() {
+        for enabled in [false, true] {
+            for preserve_prompts in [false, true] {
+                let (mut manager, root) = manager();
+                manager
+                    .set_dictation_external_correction_learning(!enabled)
+                    .unwrap();
+                let mut stale = manager.settings().clone();
+                stale.ui.always_on_top = !stale.ui.always_on_top;
+                let expected_ui = stale.ui.always_on_top;
+                assert_eq!(
+                    manager
+                        .set_dictation_external_correction_learning(enabled)
+                        .unwrap(),
+                    enabled
+                );
+                manager
+                    .commit_whole_settings(stale, preserve_prompts)
+                    .unwrap();
+                assert_eq!(
+                    manager
+                        .settings()
+                        .transcription
+                        .dictation_learn_from_external_corrections,
+                    enabled
+                );
+                let (stored, _) = SettingsManager::load_from_file(&manager.config_path).unwrap();
+                assert_eq!(
+                    stored
+                        .transcription
+                        .dictation_learn_from_external_corrections,
+                    enabled
+                );
+                assert_eq!(stored.ui.always_on_top, expected_ui);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn external_correction_setter_persists_and_rolls_back_on_disk_failure() {
+        for enabled in [false, true] {
+            let (mut manager, root) = manager();
+            manager
+                .set_dictation_external_correction_learning(!enabled)
+                .unwrap();
+            let before_memory = serde_json::to_value(manager.settings()).unwrap();
+            let before_disk = std::fs::read(&manager.config_path).unwrap();
+            std::fs::create_dir(manager.config_path.with_extension("json.tmp")).unwrap();
+            assert!(manager
+                .set_dictation_external_correction_learning(enabled)
+                .is_err());
+            assert_eq!(
+                serde_json::to_value(manager.settings()).unwrap(),
+                before_memory
+            );
+            assert_eq!(std::fs::read(&manager.config_path).unwrap(), before_disk);
+            std::fs::remove_dir(manager.config_path.with_extension("json.tmp")).unwrap();
+            assert_eq!(
+                manager
+                    .set_dictation_external_correction_learning(enabled)
+                    .unwrap(),
+                enabled
+            );
+            let (stored, _) = SettingsManager::load_from_file(&manager.config_path).unwrap();
+            assert_eq!(
+                stored
+                    .transcription
+                    .dictation_learn_from_external_corrections,
+                enabled
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_whole_commit_replaces_and_clears_library() {
+        let (mut manager, root) = manager();
+        manager.set_saved_prompts(vec![prompt("old")]).unwrap();
+        let mut candidate = manager.settings().clone();
+        candidate.ai.saved_prompts = vec![prompt("replacement")];
+        manager.commit_whole_settings(candidate, false).unwrap();
+        assert_eq!(manager.settings().ai.saved_prompts[0].id, "replacement");
+        let mut candidate = manager.settings().clone();
+        candidate.ai.saved_prompts.clear();
+        manager.commit_whole_settings(candidate, false).unwrap();
+        assert!(manager.settings().ai.saved_prompts.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_failure_leaves_memory_and_destination_unchanged() {
+        let (mut manager, root) = manager();
+        manager.set_saved_prompts(vec![prompt("old")]).unwrap();
+        let before_memory = serde_json::to_value(manager.settings()).unwrap();
+        let before_disk = std::fs::read(&manager.config_path).unwrap();
+        // A directory at the temporary-file path forces a deterministic disk error.
+        std::fs::create_dir(manager.config_path.with_extension("json.tmp")).unwrap();
+        assert!(manager.set_saved_prompts(vec![prompt("new")]).is_err());
+        for preserve in [false, true] {
+            let mut candidate = manager.settings().clone();
+            candidate.ui.always_on_top = !candidate.ui.always_on_top;
+            candidate.ai.saved_prompts.clear();
+            assert!(manager.commit_whole_settings(candidate, preserve).is_err());
+            assert_eq!(
+                serde_json::to_value(manager.settings()).unwrap(),
+                before_memory
+            );
+            assert_eq!(std::fs::read(&manager.config_path).unwrap(), before_disk);
+        }
+        assert_eq!(
+            serde_json::to_value(manager.settings()).unwrap(),
+            before_memory
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod activation_choice_tests {
+    use super::*;
+
+    fn binding(id: &str, accelerator: &str) -> DictationBinding {
+        DictationBinding {
+            id: id.into(),
+            trigger: DictationBindingTrigger::Key {
+                accelerator: accelerator.into(),
+            },
+            action: DictationBindingAction::Dictation {
+                mode_id: None,
+                behavior: "hold".into(),
+                submit_after_insert: false,
+            },
+        }
+    }
+
+    #[test]
+    fn right_side_triggers_validate_and_round_trip() {
+        for accelerator in ["RightCommand", "RightOption"] {
+            let original = binding("right", accelerator);
+            validate_dictation_bindings(std::slice::from_ref(&original)).unwrap();
+            let restored: DictationBinding =
+                serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+            assert_eq!(original, restored);
+            assert!(validate_dictation_bindings(&[
+                original,
+                binding("duplicate", &accelerator.to_lowercase())
+            ])
+            .is_err());
+        }
+        for accelerator in ["Command", "Option", "RightCommand+C", "Cmd+RightOption"] {
+            assert!(validate_dictation_bindings(&[binding("bad", accelerator)]).is_err());
+        }
+    }
+
+    #[test]
+    fn double_tap_is_opt_in_and_keeps_legacy_choice() {
+        for single in [false, true] {
+            let legacy: TranscriptionSettings =
+                serde_json::from_value(serde_json::json!({"dictationTapToLock": single})).unwrap();
+            assert_eq!(legacy.dictation_tap_to_lock, single);
+            assert!(!legacy.dictation_double_tap_to_lock);
+            let explicit: TranscriptionSettings = serde_json::from_value(serde_json::json!({
+                "dictationTapToLock": single, "dictationDoubleTapToLock": true
+            }))
+            .unwrap();
+            let restored: TranscriptionSettings =
+                serde_json::from_str(&serde_json::to_string(&explicit).unwrap()).unwrap();
+            assert_eq!(restored.dictation_tap_to_lock, single);
+            assert!(restored.dictation_double_tap_to_lock);
+        }
+        let defaults = TranscriptionSettings::default();
+        assert!(defaults.dictation_tap_to_lock);
+        assert!(!defaults.dictation_double_tap_to_lock);
+    }
+}
+
+#[cfg(test)]
+mod fresh_install_route_tests {
+    use super::*;
+
+    #[test]
+    fn new_installs_search_by_meaning_and_existing_files_keep_word_search() {
+        let fresh = Settings::fresh_install().transcription;
+        assert_eq!(fresh.memory_search_mode, fresh_install_memory_search_mode());
+        if crate::llm::builtin_embeddings::runtime_compiled() {
+            assert_eq!(fresh.memory_search_mode, "builtin");
+        }
+        assert_eq!(
+            fresh.builtin_embedding_model,
+            crate::llm::builtin_embeddings::DEFAULT_MODEL_ID
+        );
+        // A file written before this setting existed keeps word search.
+        let existing: TranscriptionSettings = serde_json::from_value(serde_json::json!({
+            "embeddingModel": "nomic-embed-text"
+        }))
+        .unwrap();
+        assert_eq!(existing.memory_search_mode, "fts");
+        assert_eq!(existing.embedding_model, "nomic-embed-text");
+        let ollama: TranscriptionSettings = serde_json::from_value(serde_json::json!({
+            "memorySearchMode": "ollama_embeddings", "embeddingModel": "mxbai-embed-large"
+        }))
+        .unwrap();
+        assert_eq!(ollama.memory_search_mode, "ollama_embeddings");
+        assert_eq!(ollama.embedding_model, "mxbai-embed-large");
+    }
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_settings_path(label: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("plainsong-settings-{label}-{suffix}"));
+        fs::create_dir_all(&root).expect("create settings test directory");
+        let path = root.join("settings.json");
+        (root, path)
+    }
+
+    #[test]
+    fn a_fresh_install_route_moves_the_dictation_and_meeting_slots() {
+        let mut transcription = TranscriptionSettings::default();
+        apply_fresh_install_route(
+            &mut transcription,
+            Some(("transcribe_cpp", "parakeet-tdt-0.6b-v3-q8_0")),
+        );
+        assert!(!transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "transcribe_cpp");
+        assert_eq!(
+            transcription.dictation_model_id,
+            "parakeet-tdt-0.6b-v3-q8_0"
+        );
+        assert_eq!(transcription.meeting_provider, "transcribe_cpp");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+        // The shared default stays on ONNX Parakeet, the fallback for both.
+        assert_eq!(transcription.default_provider, "parakeet");
+        assert_eq!(transcription.selected_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    #[test]
+    fn no_platform_route_leaves_the_shared_onnx_default() {
+        let mut transcription = TranscriptionSettings::default();
+        apply_fresh_install_route(&mut transcription, None);
+        let defaults = TranscriptionSettings::default();
+        assert!(transcription.use_shared_asr_selection);
+        assert_eq!(
+            transcription.dictation_provider,
+            defaults.dictation_provider
+        );
+        assert_eq!(
+            transcription.dictation_model_id,
+            defaults.dictation_model_id
+        );
+        assert_eq!(transcription.meeting_provider, defaults.meeting_provider);
+        assert_eq!(transcription.meeting_model_id, defaults.meeting_model_id);
+    }
+
+    /// serde fills keys an existing file lacks from `Default`, so `Default`
+    /// itself must never carry the platform's new dictation engine.
+    #[test]
+    fn the_serde_default_stays_on_onnx_parakeet_on_every_platform() {
+        let defaults = TranscriptionSettings::default();
+        assert!(defaults.use_shared_asr_selection);
+        assert_eq!(defaults.default_provider, "parakeet");
+        assert_eq!(defaults.dictation_provider, "parakeet");
+        assert_eq!(defaults.dictation_model_id, "parakeet-tdt-0.6b-v3");
+        assert_eq!(defaults.meeting_provider, "parakeet");
+    }
+
+    #[cfg(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "asr-transcribe-cpp"
+    ))]
+    #[test]
+    fn a_new_apple_silicon_install_dictates_and_meets_on_gguf() {
+        assert_eq!(
+            fresh_install_dictation_route(),
+            Some((
+                "transcribe_cpp",
+                crate::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+            ))
+        );
+        let (root, path) = temp_settings_path("fresh-install");
+        let manager = SettingsManager::load_from_path(path).expect("no file loads defaults");
+        let _ = fs::remove_dir_all(&root);
+        let transcription = &manager.settings().transcription;
+        assert!(!transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "transcribe_cpp");
+        assert_eq!(
+            transcription.dictation_model_id,
+            crate::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+        );
+        assert_eq!(transcription.default_provider, "parakeet");
+        assert_eq!(transcription.selected_model_id, "parakeet-tdt-0.6b-v3");
+        assert_eq!(transcription.meeting_provider, "transcribe_cpp");
+        assert_eq!(
+            transcription.meeting_model_id,
+            crate::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+        );
+
+        // A settings reset starts over the same way.
+        let (root, path) = temp_settings_path("reset");
+        let mut reset = SettingsManager::load_from_path(path).expect("load defaults");
+        let _ = fs::remove_dir_all(&root);
+        reset.settings_mut().transcription.meeting_provider = "parakeet".to_string();
+        reset.reset();
+        assert_eq!(
+            reset.settings().transcription.meeting_provider,
+            "transcribe_cpp"
+        );
+    }
+
+    /// serde fills a missing `diarizationModelId` from `Default` (unset, which
+    /// means ECAPA-TDNN), so an existing settings file never moves to the new
+    /// speaker model; only a new install or a reset does.
+    #[test]
+    fn existing_installs_keep_their_speaker_model() {
+        assert_eq!(TranscriptionSettings::default().diarization_model_id, None);
+        let (root, path) = temp_settings_path("existing-speaker-model");
+        fs::write(&path, r#"{"transcription":{"enableDiarization":true}}"#)
+            .expect("write an older settings file");
+        let manager = SettingsManager::load_from_path(path).expect("load existing file");
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(manager.settings().transcription.diarization_model_id, None);
+
+        let (root, path) = temp_settings_path("chosen-speaker-model");
+        fs::write(
+            &path,
+            r#"{"transcription":{"diarizationModelId":"campplus_speaker"}}"#,
+        )
+        .expect("write a chosen model");
+        let manager = SettingsManager::load_from_path(path).expect("load chosen model");
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            manager
+                .settings()
+                .transcription
+                .diarization_model_id
+                .as_deref(),
+            Some("campplus_speaker")
+        );
+    }
+
+    #[cfg(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "diarization",
+        feature = "ort-coreml-ep"
+    ))]
+    #[test]
+    fn a_new_apple_silicon_install_separates_speakers_with_community1() {
+        assert_eq!(
+            fresh_install_diarization_model(),
+            Some(crate::download::COMMUNITY1_MODEL_ID)
+        );
+        let (root, path) = temp_settings_path("fresh-speaker-model");
+        let mut manager = SettingsManager::load_from_path(path).expect("no file loads defaults");
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(
+            manager
+                .settings()
+                .transcription
+                .diarization_model_id
+                .as_deref(),
+            Some(crate::download::COMMUNITY1_MODEL_ID)
+        );
+        manager.settings_mut().transcription.diarization_model_id =
+            Some("ecapa_tdnn_speaker".to_string());
+        manager.reset();
+        assert_eq!(
+            manager
+                .settings()
+                .transcription
+                .diarization_model_id
+                .as_deref(),
+            Some(crate::download::COMMUNITY1_MODEL_ID)
+        );
+    }
+
+    #[cfg(not(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "diarization",
+        feature = "ort-coreml-ep"
+    )))]
+    #[test]
+    fn other_builds_start_new_installs_on_the_ecapa_speaker_model() {
+        assert_eq!(fresh_install_diarization_model(), None);
+        assert_eq!(
+            Settings::fresh_install().transcription.diarization_model_id,
+            None
+        );
+    }
+
+    #[cfg(not(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "asr-transcribe-cpp"
+    )))]
+    #[test]
+    fn other_builds_start_new_installs_on_the_shared_onnx_route() {
+        assert_eq!(fresh_install_dictation_route(), None);
+        let fresh = Settings::fresh_install().transcription;
+        assert!(fresh.use_shared_asr_selection);
+        assert_eq!(fresh.dictation_provider, "parakeet");
+        assert_eq!(fresh.dictation_model_id, "parakeet-tdt-0.6b-v3");
+        assert_eq!(fresh.meeting_provider, "parakeet");
+        assert_eq!(fresh.meeting_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    /// An existing settings file keeps its route on every platform: the new
+    /// default applies only when there is no file at all.
+    #[test]
+    fn existing_settings_keep_their_dictation_route() {
+        // A current file on the shared ONNX route.
+        let (root, path) = temp_settings_path("existing-onnx");
+        let mut written = Settings::default();
+        written.transcription.dictation_keep_warm = "on".to_string();
+        fs::write(&path, serde_json::to_string(&written).expect("serialize")).expect("write");
+        let manager = SettingsManager::load_from_path(path.clone()).expect("load");
+        let transcription = &manager.settings().transcription;
+        assert!(transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "parakeet");
+        assert_eq!(transcription.dictation_model_id, "parakeet-tdt-0.6b-v3");
+        assert_eq!(transcription.meeting_provider, "parakeet");
+
+        // An older file that predates the per-lane keys: serde fills them from
+        // `Default`, which must not be the new engine.
+        fs::write(
+            &path,
+            r#"{"transcription":{"defaultProvider":"parakeet","selectedModelId":"parakeet-tdt-0.6b-v3"}}"#,
+        )
+        .expect("write");
+        let manager = SettingsManager::load_from_path(path.clone()).expect("load");
+        let transcription = &manager.settings().transcription;
+        assert!(transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "parakeet");
+        assert_eq!(transcription.dictation_model_id, "parakeet-tdt-0.6b-v3");
+
+        // A deliberate non-default choice is left exactly as written.
+        fs::write(
+            &path,
+            r#"{"transcription":{"useSharedAsrSelection":false,"defaultProvider":"whisper","selectedModelId":"base.en","dictationProvider":"whisper","dictationModelId":"small.en","meetingProvider":"parakeet","meetingModelId":"parakeet-tdt-0.6b-v3"}}"#,
+        )
+        .expect("write");
+        let manager = SettingsManager::load_from_path(path).expect("load");
+        let _ = fs::remove_dir_all(&root);
+        let transcription = &manager.settings().transcription;
+        assert!(!transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "whisper");
+        assert_eq!(transcription.dictation_model_id, "small.en");
+        assert_eq!(transcription.meeting_provider, "parakeet");
+    }
+
+    /// An install made by 0.9.0-beta.6 dictates on GGUF and records meetings
+    /// on ONNX Parakeet. Loading the file never moves its meetings; only the
+    /// startup upgrade does, once the GGUF build is verified on this Mac
+    /// (`downloaded_gguf_moves_only_the_lane_still_on_onnx`).
+    #[test]
+    fn an_install_with_gguf_dictation_keeps_its_onnx_meetings() {
+        let (root, path) = temp_settings_path("beta6-split");
+        fs::write(
+            &path,
+            r#"{"transcription":{"useSharedAsrSelection":false,"defaultProvider":"parakeet","selectedModelId":"parakeet-tdt-0.6b-v3","dictationProvider":"transcribe_cpp","dictationModelId":"parakeet-tdt-0.6b-v3-q8_0","meetingProvider":"parakeet","meetingModelId":"parakeet-tdt-0.6b-v3"}}"#,
+        )
+        .expect("write");
+        let manager = SettingsManager::load_from_path(path).expect("load");
+        let _ = fs::remove_dir_all(&root);
+        let transcription = &manager.settings().transcription;
+        assert_eq!(transcription.meeting_provider, "parakeet");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
+    }
+
+    const GGUF_ROUTE: (&str, &str) = ("transcribe_cpp", "parakeet-tdt-0.6b-v3-q8_0");
+
+    fn split_transcription(
+        dictation: (&str, &str),
+        meeting: (&str, &str),
+    ) -> TranscriptionSettings {
+        TranscriptionSettings {
+            use_shared_asr_selection: false,
+            dictation_provider: dictation.0.to_string(),
+            dictation_model_id: dictation.1.to_string(),
+            meeting_provider: meeting.0.to_string(),
+            meeting_model_id: meeting.1.to_string(),
+            ..TranscriptionSettings::default()
+        }
+    }
+
+    /// An older install on the shared ONNX default, with the GGUF build
+    /// already downloaded and verified: both lanes move, the shared default
+    /// stays ONNX as the fallback, and the app is told to say so once.
+    #[test]
+    fn downloaded_gguf_moves_an_onnx_parakeet_install_once() {
+        let mut transcription = TranscriptionSettings::default();
+        let upgrade = upgrade_onnx_parakeet_slots(&mut transcription, Some(GGUF_ROUTE), true);
+        assert_eq!(
+            upgrade,
+            ParakeetUpgrade {
+                dictation: true,
+                meeting: true
+            }
+        );
+        assert!(!transcription.use_shared_asr_selection);
+        assert_eq!(
+            (
+                transcription.dictation_provider.as_str(),
+                transcription.dictation_model_id.as_str()
+            ),
+            GGUF_ROUTE
+        );
+        assert_eq!(
+            (
+                transcription.meeting_provider.as_str(),
+                transcription.meeting_model_id.as_str()
+            ),
+            GGUF_ROUTE
+        );
+        assert_eq!(transcription.default_provider, "parakeet");
+        assert_eq!(transcription.selected_model_id, "parakeet-tdt-0.6b-v3");
+        assert!(transcription.parakeet_upgrade_applied);
+        assert!(transcription.parakeet_upgrade_notice_pending);
+
+        // One-time: a slot set back to ONNX later stays there.
+        transcription.parakeet_upgrade_notice_pending = false;
+        transcription.dictation_provider = "parakeet".to_string();
+        transcription.dictation_model_id = "parakeet-tdt-0.6b-v3".to_string();
+        let again = upgrade_onnx_parakeet_slots(&mut transcription, Some(GGUF_ROUTE), true);
+        assert!(!again.moved_any());
+        assert_eq!(transcription.dictation_provider, "parakeet");
+        assert!(!transcription.parakeet_upgrade_notice_pending);
+    }
+
+    /// The 0.9.0-beta.6 split (GGUF dictation, ONNX meetings) moves only its
+    /// meetings.
+    #[test]
+    fn downloaded_gguf_moves_only_the_lane_still_on_onnx() {
+        let mut transcription =
+            split_transcription(GGUF_ROUTE, ("parakeet", "parakeet-tdt-0.6b-v3"));
+        let upgrade = upgrade_onnx_parakeet_slots(&mut transcription, Some(GGUF_ROUTE), true);
+        assert_eq!(
+            upgrade,
+            ParakeetUpgrade {
+                dictation: false,
+                meeting: true
+            }
+        );
+        assert_eq!(transcription.meeting_provider, "transcribe_cpp");
+        assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3-q8_0");
+        assert!(transcription.parakeet_upgrade_notice_pending);
+    }
+
+    /// Until the GGUF build is downloaded and verified nothing moves, and the
+    /// check stays pending for a later launch.
+    #[test]
+    fn missing_gguf_leaves_onnx_parakeet_in_place() {
+        let mut transcription = TranscriptionSettings::default();
+        let before = serde_json::to_value(&transcription).unwrap();
+        let upgrade = upgrade_onnx_parakeet_slots(&mut transcription, Some(GGUF_ROUTE), false);
+        assert!(!upgrade.moved_any());
+        assert_eq!(serde_json::to_value(&transcription).unwrap(), before);
+        assert!(!transcription.parakeet_upgrade_applied);
+        assert!(!transcription.parakeet_upgrade_notice_pending);
+    }
+
+    /// Any model other than ONNX Parakeet v3 is a choice, and stays.
+    #[test]
+    fn other_models_are_never_moved() {
+        let mut transcription = split_transcription(
+            ("whisper", "small.en"),
+            ("parakeet", "parakeet-tdt-0.6b-v3"),
+        );
+        let upgrade = upgrade_onnx_parakeet_slots(&mut transcription, Some(GGUF_ROUTE), true);
+        assert_eq!(
+            upgrade,
+            ParakeetUpgrade {
+                dictation: false,
+                meeting: true
+            }
+        );
+        assert_eq!(transcription.dictation_provider, "whisper");
+        assert_eq!(transcription.dictation_model_id, "small.en");
+
+        let mut shared = TranscriptionSettings {
+            default_provider: "whisper".to_string(),
+            selected_model_id: "large-v3-turbo".to_string(),
+            ..TranscriptionSettings::default()
+        };
+        let before = (
+            shared.use_shared_asr_selection,
+            shared.dictation_provider.clone(),
+            shared.meeting_provider.clone(),
+        );
+        let upgrade = upgrade_onnx_parakeet_slots(&mut shared, Some(GGUF_ROUTE), true);
+        assert!(!upgrade.moved_any());
+        assert_eq!(
+            (
+                shared.use_shared_asr_selection,
+                shared.dictation_provider.clone(),
+                shared.meeting_provider.clone(),
+            ),
+            before
+        );
+        assert_eq!(shared.default_provider, "whisper");
+        assert!(shared.parakeet_upgrade_applied);
+        assert!(!shared.parakeet_upgrade_notice_pending);
+
+        let mut parakeet_v2 =
+            split_transcription(("parakeet", "parakeet-tdt-0.6b-v2"), ("deepgram", "nova-3"));
+        assert!(!upgrade_onnx_parakeet_slots(&mut parakeet_v2, Some(GGUF_ROUTE), true).moved_any());
+        assert_eq!(parakeet_v2.dictation_model_id, "parakeet-tdt-0.6b-v2");
+        assert_eq!(parakeet_v2.meeting_provider, "deepgram");
+    }
+
+    /// Where the GGUF build can't run (Intel, a build without the runtime)
+    /// ONNX Parakeet is the only Parakeet v3, and nothing changes.
+    #[test]
+    fn builds_without_the_gguf_route_never_move_onnx_parakeet() {
+        let mut transcription = TranscriptionSettings::default();
+        let before = serde_json::to_value(&transcription).unwrap();
+        let upgrade = upgrade_onnx_parakeet_slots(&mut transcription, None, true);
+        assert!(!upgrade.moved_any());
+        assert_eq!(serde_json::to_value(&transcription).unwrap(), before);
+
+        #[cfg(not(all(
+            target_os = "macos",
+            target_arch = "aarch64",
+            feature = "asr-transcribe-cpp"
+        )))]
+        {
+            let (root, path) = temp_settings_path("parakeet-upgrade-intel");
+            fs::write(&path, serde_json::to_string(&Settings::default()).unwrap()).unwrap();
+            let mut manager = SettingsManager::load_from_path(path).expect("load");
+            let _ = fs::remove_dir_all(&root);
+            assert!(!manager.apply_parakeet_upgrade(true).moved_any());
+            assert_eq!(
+                manager.settings().transcription.dictation_provider,
+                "parakeet"
+            );
+        }
+    }
+
+    /// The startup check saves what it moved, so the next launch reads it.
+    #[test]
+    fn the_startup_upgrade_is_saved() {
+        let (root, path) = temp_settings_path("parakeet-upgrade-saved");
+        fs::write(&path, serde_json::to_string(&Settings::default()).unwrap()).unwrap();
+        let mut manager = SettingsManager::load_from_path(path.clone()).expect("load");
+        let upgrade = manager.apply_parakeet_upgrade_for_route(Some(GGUF_ROUTE), true);
+        assert!(upgrade.moved_any());
+        let reloaded = SettingsManager::load_from_path(path).expect("reload");
+        let _ = fs::remove_dir_all(&root);
+        let transcription = &reloaded.settings().transcription;
+        assert_eq!(transcription.dictation_provider, "transcribe_cpp");
+        assert_eq!(transcription.meeting_provider, "transcribe_cpp");
+        assert!(transcription.parakeet_upgrade_applied);
+        assert!(transcription.parakeet_upgrade_notice_pending);
+    }
+
+    /// An unreadable file is an existing install that lost its settings, not
+    /// a new one, so it falls back to the shared ONNX default.
+    #[test]
+    fn a_corrupt_settings_file_does_not_adopt_the_new_engine() {
+        let (root, path) = temp_settings_path("corrupt");
+        fs::write(&path, "{ not json").expect("write");
+        let manager = SettingsManager::load_from_path(path).expect("corrupt file still loads");
+        let _ = fs::remove_dir_all(&root);
+        let transcription = &manager.settings().transcription;
+        assert!(transcription.use_shared_asr_selection);
+        assert_eq!(transcription.dictation_provider, "parakeet");
+        assert_eq!(transcription.dictation_model_id, "parakeet-tdt-0.6b-v3");
     }
 }

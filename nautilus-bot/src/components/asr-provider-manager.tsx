@@ -1,10 +1,15 @@
-import { describeCloudDictationVocabularyNote } from "@/lib/dictation-ui-message";
+import { describeDictationVocabularyNote } from "@/lib/dictation-ui-message";
 import { useState, useEffect, useMemo, useRef } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeDownloadStatus } from "@/lib/download-status";
-import { formatModelSize, getAsrModelCapability } from "@/lib/asr-capabilities";
+import { formatModelSize, getAsrModelCapabilityFor } from "@/lib/asr-capabilities";
 import { getProviderSelectionStatus } from "@/lib/asr-provider-selection";
-import { describeAppleSpeechEngine } from "@/lib/asr-route-catalog";
+import { AsrBenchmarkResults } from "@/components/asr-benchmark-results";
+import { readAsrBenchmarkAudio } from "@/lib/asr-benchmark-audio";
+import {
+  describeAppleSpeechEngine,
+  routeDisplayLabel,
+} from "@/lib/asr-route-catalog";
 import { selectionStateFromSettings } from "@/lib/asr-route-selection";
 import {
   refreshAsrRuntimeProbes,
@@ -13,7 +18,7 @@ import {
 } from "@/lib/backend/asr";
 import {
   getSettings,
-  saveSettings,
+  updateSettings,
   getPermissionDiagnostics,
   openPermissionSettings,
   cancelAppleSpeechLanguageInstall,
@@ -24,6 +29,7 @@ import {
   type PermissionDiagnostics,
 } from "@/lib/backend/settings";
 import { invoke, listen } from "@/lib/electron";
+import { requestSettingsTab } from "@/lib/navigation";
 import {
   Card,
   CardContent,
@@ -31,10 +37,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  SettingsGroup,
+  SettingsMore,
+  SettingsRow,
+} from "@/components/ui/settings-control";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -59,7 +69,6 @@ import {
   Cpu,
   Globe,
   Clock,
-  BarChart3,
   FileAudio,
   Zap,
   CloudLightning,
@@ -116,7 +125,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const [permissionDiagnostics, setPermissionDiagnostics] =
     useState<PermissionDiagnostics | null>(null);
   const benchmarkFileInputRef = useRef<HTMLInputElement | null>(null);
-  const autoPromptedNativePermissionRef = useRef<string | null>(null);
 
   const manualEngineOptions = [
     { value: "provider_default", label: "Provider default" },
@@ -347,12 +355,12 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             defaultPlatformSettings(),
         )
       ) {
-        await saveSettings({
-          ...settings,
-          transcription: {
-            ...settings.transcription,
-            platformOptimization: normalized,
-          },
+        await updateSettings((draft) => {
+          draft.transcription.platformOptimization = withNormalizedManualPriority(
+            withoutNativeRouteOverrides(
+              draft.transcription.platformOptimization ?? defaultPlatformSettings(),
+            ),
+          );
         });
       }
     } catch (error) {
@@ -367,7 +375,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
    *
    * Nothing on screen edits these keys any more -- the "Compatibility &
    * Runtime Tuning" card that did was removed because every control in it was
-   * inert on a macOS build (see docs/settings-inventory-2026-09-03.md). What is
+   * inert on a macOS build (see docs/settings-inventory-2026-10-22.md). What is
    * left is housekeeping, so a failure is logged rather than surfaced: there is
    * no control for the user to retry.
    */
@@ -376,13 +384,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   ) => {
     const normalizedNext = withNormalizedManualPriority(next);
     try {
-      const settings = await getSettings();
-      await saveSettings({
-        ...settings,
-        transcription: {
-          ...settings.transcription,
-          platformOptimization: normalizedNext,
-        },
+      await updateSettings((draft) => {
+        draft.transcription.platformOptimization = normalizedNext;
       });
       setPlatformSettings(normalizedNext);
     } catch (error) {
@@ -467,11 +470,23 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     return provider ? provider.name : providerType;
   };
 
+  /** The model a task points at, named the way Settings > Models names it. */
+  const selectedModelDisplayName = (providerType: AsrProviderType) => {
+    const provider = selectionProviderByType(providerType);
+    if (!provider) return providerDisplayName(providerType);
+    const option = provider.modelOptions.find(
+      (candidate) => candidate.id === provider.selectedModelId,
+    );
+    return option
+      ? routeDisplayLabel(providerType, option.id, option.label)
+      : provider.name;
+  };
+
   const inventoryReadiness = (provider: SelectionProvider) => {
     const status = normalizeDownloadStatus(provider.downloadStatus);
     if (provider.providerType === "macos_apple_speech" && provider.platformReadiness) {
       return provider.platformReadiness.ready
-        ? { tone: "success" as const, label: "Ready on-device" }
+        ? { tone: "success" as const, label: "Ready on this Mac" }
         : {
             tone: "warning" as const,
             label:
@@ -480,18 +495,18 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 : provider.platformReadiness.status === "authorization_denied"
                   ? "Permission denied"
                   : provider.platformReadiness.status === "unsupported_locale"
-                    ? "Locale unsupported"
+                    ? "Language not supported"
                     : provider.platformReadiness.status === "helper_missing"
-                      ? "Helper missing"
+                      ? "Needs repair"
                       : provider.platformReadiness.status === "on_device_unavailable"
-                        ? "On-device unavailable"
+                        ? "Not available offline"
                         : "Needs setup",
           };
     }
     if (!provider.inferenceEnabled) {
       return {
         tone: "muted" as const,
-        label: "Unavailable in this build",
+        label: "Not available on this Mac",
       };
     }
     if (status.kind === "not_downloaded") {
@@ -616,8 +631,9 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
 
     setBenchmarkError(null);
     setIsBenchmarking(true);
+    setBenchmarkResults([]);
     try {
-      const fileBytes = new Uint8Array(await selectedFile.arrayBuffer());
+      const fileBytes = await readAsrBenchmarkAudio(selectedFile);
       const results = await invoke<BenchmarkResult[]>(
         "benchmark_asr_providers_bytes",
         {
@@ -625,6 +641,9 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
         },
       );
       setBenchmarkResults(results);
+      if (results.length === 0) {
+        setBenchmarkError("No local models were available. Download a model in Providers, then try again.");
+      }
       await loadBenchmarkHistory();
     } catch (error) {
       console.error("Benchmark failed:", error);
@@ -665,7 +684,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "gemini_transcribe":
       case "mistral_voxtral":
       case "xai_stt":
-      case "plainsong_plus":
         return <CloudLightning className="h-5 w-5" />;
       default:
         return <Cpu className="h-5 w-5" />;
@@ -677,10 +695,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const activeProgress = downloadProgress[provider.providerType];
 
     // Determine if this is a large download (>500 MiB) to show a wider bar.
-    const cap = getAsrModelCapability(
-      provider.providerType,
-      provider.selectedModelId,
-    );
+    const cap = getAsrModelCapabilityFor(provider, provider.selectedModelId);
     const isLargeDownload = cap !== null && cap.sizeMib > 500;
     const progressWidth = isLargeDownload ? "w-32" : "w-20";
 
@@ -749,7 +764,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "parakeet":
         return "Use the Download button to fetch the selected Parakeet model. TDT 0.6B v3 is the recommended multilingual default; CTC, larger, and legacy variants are available on demand.";
       case "whisper_candle":
-        return "Use the Download button to fetch Whisper Large V3 Turbo for the native Candle runtime. This path is experimental and best used for dictation.";
+        return "Use the Download button to fetch the alternate Whisper Large Turbo. It is experimental and best used for dictation.";
       case "distil_whisper":
         return "Use the Download button to fetch the Distil-Whisper Large v3.5 model (no Python needed)";
       case "macos_apple_speech":
@@ -761,27 +776,25 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
       case "moonshine":
         return "Use the Download button to fetch the selected Moonshine bundle. Tiny is the smallest edge model; Base is the default stable option.";
       case "qwen3_asr":
-        return "Use the Download button to fetch the Qwen3-ASR 0.6B model (~1.9 GiB, 7 files). Experimental: English is verified in Plainsong; 30 languages including Chinese, Japanese and Korean are listed upstream; it runs slower than real time on the CPU.";
+        return "Use the Download button to fetch the Qwen3-ASR 0.6B model (about 2.0 GB, 7 files). Experimental: tested in English in Plainsong, and built for 30 languages including Chinese, Japanese and Korean. It can be slower than real time.";
       case "cohere_local":
-        return "Use the Download button to fetch Cohere Transcribe 03-2026 as int4 ONNX (~2.0 GiB, 8 files). Experimental: it runs on the CPU with no Metal path, it cannot detect a language so you have to pick one of its 14, and its segment times are estimated rather than measured.";
+        return "Use the Download button to fetch Cohere Transcribe 03-2026 (about 2.1 GB, 8 files). Experimental and slower than Parakeet: it can't detect a language, so you pick one of its 14, and its timings are estimated rather than measured.";
       case "windows_sdk_dictation":
-        return "Use a Windows x86_64 build with Windows speech recognition components available, or pick another ASR provider";
+        return "Use a Windows x86_64 build with Windows speech recognition components available, or pick another speech model";
       case "elevenlabs_scribe":
-        return "Add an ElevenLabs API key in Settings → API Keys";
+        return "Add an ElevenLabs API key in Settings > Search & AI > API keys";
       case "openai_cloud":
-        return "Add an OpenAI API key in Settings → API Keys";
+        return "Add an OpenAI API key in Settings > Search & AI > API keys";
       case "cohere_transcribe":
-        return "Add a Cohere API key in Settings → API Keys";
+        return "Add a Cohere API key in Settings > Search & AI > API keys";
       case "deepgram":
-        return "Add a Deepgram API key in Settings → API Keys";
+        return "Add a Deepgram API key in Settings > Search & AI > API keys";
       case "gemini_transcribe":
-        return "Add a Google Gemini API key in Settings → API Keys";
+        return "Add a Google Gemini API key in Settings > Search & AI > API keys";
       case "mistral_voxtral":
-        return "Add a Mistral API key in Settings → API Keys";
+        return "Add a Mistral API key in Settings > Search & AI > API keys";
       case "xai_stt":
-        return "Add an xAI API key in Settings → API Keys";
-      case "plainsong_plus":
-        return "Enter your license key in Settings → Plainsong Plus";
+        return "Add an xAI API key in Settings > Search & AI > API keys";
       default:
         return "Use the Download button to fetch the model (no Python needed)";
     }
@@ -822,12 +835,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const provider = providerByType(providerType);
     const lightweightProvider = selectionProviderByType(providerType);
     if (!provider && !lightweightProvider) return null;
-    const routeLabel = providerDisplayName(providerType);
+    const routeLabel = selectedModelDisplayName(providerType);
     if (!provider && lightweightProvider) {
       return (
         <p className="text-sm text-muted-foreground">
-          {label}: {routeLabel} is{" "}
-          {inventoryReadiness(lightweightProvider).label.toLowerCase()}.
+          {label}: {routeLabel} · {inventoryReadiness(lightweightProvider).label}
         </p>
       );
     }
@@ -840,7 +852,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     ) {
       return (
         <p className="text-sm text-muted-foreground">
-          {label}: {routeLabel} is ready.
+          {label}: {routeLabel} · Ready
         </p>
       );
     }
@@ -848,7 +860,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     if (selection.reason === null) {
       return (
         <p className="text-sm text-muted-foreground">
-          {label}: {routeLabel} is ready.
+          {label}: {routeLabel} · Ready
         </p>
       );
     }
@@ -859,7 +871,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
           {label}:{" "}
           {provider.runtimeMessage ?? `${routeLabel} is not ready yet.`}{" "}
           {provider.runtimeDetails.setupAction ??
-            "Choose another speech engine if you need to keep working."}
+            "Choose another speech model if you need to keep working."}
         </p>
         {canRequestSpeechPermission ? (
           <div className="flex flex-wrap gap-2">
@@ -1000,56 +1012,6 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   const appleNativeUsedForDictation = useSharedAsrSelection
     ? defaultProvider === "macos_apple_speech"
     : dictationProvider === "macos_apple_speech";
-
-  useEffect(() => {
-    if (!selectedRouteUsesAppleNative || permissionActionBusy) {
-      return;
-    }
-
-    if (permissionDiagnostics?.speechRecognitionReady) {
-      autoPromptedNativePermissionRef.current = null;
-      return;
-    }
-
-    if (
-      appleSpeechReadiness &&
-      appleSpeechReadiness.status !== "authorization_not_determined"
-    ) {
-      return;
-    }
-
-    const promptKey = useSharedAsrSelection
-      ? "shared"
-      : `${dictationProvider}:${meetingProvider}`;
-    if (autoPromptedNativePermissionRef.current === promptKey) {
-      return;
-    }
-
-    autoPromptedNativePermissionRef.current = promptKey;
-    setPermissionActionBusy(true);
-    void (async () => {
-      try {
-        await requestAppleSpeechPermission();
-        await refreshAppleNativeReadiness();
-      } catch (error) {
-        console.error(
-          "Failed to auto-request Apple native permissions:",
-          error,
-        );
-      } finally {
-        setPermissionActionBusy(false);
-      }
-    })();
-  }, [
-    appleSpeechReadiness,
-    defaultProvider,
-    dictationProvider,
-    meetingProvider,
-    permissionActionBusy,
-    permissionDiagnostics?.speechRecognitionReady,
-    selectedRouteUsesAppleNative,
-    useSharedAsrSelection,
-  ]);
 
   const appleNativePermissionRows = [
     {
@@ -1241,7 +1203,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <p className="text-sm font-medium text-rust">
               Apple Speech transcription is ready.
             </p>
-            <p className="text-sm text-rust/90">
+            <p className="text-sm text-rust">
               Cursor insertion is not ready yet. Enable Plainsong in Privacy &
               Security &gt; Accessibility so it can insert text into the target
               app.
@@ -1258,7 +1220,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <p className="text-sm font-medium text-rust">
               Apple Speech transcription is ready.
             </p>
-            <p className="text-sm text-rust/90">
+            <p className="text-sm text-rust">
               Native Cmd+V fallback is available. Direct Accessibility text
               insertion is not currently verified for this app copy.
             </p>
@@ -1270,7 +1232,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
             <p className="text-sm font-medium text-rust">
               Latest dictation fell back to clipboard-only.
             </p>
-            <p className="text-sm text-rust/90">
+            <p className="text-sm text-rust">
               {lastCursorInsertFailure}
             </p>
           </div>
@@ -1282,7 +1244,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               You are running Plainsong from the mounted DMG, not the installed
               app.
             </p>
-            <p className="text-sm text-rust/90">
+            <p className="text-sm text-rust">
               macOS permissions granted to the installed app do not apply to the
               disk image copy. Open the installed app in{" "}
               <code>/Applications</code>, then quit this DMG copy.
@@ -1406,69 +1368,46 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const insertDetail = lastCursorInsertFailure
       ? lastCursorInsertFailure
       : insertReady
-        ? "Plainsong is currently reporting that auto-insert can target the active app."
-        : "macOS is not currently exposing a working auto-insert path for this app copy.";
+        ? "Plainsong can type your words into the app you are using."
+        : "macOS is not letting this copy of Plainsong type into other apps yet.";
 
+    // The repair and permission buttons live once, under Privacy & data >
+    // macOS permissions. This row only reports, and points there.
     return (
-      <div className="rounded-lg border border-border bg-muted/10 p-4 space-y-3">
-        <div className="flex items-center justify-between gap-3">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <Badge
-                variant={insertReady ? "default" : "secondary"}
-                className={insertReady ? "bg-gold" : ""}
-              >
-                {insertReady
-                  ? "Auto-insert ready"
-                  : "Auto-insert needs attention"}
-              </Badge>
-              <span className="text-sm font-medium">Cursor Insert</span>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              This repair path is shared by Whisper, Apple Speech, and every
-              other dictation provider on macOS.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
+      <SettingsRow
+        label={
+          <span className="flex items-center gap-2">
+            <span
+              aria-hidden="true"
+              className={insertReady ? "neume neume-lit" : "neume neume-rust"}
+            />
+            {insertReady
+              ? "Typing into other apps: ready"
+              : "Typing into other apps: needs attention"}
+          </span>
+        }
+        description={insertDetail}
+        control={
+          <>
             <Button
               size="sm"
-              variant="outline"
-              disabled={permissionActionBusy}
-              onClick={async () => {
-                setPermissionActionBusy(true);
-                try {
-                  const diagnostics = await repairCursorInsertPermissions();
-                  setPermissionDiagnostics(diagnostics);
-                  await Promise.all([loadProviders(), loadSelectionSettings()]);
-                } catch (error) {
-                  console.error("Failed to repair insert permissions:", error);
-                } finally {
-                  setPermissionActionBusy(false);
-                }
-              }}
-            >
-              {permissionActionBusy
-                ? "Repairing..."
-                : "Repair insert permissions"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void openPermissionSettings("accessibility")}
-            >
-              Open Accessibility
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
+              variant="ghost"
               onClick={() => void refreshAppleNativeReadiness()}
             >
-              Re-check readiness
+              Check again
             </Button>
-          </div>
-        </div>
-        <p className="text-sm text-muted-foreground">{insertDetail}</p>
-      </div>
+            {!insertReady || lastCursorInsertFailure ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => requestSettingsTab("privacy", "permissions")}
+              >
+                Fix in Privacy &amp; data
+              </Button>
+            ) : null}
+          </>
+        }
+      />
     );
   };
 
@@ -1476,7 +1415,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
     const selection = getProviderSelectionStatus(provider);
     const runtimeIssue =
       selection.reason === "runtime_unavailable"
-        ? (provider.runtimeMessage ?? "Runtime setup required.")
+        ? (provider.runtimeMessage ?? "Needs setup.")
         : null;
     const providerError = providerErrors[provider.providerType];
     const modelOptions = provider.modelOptions ?? [];
@@ -1512,9 +1451,9 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 <CardDescription className="mt-1">
                   {provider.description}
                 </CardDescription>
-                {describeCloudDictationVocabularyNote(provider.providerType) ? (
+                {describeDictationVocabularyNote(provider.providerType) ? (
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {describeCloudDictationVocabularyNote(provider.providerType)}
+                    {describeDictationVocabularyNote(provider.providerType)}
                   </p>
                 ) : null}
               </div>
@@ -1532,20 +1471,24 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                 <div className="rubric-muted">Size</div>
                 <div className="mt-0.5 font-medium tabular-nums">
                   {/* Rust's `size_mb` is MiB despite the name -- see the unit
-                      note on AsrModelCapability.sizeMib. */}
-                  {provider.modelInfo.sizeMb} MiB
+                      note on AsrModelCapability.sizeMib. A Parakeet download
+                      on Apple Silicon fetches more than its one file. */}
+                  {formatModelSize(
+                    (provider.modelDownloadBytes?.[provider.selectedModelId] ?? 0) / (1024 * 1024) ||
+                      provider.modelInfo.sizeMb,
+                  )}
                 </div>
               </div>
               <div className="p-2 bg-muted rounded-lg">
                 <div className="rubric-muted">
-                  Model / Parameters
+                  Model
                 </div>
                 <div className="mt-0.5 font-medium">
                   {provider.modelInfo.name || provider.modelInfo.parameters}
                 </div>
               </div>
               <div className="p-2 bg-muted rounded-lg">
-                <div className="rubric-muted">WER</div>
+                <div className="rubric-muted">Word errors</div>
                 <div className="mt-0.5 font-medium tabular-nums">
                   {provider.modelInfo.wordErrorRate?.toFixed(2) || "N/A"}%
                 </div>
@@ -1645,10 +1588,10 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               {selection.reason === "runtime_unavailable" && (
                 <Badge variant="secondary" className="text-xs">
                   {provider.runtimeStatus === "missing_runtime"
-                    ? "Runtime setup required"
+                    ? "Needs setup"
                     : provider.runtimeStatus === "missing_model"
                       ? "Model files missing"
-                      : "Runtime error"}
+                      : "Couldn't start"}
                 </Badge>
               )}
               {!provider.inferenceEnabled && (
@@ -1681,7 +1624,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                   >
                     {defaultProvider === provider.providerType
                       ? "Default"
-                      : "Set Default"}
+                      : "Make default"}
                   </Button>
                   {selection.reason === "download_required" &&
                   isNotDownloaded(provider.downloadStatus) ? (
@@ -1692,8 +1635,8 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                     >
                       <Download className="h-4 w-4 mr-2" />
                       {(() => {
-                        const cap = getAsrModelCapability(
-                          provider.providerType,
+                        const cap = getAsrModelCapabilityFor(
+                          provider,
                           provider.selectedModelId,
                         );
                         return cap
@@ -1721,14 +1664,14 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                             await refreshAsrRuntimeProbes();
                           } catch (error) {
                             console.warn(
-                              "Failed to refresh runtime probes:",
+                              "Failed to refresh speech model checks:",
                               error,
                             );
                           }
                           await loadProviders();
                         }}
                       >
-                        Re-check runtime
+                        Check again
                       </Button>
                       {defaultProvider === provider.providerType &&
                       provider.providerType !== "whisper" ? (
@@ -1746,11 +1689,11 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               ) : selection.reason === "runtime_unavailable" ? (
                 <span
                   role="status"
-                  aria-label={`${provider.name} is unavailable until its runtime is set up. Use the setup steps below.`}
+                  aria-label={`${provider.name} needs setup before it can be used. Use the setup steps below.`}
                   className="inline-flex items-center gap-1.5 rounded-md border border-rust/30 bg-rust/10 px-2.5 py-1.5 text-xs font-medium text-rust"
                 >
                   <span aria-hidden="true" className="neume neume-rust" />
-                  Runtime setup required
+                  Needs setup
                 </span>
               ) : selection.reason === "not_enabled" ? (
                 <span
@@ -1770,14 +1713,14 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
               {selection.reason === "runtime_unavailable" && (
                 <>
                   {provider.runtimeDetails?.missingFiles?.length ? (
-                    <p className="text-rust/90">
+                    <p className="text-rust">
                       Missing:{" "}
                       <span className="font-mono">
                         {provider.runtimeDetails.missingFiles.join(", ")}
                       </span>
                     </p>
                   ) : null}
-                  <p className="text-rust/90">
+                  <p className="text-rust">
                     How to enable:{" "}
                     <span className="font-mono">
                       {provider.runtimeDetails?.setupAction ??
@@ -1785,7 +1728,7 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
                     </span>
                   </p>
                   {provider.runtimeDetails?.pythonPath ? (
-                    <p className="text-rust/90">
+                    <p className="text-rust">
                       Detected Python:{" "}
                       <span className="font-mono">
                         {provider.runtimeDetails.pythonPath}
@@ -1802,292 +1745,160 @@ export function AsrProviderManager({ className }: AsrProviderManagerProps) {
   };
 
   return (
-    <div className={cn("space-y-6", className)}>
-      <Tabs defaultValue="providers" className="space-y-4">
-        <TabsList className="grid w-full grid-cols-2">
-          <TabsTrigger value="providers">Providers</TabsTrigger>
-          <TabsTrigger value="benchmark">Benchmark</TabsTrigger>
-        </TabsList>
+    <div className={cn("settings-section", className)}>
+      <SettingsGroup
+        title="Speech model status"
+        description="Whether the speech models chosen in Models are ready, and what to do when one is not."
+      >
+        <div className="space-y-4 py-3.5">
+          {inventory.length === 0 && isLoading ? (
+            <p className="text-sm text-muted-foreground">
+              Reading the speech models on this Mac…
+            </p>
+          ) : null}
 
-        <TabsContent value="providers" className="space-y-4">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="font-serif text-lg font-semibold">
-                Engine status
-              </CardTitle>
-              <CardDescription>
-                Which model each task uses is chosen in Settings &rarr; Models.
-                This is the state of the engines behind that choice.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {inventory.length === 0 && isLoading ? (
-                <div className="rounded-xl border bg-muted/10 p-6 text-center">
-                  <p className="text-sm text-muted-foreground">
-                    Reading the installed engines…
-                  </p>
-                </div>
-              ) : null}
+          {renderAppleNativeSetupCard()}
 
-              {renderAppleNativeSetupCard()}
-              {renderCursorInsertToolsCard()}
+          <div className="space-y-1">
+            {useSharedAsrSelection
+              ? renderRouteStatus(
+                  "Dictation and meetings",
+                  defaultProvider,
+                )
+              : renderRouteStatus("Dictation", dictationProvider)}
+            {!useSharedAsrSelection
+              ? renderRouteStatus("Meetings", meetingProvider)
+              : null}
+          </div>
+        </div>
+        {renderCursorInsertToolsCard()}
+      </SettingsGroup>
 
-              <div className="space-y-1">
-                {useSharedAsrSelection
-                  ? renderRouteStatus(
-                      "Speech engine (dictation and meetings)",
-                      defaultProvider,
-                    )
-                  : renderRouteStatus("Dictation engine", dictationProvider)}
-                {!useSharedAsrSelection
-                  ? renderRouteStatus("Meeting engine", meetingProvider)
-                  : null}
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="font-serif text-lg font-semibold">
-                Downloads & Diagnostics
-              </CardTitle>
-              <CardDescription>
-                Model downloads, compatibility tuning, and repair tools for
-                power users.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="pt-0">
+      <SettingsGroup
+        title="Repair and compare"
+        description="For when a speech model will not load, or to see which one is fastest on this Mac."
+      >
+        <SettingsMore
+          label="Repair speech models"
+          hint="Damaged downloads, each model's status"
+          onOpenChange={(open) => {
+            if (open) setShowAdvancedTools(true);
+          }}
+        >
+          <SettingsRow
+            label="Repair downloaded speech models"
+            description="Deletes only damaged speech model files, then checks every model again. Anything that still works is kept."
+            control={
               <Button
-                variant="outline"
                 size="sm"
-                onClick={() => setShowAdvancedTools((value) => !value)}
+                variant="outline"
+                onClick={handleRepairLocalCache}
+                disabled={repairingCache}
               >
-                {showAdvancedTools ? "Hide tools" : "Show tools"}
+                {repairingCache ? "Repairing…" : "Repair"}
               </Button>
-            </CardContent>
-          </Card>
-          {showAdvancedTools ? (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="font-serif text-lg font-semibold">
-                  Local Model Cache Repair
-                </CardTitle>
-                <CardDescription>
-                  Deletes only invalid local ASR artifacts, then re-checks
-                  runtime probes.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex items-center gap-3">
+            }
+          >
+            {repairSummary ? (
+              <p className="text-sm text-muted-foreground">{repairSummary}</p>
+            ) : null}
+          </SettingsRow>
+          <div className="grid gap-4 py-3.5">
+            {providers.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                Reading every speech model on this Mac. The first time can take
+                up to 15 seconds.
+              </p>
+            ) : (
+              providers.map((provider) => renderProviderCard(provider))
+            )}
+          </div>
+        </SettingsMore>
+
+        <SettingsMore
+          label="Compare speech models"
+          hint="Time each one on a short clip"
+        >
+          <SettingsRow
+            label="Clip to compare"
+            description="A WAV clip up to 6 MiB. Each speech model on this Mac transcribes it so you can compare speed and text. Audio stays on this Mac."
+            control={
+              <>
+                <input
+                  ref={benchmarkFileInputRef}
+                  type="file"
+                  accept=".wav,audio/wav"
+                  className="hidden"
+                  disabled={isBenchmarking}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0] ?? null;
+                    setBenchmarkFileName(file?.name ?? null);
+                    setBenchmarkResults([]);
+                    setBenchmarkError(null);
+                  }}
+                />
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={handleRepairLocalCache}
-                  disabled={repairingCache}
+                  disabled={isBenchmarking}
+                  onClick={() => benchmarkFileInputRef.current?.click()}
                 >
-                  {repairingCache ? "Repairing..." : "Repair local cache"}
+                  <FileAudio aria-hidden="true" className="mr-1.5 h-3.5 w-3.5" />
+                  Choose a clip
                 </Button>
-                {repairSummary ? (
-                  <p className="text-sm text-muted-foreground">
-                    {repairSummary}
-                  </p>
-                ) : null}
-              </CardContent>
-            </Card>
-          ) : null}
-          {showAdvancedTools ? (
-            <div className="grid gap-4">
-              {providers.length === 0 ? (
-                <Card>
-                  <CardContent className="p-6 text-center">
-                    <p className="text-muted-foreground">
-                      Loading providers...
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      This may take up to 15 seconds on first load.
-                    </p>
-                  </CardContent>
-                </Card>
-              ) : (
-                <>
-                  {providers.map((provider) => renderProviderCard(provider))}
-                </>
-              )}
-            </div>
-          ) : null}
-        </TabsContent>
-
-        <TabsContent value="benchmark" className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 font-serif font-semibold">
-                <BarChart3 className="h-5 w-5" />
-                Performance Benchmark
-              </CardTitle>
-              <CardDescription>
-                Compare transcription speed and accuracy across all available
-                providers
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-center p-8 border-2 border-dashed rounded-lg">
-                <div className="text-center">
-                  <FileAudio className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-                  <p className="text-sm text-muted-foreground mb-4">
-                    Upload a WAV test audio file to benchmark all available
-                    providers
-                  </p>
-                  <input
-                    ref={benchmarkFileInputRef}
-                    type="file"
-                    accept=".wav,audio/wav"
-                    className="hidden"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0] ?? null;
-                      setBenchmarkFileName(file?.name ?? null);
-                    }}
-                  />
-                  <div className="flex flex-col items-center gap-2">
-                    <Button
-                      variant="outline"
-                      onClick={() => benchmarkFileInputRef.current?.click()}
-                    >
-                      Choose WAV File
-                    </Button>
-                    {benchmarkFileName ? (
-                      <p className="text-xs text-muted-foreground">
-                        {benchmarkFileName}
-                      </p>
-                    ) : null}
-                  </div>
-                  <Button
-                    className="mt-3"
-                    onClick={runBenchmark}
-                    disabled={isBenchmarking || !benchmarkFileName}
-                  >
-                    <Clock className="h-4 w-4 mr-2" />
-                    {isBenchmarking ? "Running..." : "Run Benchmark"}
-                  </Button>
-                  {benchmarkError && (
-                    <p className="mt-3 rounded-md bg-rust/10 p-2 text-sm text-rust">
-                      {benchmarkError}
-                    </p>
-                  )}
-                </div>
-              </div>
-
-              {benchmarkResults.length > 0 && (
-                <div className="space-y-2">
-                  {benchmarkResults.map((result) => (
-                    <div
-                      key={`${result.providerType}-${result.modelId}`}
-                      className="flex items-center justify-between p-3 border rounded-lg"
-                    >
-                      <div>
-                        <p className="font-medium">{result.providerName}</p>
-                        <p className="text-sm text-muted-foreground">
-                          {result.modelId} · {result.runtimeStatus} ·
-                          Confidence: {(result.confidence * 100).toFixed(1)}%
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          Transcript:{" "}
-                          {result.nonEmptyTranscript ? "non-empty" : "empty"}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-mono font-medium tabular-nums">
-                          {(result.processingTimeMs / 1000).toFixed(2)}s
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          Processing time
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {benchmarkHistory.length > 0 && (
-                <div className="space-y-2 pt-2">
-                  <p className="rubric-muted">
-                    Recent benchmark history
-                  </p>
-                  {benchmarkHistory.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className="flex items-center justify-between rounded-lg border p-2 text-xs"
-                    >
-                      <div>
-                        <p className="font-medium">{entry.providerName}</p>
-                        <p className="text-muted-foreground">
-                          {entry.modelId} · {entry.runtimeStatus}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-mono tabular-nums">{(entry.processingTimeMs / 1000).toFixed(2)}s</p>
-                        <p className="text-muted-foreground tabular-nums">
-                          {(entry.confidence * 100).toFixed(1)}% ·{" "}
-                          {entry.nonEmptyTranscript ? "non-empty" : "empty"}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="font-serif font-semibold">Provider Status</CardTitle>
-              <CardDescription>
-                Production availability for ASR providers in this build
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-4 text-sm">
-                <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">Whisper (Enabled)</p>
+                <Button
+                  size="sm"
+                  onClick={runBenchmark}
+                  disabled={isBenchmarking || !benchmarkFileName}
+                >
+                  <Clock aria-hidden="true" className="mr-1.5 h-3.5 w-3.5" />
+                  {isBenchmarking ? "Comparing…" : "Compare"}
+                </Button>
+              </>
+            }
+          >
+            {benchmarkFileName ? (
+              <p className="text-sm text-muted-foreground">{benchmarkFileName}</p>
+            ) : null}
+            {benchmarkError ? (
+              <p role="alert" className="text-sm text-rust">
+                {benchmarkError}
+              </p>
+            ) : null}
+            <AsrBenchmarkResults results={benchmarkResults} />
+        {benchmarkHistory.length > 0 && (
+          <div className="space-y-2 pt-2">
+            <p className="rubric-muted">
+              Earlier comparisons
+            </p>
+            {benchmarkHistory.map((entry) => (
+              <div
+                key={entry.id}
+                className="flex items-center justify-between rounded-lg border p-2 text-xs"
+              >
+                <div>
+                  <p className="font-medium">{entry.providerName}</p>
                   <p className="text-muted-foreground">
-                    Production local transcription provider. Supports model
-                    selection including turbo variants. The multilingual
-                    small, medium, large-v3 and large-v3-turbo models can also
-                    run meetings (100 languages, on the GPU, slower than
-                    Parakeet); tiny, base and every .en model stay dictation-only.
+                    {entry.modelId} · {entry.runtimeStatus}
                   </p>
                 </div>
-                <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">
-                    Parakeet (Enabled when runtime ready)
-                  </p>
-                  <p className="text-muted-foreground">
-                    Uses a local NeMo runtime bridge. Provider becomes
-                    selectable only when model files and runtime health checks
-                    are both ready.
-                  </p>
-                </div>
-                <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">
-                    Distil Whisper (Enabled)
-                  </p>
-                  <p className="text-muted-foreground">
-                    Native local Distil runtime using model artifacts from
-                    distil-large-v3.5.
-                  </p>
-                </div>
-                <div className="p-3 bg-muted/50 rounded-lg">
-                  <p className="font-medium mb-1">
-                    Whisper Candle (Experimental)
-                  </p>
-                  <p className="text-muted-foreground">
-                    Uses Whisper Large V3 Turbo through the native Candle
-                    runtime. Best for Apple Silicon dictation experiments after
-                    the local bundle is downloaded.
+                <div className="text-right">
+                  <p className="font-mono tabular-nums">{(entry.processingTimeMs / 1000).toFixed(2)}s</p>
+                  <p className="text-muted-foreground tabular-nums">
+                    {entry.runtimeStatus === "error"
+                      ? "Could not benchmark"
+                      : entry.nonEmptyTranscript
+                        ? "Speech returned"
+                        : "No speech returned"}
                   </p>
                 </div>
               </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+            ))}
+          </div>
+        )}
+          </SettingsRow>
+        </SettingsMore>
+      </SettingsGroup>
     </div>
   );
 }

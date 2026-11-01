@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const harnessPath = resolve(
   process.cwd(),
-  "scripts/capture-packaged-macos-recovery-shortcuts.mjs",
+  "scripts/capture-packaged-macos-recovery-shortcuts.ts",
 );
 
 describe("packaged recovery shortcut harness", () => {

@@ -1,18 +1,20 @@
+import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useSavedPromptChat } from "@/components/prompts/use-saved-prompt-chat";
 import { BUILTIN_SAVED_PROMPTS } from "@/lib/saved-prompts";
+import type { SavedPrompt } from "@/lib/saved-prompts";
 import type { Settings } from "@/types/settings";
 
 const backendMocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
-  saveSettings: vi.fn(),
+  setSavedPrompts: vi.fn<(prompts: readonly SavedPrompt[]) => Promise<SavedPrompt[]>>(),
 }));
 
 vi.mock("@/lib/backend", () => ({
   getSettings: backendMocks.getSettings,
-  saveSettings: backendMocks.saveSettings,
+  setSavedPrompts: backendMocks.setSavedPrompts,
 }));
 
 function settingsWith(savedPrompts: Settings["ai"] extends undefined ? never : NonNullable<Settings["ai"]>["savedPrompts"]) {
@@ -38,6 +40,7 @@ function ChatHarness({ scope }: { scope: "meeting" | "memory" }) {
       {chat.manager}
       <input
         aria-label="Ask"
+        {...chat.inputProps}
         value={value}
         onChange={(event) => setValue(event.target.value)}
         onKeyDown={(event) => {
@@ -87,7 +90,7 @@ describe("the saved prompt picker in a chat box", () => {
         },
       ]),
     );
-    backendMocks.saveSettings.mockResolvedValue(undefined);
+    backendMocks.setSavedPrompts.mockImplementation(async (prompts) => [...prompts]);
   });
 
   it("stays closed until the reader types a leading slash", async () => {
@@ -204,6 +207,44 @@ describe("the saved prompt picker in a chat box", () => {
     expect(within(picker).getByText(/Esc closes this/)).toBeTruthy();
   });
 
+  it.each(["delayed load", "failed load and retry"])("preserves the saved library and seeded prompt after %s", async (mode) => {
+    let finishLoad = (_settings: Settings) => {};
+    const pending = new Promise<Settings>((resolve) => { finishLoad = resolve; });
+    if (mode === "failed load and retry") {
+      backendMocks.getSettings.mockRejectedValueOnce(new Error("Settings unavailable"));
+      backendMocks.getSettings.mockReturnValueOnce(pending);
+    } else {
+      backendMocks.getSettings.mockReturnValueOnce(pending);
+    }
+    render(<ChatHarness scope="meeting" />);
+    fireEvent.change(screen.getByLabelText("Ask"), { target: { value: "/" } });
+    const starter = BUILTIN_SAVED_PROMPTS.find((prompt) => prompt.scope !== "memory");
+    if (!starter) throw new Error("Expected a meeting starter");
+    fireEvent.click(screen.getByText(starter.name));
+    expect(screen.getByLabelText("Ask")).toHaveValue(starter.prompt);
+    fireEvent.click(screen.getByRole("button", { name: "Save as prompt" }));
+    if (mode === "failed load and retry") {
+      expect(await screen.findByRole("alert")).toHaveTextContent("Could not load saved prompts.");
+      expect(screen.queryByRole("button", { name: "Save prompt" })).not.toBeInTheDocument();
+      expect(backendMocks.setSavedPrompts).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    }
+    expect(await screen.findByRole("status")).toHaveTextContent("Loading saved prompts…");
+    expect(screen.queryByRole("button", { name: "Save prompt" })).not.toBeInTheDocument();
+    expect(backendMocks.setSavedPrompts).not.toHaveBeenCalled();
+    const existing: SavedPrompt = { id: "existing", name: "My saved question", prompt: "What remains open?", scope: "both" };
+    await act(async () => { finishLoad(settingsWith([existing])); });
+    expect(await screen.findByLabelText("Name")).toHaveValue("Who owns the migration?");
+    expect(screen.getByLabelText("Prompt")).toHaveValue("Who owns the migration?");
+    fireEvent.click(screen.getByRole("button", { name: "Save prompt" }));
+    await waitFor(() => expect(backendMocks.setSavedPrompts).toHaveBeenCalledOnce());
+    expect(backendMocks.setSavedPrompts.mock.calls[0][0]).toEqual(expect.arrayContaining([
+      expect.objectContaining(existing),
+      expect.objectContaining({ name: "Who owns the migration?", prompt: "Who owns the migration?", scope: "meeting" }),
+      ...BUILTIN_SAVED_PROMPTS.map((prompt) => expect.objectContaining({ id: prompt.id })),
+    ]));
+  });
+
   it("opens the manage dialog on a new prompt seeded from a sent message", async () => {
     render(<ChatHarness scope="meeting" />);
     await waitFor(() => expect(backendMocks.getSettings).toHaveBeenCalled());
@@ -218,15 +259,34 @@ describe("the saved prompt picker in a chat box", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Save prompt" }));
 
-    await waitFor(() => expect(backendMocks.saveSettings).toHaveBeenCalled());
-    const written = backendMocks.saveSettings.mock.calls[0][0] as Settings;
-    const saved = written.ai?.savedPrompts ?? [];
-    expect(
-      saved.some((prompt) => prompt.prompt === "Who owns the migration?"),
-    ).toBe(true);
+    await waitFor(() => expect(backendMocks.setSavedPrompts).toHaveBeenCalledOnce());
+    const saved = backendMocks.setSavedPrompts.mock.calls[0][0];
+    expect(saved).toEqual(expect.arrayContaining([expect.objectContaining({
+      name: "Who owns the migration?",
+      prompt: "Who owns the migration?",
+      scope: "meeting",
+      builtIn: false,
+    })]));
     // Every starter is written back too, because order is now a stored fact.
     for (const builtin of BUILTIN_SAVED_PROMPTS) {
       expect(saved.some((prompt) => prompt.id === builtin.id)).toBe(true);
     }
   });
+});
+
+it("announces arrow selection through the question combobox and opens Manage by keyboard", async () => {
+  backendMocks.getSettings.mockResolvedValue(settingsWith([...BUILTIN_SAVED_PROMPTS]));
+  render(<ChatHarness scope="meeting" />);
+  fireEvent.change(screen.getByLabelText("Ask"), { target: { value: "/" } });
+  const input = await screen.findByRole("combobox");
+  const list = await screen.findByRole("listbox", { name: "Saved prompts" });
+  expect(input).toHaveAttribute("aria-controls", list.id);
+  const before = input.getAttribute("aria-activedescendant");
+  fireEvent.keyDown(input, { key: "ArrowDown" });
+  const after = input.getAttribute("aria-activedescendant");
+  expect(after).not.toBe(before);
+  expect(document.getElementById(after!)).toHaveAttribute("aria-selected", "true");
+  screen.getByRole("button", { name: "Manage" }).focus();
+  await userEvent.keyboard("{Enter}");
+  expect(await screen.findByRole("dialog")).toBeInTheDocument();
 });

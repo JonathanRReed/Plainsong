@@ -87,6 +87,51 @@ describe("meeting start failures", () => {
     ).toBe("mic_permission_denied");
   });
 
+  it("sends a locked vault to the vault, not to the consent notice", () => {
+    for (const code of ["consent_required", "unknown"]) {
+      const failure = describeMeetingStartFailure({
+        code,
+        message:
+          "The vault is locked. Unlock vault in Settings > Privacy & data, then start the meeting again.",
+      });
+      expect(failure.action.id).toBe("open_security_settings");
+      expect(failure.message).not.toMatch(/consent/i);
+    }
+  });
+
+  it("sends a meeting model that is not ready to Models", () => {
+    const failure = describeMeetingStartFailure({
+      code: "sidecar_unavailable",
+      message:
+        "No meeting model is ready yet. Parakeet v3 isn't ready for meeting transcription. It isn't set up yet. Finish its setup in Settings > Models.",
+    });
+    expect(failure.action.id).toBe("open_models");
+    expect(failure.message).not.toMatch(/engine|not answering/i);
+  });
+
+  it("does not call every microphone problem a permission problem", () => {
+    expect(describeMeetingStartFailure("Microphone stream error: device busy").code).toBe(
+      "audio_device_not_found",
+    );
+    expect(describeMeetingStartFailure("Microphone permission denied").code).toBe(
+      "mic_permission_denied",
+    );
+    // "space" in an unrelated sentence is not a full disk.
+    expect(describeMeetingStartFailure("Workspace sync is busy").code).toBe("unknown");
+    expect(describeMeetingStartFailure("No space left on device (os error 28)").code).toBe(
+      "disk_full",
+    );
+  });
+
+  it("passes a plain busy explanation through", () => {
+    const message = "Plainsong is finishing a backup, restore or storage task. Try again in a moment.";
+    expect(describeMeetingStartFailure({ code: "unknown", message }).message).toBe(message);
+    const dictation = "Dictation is running. Finish it, then try again.";
+    expect(describeMeetingStartFailure({ code: "already_recording", message: dictation }).message).toBe(
+      dictation,
+    );
+  });
+
   it("round-trips through the thrown error without re-guessing", () => {
     const failure = describeMeetingStartFailure({
       code: "consent_required",

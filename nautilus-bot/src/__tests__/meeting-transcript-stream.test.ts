@@ -159,6 +159,47 @@ describe("describeAudioSourceWarning", () => {
     expect(warning.message).not.toMatch(/unmuted/i);
   });
 
+  it("tells pure digital silence from the tap apart from a quiet call", () => {
+    const detail =
+      "Meeting audio stopped arriving: for 30s this Mac has sent Plainsong no sound at all, not even the background noise of a quiet call. If people are talking, check System Settings → Privacy & Security → Screen & System Audio Recording. Your microphone is still recording.";
+    const warning = describeAudioSourceWarning({
+      recordingId: "r1",
+      source: "system",
+      reason: "digital_silence",
+      recovered: false,
+      detail,
+    });
+
+    expect(warning.title).toBe("Meeting audio stopped arriving");
+    expect(warning.message).toBe(detail);
+    expect(warning.message).not.toMatch(/unmuted/i);
+  });
+
+  it("sends a withdrawn permission to Privacy & Security", () => {
+    const warning = describeAudioSourceWarning({
+      recordingId: "r1",
+      source: "system",
+      reason: "permission_denied",
+      recovered: false,
+    });
+
+    expect(warning.title).toBe("Meeting audio stopped arriving");
+    expect(warning.message).toMatch(/Privacy & Security/);
+  });
+
+  it("does not pass an audio-system status code to the reader", () => {
+    const warning = describeAudioSourceWarning({
+      recordingId: "r1",
+      source: "system",
+      reason: "stream_construction",
+      detail: "Creating the system-audio tap failed with Core Audio status -10877",
+    });
+
+    expect(warning.title).toBe("System audio is not being recorded");
+    expect(warning.message).not.toMatch(/core audio|status -/i);
+    expect(warning.message).toMatch(/Nothing from that source is being recorded/);
+  });
+
   it("does not describe a recovered route as a live problem", () => {
     const warning = describeAudioSourceWarning({
       recordingId: "r1",

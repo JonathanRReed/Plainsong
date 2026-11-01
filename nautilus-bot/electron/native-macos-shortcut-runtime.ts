@@ -26,7 +26,7 @@ type RuntimePlatform =
 
 type NativeShortcutChild = Pick<
   ChildProcessWithoutNullStreams,
-  "stdout" | "stderr" | "on" | "kill"
+  "stdin" | "stdout" | "stderr" | "on" | "kill"
 >;
 
 export function startNativeMacosShortcutController(input: {
@@ -46,6 +46,7 @@ export function startNativeMacosShortcutController(input: {
         platform: input.platform,
         helperReady: false,
       }),
+      setSessionActive: () => {},
       dispose: () => {},
     };
   }
@@ -57,6 +58,7 @@ export function startNativeMacosShortcutController(input: {
         platform: input.platform,
         helperReady: false,
       }),
+      setSessionActive: () => {},
       dispose: () => {},
     };
   }
@@ -67,6 +69,7 @@ export function startNativeMacosShortcutController(input: {
   if (input.helperBindings.length === 0) {
     return {
       status: { available: false, reason: "shortcut_disabled" },
+      setSessionActive: () => {},
       dispose: () => {},
     };
   }
@@ -75,13 +78,17 @@ export function startNativeMacosShortcutController(input: {
   const child =
     input.spawnHelper?.(helperPath, args) ??
     spawn(helperPath, args, {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "pipe"],
     });
   const status = resolveNativeShortcutStatus({
     platform: input.platform,
     helperReady: true,
   });
   let disposed = false;
+  let lines: Interface | null = null;
+  const writeSessionActive = (active: boolean): void => {
+    if (!child.stdin.destroyed) child.stdin.write(`${JSON.stringify({ sessionActive: active })}\n`);
+  };
   const markHelperUnavailable = (): void => {
     // A crash-exit event from an already-disposed helper must not clobber the
     // availability of a freshly spawned replacement controller.
@@ -90,13 +97,19 @@ export function startNativeMacosShortcutController(input: {
     }
     status.available = false;
     status.reason = "helper_unavailable";
+    writeSessionActive(false);
     lines?.close();
     lines = null;
     child.kill("SIGTERM");
     input.onUnavailable?.(status);
   };
-  let lines: Interface | null = createInterface({ input: child.stdout });
+  child.stdin.on("error", () => markHelperUnavailable());
+  lines = createInterface({ input: child.stdout });
+  lines.on("close", markHelperUnavailable);
+  lines.on("error", markHelperUnavailable);
+  child.stdout.on("error", markHelperUnavailable);
   lines.on("line", (line: string) => {
+    if (disposed || !status.available) return;
     try {
       const parsed = JSON.parse(line) as unknown;
       if (isNativeShortcutRawEvent(parsed)) {
@@ -116,10 +129,11 @@ export function startNativeMacosShortcutController(input: {
   });
 
   child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-    if (code !== 0 && signal !== "SIGTERM") {
-      console.warn("[shortcuts] native helper exited", { code, signal });
-      markHelperUnavailable();
+    if (disposed) {
+      return;
     }
+    console.warn("[shortcuts] native helper exited", { code, signal });
+    markHelperUnavailable();
   });
 
   child.on("error", (error: Error) => {
@@ -127,9 +141,15 @@ export function startNativeMacosShortcutController(input: {
     markHelperUnavailable();
   });
 
+  writeSessionActive(false);
+
   return {
     status,
+    setSessionActive: (active) => {
+      if (!disposed && status.available) writeSessionActive(active);
+    },
     dispose: () => {
+      writeSessionActive(false);
       disposed = true;
       lines?.close();
       lines = null;

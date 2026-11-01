@@ -66,7 +66,7 @@ impl CohereTranscribeProvider {
 
     async fn transcribe_impl(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let api_key = Self::api_key()
-            .context("Cohere API key not set. Add it in Settings → API Keys or set CO_API_KEY.")?;
+            .context("Cohere API key not set. Add it in Settings > Search & AI > API keys or set CO_API_KEY.")?;
 
         let start = std::time::Instant::now();
 
@@ -126,7 +126,9 @@ impl CohereTranscribeProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 }

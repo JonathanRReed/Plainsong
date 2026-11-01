@@ -26,7 +26,7 @@ describe("readiness navigation", () => {
     expect(
       (settingsTabListener.mock.calls[0]?.[0] as CustomEvent).detail,
     ).toEqual({ tab: "models" });
-    expect(consumePendingSettingsTab()).toBe("models");
+    expect(consumePendingSettingsTab()).toEqual({ tab: "models" });
     expect(consumePendingSettingsTab()).toBeNull();
 
     window.removeEventListener(OPEN_MAIN_VIEW_EVENT, mainViewListener);

@@ -24,8 +24,8 @@ const SIDECAR_SETTINGS = join(
 );
 
 describe("numbers-as-digits defaults", () => {
-  it("ships on for the drafting presets and off for plain Voice", () => {
-    expect(defaultNumbersAsDigits("voice")).toBe(false);
+  it("ships on for every preset", () => {
+    expect(defaultNumbersAsDigits("voice")).toBe(true);
     expect(defaultNumbersAsDigits("messages")).toBe(true);
     expect(defaultNumbersAsDigits("email")).toBe(true);
     expect(defaultNumbersAsDigits("notes")).toBe(true);
@@ -50,26 +50,30 @@ describe("numbers-as-digits defaults", () => {
     )?.[0];
     expect(defaults).toBeTruthy();
     for (const mode of DICTATION_NUMBER_MODE_IDS) {
-      const listedAsTrue = new RegExp(`"${mode}"[^\\n]*=> true`).test(
-        defaults ?? "",
-      );
+      const listedAsTrue = mode === "voice"
+        ? /DEFAULT_VOICE_NUMBERS_AS_DIGITS: bool = true/.test(source) &&
+          /"voice" => DEFAULT_VOICE_NUMBERS_AS_DIGITS/.test(defaults ?? "")
+        : new RegExp(`"${mode}"[^\\n]*=> true`).test(defaults ?? "");
       expect(listedAsTrue).toBe(defaultNumbersAsDigits(mode));
     }
   });
 
   it("uses the stored override when the user set one", () => {
     expect(resolveNumbersAsDigits("voice", { voice: true })).toBe(true);
+    expect(resolveNumbersAsDigits("voice", { voice: false })).toBe(false);
     expect(resolveNumbersAsDigits("email", { email: false })).toBe(false);
     expect(resolveNumbersAsDigits("email", {})).toBe(true);
     expect(resolveNumbersAsDigits("email", undefined)).toBe(true);
     // An override for a different preset must not leak.
-    expect(resolveNumbersAsDigits("voice", { email: true })).toBe(false);
+    expect(resolveNumbersAsDigits("voice", { email: true })).toBe(true);
   });
 
   it("lets a custom profile inherit its base style or override it", () => {
-    expect(resolveCustomModeNumbersAsDigits(null, "voice", {})).toBe(false);
+    expect(resolveCustomModeNumbersAsDigits(null, "voice", {})).toBe(true);
     expect(resolveCustomModeNumbersAsDigits(undefined, "email", {})).toBe(true);
     expect(resolveCustomModeNumbersAsDigits(true, "voice", {})).toBe(true);
+    expect(resolveCustomModeNumbersAsDigits(null, "voice", { voice: false })).toBe(false);
+    expect(resolveCustomModeNumbersAsDigits(false, "voice", {})).toBe(false);
     expect(resolveCustomModeNumbersAsDigits(false, "email", {})).toBe(false);
     // Inheritance follows the user's preset override, not just the default.
     expect(
@@ -85,11 +89,6 @@ describe("numbers-as-digits defaults", () => {
     expect(customModeNumbersValue("inherit")).toBeNull();
     expect(customModeNumbersValue("on")).toBe(true);
     expect(customModeNumbersValue("off")).toBe(false);
-    for (const stored of [null, true, false] as const) {
-      expect(customModeNumbersValue(customModeNumbersChoice(stored))).toBe(
-        stored,
-      );
-    }
   });
 });
 
@@ -103,9 +102,9 @@ describe("numbers-as-digits settings copy", () => {
     expect(DICTATION_NUMBERS_SECTION_DESCRIPTION).toContain("two thirty");
   });
 
-  it("explains why Voice ships off", () => {
+  it("explains the Voice prose rule", () => {
     expect(numbersAsDigitsModeHint("voice")).toBe(
-      "Off by default: raw voice mode keeps your words as spoken.",
+      "On by default: digits for data, words for small prose numbers.",
     );
     for (const mode of DICTATION_NUMBER_MODE_IDS) {
       const hint = numbersAsDigitsModeHint(mode);
@@ -119,7 +118,7 @@ describe("numbers-as-digits settings copy", () => {
     expect(CUSTOM_MODE_NUMBERS_CHOICE_LABELS.inherit).toBe(
       "Follow the base style",
     );
-    expect(CUSTOM_MODE_NUMBERS_CHOICE_LABELS.on).toBe("Always digits");
-    expect(CUSTOM_MODE_NUMBERS_CHOICE_LABELS.off).toBe("Always as spoken");
+    expect(CUSTOM_MODE_NUMBERS_CHOICE_LABELS.on).toBe("Digits");
+    expect(CUSTOM_MODE_NUMBERS_CHOICE_LABELS.off).toBe("Words");
   });
 });

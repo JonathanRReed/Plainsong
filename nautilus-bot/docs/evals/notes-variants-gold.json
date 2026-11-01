@@ -1,0 +1,138 @@
+{
+  "schema": "plainsong-notes-variants-gold-v1",
+  "description": "Hand-written meaning annotations for docs/evals/notes-fidelity-fixtures.json. Terms are lowercase prefixes matched against canonicalized words: number words become digits and ordinal suffixes are dropped. A commitment is mentioned when one verb prefix and one object prefix occur outside a condition span. Condition terms must all occur in the attached condition span. Dates list canonical forms; conditionDates are dates allowed only because the condition itself names them. key marks a decision or conditional commitment that the prose must state with its condition and date. action marks a commitment that the action list must contain. Statuses list the only status or completion assertions the source makes. labels lists spoken headings or capture labels that name no participant, deliverable or product; a claim may not use a word that occurs only inside one. numbers lists each quantity (not calendar dates) with the prefixes of the words it is stated with in its own clause, and restriction prefixes a restatement must keep. actors maps each person to the verb prefixes the source makes that person the subject of, including speech acts the person actually made.",
+  "families": {
+    "footprint": {
+      "fixtures": ["conditional-beta", "packaged-b21-16gb", "b23-full-16gb", "b24-full-16gb", "b25-full-16gb"],
+      "commitments": [
+        {"id": "ship", "owner": null, "verb": ["ship"], "object": ["beta"], "condition": ["memory", "gate"], "dates": ["14"], "negated": false, "key": true, "action": true},
+        {"id": "review", "owner": "Priya", "verb": ["review"], "object": ["notes"], "condition": null, "dates": [], "negated": false, "key": false, "action": true},
+        {"id": "replace", "owner": "Priya", "verb": ["replac"], "object": ["passage"], "condition": null, "dates": [], "negated": false, "key": false, "action": false, "only": ["b24-full-16gb"]}
+      ],
+      "statuses": [],
+      "labels": ["Plainsong footprint fixture"],
+      "numbers": [],
+      "actors": {"Priya": ["review", "replac"]}
+    },
+    "aside": {
+      "fixtures": ["b23-aside-normal", "b23-aside-light"],
+      "aliases": {"pria": "priya"},
+      "commitments": [
+        {"id": "review", "owner": "Priya", "verb": ["review"], "object": ["launch", "notes"], "condition": ["memory", "gate"], "dates": ["friday"], "negated": false, "key": true, "action": true}
+      ],
+      "statuses": [],
+      "labels": ["Meeting record"],
+      "numbers": [],
+      "actors": {"Priya": ["review"]}
+    },
+    "release-handoff": {
+      "fixtures": ["release-handoff"],
+      "commitments": [
+        {"id": "send", "owner": "Leo", "verb": ["send", "sent"], "object": ["export", "report"], "condition": ["rerun"], "dates": ["tuesday"], "negated": false, "key": true, "action": true},
+        {"id": "review", "owner": "Nina", "verb": ["review"], "object": ["export", "report"], "condition": null, "dates": ["wednesday"], "negated": false, "key": false, "action": true},
+        {"id": "ship", "owner": "Mara", "verb": ["ship"], "object": ["2.8", "version", "release"], "condition": ["nina", "approv"], "dates": ["friday"], "negated": false, "key": true, "action": true},
+        {"id": "notify", "owner": "Mara", "verb": ["notif"], "object": ["support"], "condition": ["planned"], "dates": ["thursday"], "conditionDates": ["friday"], "negated": false, "key": true, "action": true},
+        {"id": "expand", "owner": null, "verb": ["expand", "expansion", "grow"], "object": ["40", "pilot", "seat"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["import"], "status": ["pass"]},
+        {"subject": ["support", "guide"], "status": ["finish", "complet", "done"]},
+        {"subject": ["export", "test"], "status": ["fail"]}
+      ],
+      "labels": [],
+      "numbers": [
+        {"value": "24", "terms": ["alder", "desktop", "pilot", "seat"], "restriction": []},
+        {"value": "40", "terms": ["seat", "expand", "expansion", "grow", "pilot", "month", "alder", "desktop"], "restriction": []},
+        {"value": "87", "terms": ["import", "test", "pass", "check"], "restriction": []},
+        {"value": "3", "terms": ["export", "test", "fail", "check", "rerun", "send", "report"], "restriction": []},
+        {"value": "2.8", "terms": ["version", "ship", "release", "friday", "approv", "export", "report"], "restriction": []}
+      ],
+      "actors": {"Mara": ["ship", "notif", "ask", "request", "plan", "state", "say", "said", "note"], "Leo": ["send", "sent", "rerun", "say", "said", "state", "note", "report", "confirm"], "Nina": ["review", "approv", "suggest", "propos", "ask", "add", "say", "said", "state", "note"]}
+    },
+    "renewal-terms": {
+      "fixtures": ["renewal-terms"],
+      "commitments": [
+        {"id": "send", "owner": "Dev", "verb": ["send", "sent"], "object": ["quote"], "condition": null, "dates": ["march 6"], "negated": false, "key": false, "action": true},
+        {"id": "review", "owner": "Ben", "verb": ["review"], "object": ["quote"], "condition": ["procurement", "confirm"], "dates": ["march 8"], "negated": false, "key": true, "action": true},
+        {"id": "update", "owner": "Dev", "verb": ["updat"], "object": ["appendix", "residency"], "condition": null, "dates": ["march 7"], "negated": false, "key": false, "action": true},
+        {"id": "migrate", "owner": "Dev", "verb": ["migrat"], "object": ["data"], "condition": ["ben", "approv"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "renew", "owner": null, "verb": ["renew"], "object": ["renew", "contract"], "condition": null, "dates": [], "negated": true, "key": false, "action": false},
+        {"id": "residency", "owner": null, "verb": ["stay", "remain", "kept", "keep", "store"], "object": ["data"], "condition": null, "dates": [], "negated": false, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["procurement"], "status": ["approv"]},
+        {"subject": ["contract"], "status": ["end"]},
+        {"subject": ["billing"], "status": ["stay"]}
+      ],
+      "labels": [],
+      "numbers": [
+        {"value": "60", "terms": ["birch", "studio", "current", "plan", "seat", "per", "month", "pric"], "restriction": []},
+        {"value": "32", "terms": ["birch", "studio", "current", "plan", "seat", "month", "monthly", "bill", "stay", "remain"], "restriction": []},
+        {"value": "80", "terms": ["seat", "grow", "increas", "expan", "procurement", "approv", "quot", "propos", "pric", "send", "option", "month", "bill", "option", "sent", "show"], "restriction": []},
+        {"value": "29", "terms": ["propos", "pric", "seat", "month", "80", "option", "contract"], "restriction": ["annual"]}
+      ],
+      "actors": {"Asha": ["say", "said", "state", "propos", "note", "explain"], "Ben": ["review", "approv", "say", "said", "state", "note"], "Dev": ["send", "sent", "updat", "migrat", "say", "said", "state"]}
+    },
+    "workshop-schedule": {
+      "fixtures": ["workshop-schedule"],
+      "commitments": [
+        {"id": "send", "owner": "Noah", "verb": ["send", "sent"], "object": ["room", "plan"], "condition": null, "dates": ["wednesday"], "negated": false, "key": false, "action": true},
+        {"id": "review", "owner": "Sam", "verb": ["review"], "object": ["room", "plan"], "condition": ["noah", "send"], "dates": ["thursday"], "negated": false, "key": true, "action": true},
+        {"id": "book", "owner": "Iris", "verb": ["book"], "object": ["room"], "condition": ["sam", "approv"], "dates": ["friday"], "negated": false, "key": true, "action": true},
+        {"id": "budget", "owner": null, "verb": ["increas"], "object": ["budget"], "condition": null, "dates": [], "negated": true, "key": false, "action": false},
+        {"id": "equipment", "owner": null, "verb": ["approv"], "object": ["equipment"], "condition": null, "dates": [], "negated": true, "key": false, "action": false},
+        {"id": "bring", "owner": "Noah", "verb": ["bring", "commit"], "object": ["equipment"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["catering"], "status": ["sent", "send", "complet", "done"]},
+        {"subject": ["equipment"], "status": ["approv"]}
+      ],
+      "labels": [],
+      "numbers": [
+        {"value": "18", "terms": ["cedar", "workshop", "attend"], "restriction": []},
+        {"value": "2", "terms": ["cedar", "workshop", "room", "book"], "restriction": []},
+        {"value": "900", "terms": ["budget"], "restriction": []},
+        {"value": "1900", "terms": ["budget"], "restriction": []}
+      ],
+      "actors": {"Iris": ["book", "say", "said", "state", "note"], "Noah": ["send", "sent", "explain", "correct", "say", "said", "state", "commit", "bring"], "Sam": ["review", "approv", "say", "said", "state", "confirm"]}
+    },
+    "museum-access": {
+      "fixtures": ["museum-access"],
+      "commitments": [
+        {"id": "send", "owner": "Elena", "verb": ["send", "sent"], "object": ["access", "map"], "condition": ["omar", "approv"], "dates": ["thursday"], "negated": false, "key": true, "action": true},
+        {"id": "review", "owner": "Omar", "verb": ["review"], "object": ["access", "map"], "condition": null, "dates": ["wednesday"], "negated": false, "key": false, "action": true},
+        {"id": "tours", "owner": null, "verb": ["approv"], "object": ["tour"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["caption"], "status": ["finish", "complet", "done"]},
+        {"subject": ["west", "entrance"], "status": ["clos"]},
+        {"subject": ["tour"], "status": ["approv"]}
+      ],
+      "labels": [],
+      "numbers": [
+        {"value": "12", "terms": ["dune", "museum", "trial", "guide"], "restriction": []},
+        {"value": "4", "terms": ["dune", "museum", "trial", "tablet"], "restriction": []}
+      ],
+      "actors": {"Elena": ["send", "sent", "say", "said", "state"], "Omar": ["review", "approv", "say", "said", "state"]}
+    },
+    "garden-sensors": {
+      "fixtures": ["garden-sensors"],
+      "commitments": [
+        {"id": "send", "owner": "Tessa", "verb": ["send", "sent"], "object": ["sensor", "report"], "condition": ["confirm"], "dates": ["june 12"], "negated": false, "key": true, "action": true},
+        {"id": "review", "owner": "Ravi", "verb": ["review"], "object": ["sensor", "report"], "condition": null, "dates": ["june 13"], "negated": false, "key": false, "action": true},
+        {"id": "irrigation", "owner": null, "verb": ["stay", "remain", "off", "keep", "turn"], "object": ["irrigation"], "condition": ["leak", "test"], "dates": [], "negated": false, "key": true, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["battery"], "status": ["complet", "finish", "done", "replac"]},
+        {"subject": ["leak", "test"], "status": ["pass"], "conditionOnly": true}
+      ],
+      "labels": [],
+      "numbers": [
+        {"value": "16", "terms": ["elm", "garden", "sensor"], "restriction": []},
+        {"value": "5", "terms": ["north", "bed", "dry", "sensor"], "restriction": []},
+        {"value": "2", "terms": ["south", "bed", "dry", "sensor"], "restriction": []}
+      ],
+      "actors": {"Tessa": ["send", "sent", "say", "said", "state", "report"], "Ravi": ["review", "say", "said", "state"]}
+    }
+  }
+}

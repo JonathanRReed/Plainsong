@@ -3,66 +3,32 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
-import { evaluateReleaseReceiptFreshness } from "../../scripts/lib/release-receipt-freshness.mjs";
+import { evaluateReleaseReceiptFreshness } from "../../scripts/lib/release-receipt-freshness.ts";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
 describe("release receipt freshness", () => {
   const candidateBuiltAtMs = Date.parse("2026-08-08T12:00:00.000Z");
 
-  it("accepts an unbound receipt without a candidate timestamp", () => {
-    expect(
-      evaluateReleaseReceiptFreshness({
-        candidateBound: false,
-        candidateBuiltAtMs: null,
-        generatedAt: "not-a-date",
-      }),
-    ).toMatchObject({ current: true });
+  it("accepts an unbound receipt without an app identity", () => {
+    expect(evaluateReleaseReceiptFreshness({ candidateBound: false }))
+      .toMatchObject({ current: true, reason: "not-candidate-bound" });
   });
 
-  it("accepts a candidate receipt generated at the archive timestamp", () => {
-    expect(
-      evaluateReleaseReceiptFreshness({
+  it("rejects missing and malformed candidate identities", () => {
+    for (const receiptIdentitySha256 of [undefined, null, "", "not-a-hash", "a".repeat(63)]) {
+      expect(evaluateReleaseReceiptFreshness({
         candidateBound: true,
-        candidateBuiltAtMs,
-        generatedAt: "2026-08-08T12:00:00.000Z",
-      }),
-    ).toMatchObject({ current: true });
+        expectedIdentitySha256: "a".repeat(64),
+        receiptIdentitySha256,
+      })).toMatchObject({ current: false, reason: "candidate-identity-mismatch" });
+    }
   });
 
-  it("allows the existing one-second filesystem timestamp tolerance", () => {
+  it("requires a matching valid identity for every candidate-bound receipt", () => {
     expect(
       evaluateReleaseReceiptFreshness({
         candidateBound: true,
-        candidateBuiltAtMs,
-        generatedAt: "2026-08-08T11:59:59.000Z",
-      }),
-    ).toMatchObject({ current: true });
-  });
-
-  it("rejects stale and malformed candidate-bound receipts", () => {
-    expect(
-      evaluateReleaseReceiptFreshness({
-        candidateBound: true,
-        candidateBuiltAtMs,
-        generatedAt: "2026-08-08T11:59:58.999Z",
-      }),
-    ).toMatchObject({ current: false, reason: "receipt-predates-candidate" });
-    expect(
-      evaluateReleaseReceiptFreshness({
-        candidateBound: true,
-        candidateBuiltAtMs,
-        generatedAt: "not-a-date",
-      }),
-    ).toMatchObject({ current: false, reason: "invalid-generated-at" });
-  });
-
-  it("requires an exact release identity when one is supplied", () => {
-    expect(
-      evaluateReleaseReceiptFreshness({
-        candidateBound: true,
-        candidateBuiltAtMs,
-        generatedAt: "2026-08-08T12:00:01.000Z",
         expectedIdentitySha256: "a".repeat(64),
         receiptIdentitySha256: "b".repeat(64),
       }),
@@ -70,15 +36,22 @@ describe("release receipt freshness", () => {
     expect(
       evaluateReleaseReceiptFreshness({
         candidateBound: true,
-        candidateBuiltAtMs,
-        generatedAt: "2026-08-08T12:00:01.000Z",
         expectedIdentitySha256: "a".repeat(64),
         receiptIdentitySha256: "a".repeat(64),
       }),
     ).toMatchObject({ current: true, reason: "exact-candidate-identity" });
   });
 
-  it("marks a stale candidate-bound receipt contradicted in the release audit", () => {
+  it("rejects legacy timestamp-only receipts even when their timestamp is current", () => {
+    const result = Reflect.apply(evaluateReleaseReceiptFreshness, null, [{
+      candidateBound: true,
+      candidateBuiltAtMs,
+      generatedAt: "2026-08-08T12:00:01.000Z",
+    }]);
+    expect(result).toMatchObject({ current: false, reason: "candidate-identity-mismatch" });
+  });
+
+  it("rejects identity-free candidate receipts in the release audit", () => {
     const candidateDir = fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-release-audit-"));
     const appAsarPath = path.join(
       candidateDir,
@@ -178,9 +151,9 @@ describe("release receipt freshness", () => {
     );
 
     const result = spawnSync(
-      "node",
+      "bun",
       [
-        path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+        path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.ts"),
         "--candidate",
         candidateDir,
         "--qa-dir",
@@ -273,9 +246,9 @@ describe("release receipt freshness", () => {
       );
 
       const result = spawnSync(
-        "node",
+        "bun",
         [
-          path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+          path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.ts"),
           "--candidate",
           candidateDir,
           "--qa-dir",

@@ -28,6 +28,8 @@ export type MeetingStartActionId =
   | "open_system_audio_settings"
   | "open_audio_input_settings"
   | "open_storage_settings"
+  | "open_security_settings"
+  | "open_models"
   | "retry"
   | "none";
 
@@ -69,10 +71,10 @@ const FAILURES: Record<
   },
   system_audio_unavailable: {
     message:
-      "System audio is not available, so the other side of the call would not be recorded.",
+      "Plainsong can't record the meeting audio right now, so the other side of the call would not be recorded.",
     action: {
       id: "open_system_audio_settings",
-      label: "Set up system audio",
+      label: "Set up meeting audio",
     },
   },
   audio_device_not_found: {
@@ -83,8 +85,10 @@ const FAILURES: Record<
     },
   },
   sidecar_unavailable: {
+    // Also the code for a meeting route that is not ready, which may be a
+    // cloud provider, so this does not claim local transcription.
     message:
-      "The local transcription engine is not answering. Plainsong is restarting it.",
+      "Plainsong's background service isn't answering. It is restarting; try again in a moment.",
     action: { id: "retry", label: "Try again" },
   },
   disk_full: {
@@ -162,19 +166,31 @@ function readMessage(error: unknown): string {
   return String(error);
 }
 
+export function stripTransportPrefix(message: string): string {
+  // Electron can wrap an Error more than once across main and renderer IPC.
+  // Strip only leading transport text, preserving the actual recovery advice.
+  return message.trim().replace(
+    /^(?:(?:Error invoking remote method ['"][^'"]+['"]:\s*)|(?:Error:\s*))+/i,
+    "",
+  );
+}
+
 /**
  * The fallback for a payload with no code: the same substring reading as
  * before, but choosing a *code* rather than appending a sentence, so the result
  * is still one message and one action.
  */
 function guessCode(message: string): MeetingStartErrorCode {
+  if (/microphone setup stalled|timed out waiting for (?:dictation )?microphone stream/i.test(message)) {
+    return "sidecar_unavailable";
+  }
   if (/already (recording|in progress)/i.test(message)) {
     return "already_recording";
   }
   if (/consent/i.test(message)) {
     return "consent_required";
   }
-  if (/disk|space/i.test(message)) {
+  if (/no space left|disk (is )?full|not enough (free )?(disk )?space|insufficient (disk )?space/i.test(message)) {
     return "disk_full";
   }
   if (/sidecar|engine (is )?(not|un)available|exited/i.test(message)) {
@@ -183,13 +199,43 @@ function guessCode(message: string): MeetingStartErrorCode {
   if (/no (usable )?(microphone|input device)|device (not found|is gone)/i.test(message)) {
     return "audio_device_not_found";
   }
-  if (/screen recording|system audio|loopback/i.test(message)) {
+  if (/screen recording|system audio|meeting audio|loopback/i.test(message)) {
     return "system_audio_unavailable";
   }
-  if (/microphone|permission/i.test(message)) {
+  if (/(microphone|mic) (access|permission)|permission (was )?denied|not (authori[sz]ed|allowed) to (use|record)/i.test(message)) {
     return "mic_permission_denied";
   }
+  if (/microphone/i.test(message)) {
+    return "audio_device_not_found";
+  }
   return "unknown";
+}
+
+/**
+ * Failures whose cure is somewhere specific, whatever code they arrived with:
+ * a locked vault (sent as a generic code, and once as "consent") and a
+ * meeting speech model that is not ready (sent as "sidecar unavailable").
+ */
+function specificFailure(
+  code: MeetingStartErrorCode,
+  message: string,
+): MeetingStartFailure | null {
+  if (/vault is locked|unlock (the )?vault/i.test(message)) {
+    return {
+      code,
+      message: "The vault is locked. Unlock it, then start the meeting again.",
+      action: { id: "open_security_settings", label: "Unlock vault" },
+    };
+  }
+  if (/no meeting model is ready|isn't ready for meeting transcription/i.test(message)) {
+    return {
+      code,
+      message:
+        "The speech model meetings use isn't ready. Download it in Models, then start the meeting again.",
+      action: { id: "open_models", label: "Review models" },
+    };
+  }
+  return null;
 }
 
 export function describeMeetingStartFailure(
@@ -199,8 +245,10 @@ export function describeMeetingStartFailure(
     return error.failure;
   }
 
-  const rawMessage = readMessage(error).trim();
+  const rawMessage = stripTransportPrefix(readMessage(error));
   const code = readCode(error) ?? guessCode(rawMessage);
+  const specific = specificFailure(code, rawMessage);
+  if (specific) return specific;
   const mapped = FAILURES[code];
 
   return {

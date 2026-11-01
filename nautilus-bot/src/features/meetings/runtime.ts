@@ -1,3 +1,5 @@
+import { parseMeetingMicrophoneInput, sameMeetingMicrophoneInput, type MeetingMicrophoneInput } from "@/lib/meeting-microphone-input";
+import { plainMeetingProcessingMessage } from "@/lib/meeting-ui-message";
 export type MeetingLifecyclePhase =
   | "idle"
   | "preparing"
@@ -16,6 +18,8 @@ export interface MeetingLifecycleEvent {
   systemAudioActive?: boolean | null;
   consentPromptShown?: boolean | null;
   message?: string | null;
+  microphoneInput?: MeetingMicrophoneInput | null;
+  microphoneWarningDismissed?: boolean | null;
   /**
    * Pause state, carried by the sidecar's pause/resume events and by the
    * overlay snapshot. Absent on every other event, which keeps what it had.
@@ -32,6 +36,8 @@ export interface MeetingLifecycleState {
   systemAudioActive: boolean;
   consentPromptShown: boolean;
   message: string | null;
+  microphoneInput?: MeetingMicrophoneInput | null;
+  microphoneWarningDismissed?: boolean;
   /** Capture is live but every frame is being dropped on purpose. */
   paused: boolean;
   /** Paused time from pauses that have ended, in milliseconds. */
@@ -47,6 +53,8 @@ export const INITIAL_MEETING_LIFECYCLE_STATE: MeetingLifecycleState = {
   systemAudioActive: false,
   consentPromptShown: false,
   message: null,
+  microphoneInput: null,
+  microphoneWarningDismissed: false,
   paused: false,
   closedPausedMs: 0,
   pauseStartedAtMs: null,
@@ -107,9 +115,45 @@ export function reduceMeetingLifecycleState(
         ? event.consentPromptShown
         : current.consentPromptShown,
     message:
-      event.message === undefined ? current.message : event.message ?? null,
+      event.message === undefined
+        ? incomingId && incomingId !== current.recordingId ? null : current.message
+        : readerFacingLifecycleMessage(event.message, phase),
+    ...reduceMeetingMicrophoneFields(current, event, phase, incomingId),
     ...reducePauseFields(current, event, phase, incomingId),
   };
+}
+
+/**
+ * The sidecar's lifecycle message as the meeting banner and chip may show it.
+ * A processing failure can carry the raw chunk or model error, written for
+ * the log; that becomes the plain next step instead.
+ */
+function readerFacingLifecycleMessage(
+  message: string | null | undefined,
+  phase: MeetingLifecyclePhase,
+): string | null {
+  if (!message?.trim()) return null;
+  const fallback =
+    phase === "error" || phase === "recoverable"
+      ? "Plainsong could not finish this meeting. The recording is saved; open the meeting to transcribe it again."
+      : "Plainsong is working on this meeting.";
+  return plainMeetingProcessingMessage(message, fallback);
+}
+
+function reduceMeetingMicrophoneFields(
+  current: MeetingLifecycleState, event: MeetingLifecycleEvent, phase: MeetingLifecyclePhase, incomingId: string | null,
+) {
+  if (phase !== "recording") return { microphoneInput: null, microphoneWarningDismissed: false };
+  const sameOwner = incomingId === null || incomingId === current.recordingId;
+  let input = sameOwner && current.phase === "recording" ? current.microphoneInput ?? null : null;
+  let dismissed = sameOwner && current.phase === "recording" ? current.microphoneWarningDismissed ?? false : false;
+  // Route metadata must carry its own session ID; omitted fields preserve pause state.
+  if (incomingId && event.microphoneInput !== undefined) {
+    const parsed = parseMeetingMicrophoneInput(event.microphoneInput);
+    if (!sameMeetingMicrophoneInput(input, parsed)) { input = parsed; dismissed = false; }
+  }
+  if (incomingId && typeof event.microphoneWarningDismissed === "boolean") dismissed = event.microphoneWarningDismissed;
+  return { microphoneInput: input, microphoneWarningDismissed: input ? dismissed : false };
 }
 
 /**

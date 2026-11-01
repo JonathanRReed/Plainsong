@@ -87,3 +87,21 @@ export function parseStoredActionItems(
     .filter((item) => item.length > 0)
     .map(parseStoredActionItem);
 }
+
+/** Write only values that the stored suffix grammar can read back unchanged. */
+export function serializeActionItem(task: string, owner: string, dueDate: string): string {
+  const values = [task.trim(), owner.trim(), dueDate.trim()];
+  if (!values[0] || values.some((value) => /[\r\n]/.test(value))) {
+    throw new Error("Enter a task on one line.");
+  }
+  if (values.slice(1).some((value) => value.includes(DETAIL_SEPARATOR) || value.includes(" (") || value.includes(")"))) {
+    throw new Error("Owner and due date cannot contain parentheses or the field separator.");
+  }
+  const details = [values[1] ? `Owner: ${values[1]}` : null, values[2] ? `Due: ${values[2]}` : null].filter(Boolean);
+  const result = `${values[0]}${details.length ? ` (${details.join(DETAIL_SEPARATOR)})` : ""}`;
+  const parsed = parseStoredActionItem(result);
+  if (parsed.task !== values[0] || parsed.owner !== (values[1] || null) || parsed.dueDate !== (values[2] || null)) {
+    throw new Error("These fields cannot be saved unambiguously. Adjust the task text.");
+  }
+  return result;
+}

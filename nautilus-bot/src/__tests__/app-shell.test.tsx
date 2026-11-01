@@ -1,9 +1,11 @@
+import { canLeaveMainView, consumePendingDictationHistoryRequest, queueDictationHistoryRequest, registerViewLeaveGuard } from "@/lib/navigation";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import App, { ErrorBoundary } from "@/App";
+import { StrictMode, useEffect, useState, type ReactNode } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import App, { ErrorBoundary, LaunchInteractiveReporter } from "@/App";
 import type { Settings } from "@/types/settings";
 import { requestOnboarding } from "@/lib/onboarding";
+import { scheduleAfterPaint } from "@/lib/post-paint";
 
 type Listener = (event: { payload: unknown }) => void;
 
@@ -11,6 +13,8 @@ const electronMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   listeners: {} as Record<string, Listener>,
 }));
+
+const workspaceGuard = vi.hoisted(() => ({ enabled: false }));
 
 vi.mock("@/lib/electron", () => ({
   invoke: electronMocks.invoke,
@@ -26,7 +30,10 @@ vi.mock("@/components/views/dashboard-view", () => ({
   DashboardView: () => <div>Mock home workspace</div>,
 }));
 vi.mock("@/components/views/dictation-view", () => ({
-  DictationView: () => <div>Mock dictation workspace</div>,
+  DictationView: () => {
+    useEffect(() => workspaceGuard.enabled ? registerViewLeaveGuard("dictation", async () => false) : undefined, []);
+    return <div>Mock dictation workspace</div>;
+  },
 }));
 vi.mock("@/components/views/recordings-view", () => ({
   RecordingsView: () => <div>Mock meetings workspace</div>,
@@ -142,7 +149,42 @@ const settings = {
 };
 
 describe("App shell", () => {
+  function canSuspend() {
+    return (window as Window & { __plainsongCanSuspend?: () => boolean }).__plainsongCanSuspend?.();
+  }
+
+  it("vetoes idle destruction during setup", async () => {
+    render(<App />);
+    await waitFor(() => expect(canSuspend()).toBe(false));
+  });
+
+  it("retains changed controls until a guarded navigation, then restores that view", async () => {
+    setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+    const mounted = render(<App />);
+    await screen.findByText("Mock dictation workspace");
+    await waitFor(() => expect(canSuspend()).toBe(true));
+    const input = document.createElement("input");
+    document.body.append(input);
+    fireEvent.input(input, { target: { value: "unfinished" } });
+    expect(canSuspend()).toBe(false);
+    input.remove();
+    act(() => window.dispatchEvent(new CustomEvent("nautilus-open-main-view", { detail: { view: "dashboard" } })));
+    await screen.findByText("Mock home workspace");
+    await waitFor(() => expect(canSuspend()).toBe(true));
+    mounted.unmount();
+    expect(canSuspend()).toBeUndefined();
+    render(<App />);
+    await screen.findByText("Mock home workspace");
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      await new Promise<void>((resolve) => scheduleAfterPaint(resolve));
+    });
+  });
+
   beforeEach(() => {
+    workspaceGuard.enabled = false;
     vi.clearAllMocks();
     electronMocks.listeners = {};
     const localStore = new Map<string, string>();
@@ -204,6 +246,94 @@ describe("App shell", () => {
       }
       return null;
     });
+  });
+
+  it.each([true, false])("binds launch reporting to the mounted effect (unmount: %s)", async (dispose) => {
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(window, "electronAPI");
+    const report = vi.fn();
+    Object.defineProperty(window, "electronAPI", { configurable: true, value: { reportLaunchMilestone: report } });
+    const marked = { current: false };
+    const { unmount } = render(<StrictMode><LaunchInteractiveReporter marked={marked} /></StrictMode>);
+    try {
+      if (dispose) unmount();
+      for (let frame = 0; frame < 2; frame++) {
+        for (const callback of frames.splice(0)) callback(frame);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (dispose) {
+        expect(report).not.toHaveBeenCalled();
+      } else {
+        expect(report).toHaveBeenCalledExactlyOnceWith("workspace-or-wizard-interactive", expect.any(Number));
+      }
+    } finally {
+      unmount();
+      requestFrame.mockRestore();
+      if (descriptor) Object.defineProperty(window, "electronAPI", descriptor);
+      else Reflect.deleteProperty(window, "electronAPI");
+    }
+  });
+
+  describe("exact saved result review", () => {
+    it("forwards the requested dictation ID into the lazy workspace queue", async () => {
+      consumePendingDictationHistoryRequest();
+      setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+      render(<App />);
+      await screen.findByText("Mock dictation workspace");
+      await waitFor(() => expect(electronMocks.listeners["main-view-requested"]).toBeDefined());
+      act(() => electronMocks.listeners["main-view-requested"]({ payload: { view: "dictation", recordingId: "saved-exact" } }));
+      await waitFor(() => expect(consumePendingDictationHistoryRequest()).toBe("saved-exact"));
+    });
+
+    it("discards a parked result when a newer navigation leaves Dictation", async () => {
+      consumePendingDictationHistoryRequest();
+      setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+      render(<App />);
+      await screen.findByText("Mock dictation workspace");
+      act(() => queueDictationHistoryRequest("abandoned-result"));
+      fireEvent.keyDown(window, { key: "h", ctrlKey: true, shiftKey: true });
+      await screen.findByText("Mock home workspace");
+      expect(consumePendingDictationHistoryRequest()).toBeNull();
+    });
+
+    it("does not queue an exact result when the current workspace refuses to leave", async () => {
+      consumePendingDictationHistoryRequest();
+      setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+      render(<App />);
+      await screen.findByText("Mock dictation workspace");
+      fireEvent.keyDown(window, { key: "m", ctrlKey: true, shiftKey: true });
+      await screen.findByText("Mock meetings workspace");
+      const unregister = registerViewLeaveGuard("recordings", async () => false);
+      try {
+        await act(async () => electronMocks.listeners["main-view-requested"]({ payload: { view: "dictation", recordingId: "saved-blocked" } }));
+        expect(screen.getByText("Mock meetings workspace")).toBeInTheDocument();
+        expect(consumePendingDictationHistoryRequest()).toBeNull();
+      } finally { unregister(); }
+    });
+  });
+
+  it("keeps unsaved-work navigation guards registered while the window is hidden", async () => {
+    workspaceGuard.enabled = true;
+    setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const { unmount } = render(<App />);
+    try {
+      await screen.findByText("Mock dictation workspace");
+      expect(await canLeaveMainView("dictation")).toBe(false);
+      await act(async () => {
+        visibility.mockReturnValue("hidden");
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      expect(await canLeaveMainView("dictation")).toBe(false);
+    } finally {
+      unmount();
+      visibility.mockRestore();
+      workspaceGuard.enabled = false;
+    }
   });
 
   it("opens to dictation for returning users and routes with app shortcuts", async () => {
@@ -274,11 +404,14 @@ describe("App shell", () => {
       "First-run wizard: full"
     );
 
+    const shell = document.querySelector(".app-shell");
+    expect(shell).toHaveAttribute("inert");
     fireEvent.click(screen.getByRole("button", { name: "Complete setup" }));
 
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "First-run wizard" })).not.toBeInTheDocument();
     });
+    expect(shell).not.toHaveAttribute("inert");
     // Into settings.json through the sidecar, not into a renderer localStorage
     // that every development build shares with the packaged app.
     expect(electronMocks.invoke).toHaveBeenCalledWith("record_onboarding_state", {
@@ -385,6 +518,24 @@ describe("App shell", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("keeps setup open while readiness changes underneath it", async () => {
+    const { rerender } = render(<App />);
+    const wizard = await screen.findByRole("dialog", { name: "First-run wizard" });
+
+    // Mid-setup the Mac becomes ready (a download finishes, a permission is
+    // granted), then briefly not (the model is busy with a practice
+    // dictation). Following the gate unmounted the wizard and brought it back
+    // at step 1 when the reader clicked back to Plainsong.
+    setReadiness(readyMac(undefined));
+    rerender(<App />);
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "First-run wizard" })).toBe(wizard);
+    });
+    setReadiness({ dictationRoute: { ready: false } } as never);
+    rerender(<App />);
+    expect(screen.getByRole("dialog", { name: "First-run wizard" })).toBe(wizard);
+  });
+
   it("reopens setup on demand after it has been closed", async () => {
     render(<App />);
 
@@ -432,6 +583,7 @@ describe("App shell", () => {
 
   it("holds the setup check rather than flashing a workspace whose state is unknown", async () => {
     setReadiness({ settings: null, providers: [], permissions: null, loading: true });
+    electronMocks.invoke.mockImplementation(() => new Promise(() => {}));
 
     render(<App />);
 
@@ -439,6 +591,28 @@ describe("App shell", () => {
       await screen.findByRole("status", { name: "Checking first-run setup" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Mock dictation workspace")).not.toBeInTheDocument();
+  });
+
+  it("opens fresh setup while readiness is pending and leaves the hidden workspace unloaded", async () => {
+    setReadiness({ settings: null, providers: [], permissions: null, loading: true });
+    render(<App />);
+
+    await screen.findByRole("dialog", { name: "First-run wizard" });
+    expect(screen.queryByRole("status", { name: "Checking first-run setup" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Mock dictation workspace")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Skip setup for now" }));
+    expect(await screen.findByText("Mock dictation workspace")).toBeInTheDocument();
+  });
+
+  it("keeps an existing workspace mounted when setup reopens", async () => {
+    setReadiness(readyMac({ completedAt: "2026-06-19T10:04:00Z" }));
+    render(<App />);
+    const workspace = await screen.findByText("Mock dictation workspace");
+
+    act(() => requestOnboarding("full"));
+    await screen.findByRole("dialog", { name: "First-run wizard" });
+    expect(screen.getByText("Mock dictation workspace")).toBe(workspace);
   });
 
   it("opens a completed install to its workspace without waiting for readiness", async () => {

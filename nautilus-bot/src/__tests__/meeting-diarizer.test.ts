@@ -107,8 +107,15 @@ describe("describeMeetingDiarizerDetail", () => {
     const detail = describeMeetingDiarizerDetail(
       details({ diarizer: "plainsong:campplus_speaker" }),
     );
-    expect(detail).toContain("campplus_speaker");
-    expect(detail).toContain("No audio left the machine");
+    expect(detail).toBe(
+      "Speakers were told apart on this Mac with CAM++. No audio left the machine for this step.",
+    );
+  });
+
+  it("names no model rather than a raw id it does not know", () => {
+    expect(
+      describeMeetingDiarizerDetail(details({ diarizer: "plainsong:future_model" })),
+    ).toBe("Speakers were told apart on this Mac. No audio left the machine for this step.");
   });
 
   it("explains that the provider already had the audio", () => {

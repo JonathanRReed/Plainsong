@@ -62,8 +62,8 @@ function runGate(fixture: {
     mkdirSync(path.join(tempRoot, "electron"), { recursive: true });
     mkdirSync(path.join(tempRoot, "rust-sidecar", "src"), { recursive: true });
     copyFileSync(
-      path.resolve(process.cwd(), "scripts/verify-ipc-contract.mjs"),
-      path.join(tempRoot, "scripts/verify-ipc-contract.mjs"),
+      path.resolve(process.cwd(), "scripts/verify-ipc-contract.ts"),
+      path.join(tempRoot, "scripts/verify-ipc-contract.ts"),
     );
     writeFileSync(
       path.join(tempRoot, "electron/ipc-bridge.ts"),
@@ -82,8 +82,8 @@ function runGate(fixture: {
     );
 
     const result = spawnSync(
-      process.execPath,
-      [path.join(tempRoot, "scripts/verify-ipc-contract.mjs")],
+      "bun",
+      [path.join(tempRoot, "scripts/verify-ipc-contract.ts")],
       { cwd: tempRoot, encoding: "utf8" },
     );
     return {
@@ -96,16 +96,16 @@ function runGate(fixture: {
   }
 }
 
-describe("verify-ipc-contract.mjs", () => {
+describe("verify-ipc-contract.ts", () => {
   it("derives the local command set from main.ts rather than a literal", () => {
     // The finding: the hand-maintained `electronLocalCommands` literal hid both
     // a dead allowlist entry and a dead handler at once, because it was only
     // ever compared against other hand-written lists.
     const source = readFileSync(
-      path.resolve(process.cwd(), "scripts/verify-ipc-contract.mjs"),
+      path.resolve(process.cwd(), "scripts/verify-ipc-contract.ts"),
       "utf8",
     );
-    expect(source).toContain("function extractElectronLocalCommands(source)");
+    expect(source).toContain("function extractElectronLocalCommands(source: string)");
     expect(source).toContain("extractElectronLocalCommands(main)");
     // No hardcoded command names remain in the derived set.
     expect(source).not.toContain('"__window_set_size__"');
@@ -123,6 +123,14 @@ describe("verify-ipc-contract.mjs", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("IPC contract validation passed");
     expect(result.stdout).toContain("1 Electron local commands derived from main.ts");
+  });
+
+  it("keeps path-based benchmarks privileged and bytes-based benchmarks reachable", () => {
+    expect(runGate({
+      allowed: ["__window_show__", "benchmark_asr_providers_bytes"],
+      local: ["__window_show__"],
+      dispatched: ["benchmark_asr_providers", "benchmark_asr_providers_bytes"],
+    }).status).toBe(0);
   });
 
   it("fails on a local case the renderer allowlist does not admit", () => {

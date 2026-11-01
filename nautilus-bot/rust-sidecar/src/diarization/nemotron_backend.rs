@@ -1,11 +1,8 @@
 //! EXPERIMENTAL Nemotron 3 Diarization backend (NVIDIA Sortformer v3).
 //!
-//! Compiled only with the `diarization-nemotron` Cargo feature, which is off
-//! by default and not in the shipped feature list. It is a measurement spike:
-//! nothing in the product can select it, and it has no pinned download yet.
-//! The eval harness in [`super::eval_tests`] runs it against the same fixture
-//! as the ECAPA and speakrs backends. See
-//! `docs/typeless-parity-and-model-refresh-2026-09.md` §4.
+//! Compiled with `diarization-nemotron` in macOS builds. The model download
+//! remains optional and the picker labels it experimental. Production loads
+//! only the pinned, verified asset; the external path override is test-only.
 //!
 //! What it does differently from the default pipeline: one ~100M-parameter
 //! end-to-end model predicts per-frame activity for up to eight speakers,
@@ -19,25 +16,37 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use super::turns::{normalize_turns, speakers_for, uncovered_spans, RawTurn, MIN_TURN_SECONDS};
-use super::{DiarizationMethod, DiarizationResult, SpeakerSegment};
+#[cfg(test)]
+use super::turns::normalize_turns;
+use super::turns::{speakers_for, uncovered_spans, RawTurn, MIN_TURN_SECONDS};
+use super::{DiarizationMethod, DiarizationResult};
 
 /// File name of the community ONNX export
 /// (`altunenes/parakeet-rs`, `nemotron-3-diarization/nemotron3_diar_v3.onnx`).
 /// The `-preview` checkpoint is evaluation-only and must not be used.
 pub(crate) const MODEL_FILE_NAME: &str = "nemotron3_diar_v3.onnx";
 
-/// Overrides the model location for the eval harness, so the spike can run
-/// before the file has a pinned, receipted download.
+/// Overrides the model location for the eval harness. The file there must
+/// still match the pin.
+#[cfg(test)]
 pub(crate) const MODEL_PATH_ENV_VAR: &str = "PLAINSONG_NEMOTRON_DIAR_ONNX";
 
 /// Samples per second of the offsets `parakeet-rs` reports.
 const SEGMENT_SAMPLE_RATE: f64 = 16_000.0;
 
 pub(crate) fn model_path() -> PathBuf {
-    std::env::var_os(MODEL_PATH_ENV_VAR)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| super::diarization_models_dir().join(MODEL_FILE_NAME))
+    #[cfg(test)]
+    if let Some(path) = std::env::var_os(MODEL_PATH_ENV_VAR) {
+        return PathBuf::from(path);
+    }
+    super::diarization_models_dir().join(MODEL_FILE_NAME)
+}
+
+pub(crate) fn is_available() -> bool {
+    crate::download::is_diarization_model_artifact_installed(
+        crate::download::NEMOTRON_DIARIZATION_MODEL_ID,
+        &model_path(),
+    )
 }
 
 /// Maps Sortformer's sample-offset segments onto the shared raw-turn shape.
@@ -71,22 +80,54 @@ pub(crate) async fn run(
     let audio_path = audio_path.to_path_buf();
 
     // ONNX Runtime inference is blocking CPU work.
-    let segments = tokio::task::spawn_blocking(move || -> Result<Vec<SpeakerSegment>> {
+    let (segments, word_activity) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _model_load = crate::llm::local_model_load::guard(&[model_path.as_path()])?;
         let samples = crate::audio::utils::load_audio_file(&audio_path)
             .context("Failed to load audio for Nemotron diarization")?;
         if samples.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
-        let mut diarizer = parakeet_rs::sortformer::Sortformer::new(&model_path)
-            .map_err(|error| anyhow::anyhow!("Failed to load Nemotron 3 Diarization: {error}"))?;
-        let raw = diarizer
-            .diarize(samples, 16_000, 1)
+        let sha256 = crate::download::diarization_model_expected_sha256(
+            crate::download::NEMOTRON_DIARIZATION_MODEL_ID,
+        )
+        .context("Missing integrity pin for Nemotron 3 Diarization")?;
+        let model = crate::download::open_verified_model_artifact(&model_path, sha256)
+            .map_err(crate::download::mismatch_first)?;
+        let _qa_residency;
+        let mut diarizer = model.load(|path| {
+            parakeet_rs::sortformer::Sortformer::new(path)
+                .map_err(|error| anyhow::anyhow!("Failed to load Nemotron 3 Diarization: {error}"))
+        })?;
+        _qa_residency = crate::memory_pressure::QaResidency::loaded("speaker", std::process::id());
+        let (probabilities, sample_count) = diarizer
+            .predict_raw(samples, 16_000, 1)
             .map_err(|error| anyhow::anyhow!("Nemotron diarization failed: {error}"))?;
+        let raw = parakeet_rs::sortformer::Sortformer::post_process(
+            &parakeet_rs::sortformer::DiarizationConfig::default(),
+            &probabilities,
+            sample_count,
+        );
         let turns = raw_turns_from_sample_offsets(
             raw.iter()
                 .map(|segment| (segment.start, segment.end, segment.speaker_id)),
         );
-        Ok(normalize_turns(&turns, duration))
+        let (segments, ids) = super::turns::normalize_turns_with_ids(&turns, duration);
+        let activity = if probabilities.ncols() == 8 {
+            let rows = probabilities
+                .rows()
+                .into_iter()
+                .map(|row| std::array::from_fn(|slot| row[slot]))
+                .collect();
+            let labels = std::array::from_fn(|slot| ids.get(&format!("nemotron-{slot}")).cloned());
+            Some(super::SpeakerActivity::new(
+                rows,
+                labels,
+                sample_count as f64 / SEGMENT_SAMPLE_RATE,
+            ))
+        } else {
+            None
+        };
+        Ok((segments, activity))
     })
     .await
     .context("Failed to join the Nemotron diarization task")??;
@@ -108,6 +149,7 @@ pub(crate) async fn run(
         duration,
         method: DiarizationMethod::Model,
         cluster_centroids: std::collections::HashMap::new(),
+        word_activity,
     })
 }
 

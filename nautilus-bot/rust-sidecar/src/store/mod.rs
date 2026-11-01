@@ -122,6 +122,12 @@ pub struct InsertionActionRecord {
 #[serde(rename_all = "camelCase")]
 pub struct MeetingChatCitationRecord {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<String>,
     pub start_time: Option<f64>,
     pub end_time: Option<f64>,
     pub recording_id: Option<String>,
@@ -170,4 +176,45 @@ pub struct PolicySnapshotRecord {
     pub insertion_policy: serde_json::Value,
     pub export_constraints: serde_json::Value,
     pub created_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod citation_tests {
+    use super::MeetingChatCitationRecord;
+
+    #[test]
+    fn meeting_chat_citation_roundtrips_written_note_identity_and_legacy_shape() {
+        let written_note_json = serde_json::json!({
+            "text": "Ship the revised brief",
+            "sourceKind": "meeting_note",
+            "lineId": "L7",
+            "segmentId": "meeting-note:4",
+            "startTime": null,
+            "endTime": null,
+            "recordingId": "recording-1",
+            "certainty": 1.0
+        });
+        let written_note: MeetingChatCitationRecord =
+            serde_json::from_value(written_note_json).expect("deserialize written-note citation");
+        let roundtrip =
+            serde_json::to_value(written_note).expect("serialize written-note citation");
+        assert_eq!(roundtrip["sourceKind"], "meeting_note");
+        assert_eq!(roundtrip["lineId"], "L7");
+        assert_eq!(roundtrip["segmentId"], "meeting-note:4");
+        assert!(roundtrip["startTime"].is_null());
+        assert!(roundtrip["endTime"].is_null());
+
+        let legacy: MeetingChatCitationRecord = serde_json::from_value(serde_json::json!({
+            "text": "Transcript evidence",
+            "startTime": 2.0,
+            "endTime": 3.0,
+            "recordingId": "recording-1",
+            "certainty": 0.9
+        }))
+        .expect("deserialize legacy citation");
+        let legacy_roundtrip = serde_json::to_value(legacy).expect("serialize legacy citation");
+        assert!(legacy_roundtrip.get("sourceKind").is_none());
+        assert!(legacy_roundtrip.get("lineId").is_none());
+        assert!(legacy_roundtrip.get("segmentId").is_none());
+    }
 }

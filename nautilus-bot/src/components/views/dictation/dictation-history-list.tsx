@@ -17,10 +17,12 @@ interface DictationHistoryListProps {
   recordings: Recording[];
   isLoading: boolean;
   formatDuration: (seconds: number) => string;
-  onOpen: (recording: Recording) => void;
+  onOpen: (recording: Recording, opener: HTMLButtonElement) => void;
   /** Resolves true once the words are on the clipboard. */
   onCopy: (recording: Recording) => Promise<boolean>;
   onDelete: (recording: Recording) => void;
+  /** The dictation shortcut as displayed, once known; names it in the empty state. */
+  shortcutLabel?: string | null;
 }
 
 const COPIED_CONFIRMATION_MS = 1600;
@@ -32,16 +34,27 @@ export function DictationHistoryList({
   onOpen,
   onCopy,
   onDelete,
+  shortcutLabel = null,
 }: DictationHistoryListProps) {
   const [visibleCount, setVisibleCount] = useState(DICTATION_HISTORY_PAGE_SIZE);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copyingId, setCopyingId] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState(false);
+  const copyPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const recordingIdsRef = useRef(new Set<string>());
+  recordingIdsRef.current = new Set(recordings.map((recording) => recording.id));
   const copiedTimer = useRef<number | null>(null);
 
   useEffect(
-    () => () => {
-      if (copiedTimer.current !== null) {
-        window.clearTimeout(copiedTimer.current);
-      }
+    () => {
+      mountedRef.current = true;
+      return () => {
+        mountedRef.current = false;
+        if (copiedTimer.current !== null) {
+          window.clearTimeout(copiedTimer.current);
+        }
+      };
     },
     [],
   );
@@ -51,17 +64,34 @@ export function DictationHistoryList({
   const remaining = recordings.length - visible.length;
 
   const handleCopy = async (recording: Recording) => {
-    if (!(await onCopy(recording))) {
-      return;
-    }
+    if (copyPendingRef.current) return;
+    copyPendingRef.current = true;
+    setCopyingId(recording.id);
+    setCopyError(false);
+    const isCurrent = () => mountedRef.current && recordingIdsRef.current.has(recording.id);
     if (copiedTimer.current !== null) {
       window.clearTimeout(copiedTimer.current);
-    }
-    setCopiedId(recording.id);
-    copiedTimer.current = window.setTimeout(() => {
-      setCopiedId(null);
       copiedTimer.current = null;
-    }, COPIED_CONFIRMATION_MS);
+    }
+    setCopiedId(null);
+    try {
+      const copied = await onCopy(recording);
+      if (!isCurrent()) return;
+      if (!copied) {
+        setCopyError(true);
+        return;
+      }
+      setCopiedId(recording.id);
+      copiedTimer.current = window.setTimeout(() => {
+        setCopiedId(null);
+        copiedTimer.current = null;
+      }, COPIED_CONFIRMATION_MS);
+    } catch {
+      if (isCurrent()) setCopyError(true);
+    } finally {
+      copyPendingRef.current = false;
+      if (mountedRef.current) setCopyingId(null);
+    }
   };
 
   if (isLoading) {
@@ -87,8 +117,10 @@ export function DictationHistoryList({
   if (recordings.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
-        No saved dictations yet. If auto-delete is set to Immediate, history is
-        intentionally not retained.
+        {shortcutLabel
+          ? `No dictations yet. Press ${shortcutLabel} anywhere to start one.`
+          : "No dictations yet."}{" "}
+        If auto-delete is set to Immediate, dictations are not kept here.
       </p>
     );
   }
@@ -96,8 +128,9 @@ export function DictationHistoryList({
   return (
     <div className="space-y-4">
       <span role="status" aria-live="polite" className="sr-only">
-        {copiedId ? "Copied to the clipboard" : ""}
+        {copyingId ? "Copying saved dictation…" : copiedId ? "Copied to the clipboard" : ""}
       </span>
+      {copyError && <p role="alert" className="text-sm text-rust">Couldn't copy that dictation. Try again or open it to select the text.</p>}
       {groups.map((group) => (
         <section key={group.key} aria-label={group.label} className="space-y-1.5">
           <h3 className="rubric-muted px-1">{group.label}</h3>
@@ -106,6 +139,7 @@ export function DictationHistoryList({
               const app = dictationHistoryAppName(recording);
               const status = dictationHistoryStatusLabel(recording.status);
               const copied = copiedId === recording.id;
+              const copying = copyingId === recording.id;
               return (
                 <li
                   key={recording.id}
@@ -115,7 +149,7 @@ export function DictationHistoryList({
                     type="button"
                     aria-label={`Open saved dictation: ${recording.title}`}
                     className="min-w-0 flex-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                    onClick={() => onOpen(recording)}
+                    onClick={(event) => onOpen(recording, event.currentTarget)}
                   >
                     <p className="line-clamp-2 text-sm text-foreground">
                       {dictationHistoryPreview(recording)}
@@ -154,13 +188,15 @@ export function DictationHistoryList({
                   <div
                     className={cn(
                       "flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100",
-                      copied && "opacity-100",
+                      (copied || copying) && "opacity-100",
                     )}
                   >
                     <Button
                       variant="ghost"
                       size="sm"
                       aria-label={`Copy ${recording.title}`}
+                      aria-busy={copying}
+                      disabled={copyingId !== null}
                       onClick={() => void handleCopy(recording)}
                     >
                       {copied ? (
@@ -168,7 +204,7 @@ export function DictationHistoryList({
                       ) : (
                         <Copy aria-hidden="true" />
                       )}
-                      {copied ? "Copied" : "Copy"}
+                      {copying ? "Copying…" : copied ? "Copied" : "Copy"}
                     </Button>
                     <Button
                       variant="ghost"

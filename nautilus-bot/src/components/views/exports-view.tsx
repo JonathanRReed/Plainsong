@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { useRecordings } from "@/hooks/use-recordings";
 import {
   exportRecordingV2,
@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { EmptyState } from "@/components/ui/empty-state";
 import { requestMainView } from "@/lib/navigation";
+import { describeAnalysisSourceReview, readMeetingIntegrity } from "@/lib/meeting-recovery";
 import {
   Select,
   SelectContent,
@@ -108,6 +109,54 @@ export function ExportsView() {
   const [lastTemplateExportPath, setLastTemplateExportPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const mountedRef = useRef(true);
+  const exportPendingRef = useRef(false);
+  const selectedRecording = recordings.find((recording) => recording.id === recordingId);
+  const recordingSignature = JSON.stringify(selectedRecording ?? null);
+  const sourceReview = describeAnalysisSourceReview(readMeetingIntegrity(selectedRecording));
+  const selectionKeys = {
+    preview: JSON.stringify([recordingId, recordingSignature, format, redactionLevel]),
+    file: JSON.stringify([recordingId, recordingSignature, format, redactionLevel, targetPath]),
+    templatePreview: JSON.stringify([recordingId, recordingSignature, selectedTemplateId, redactionLevel]),
+    templateFile: JSON.stringify([recordingId, recordingSignature, selectedTemplateId, redactionLevel, templateTargetPath]),
+  };
+  type ExportScope = keyof typeof selectionKeys;
+  const selectionRef = useRef<Record<ExportScope, { key: string }>>({
+    preview: { key: selectionKeys.preview },
+    file: { key: selectionKeys.file },
+    templatePreview: { key: selectionKeys.templatePreview },
+    templateFile: { key: selectionKeys.templateFile },
+  });
+  for (const scope of Object.keys(selectionKeys) as ExportScope[]) {
+    if (selectionRef.current[scope].key !== selectionKeys[scope]) {
+      selectionRef.current[scope] = { key: selectionKeys[scope] };
+    }
+  }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  useEffect(() => { setPreviewContent(""); }, [selectionKeys.preview]);
+  useEffect(() => { setTemplatePreview(""); }, [selectionKeys.templatePreview]);
+  useEffect(() => { setLastExportPath(null); }, [selectionKeys.file]);
+  useEffect(() => { setLastTemplateExportPath(null); }, [selectionKeys.templateFile]);
+  useEffect(() => { setError(null); }, [selectionKeys.file, selectionKeys.templateFile]);
+
+  const beginExport = (scope: ExportScope) => {
+    if (exportPendingRef.current) return null;
+    exportPendingRef.current = true;
+    setError(null);
+    setIsWorking(true);
+    return { scope, selection: selectionRef.current[scope] };
+  };
+  const isCurrentExport = (request: { scope: ExportScope; selection: { key: string } }) =>
+    mountedRef.current && selectionRef.current[request.scope] === request.selection;
+
+  const finishExport = () => {
+    exportPendingRef.current = false;
+    if (mountedRef.current) setIsWorking(false);
+  };
+
   const formatNote =
     EXPORT_FORMATS.find((option) => option.value === format)?.note ?? "";
 
@@ -143,26 +192,29 @@ export function ExportsView() {
   }, [loadTemplates]);
 
   const generatePreview = async () => {
-    setError(null);
+    const selection = beginExport("preview");
+    if (!selection) return;
     setLastExportPath(null);
-    setIsWorking(true);
     try {
       ensureRecording();
       const result = await exportRecordingV2(recordingId, format, {
         redactionLevel,
         preview: true,
       });
+      if (!isCurrentExport(selection)) return;
       setPreviewContent(result.content ?? "");
     } catch (e) {
+      if (!isCurrentExport(selection)) return;
       setError(e instanceof Error ? e.message : "Preview failed");
     } finally {
-      setIsWorking(false);
+      finishExport();
     }
   };
 
   const exportNow = async () => {
-    setError(null);
-    setIsWorking(true);
+    const selection = beginExport("file");
+    if (!selection) return;
+    setLastExportPath(null);
     try {
       ensureRecording();
       const result = await exportRecordingV2(recordingId, format, {
@@ -170,26 +222,30 @@ export function ExportsView() {
         target: targetPath.trim() || undefined,
         preview: false,
       });
+      if (!isCurrentExport(selection)) return;
+      if (!result.exportPath) throw new Error("Export did not return a file path");
       setLastExportPath(result.exportPath ?? null);
     } catch (e) {
+      if (!isCurrentExport(selection)) return;
       setError(e instanceof Error ? e.message : "Export failed");
     } finally {
-      setIsWorking(false);
+      finishExport();
     }
   };
 
-  const openLastExport = async (path: string) => {
+  const openLastExport = async (path: string, scope: "file" | "templateFile") => {
+    const selection = { scope, selection: selectionRef.current[scope] };
     setError(null);
     try {
       await openExportPath(path);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not open export");
+      if (isCurrentExport(selection)) setError(e instanceof Error ? e.message : "Could not open export");
     }
   };
 
   const generateTemplatePreview = async () => {
-    setError(null);
-    setIsWorking(true);
+    const selection = beginExport("templatePreview");
+    if (!selection) return;
     setLastTemplateExportPath(null);
     try {
       ensureRecording();
@@ -200,17 +256,19 @@ export function ExportsView() {
         preview: true,
         redactionLevel,
       });
+      if (!isCurrentExport(selection)) return;
       setTemplatePreview(rendered.content ?? "");
     } catch (e) {
+      if (!isCurrentExport(selection)) return;
       setError(e instanceof Error ? e.message : "Template preview failed");
     } finally {
-      setIsWorking(false);
+      finishExport();
     }
   };
 
   const exportTemplateNow = async () => {
-    setError(null);
-    setIsWorking(true);
+    const selection = beginExport("templateFile");
+    if (!selection) return;
     setLastTemplateExportPath(null);
     try {
       ensureRecording();
@@ -222,14 +280,16 @@ export function ExportsView() {
         target: templateTargetPath.trim() || undefined,
         redactionLevel,
       });
+      if (!isCurrentExport(selection)) return;
       if (!result.exportPath) {
         throw new Error("Template export did not return a file path");
       }
       setLastTemplateExportPath(result.exportPath);
     } catch (e) {
+      if (!isCurrentExport(selection)) return;
       setError(e instanceof Error ? e.message : "Template export failed");
     } finally {
-      setIsWorking(false);
+      finishExport();
     }
   };
 
@@ -298,6 +358,21 @@ export function ExportsView() {
                 </SelectContent>
               </Select>
             </div>
+
+            {sourceReview ? (
+              <div
+                role="status"
+                aria-live="polite"
+                className="space-y-2 rounded-lg border border-rust/30 bg-rust/10 px-4 py-3 text-sm text-rust"
+              >
+                <p>{sourceReview}</p>
+                {format === "srt" || format === "vtt" ? (
+                  <p>
+                    Subtitle files contain only the saved timed cues. This warning isn't included in the file.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
@@ -379,7 +454,7 @@ export function ExportsView() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => void openLastExport(lastExportPath)}
+                  onClick={() => void openLastExport(lastExportPath, "file")}
                 >
                   <ExternalLink data-icon="inline-start" />
                   Open export
@@ -492,7 +567,7 @@ export function ExportsView() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  onClick={() => void openLastExport(lastTemplateExportPath)}
+                  onClick={() => void openLastExport(lastTemplateExportPath, "templateFile")}
                 >
                   <ExternalLink data-icon="inline-start" />
                   Open export

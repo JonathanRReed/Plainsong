@@ -1,3 +1,4 @@
+import { createDictationShortcutSignalRuntime } from "../../electron/dictation-shortcut-controller";
 import { EventEmitter } from "events";
 import { PassThrough } from "stream";
 import { describe, expect, it, vi } from "vitest";
@@ -20,10 +21,12 @@ function createNativeShortcutTestChild(): NativeShortcutTestChild & {
   stdout: PassThrough;
 } {
   const emitter = new EventEmitter();
+  const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const kill = vi.fn();
   const child = {
+    stdin,
     stdout,
     stderr,
     on: (event: string, listener: (...args: unknown[]) => void) => {
@@ -48,6 +51,24 @@ function createNativeShortcutTestChild(): NativeShortcutTestChild & {
 }
 
 describe("startNativeMacosShortcutController", () => {
+  it("reports a lost event stream without waiting for helper process exit", async () => {
+    const child = createNativeShortcutTestChild();
+    const onUnavailable = vi.fn();
+    const controller = startNativeMacosShortcutController({
+      platform: "darwin", helperPath: "/fake/helper", helperBindings: PRIMARY_TABLE,
+      helperExists: () => true, spawnHelper: () => child, onEvent: vi.fn(), onUnavailable,
+    });
+    const ended = new Promise<void>(resolve => child.stdout.once("end", resolve));
+    child.stdout.end();
+    await ended;
+    expect(controller.status.available).toBe(false);
+    expect(onUnavailable).toHaveBeenCalledOnce();
+    expect(child.kill).toHaveBeenCalledOnce();
+    child.emitExit(1, null);
+    expect(onUnavailable).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+
   it("does not spawn the helper outside macOS", () => {
     const spawnHelper = vi.fn();
 
@@ -187,10 +208,36 @@ describe("startNativeMacosShortcutController", () => {
       onUnavailable,
     });
 
+    controller.dispose();
     child.emitExit(null, "SIGTERM");
 
     expect(controller.status).toEqual({ available: true, reason: null });
     expect(onUnavailable).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [0, null],
+    [null, "SIGTERM"],
+  ] as const)("reports unexpected helper exit %s/%s", (code, signal) => {
+    const child = createNativeShortcutTestChild();
+    const onUnavailable = vi.fn();
+    const controller = startNativeMacosShortcutController({
+      platform: "darwin",
+      helperPath: "/tmp/helper",
+      helperBindings: PRIMARY_TABLE,
+      helperExists: () => true,
+      spawnHelper: () => child,
+      onEvent: vi.fn(),
+      onUnavailable,
+    });
+
+    child.emitExit(code, signal);
+
+    expect(controller.status).toEqual({
+      available: false,
+      reason: "helper_unavailable",
+    });
+    expect(onUnavailable).toHaveBeenCalledExactlyOnceWith(controller.status);
   });
 
   it("marks the helper unavailable after a helper process error", () => {
@@ -262,4 +309,54 @@ describe("startNativeMacosShortcutController", () => {
     expect(onUnavailable).toHaveBeenCalledTimes(1);
     expect(onUnavailable).toHaveBeenCalledWith(controller.status);
   });
+});
+
+
+it("starts inactive, resends session state, and clears it on helper loss or disposal", () => {
+  for (const ending of ["exit", "error", "dispose"] as const) {
+    const child = createNativeShortcutTestChild();
+    const writes: string[] = [];
+    child.stdin.on("data", (chunk) => writes.push(String(chunk)));
+    const controller = startNativeMacosShortcutController({
+      platform: "darwin", helperPath: "/tmp/helper", helperBindings: PRIMARY_TABLE,
+      helperExists: () => true, spawnHelper: () => child, onEvent: vi.fn(),
+    });
+    expect(writes).toEqual(['{"sessionActive":false}\n']);
+    controller.setSessionActive(true);
+    controller.setSessionActive(false);
+    controller.setSessionActive(true);
+    if (ending === "dispose") controller.dispose();
+    if (ending === "exit") child.emitExit(1, null);
+    if (ending === "error") child.emitError(new Error("lost helper"));
+    expect(writes).toEqual([false, true, false, true, false].map((sessionActive) => `${JSON.stringify({ sessionActive })}\n`));
+    controller.setSessionActive(true);
+    expect(writes).toHaveLength(5);
+  }
+});
+
+
+it.each([42, 43])("helper loss cancels only its owner, current session %i", async (currentSessionId) => {
+  const invoke = vi.fn().mockResolvedValue(undefined);
+  let phase: "idle" | "recording" = "idle";
+  let sessionId = 42;
+  const owned = createDictationShortcutSignalRuntime({ getPhase: () => phase, getSessionId: () => sessionId, invoke });
+  const input = { behavior: "hold_to_talk", capability: "press_and_release", bindingId: "primary" } as const;
+  await owned.handleSignal({ ...input, signal: "pressed" });
+  phase = "recording"; owned.onPhase(phase);
+  sessionId = currentSessionId;
+  const child = createNativeShortcutTestChild();
+  let cancellation = Promise.resolve();
+  const controller = startNativeMacosShortcutController({
+    platform: "darwin", helperPath: "/tmp/helper", helperBindings: PRIMARY_TABLE,
+    helperExists: () => true, spawnHelper: () => child, onEvent: vi.fn(),
+    onUnavailable: () => { cancellation = owned.cancelOwned(); },
+  });
+  child.emitExit(1, null);
+  child.emitExit(1, null);
+  await cancellation;
+  expect(invoke.mock.calls.map(([command]) => command)).toEqual(currentSessionId === 42
+    ? ["start_dictation", "force_stop_dictation"] : ["start_dictation"]);
+  if (currentSessionId === 42) expect(invoke).toHaveBeenLastCalledWith("force_stop_dictation", { sessionId: 42 });
+  expect(invoke.mock.calls.some(([command]) => command === "stop_dictation")).toBe(false);
+  controller.dispose(); owned.dispose();
 });

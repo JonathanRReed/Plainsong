@@ -1,3 +1,4 @@
+import { resolveDisplayedDictationHotkeyMode } from "@/lib/dictation-hotkey-mode";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
@@ -40,7 +41,6 @@ import { requestReadinessDestination } from "@/lib/navigation";
 import {
   describeAnalysisDestination,
   isKnownAnalysisProvider,
-  isRemoteAnalysisProvider,
 } from "@/components/models/ai-lanes";
 
 interface SidebarProps {
@@ -66,7 +66,6 @@ const moreNavItems = [
   { id: "exports", label: "Exports", icon: FileOutput },
 ];
 
-type DictationShortcutMode = "hold_to_talk" | "toggle" | "hands_free";
 
 interface DictationHotkey {
   label: string;
@@ -113,15 +112,8 @@ const CHECKING_LOCAL_MODE_STATUS: LocalModeStatus = {
   detail: "Reading privacy settings.",
 };
 
-// Two lanes now choose an analysis provider — dictation cleanup and meeting
-// analysis — and either one leaving the machine is enough to break a "Local
-// only" claim, so the chip has to look at both.
-//
-// This asks `isRemoteAnalysisProvider` rather than comparing against Ollama.
-// It used to be `provider !== "ollama"`, which was true while Ollama was the
-// only local route; with the built-in model and Apple's on-device model that
-// test would report "Cloud Enabled · dictation cleanup uses 'bundled_local'"
-// for a provider that has no network path at all.
+// Report the app's network permission. Local text providers alone cannot
+// establish locality for speech engines or saved profile overrides.
 function deriveLocalModeStatus(
   dictationProvider: string | undefined,
   meetingsProvider: string | undefined,
@@ -146,27 +138,12 @@ function deriveLocalModeStatus(
     return UNKNOWN_LOCAL_MODE_STATUS;
   }
 
-  const remoteLanes = [
-    { label: "dictation cleanup", provider: dictationProvider },
-    { label: "meeting summaries", provider: meetingsProvider },
-  ].filter((lane) => isRemoteAnalysisProvider(lane.provider));
-
-  if (remoteLanes.length === 0) {
-    return {
-      active: true,
-      label: "Local only",
-      detail: `Both analysis lanes run on this Mac: dictation cleanup on ${describeAnalysisDestination(
-        dictationProvider
-      )}, meeting summaries on ${describeAnalysisDestination(meetingsProvider)}.`,
-    };
-  }
-
   return {
     active: false,
-    label: "Cloud Enabled",
-    detail: `Remote processing enabled: ${remoteLanes
-      .map((lane) => `${lane.label} uses '${lane.provider}'`)
-      .join("; ")}.`,
+    label: "Cloud allowed",
+    detail: `Remote processing is allowed. Text-model choices: dictation cleanup uses ${describeAnalysisDestination(
+      dictationProvider,
+    )}; meeting summaries use ${describeAnalysisDestination(meetingsProvider)}.`,
   };
 }
 
@@ -179,8 +156,14 @@ export function Sidebar({
   const { productReadiness, settings, loading } = useProductReadinessStatus();
   const sidebarReadiness = selectReadinessForSurface(
     productReadiness,
-    "sidebar",
+    activeView === "dictation" ? "dictation" : "sidebar",
   );
+  const readinessLabel =
+    sidebarReadiness.cause?.id === "system_audio_unverified"
+      ? "Check meeting audio"
+      : sidebarReadiness.cause?.id === "system_audio_unavailable"
+        ? "Set up meeting audio"
+        : "Setup needed";
   const { isRecording, recordingMode } = useRecordingSession();
   const localModeStatus = settings
     ? deriveLocalModeStatus(
@@ -192,11 +175,12 @@ export function Sidebar({
       ? CHECKING_LOCAL_MODE_STATUS
       : UNKNOWN_LOCAL_MODE_STATUS;
   const shortcut = settings?.shortcuts?.toggleDictation || defaultDictationShortcut();
-  const dictationMode: DictationShortcutMode = settings?.transcription?.dictationHandsFreeEnabled
-    ? "hands_free"
-    : settings?.transcription?.dictationPushToTalk
-      ? "hold_to_talk"
-      : "toggle";
+  const dictationMode = resolveDisplayedDictationHotkeyMode({
+    shortcut: settings?.shortcuts?.toggleDictation ?? "",
+    bindings: settings?.shortcuts?.dictationBindings,
+    pushToTalk: settings?.transcription?.dictationPushToTalk ?? false,
+    handsFreeEnabled: settings?.transcription?.dictationHandsFreeEnabled ?? false,
+  });
   const dictationHotkey: DictationHotkey = settings
     ? {
         label: formatShortcutForDisplay(shortcut),
@@ -227,7 +211,7 @@ export function Sidebar({
           the whole workspace on every frame. The labels fade in instead. */}
       <div
         className={cn(
-          "flex h-full shrink-0 flex-col overflow-hidden border-r border-border/70 bg-card/80 shadow-[1px_0_0_hsl(var(--foreground)/0.03)_inset] backdrop-blur-xl",
+          "flex h-full shrink-0 flex-col overflow-hidden border-r border-border/70 bg-card/80 shadow-[1px_0_0_hsl(var(--foreground)/0.03)_inset]",
           !isCollapsed && "sidebar-labels-enter",
           isCollapsed ? "w-[72px]" : "w-72"
         )}
@@ -302,7 +286,7 @@ export function Sidebar({
                             {isActive ? (
                               <span className="neume neume-lit" aria-hidden="true" />
                             ) : (
-                              <span className="text-[10px] text-muted-foreground/70">{item.shortcut}</span>
+                              <span className="text-[10px] text-muted-foreground/80">{item.shortcut}</span>
                             )}
                           </>
                         )}
@@ -355,7 +339,7 @@ export function Sidebar({
                             {isActive ? (
                               <span className="neume neume-lit" aria-hidden="true" />
                             ) : (
-                              <span className="text-[10px] text-muted-foreground/70">{item.shortcut}</span>
+                              <span className="text-[10px] text-muted-foreground/80">{item.shortcut}</span>
                             )}
                           </>
                         )}
@@ -492,7 +476,7 @@ export function Sidebar({
                         sidebarReadiness.cause!.action.destination,
                       )
                     }
-                    aria-label={`Setup needed. ${sidebarReadiness.cause.message}`}
+                    aria-label={`${readinessLabel}. ${sidebarReadiness.cause.message}`}
                     className={cn(
                       "flex h-9 items-center gap-2 rounded-xl border border-rust/30 bg-rust/10 px-2.5 text-xs text-rust transition-colors hover:bg-rust/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
                       isCollapsed && "h-10 w-10 justify-center p-0",
@@ -502,7 +486,7 @@ export function Sidebar({
                       className="neume neume-rust"
                       aria-hidden="true"
                     />
-                    {!isCollapsed && <span>Setup needed</span>}
+                    {!isCollapsed && <span>{readinessLabel}</span>}
                   </button>
                 </TooltipTrigger>
                 <TooltipContent side="right">

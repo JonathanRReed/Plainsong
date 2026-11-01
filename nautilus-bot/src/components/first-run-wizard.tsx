@@ -1,9 +1,16 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { cn } from "@/lib/utils";
+import { userFacingErrorMessage } from "@/lib/user-facing-error";
+import { isDictationMemoryAdmissionRefusal, sanitizeUserFacingDictationMessage } from "@/lib/dictation-ui-message";
+import { Radio } from "@base-ui/react/radio";
+import { RadioGroup } from "@base-ui/react/radio-group";
 import {
   Bell,
   Brain,
   CalendarDays,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   Download,
   KeyRound,
@@ -17,9 +24,21 @@ import {
 } from "lucide-react";
 import {
   downloadAsrModels,
+  downloadDiarizationModel,
   getAsrProviders,
+  getDiarizationModelPlan,
+  listDownloadedModels,
+  type DiarizationModelPlan,
+  type DownloadedModelFile,
 } from "@/lib/backend/asr";
-import { listen } from "@/lib/electron";
+import { NativeTextModelRow } from "@/components/models/native-text-model-row";
+import { buildDownloadedModelIndex } from "@/components/models/downloaded-models";
+import { speakerModelDownloadName } from "@/components/meetings/speaker-model-download-note";
+import { invoke, listen } from "@/lib/electron";
+import type {
+  DictationStateChangedEvent,
+  useDictationRuntime,
+} from "@/features/dictation/runtime";
 import {
   getDictationShortcutCapabilityStatus,
   getPermissionDiagnostics,
@@ -28,7 +47,7 @@ import {
   openPermissionSettings,
   recordOnboardingState,
   requestDictationPermissions,
-  saveSettings,
+  updateSettings,
   verifyMeetingSetup,
   type PermissionDiagnostics,
   type SetupVerificationResult,
@@ -62,16 +81,43 @@ import {
 import {
   buildAsrRouteCatalog,
   getRecommendedLaneRoute,
+  isOnnxParakeetRoute,
+  isRecommendedSpeechRoute,
+  RECOMMENDED_SPEECH_ROUTE,
+  routeDisplayLabel,
+  routeIdFor,
 } from "@/lib/asr-route-catalog";
-import { formatModelSize, getAsrModelCapability } from "@/lib/asr-capabilities";
+import {
+  getAsrModelCapability,
+  isDownloadableProvider,
+} from "@/lib/asr-capabilities";
+import {
+  canonicalSpeechRoute,
+  defaultMeetingChoice,
+  groupSpeechChoices,
+  speechChoicesForLane,
+  type SpeechChoice,
+} from "@/lib/speech-model-choices";
+import { withParakeetUpgrade } from "@/lib/parakeet-upgrade";
 import { normalizeDownloadStatus } from "@/lib/download-status";
+import { describeModelDownloadError } from "@/lib/model-download-error";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Progress } from "@/components/ui/progress";
+import { ModelDownloadProgress } from "@/components/models/model-download-progress";
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
 import { type OnboardingMode } from "@/lib/onboarding";
 import { readAiNotesOptOut, writeAiNotesOptOut } from "@/lib/ai-notes-preference";
-import { getOllamaStatus } from "@/lib/backend/ai";
+import {
+  getNativeTextModelStatus,
+  type NativeTextModelStatus,
+  getOllamaStatus,
+  listOllamaModelCatalog,
+  listOllamaModels,
+} from "@/lib/backend/ai";
+import { probeOllamaModelReadiness } from "@/lib/ollama-model-readiness";
+import { probeMeetingNotesRoute } from "@/hooks/use-setup-status";
+import { resolveMeetingNotesRoute } from "@/features/readiness/meeting-notes-route";
+import { describeMeetingAudio, MEETING_AUDIO_EXPLAINER } from "@/lib/meeting-audio-status";
 import {
   describeAnalysisDestination,
   isRemoteAnalysisProvider,
@@ -107,7 +153,7 @@ type Step =
   | "ai-notes";
 
 /** How meeting summaries, action items and titles get written — or that they don't. */
-type AiNotesChoice = "ollama" | "byok" | "none";
+type AiNotesChoice = "ollama" | "native_text" | "byok" | "none";
 
 type ScratchDictationState =
   | "idle"
@@ -117,65 +163,249 @@ type ScratchDictationState =
   | "complete"
   | "error";
 
-// Ordered so the recommended default (Parakeet TDT 0.6B v3 -- see
-// settings.rs's default_provider/default_model_id) is first and
-// pre-selected. Whisper base.en mis-transcribes words it hasn't seen before
-// -- including "Plainsong" itself, per this repo's own benchmark -- so it is
-// offered as the small-download alternative, not the default. Model weights
-// are downloaded on demand; none ship inside the app bundle.
-//
-// A first run reads `title` and `desc`, which say what the choice means for
-// the reader. The model's own name (`label`) and download size are the small
-// print under them. Sizes come from the capability table through
-// `formatModelSize`, so every row uses the same unit as the rest of the app.
-const POWER_MODEL_OPTIONS: Array<{
-  id: string;
+type PreservedDictationRoute = {
+  routeId: string;
   providerType: AsrProviderType;
+  modelId: string;
   label: string;
-  title: string;
-  desc: string;
-  recommended?: boolean;
-}> = [
-  {
-    id: "parakeet-tdt-0.6b-v3",
-    providerType: "parakeet",
-    label: "Parakeet TDT 0.6B v3",
-    title: "Fast and accurate",
-    desc: "Runs on this Mac and handles meetings too. The right choice for most people.",
-    recommended: true,
-  },
-  {
-    id: "base.en",
-    providerType: "whisper",
-    label: "Whisper base.en",
-    title: "Smallest download",
-    desc: "English only, and more likely to miss names and unusual words.",
-  },
-  {
-    id: "distil-large-v3.5",
-    providerType: "distil_whisper",
-    label: "Distil Whisper",
-    title: "Extra accuracy for long dictation",
-    desc: "A much larger download that takes longer to set up.",
-  },
-  {
-    id: "moonshine-base",
-    providerType: "moonshine",
-    label: "Moonshine Base",
-    title: "Easy on older Macs",
-    desc: "A light model for slower machines, at some cost to accuracy.",
-  },
-];
+  /** Whether this model can also transcribe meetings (`laneCompatibility.meeting`). */
+  meetingCapable: boolean;
+};
 
-/** The option for a model id, or the recommended default for an unknown one. */
-function powerModelOption(modelId: string | undefined): (typeof POWER_MODEL_OPTIONS)[number] {
-  return POWER_MODEL_OPTIONS.find((candidate) => candidate.id === modelId) ?? POWER_MODEL_OPTIONS[0];
+// The speech step lists every distinct model this Mac can run, from the same
+// catalog Settings > Models reads (`speechChoicesForLane`). The recommended
+// one is computed, not stored: GGUF Parakeet where this build lists the
+// transcribe.cpp route for it (Apple Silicon -- see settings.rs's
+// `fresh_install_dictation_route`, which also points a new install's meeting
+// slot at it, so one download covers both), ONNX Parakeet everywhere else.
+// Where GGUF Parakeet can run, the ONNX build is never listed: it is the same
+// model, kept as an internal fallback. Model weights are downloaded on
+// demand; none ship inside the app bundle.
+//
+// The recommended card reads as what the choice means for the reader; every
+// other model is one line with what sets it apart. Sizes come from the
+// capability table and are shown in the decimal MB/GB that Finder uses -- see
+// `formatDownloadSize`. No line names a chip, a file format or an engine.
+
+/**
+ * Parakeet v3's languages, said plainly: it is built for 25 European
+ * languages, and English is the one tested in Plainsong
+ * (`PARAKEET_V3_LANGUAGES` in asr-capabilities.ts).
+ */
+const PARAKEET_LANGUAGE_NOTE = "Tested in English. Also built for 24 other European languages.";
+
+/** What the dictation step remembers about a route it can download or keep. */
+type DictationRouteSummary = {
+  routeId: string;
+  providerType: AsrProviderType;
+  modelId: string;
+  label: string;
+  sizeMib: number | null;
+  meetingCapable: boolean;
+};
+
+function summarizeChoice(choice: SpeechChoice): DictationRouteSummary {
+  return {
+    routeId: choice.route.routeId,
+    providerType: choice.route.providerType,
+    modelId: choice.route.modelId,
+    label: choice.route.label,
+    sizeMib: choice.sizeMib,
+    meetingCapable: choice.route.laneCompatibility.meeting,
+  };
 }
 
-function powerModelSize(option: (typeof POWER_MODEL_OPTIONS)[number]): string {
-  return formatModelSize(
-    getAsrModelCapability(option.providerType, option.id)?.sizeMib ?? 0,
+/** "Set up meetings later" in the meetings picker beside a dictation-only model. */
+const MEETINGS_LATER = "later";
+
+/**
+ * What the meetings picker says about one model: recommended or not, and
+ * what choosing it costs -- a download size, or nothing because it is here.
+ */
+function meetingOptionLabel(choice: SpeechChoice, available: boolean): string {
+  const cost = available
+    ? choice.route.hosting === "platform"
+      ? "built in"
+      : "on this Mac"
+    : formatDownloadSize(choice.sizeMib);
+  const details = [choice.recommended ? "recommended" : null, cost].filter(Boolean).join(", ");
+  return details ? `${choice.route.label} — ${details}` : choice.route.label;
+}
+
+/**
+ * The primary button on the speech step, naming the bytes it will fetch:
+ * "Download 79 MB + 739 MB and continue". A download whose size is unknown
+ * keeps the plain wording rather than a partial sum.
+ */
+function downloadAndContinueLabel(sizes: readonly (number | null)[]): string {
+  const formatted = sizes.map((size) => formatDownloadSize(size));
+  if (formatted.length === 0) {
+    return "Continue";
+  }
+  return formatted.every((size) => size !== null)
+    ? `Download ${formatted.join(" + ")} and continue`
+    : "Download and continue";
+}
+
+
+/**
+ * The speaker model plan, or null when it could not be read. Unknown is not
+ * "missing": the wizard then neither offers nor downloads a speaker model.
+ */
+async function loadSpeakerModelPlan(): Promise<DiarizationModelPlan | null> {
+  try {
+    return (await getDiarizationModelPlan()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a route is downloaded and ready. The provider list reports state
+ * for the one model each provider points at, so any other model of the same
+ * provider counts as not ready rather than borrowing that answer.
+ */
+function isRouteReady(
+  providers: readonly AsrProviderInfo[],
+  route: { providerType: AsrProviderType; modelId: string },
+): boolean {
+  const provider = providers.find(
+    (candidate) =>
+      candidate.providerType === route.providerType &&
+      candidate.selectedModelId === route.modelId,
   );
+  return (
+    provider !== undefined &&
+    provider.inferenceEnabled !== false &&
+    provider.runtimeStatus === "ready" &&
+    (!isDownloadableProvider(provider.providerType) ||
+      normalizeDownloadStatus(provider.downloadStatus).kind === "downloaded")
+  );
+}
+
+/** The meetings model settings name, when it can transcribe meetings. */
+type ConfiguredMeeting = {
+  routeId: string;
+  /** The listed model it reads as: GGUF Parakeet for the ONNX build. */
+  canonicalRouteId: string;
+  label: string;
+  hosting: "local" | "cloud" | "platform";
+};
+
+/**
+ * What a meetings picker offers, read once from settings, the provider list
+ * and the files on disk: every model that can transcribe meetings, which
+ * routes work without a download, and the meetings model settings name.
+ *
+ * A meetings model that already works but is not one of the listed models
+ * (the earlier build of Parakeet v3, a cloud service) is offered as it is, so
+ * a picker never replaces it with a download; the earlier Parakeet v3 stands
+ * in for the listed one, so Parakeet v3 is offered once. An unreadable file
+ * list counts nothing as present: the picker may then name a download that
+ * turns out to be unnecessary, never the reverse.
+ */
+function readMeetingPicker(
+  settings: Awaited<ReturnType<typeof getSettings>>,
+  providers: readonly AsrProviderInfo[],
+  downloadedFiles: readonly DownloadedModelFile[] | null,
+): {
+  choices: SpeechChoice[];
+  availableRouteIds: ReadonlySet<string>;
+  configured: ConfiguredMeeting | null;
+} {
+  const routes = buildAsrRouteCatalog([...providers], "prefer_local");
+  const downloadIndex = downloadedFiles ? buildDownloadedModelIndex(downloadedFiles) : null;
+  // Ready without a download: a local model on disk, or a built-in or cloud
+  // route that reports ready.
+  const routeAvailable = (route: (typeof routes)[number]) =>
+    route.hosting === "local"
+      ? downloadIndex?.presentRouteIds.has(route.routeId) === true ||
+        isRouteReady(providers, route)
+      : route.readiness === "ready";
+  const shared = settings.transcription.useSharedAsrSelection ?? true;
+  const provider = shared
+    ? settings.transcription.defaultProvider
+    : settings.transcription.meetingProvider;
+  const modelId =
+    (shared ? settings.transcription.selectedModelId : settings.transcription.meetingModelId) ??
+    providers.find((candidate) => candidate.providerType === provider)?.selectedModelId ??
+    null;
+  const configuredRoute =
+    routes.find(
+      (route) =>
+        route.providerType === provider &&
+        route.modelId === modelId &&
+        route.laneCompatibility.meeting,
+    ) ?? null;
+  const canonicalId = configuredRoute
+    ? canonicalSpeechRoute(routes, configuredRoute)?.routeId ?? configuredRoute.routeId
+    : null;
+  let choices = speechChoicesForLane(routes, "meeting").filter((choice) => choice.route.selectable);
+  if (
+    configuredRoute &&
+    routeAvailable(configuredRoute) &&
+    !choices.some((choice) => choice.route.routeId === configuredRoute.routeId)
+  ) {
+    choices = [
+      { route: configuredRoute, recommended: false, note: "", sizeMib: null },
+      ...choices.filter(
+        (choice) => !configuredRoute.superseded || choice.route.routeId !== canonicalId,
+      ),
+    ];
+  }
+  return {
+    choices,
+    availableRouteIds: new Set(routes.filter(routeAvailable).map((route) => route.routeId)),
+    configured:
+      configuredRoute && canonicalId
+        ? {
+            routeId: configuredRoute.routeId,
+            canonicalRouteId: canonicalId,
+            label: configuredRoute.label,
+            hosting: configuredRoute.hosting,
+          }
+        : null,
+  };
+}
+
+/**
+ * Point the meeting slot at a model, with dictation and meetings on their
+ * own slots from then on. Dictation keeps the model it was reading: the
+ * shared pair, when the two lanes were still shared.
+ */
+function setMeetingSlot(
+  settings: Awaited<ReturnType<typeof getSettings>>,
+  providerType: AsrProviderType,
+  modelId: string,
+) {
+  const transcription = settings.transcription;
+  if (transcription.useSharedAsrSelection) {
+    transcription.dictationProvider = transcription.defaultProvider;
+    transcription.dictationModelId = transcription.selectedModelId;
+  }
+  transcription.useSharedAsrSelection = false;
+  transcription.meetingProvider = providerType;
+  transcription.meetingModelId = modelId;
+}
+
+/**
+ * A download size the way macOS shows one: decimal MB and GB, as Finder and
+ * the App Store count them.
+ *
+ * The capability table records sizes in MiB (and the shared
+ * `formatModelSize` prints MiB/GiB for Settings), so this converts rather than
+ * relabels: 639 MiB is 670 MB. Null when the size is unknown, so a caller can
+ * leave the number out instead of printing "size unknown" to a first-time
+ * reader.
+ */
+function formatDownloadSize(sizeMib: number | null | undefined): string | null {
+  if (typeof sizeMib !== "number" || !Number.isFinite(sizeMib) || sizeMib <= 0) {
+    return null;
+  }
+  const megabytes = (sizeMib * 1024 * 1024) / 1_000_000;
+  return megabytes >= 1000
+    ? `${(megabytes / 1000).toFixed(1)} GB`
+    : `${Math.round(megabytes)} MB`;
 }
 
 // The rows themselves live in features/onboarding/permission-gates.ts, with
@@ -207,15 +437,15 @@ const STEP_LABELS: Record<Step, string> = {
   "use-everywhere": "Use it everywhere",
   ready: "Ready",
   permissions: "Permissions",
-  "dictation-model": "Dictation model",
-  hotkey: "Hotkey",
+  "dictation-model": "Speech model",
+  hotkey: "Shortcut",
   "meeting-setup": "Meeting setup",
   "ai-notes": "Meeting notes",
 };
 
 type HotkeyMode = "hold_to_talk" | "toggle" | "hands_free";
 
-// The same three behaviors Settings > Dictation offers (see
+// The same three behaviors Settings > Shortcuts offers (see
 // settings-view-simple.tsx's "How the dictation shortcut works"), written
 // the same way, so the wizard and Settings describe one feature.
 const HOTKEY_MODE_LABELS: Record<HotkeyMode, { name: string; hint: string }> = {
@@ -269,40 +499,155 @@ function formatShortcutFromKeyboardEvent(event: KeyboardEvent<HTMLInputElement>)
   return [...parts, mainKey].join("+");
 }
 
+/**
+ * The meeting model, named the way the model pickers name it: the plain model
+ * name for a model on this Mac, and the service beside it for a cloud one.
+ */
 function summarizeMeetingRoute(provider: AsrProviderType | null, modelId: string | null, providers: AsrProviderInfo[]) {
   if (!provider) {
-    return "No meeting transcription route selected";
+    return "No meeting model chosen";
+  }
+  const route = modelId
+    ? buildAsrRouteCatalog(providers, "prefer_local").find(
+        (candidate) => candidate.providerType === provider && candidate.modelId === modelId,
+      )
+    : undefined;
+  if (route) {
+    return route.hosting === "cloud" ? `${route.providerLabel} · ${route.label}` : route.label;
   }
   const providerInfo = providers.find((item) => item.providerType === provider);
-  const providerLabel = providerInfo?.name ?? provider;
-  if (!modelId) {
-    return providerLabel;
+  const modelLabel = modelId
+    ? routeDisplayLabel(
+        provider,
+        modelId,
+        providerInfo?.modelOptions.find((option) => option.id === modelId)?.label ?? modelId,
+      )
+    : null;
+  return modelLabel ?? providerInfo?.name ?? provider;
+}
+
+type MeetingRouteCatalog = ReturnType<typeof buildAsrRouteCatalog>;
+
+async function getMeetingRouteCatalog(
+  providers: AsrProviderInfo[],
+  currentProvider: AsrProviderType | null,
+  currentModelId: string | null,
+): Promise<MeetingRouteCatalog> {
+  const routes = buildAsrRouteCatalog(providers, "prefer_local");
+  const checked = new Map<string, MeetingRouteCatalog[number]>();
+  const checkRoute = async (route: MeetingRouteCatalog[number]) => {
+    const prior = checked.get(route.routeId);
+    if (prior) return prior;
+    const provider = providers.find((item) => item.providerType === route.providerType);
+    let readiness = route.readiness;
+    if (provider && provider.inferenceEnabled && route.hosting === "local") {
+      if (provider.selectedModelId === route.modelId) {
+        if (provider.runtimeStatus === "missing_model") readiness = "needs_download";
+      } else {
+        const diagnostics = await invoke<unknown>("get_asr_runtime_diagnostics", {
+          providerType: route.providerType,
+          modelId: route.modelId,
+        });
+        if (
+          !diagnostics || typeof diagnostics !== "object" ||
+          !("providerType" in diagnostics) || diagnostics.providerType !== route.providerType ||
+          !("selectedModelId" in diagnostics) || diagnostics.selectedModelId !== route.modelId ||
+          !("runtimeStatus" in diagnostics) ||
+          (diagnostics.runtimeStatus !== "ready" && diagnostics.runtimeStatus !== "missing_model" &&
+            diagnostics.runtimeStatus !== "missing_runtime" && diagnostics.runtimeStatus !== "error")
+        ) {
+          throw new Error("Could not verify the exact meeting model. Check setup again.");
+        }
+        readiness = diagnostics.runtimeStatus === "ready"
+          ? "ready"
+          : diagnostics.runtimeStatus === "missing_model"
+            ? "needs_download"
+            : "unavailable";
+      }
+    }
+    const result = { ...route, readiness };
+    checked.set(route.routeId, result);
+    return result;
+  };
+  const current = routes.find((route) =>
+    route.providerType === currentProvider && route.modelId === currentModelId &&
+    route.laneCompatibility.meeting
+  );
+  let checkFailed = false;
+  if (current) {
+    try {
+      const configured = await checkRoute(current);
+      // A working configured route needs no replacement or unrelated probes.
+      if (configured.readiness === "ready") return [configured];
+    } catch {
+      checkFailed = true;
+    }
   }
-  const modelLabel =
-    providerInfo?.modelOptions.find((option) => option.id === modelId)?.label ?? modelId;
-  return `${providerLabel} · ${modelLabel}`;
+  let candidates = routes;
+  while (candidates.length > 0) {
+    const recommendation = getRecommendedLaneRoute(
+      candidates.map((route) => checked.get(route.routeId) ?? route),
+      "meeting",
+      "prefer_local",
+    );
+    if (!recommendation) break;
+    try {
+      const verified = await checkRoute(recommendation);
+      if (verified.readiness === "ready") return [verified];
+      if (verified.readiness === "needs_download") {
+        // Rerank after correcting provider-wide readiness for this exact model.
+        const next = getRecommendedLaneRoute(
+          candidates.map((route) => checked.get(route.routeId) ?? route),
+          "meeting",
+          "prefer_local",
+        );
+        if (next?.routeId === verified.routeId) return [verified];
+        continue;
+      }
+    } catch {
+      checkFailed = true;
+    }
+    candidates = candidates.filter((route) => route.routeId !== recommendation.routeId);
+  }
+  if (checkFailed) throw new Error("Could not verify a meeting model. Check setup again.");
+  return [];
 }
 
 function isMeetingRouteReady(
   providerType: AsrProviderType | null,
   modelId: string | null,
-  providers: AsrProviderInfo[]
+  routes: MeetingRouteCatalog,
 ) {
-  if (!providerType || !modelId) {
-    return false;
-  }
-  return buildAsrRouteCatalog(providers, "prefer_local").some(
-    (route) =>
-      route.providerType === providerType &&
-      route.modelId === modelId &&
-      route.laneCompatibility.meeting &&
-      route.readiness === "ready"
+  return routes.some((route) =>
+    route.providerType === providerType &&
+    route.modelId === modelId &&
+    route.laneCompatibility.meeting &&
+    route.readiness === "ready"
   );
 }
 
-function getRecommendedMeetingRoute(providers: AsrProviderInfo[]) {
+type MeetingRecommendedRoute = {
+  providerType: AsrProviderType;
+  modelId: string;
+  label: string;
+  /** False for a model the reader picked in place of the recommended one. */
+  recommended: boolean;
+  /** False when the model is already on this Mac and only needs choosing. */
+  needsDownload: boolean;
+  sizeMib: number | null;
+  /**
+   * The same model the dictation lane names (GGUF Parakeet on a new Apple
+   * Silicon install), so choosing it for meetings costs no second download.
+   */
+  sameAsDictation: boolean;
+};
+
+function getRecommendedMeetingRoute(
+  routes: MeetingRouteCatalog,
+  dictationRoute: { providerType: string | null; modelId: string | null },
+): MeetingRecommendedRoute | null {
   const recommended = getRecommendedLaneRoute(
-    buildAsrRouteCatalog(providers, "prefer_local"),
+    routes,
     "meeting",
     "prefer_local",
   );
@@ -312,8 +657,28 @@ function getRecommendedMeetingRoute(providers: AsrProviderInfo[]) {
   return {
     providerType: recommended.providerType,
     modelId: recommended.modelId,
+    label: recommended.label,
+    recommended: true,
+    needsDownload: recommended.readiness !== "ready",
+    sizeMib:
+      recommended.capability?.sizeMib ??
+      getAsrModelCapability(recommended.providerType, recommended.modelId)?.sizeMib ??
+      null,
+    sameAsDictation:
+      recommended.providerType === dictationRoute.providerType &&
+      recommended.modelId === dictationRoute.modelId,
   };
 }
+
+/**
+ * What the system-audio test found, in the reader's words. The sidecar's own
+ * sentence (which names callbacks and routes) goes to the Details list.
+ */
+type SystemAudioTestOutcome = {
+  outcome: "passed" | "failed";
+  message: string;
+  detail: string | null;
+};
 
 export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [step, setStep] = useState<Step>(
@@ -324,12 +689,22 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         : "permissions"
   );
 
+  // The steps the reader came through, newest last, so Back returns to the
+  // step they actually saw (Ready can be reached straight from the shortcut
+  // step when meetings are skipped).
+  const [stepHistory, setStepHistory] = useState<Step[]>([]);
+  const goToStep = (next: Step) => {
+    setStepHistory((history) => [...history, step]);
+    setStep(next);
+  };
+
   // This wizard is a real modal: give it dialog semantics and trap focus
   // inside it so keyboard users can't Tab into the obscured app behind it.
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const stepHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const stepBodyRef = useRef<HTMLDivElement | null>(null);
   const titleId = useId();
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
   // The model download can run for minutes, and the wizard unmounts the moment
   // onboarding completes. Anything that resumes after an `await` has to check
@@ -343,17 +718,9 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     };
   }, []);
 
-  useEffect(() => {
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    const node = dialogRef.current;
-    const firstFocusable = node?.querySelector<HTMLElement>(
-      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-    );
-    (firstFocusable ?? node)?.focus();
-
-    return () => {
-      previouslyFocused?.focus();
-    };
+  useLayoutEffect(() => {
+    previouslyFocusedRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement : null;
   }, []);
 
   const trapDialogFocus = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
@@ -368,13 +735,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       node.querySelectorAll<HTMLElement>(
         'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
       )
-    );
+    ).filter((element) => element.tabIndex >= 0);
     if (focusables.length === 0) {
       return;
     }
     const first = focusables[0];
     const last = focusables[focusables.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
+    const activeElement = document.activeElement;
+    const activeIsTabbable = focusables.some((element) => element === activeElement);
+    if (event.shiftKey && (activeElement === first || !activeIsTabbable)) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && document.activeElement === last) {
@@ -404,10 +773,95 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [modelSelectionHydration, setModelSelectionHydration] = useState<
     "loading" | "ready" | "error"
   >("loading");
-  // Start on the fresh-install default, then keep model actions gated until
-  // persisted settings have had a chance to restore an existing selection.
-  const [selectedModelId, setSelectedModelId] = useState("parakeet-tdt-0.6b-v3");
-  const selectedModelOption = powerModelOption(selectedModelId);
+  const [modelHydrationAttempt, setModelHydrationAttempt] = useState(0);
+  // Nothing is selected until persisted settings and the provider list have
+  // loaded: model actions stay gated on `modelSelectionHydration` until then.
+  const [speechChoices, setSpeechChoices] = useState<SpeechChoice[]>([]);
+  const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
+  const [preservedDictationRoute, setPreservedDictationRoute] =
+    useState<PreservedDictationRoute | null>(null);
+  // The configured dictation model was ONNX Parakeet on a Mac that runs the
+  // GGUF build: the step then says the download replaces the same model.
+  const [upgradingFromOnnxParakeet, setUpgradingFromOnnxParakeet] = useState(false);
+  const [savedModelUnavailable, setSavedModelUnavailable] = useState(false);
+  // The meetings model offered beside a dictation-only choice, on the speech
+  // step itself, so the reader sees there and then that meetings need one.
+  const [meetingChoices, setMeetingChoices] = useState<SpeechChoice[]>([]);
+  const [availableRouteIds, setAvailableRouteIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [configuredMeeting, setConfiguredMeeting] = useState<ConfiguredMeeting | null>(null);
+  // The reader's pick in that picker; null follows `defaultMeetingChoice`.
+  const [pairedMeetingPick, setPairedMeetingPick] = useState<string | null>(null);
+  const [pairedMeetingState, setPairedMeetingState] = useState<
+    "idle" | "downloading" | "done" | "error"
+  >("idle");
+  const [pairedMeetingError, setPairedMeetingError] = useState<string | null>(null);
+  // The meetings model the speech step last saved, so Continue after a
+  // retry or a step back does not save or download it twice.
+  const [pairedMeetingSaved, setPairedMeetingSaved] = useState<string | null>(null);
+  const routeSummaryFor = useCallback(
+    (routeId: string | null): DictationRouteSummary | null => {
+      if (routeId === null) return null;
+      const choice = speechChoices.find((candidate) => candidate.route.routeId === routeId);
+      if (choice) return summarizeChoice(choice);
+      return preservedDictationRoute?.routeId === routeId
+        ? { ...preservedDictationRoute, sizeMib: null }
+        : null;
+    },
+    [preservedDictationRoute, speechChoices],
+  );
+  const selectedRoute = routeSummaryFor(selectedRouteId);
+
+  // --- Meetings, decided on the speech step ---------------------------------
+  // A model that covers both needs nothing more. A dictation-only model gets
+  // a meetings picker right under the list, defaulting to a meetings model
+  // already on this Mac or else the recommended one, with "Set up meetings
+  // later" beside them. Nothing downloads until the primary button is pressed.
+  const defaultPairedMeeting = useMemo(
+    () =>
+      defaultMeetingChoice(
+        meetingChoices,
+        (route) => availableRouteIds.has(route.routeId),
+        configuredMeeting?.routeId ?? null,
+      ),
+    [availableRouteIds, configuredMeeting, meetingChoices],
+  );
+  const offerPairedMeeting =
+    mode === "full" &&
+    selectedRoute !== null &&
+    !selectedRoute.meetingCapable &&
+    meetingChoices.length > 0;
+  const pairedMeetingValue =
+    pairedMeetingPick ?? defaultPairedMeeting?.route.routeId ?? MEETINGS_LATER;
+  const pairedMeetingChoice =
+    meetingChoices.find((choice) => choice.route.routeId === pairedMeetingValue) ?? null;
+  const pairedMeetingPending =
+    offerPairedMeeting &&
+    pairedMeetingChoice !== null &&
+    pairedMeetingSaved !== pairedMeetingChoice.route.routeId;
+  const pairedMeetingDownloadMib =
+    pairedMeetingPending && pairedMeetingChoice && !availableRouteIds.has(pairedMeetingChoice.route.routeId)
+      ? pairedMeetingChoice.sizeMib
+      : undefined;
+
+  /**
+   * Whether meetings move to the dictation model being downloaded: yes when
+   * it can transcribe meetings, unless meetings already use a different
+   * model that works on this Mac (that choice is kept).
+   */
+  const meetingsFollowDictation = useCallback(
+    (route: DictationRouteSummary | null) =>
+      route !== null &&
+      route.meetingCapable &&
+      !(
+        configuredMeeting !== null &&
+        availableRouteIds.has(configuredMeeting.routeId) &&
+        configuredMeeting.routeId !== route.routeId &&
+        configuredMeeting.canonicalRouteId !== route.routeId
+      ),
+    [availableRouteIds, configuredMeeting],
+  );
   const [downloadPercent, setDownloadPercent] = useState<number | null>(null);
   const downloadingProviderTypeRef = useRef<AsrProviderType | null>(null);
   const [meetingModelState, setMeetingModelState] = useState<
@@ -433,6 +887,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [handsFreeConfigured, setHandsFreeConfigured] = useState(false);
   // Absent means on, as in Settings.
   const [tapToLock, setTapToLock] = useState(true);
+  const [muteMediaWhileDictating, setMuteMediaWhileDictating] = useState(false);
+  const [doubleTapToLock, setDoubleTapToLock] = useState(false);
   // Hold-to-talk needs the native key helper to see the key go up. null is
   // "not checked", which never hides the option.
   const [holdToTalkAvailable, setHoldToTalkAvailable] = useState<boolean | null>(null);
@@ -441,7 +897,17 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const [micHeard, setMicHeard] = useState<{ deviceName: string | null } | null>(null);
   const [scratchState, setScratchState] =
     useState<ScratchDictationState>("idle");
+  const scratchSessionRef = useRef<{
+    sessionId: number | null;
+    terminal: "complete" | "error" | null;
+    stopPending: boolean;
+  } | null>(null);
   const [scratchText, setScratchText] = useState("");
+  // The model a practice dictation was refused memory for, while the reader
+  // is back on the model step choosing what to do about it. Continue then
+  // needs a different model or an explicit retry of this one.
+  const [memoryRefusedRouteId, setMemoryRefusedRouteId] = useState<string | null>(null);
+  const [scratchMemoryRefused, setScratchMemoryRefused] = useState(false);
   const [scratchError, setScratchError] = useState<string | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -451,27 +917,47 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   // Meeting notes: which route writes them, and whether the local one answers.
   const [aiNotesChoice, setAiNotesChoice] = useState<AiNotesChoice>("ollama");
+  const [notesDownloadStatus, setNotesDownloadStatus] = useState<NativeTextModelStatus | null>(null);
+  const [notesStatusFailed, setNotesStatusFailed] = useState(false);
   const [aiNotesProvider, setAiNotesProvider] = useState<string>("ollama");
   const [localAiReady, setLocalAiReady] = useState<boolean | null>(null);
+  const [localAiMessage, setLocalAiMessage] = useState<string | null>(null);
+  const [localAiNeedsSetup, setLocalAiNeedsSetup] = useState(false);
   const [localAiChecking, setLocalAiChecking] = useState(false);
+  const localAiProbeIdRef = useRef(0);
 
   const [meetingAudioStorageMode, setMeetingAudioStorageMode] = useState<"always" | "transcript_only">("always");
-  const [meetingRetentionPreset, setMeetingRetentionPreset] = useState<"1m" | "2m" | "3m" | "custom" | "never">("never");
+  const [meetingRetentionPreset, setMeetingRetentionPreset] = useState<"1w" | "1m" | "2m" | "3m" | "custom" | "never">("3m");
   const [meetingRetentionCustomMonths, setMeetingRetentionCustomMonths] = useState(1);
   const [meetingRetentionDeleteMode, setMeetingRetentionDeleteMode] = useState<"audio_only" | "audio_and_transcript">("audio_only");
   const [meetingSetupLoading, setMeetingSetupLoading] = useState(false);
-  const [meetingRouteSummary, setMeetingRouteSummary] = useState("Checking meeting route…");
+  // The reader chose "Skip meetings": Ready says so plainly instead of
+  // reporting a missing meeting model as a fault.
+  const [meetingsSkipped, setMeetingsSkipped] = useState(false);
+  const [meetingSetupCheckFailed, setMeetingSetupCheckFailed] = useState(false);
+  const [meetingRouteSummary, setMeetingRouteSummary] = useState("Checking the meeting model…");
   const [meetingRouteReady, setMeetingRouteReady] = useState<boolean | null>(null);
   const [meetingRouteError, setMeetingRouteError] = useState<string | null>(null);
   const [meetingSystemAudioCapability, setMeetingSystemAudioCapability] =
     useState<SystemAudioCapability | null>(null);
   const [systemAudioTestLoading, setSystemAudioTestLoading] = useState(false);
-  const [systemAudioTestStatus, setSystemAudioTestStatus] = useState<string | null>(null);
+  const [systemAudioTestResult, setSystemAudioTestResult] =
+    useState<SystemAudioTestOutcome | null>(null);
   const [meetingVerificationDetails, setMeetingVerificationDetails] = useState<string[]>([]);
-  const [meetingRecommendedRoute, setMeetingRecommendedRoute] = useState<{
-    providerType: AsrProviderType;
-    modelId: string;
-  } | null>(null);
+  const [meetingRecommendedRoute, setMeetingRecommendedRoute] =
+    useState<MeetingRecommendedRoute | null>(null);
+  // A meetings model the reader picked on the meeting step; null keeps what
+  // settings name (or, when that does not work, the recommended model).
+  const [meetingStepPick, setMeetingStepPick] = useState<string | null>(null);
+  // The speaker model, offered in the same explicit download as the meeting
+  // speech model: one click covers both, and skipping meetings downloads
+  // neither. Meetings themselves never download it.
+  const [speakerModelPlan, setSpeakerModelPlan] = useState<DiarizationModelPlan | null>(null);
+  const [speakerSeparationOn, setSpeakerSeparationOn] = useState(true);
+  const [speakerModelState, setSpeakerModelState] = useState<
+    "idle" | "downloading" | "done" | "error"
+  >("idle");
+  const [speakerModelError, setSpeakerModelError] = useState<string | null>(null);
 
   const steps = useMemo(() => {
     if (mode === "meetings") {
@@ -503,14 +989,14 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   // A new step starts at the top of the scrolling body, and focus moves to
   // its heading without scrolling anything: letting focus() scroll pushed the
   // heading to the top edge and cut off the label above it.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (stepBodyRef.current) {
       stepBodyRef.current.scrollTop = 0;
     }
-    const frame = requestAnimationFrame(() => {
+    // Initial focus belongs to the modal's mounted focus scope.
+    if (dialogRef.current?.contains(document.activeElement)) {
       stepHeadingRef.current?.focus({ preventScroll: true });
-    });
-    return () => cancelAnimationFrame(frame);
+    }
   }, [step]);
 
   useEffect(() => {
@@ -518,8 +1004,13 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     void Promise.all([
       getSettings(),
       getAsrProviders().catch(() => null),
+      // Which models are on this Mac, per model: the provider list only
+      // knows about the one model each provider points at. Unknown (a failed
+      // read) counts nothing as present, so the picker may name a download
+      // that turns out to be unnecessary, never the reverse.
+      listDownloadedModels().catch(() => null),
     ])
-      .then(([settings, providers]) => {
+      .then(([settings, providers, downloadedFiles]) => {
         if (!mounted) {
           return;
         }
@@ -531,12 +1022,14 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             : "always"
         );
         setMeetingRetentionPreset(
-          settings.transcription.meetingRetentionPreset === "1m" ||
+          settings.transcription.meetingRetentionPreset === "1w" ||
+            settings.transcription.meetingRetentionPreset === "1m" ||
             settings.transcription.meetingRetentionPreset === "2m" ||
             settings.transcription.meetingRetentionPreset === "3m" ||
-            settings.transcription.meetingRetentionPreset === "custom"
+            settings.transcription.meetingRetentionPreset === "custom" ||
+            settings.transcription.meetingRetentionPreset === "never"
             ? settings.transcription.meetingRetentionPreset
-            : "never"
+            : "3m"
         );
         setMeetingRetentionCustomMonths(
           Math.max(1, settings.transcription.meetingRetentionCustomMonths ?? 1)
@@ -555,50 +1048,114 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         setAiNotesChoice(
           readAiNotesOptOut()
             ? "none"
-            : isRemoteAnalysisProvider(configuredNotesProvider)
-              ? "byok"
-              : "ollama",
+            : configuredNotesProvider === "native_text"
+              ? "native_text"
+              : isRemoteAnalysisProvider(configuredNotesProvider)
+                ? "byok"
+                : "ollama",
         );
-        initialDictationProviderRef.current = settings.transcription.dictationProvider ?? null;
-        initialDictationModelIdRef.current =
-          settings.transcription.dictationModelId ??
-          settings.transcription.selectedModelId ??
-          null;
-        if (settings.transcription.dictationProvider === "moonshine") {
-          setSelectedModelId("moonshine-base");
-        } else if (settings.transcription.dictationProvider === "parakeet") {
-          setSelectedModelId("parakeet-tdt-0.6b-v3");
-        } else if (settings.transcription.dictationProvider === "distil_whisper") {
-          setSelectedModelId("distil-large-v3.5");
-        } else {
-          // Whisper and any unrecognized or legacy value fall back to the fast
-          // local default, which is the only Whisper option this step offers.
-          setSelectedModelId("base.en");
-        }
+        const sharedSelection = settings.transcription.useSharedAsrSelection ?? true;
         const configuredProvider = (
-          settings.transcription.dictationProvider ??
-          settings.transcription.defaultProvider
+          sharedSelection
+            ? settings.transcription.defaultProvider
+            : settings.transcription.dictationProvider ?? settings.transcription.defaultProvider
         ) as AsrProviderType | undefined;
         const configuredModelId =
-          settings.transcription.dictationModelId ??
-          settings.transcription.selectedModelId ??
+          (sharedSelection
+            ? settings.transcription.selectedModelId
+            : settings.transcription.dictationModelId ?? settings.transcription.selectedModelId) ??
           null;
-        const isWizardModel = POWER_MODEL_OPTIONS.some(
-          (option) =>
-            option.providerType === configuredProvider &&
-            option.id === configuredModelId
+        initialDictationProviderRef.current = configuredProvider ?? null;
+        initialDictationModelIdRef.current = configuredModelId;
+        // A route saved without a model id runs the provider's own model.
+        const configuredRouteModelId =
+          configuredModelId ??
+          providers?.find((provider) => provider.providerType === configuredProvider)
+            ?.selectedModelId ??
+          null;
+
+        const routes = providers ? buildAsrRouteCatalog(providers, "prefer_local") : [];
+        // A model that needs a permission first (Apple Speech before macOS
+        // allows it) is set up in Settings, not offered here.
+        const choices = speechChoicesForLane(routes, "dictation").filter(
+          (choice) => choice.route.selectable,
         );
-        const configuredProviderInfo = providers?.find(
-          (provider) =>
-            provider.providerType === configuredProvider &&
-            provider.selectedModelId === configuredModelId
-        );
+        setSpeechChoices(choices);
+        const meetingPicker = readMeetingPicker(settings, providers ?? [], downloadedFiles);
+        setAvailableRouteIds(meetingPicker.availableRouteIds);
+        setConfiguredMeeting(meetingPicker.configured);
+        setMeetingChoices(meetingPicker.choices);
+        const recommendedChoice =
+          choices.find((choice) => choice.recommended) ?? choices[0] ?? null;
+        const configuredRoute =
+          routes.find(
+            (route) =>
+              route.providerType === configuredProvider &&
+              route.modelId === configuredRouteModelId,
+          ) ?? null;
+        // ONNX Parakeet where the GGUF build can run reads as Parakeet v3,
+        // the recommended choice; it is never listed on its own.
+        const shownRoute = canonicalSpeechRoute(routes, configuredRoute);
+        const configuredChoice = shownRoute
+          ? choices.find((choice) => choice.route.routeId === shownRoute.routeId)
+          : undefined;
+        const readyLocalRoute =
+          configuredRoute &&
+          configuredRoute.hosting !== "cloud" &&
+          configuredRoute.laneCompatibility.dictation &&
+          configuredRoute.readiness === "ready" &&
+          isRouteReady(providers ?? [], configuredRoute)
+            ? configuredRoute
+            : null;
+        let initialRouteId: string | null = null;
+        if (!modelSelectionChangedRef.current) {
+          setUpgradingFromOnnxParakeet(
+            configuredRoute?.superseded === true && isRouteReady(providers ?? [], configuredRoute),
+          );
+          // ONNX Parakeet is what every older settings file names by default
+          // (serde fills it in), so it is not a choice anyone made: the step
+          // opens on the recommended model, which on a Mac that runs the GGUF
+          // build is the same Parakeet v3 in its faster version.
+          if (
+            configuredChoice &&
+            !isOnnxParakeetRoute(configuredProvider, configuredRouteModelId)
+          ) {
+            // A model someone chose, and one this step lists: keep it.
+            setPreservedDictationRoute(null);
+            initialRouteId = configuredChoice.route.routeId;
+          } else if (readyLocalRoute && !configuredChoice) {
+            // A working model this step doesn't list (an experimental one):
+            // shown as the current model, never silently replaced.
+            setPreservedDictationRoute({
+              routeId: readyLocalRoute.routeId,
+              providerType: readyLocalRoute.providerType,
+              modelId: readyLocalRoute.modelId,
+              label: readyLocalRoute.label,
+              meetingCapable: readyLocalRoute.laneCompatibility.meeting,
+            });
+            initialRouteId = readyLocalRoute.routeId;
+          } else {
+            // Nothing configured, or an old default nobody picked (ONNX
+            // Parakeet, Whisper Base English): the recommended model.
+            setPreservedDictationRoute(null);
+            initialRouteId = recommendedChoice?.route.routeId ?? null;
+          }
+          setSelectedRouteId(initialRouteId);
+        }
+        const configuredUnavailable = providers?.some((provider) =>
+          provider.providerType === configuredProvider && provider.inferenceEnabled === false
+        ) ?? false;
+        setSavedModelUnavailable(configuredUnavailable);
+        if (configuredUnavailable && !modelSelectionChangedRef.current) {
+          setModelState("idle");
+        }
+        const initialRoute = routes.find((route) => route.routeId === initialRouteId);
         if (
           !modelInteractionStartedRef.current &&
-          isWizardModel &&
-          configuredProviderInfo?.runtimeStatus === "ready" &&
-          normalizeDownloadStatus(configuredProviderInfo.downloadStatus).kind ===
-            "downloaded"
+          !modelSelectionChangedRef.current &&
+          !configuredUnavailable &&
+          initialRoute &&
+          isRouteReady(providers ?? [], initialRoute)
         ) {
           setModelState("done");
         }
@@ -611,6 +1168,8 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         );
         setHandsFreeConfigured(Boolean(settings.transcription.dictationHandsFreeEnabled));
         setTapToLock(settings.transcription.dictationTapToLock !== false);
+        setDoubleTapToLock(settings.transcription.dictationDoubleTapToLock === true);
+        setMuteMediaWhileDictating(settings.ui.muteMediaWhileDictating === true);
         setModelSelectionHydration(providers ? "ready" : "error");
       })
       .catch(() => {
@@ -625,7 +1184,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [modelHydrationAttempt]);
 
   useEffect(() => {
     let mounted = true;
@@ -672,7 +1231,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   }, []);
 
   const permissionStepVisible =
-    step === "permissions" || step === "try-dictation" || step === "use-everywhere";
+    step === "permissions" ||
+    step === "try-dictation" ||
+    step === "use-everywhere" ||
+    step === "meeting-setup" ||
+    step === "ready";
 
   useEffect(() => {
     if (permissionStepVisible) {
@@ -743,39 +1306,60 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
   const refreshMeetingSetup = useCallback(async () => {
     setMeetingSetupLoading(true);
     try {
-      const [settings, providers, systemAudioCapability, verification] = await Promise.all([
+      const [settings, providers, systemAudioCapability, verification, speakerPlan, downloadedFiles] = await Promise.all([
         getSettings(),
         getAsrProviders(),
         getSystemAudioCapability().catch(() => null),
         verifyMeetingSetup().catch(() => null as SetupVerificationResult | null),
+        loadSpeakerModelPlan(),
+        listDownloadedModels().catch(() => null),
       ]);
+      setSpeakerModelPlan(speakerPlan);
+      const meetingPicker = readMeetingPicker(settings, providers, downloadedFiles);
+      setAvailableRouteIds(meetingPicker.availableRouteIds);
+      setConfiguredMeeting(meetingPicker.configured);
+      setMeetingChoices(meetingPicker.choices);
+      setSpeakerSeparationOn(settings.transcription.enableDiarization !== false);
 
       const currentProvider = (settings.transcription.meetingProvider as AsrProviderType | undefined) ?? null;
       const currentModelId = settings.transcription.meetingModelId ?? null;
+      const meetingRoutes = await getMeetingRouteCatalog(providers, currentProvider, currentModelId);
       const routeReady = isMeetingRouteReady(
         currentProvider,
         currentModelId,
-        providers
+        meetingRoutes
       );
 
       setMeetingRouteSummary(summarizeMeetingRoute(currentProvider, currentModelId, providers));
+      setMeetingSetupCheckFailed(false);
       setMeetingRouteReady(routeReady);
       setMeetingVerificationDetails(verification?.details ?? []);
       setMeetingRouteError(
         routeReady
           ? null
           : verification?.summary ??
-              "Meetings need a meeting transcription model. Download it below, or choose one later in Models."
+              "Meetings need a speech model. Download it below, or choose one later in Settings > Models."
       );
       setMeetingSystemAudioCapability(systemAudioCapability);
-      setMeetingRecommendedRoute(getRecommendedMeetingRoute(providers));
+      const sharedSelection = settings.transcription.useSharedAsrSelection ?? true;
+      setMeetingRecommendedRoute(
+        getRecommendedMeetingRoute(meetingRoutes, {
+          providerType: sharedSelection
+            ? settings.transcription.defaultProvider ?? null
+            : settings.transcription.dictationProvider ?? null,
+          modelId: sharedSelection
+            ? settings.transcription.selectedModelId ?? null
+            : settings.transcription.dictationModelId ?? null,
+        }),
+      );
       return {
         routeReady,
         systemAudioAvailable: systemAudioCapability?.backend !== "none",
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setMeetingRouteSummary("Meeting setup check failed");
+      const message = userFacingErrorMessage(error, "Could not verify the meeting setup right now.");
+      setMeetingRouteSummary("The meeting setup check failed");
+      setMeetingSetupCheckFailed(true);
       setMeetingRouteReady(false);
       setMeetingRouteError(message || "Could not verify the meeting setup right now.");
       setMeetingVerificationDetails([]);
@@ -789,39 +1373,76 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
   const testMeetingSystemAudio = useCallback(async () => {
     setSystemAudioTestLoading(true);
-    setSystemAudioTestStatus(
-      "Waiting for macOS and checking the current system-audio signal…"
-    );
+    setSystemAudioTestResult(null);
     try {
       const result = await testSystemAudioCapture();
-      setMeetingSystemAudioCapability(result.capability);
-      if (result.capability.ready) {
-        setSystemAudioTestStatus(
-          result.verificationMethod === "external_audio"
-            ? `Verified non-silent system audio via ${result.capability.routeDevice ?? "the current external-audio route"}.`
-            : `Verified ${Math.round(result.expectedToneHz)} Hz system audio via ${result.capability.routeDevice ?? "the current route"}.`
-        );
-      } else {
-        setSystemAudioTestStatus(
-          result.capability.actionableReason ??
-            "System audio could not be verified. Check the current route and macOS privacy settings."
-        );
+      if (!mountedRef.current) {
+        return;
       }
+      setMeetingSystemAudioCapability(result.capability);
+      const device = result.capability.routeDevice;
       if (result.capability.ready) {
+        setSystemAudioTestResult({
+          outcome: "passed",
+          message:
+            result.verificationMethod === "external_audio"
+              ? `Heard sound through ${device ?? "that device"}.`
+              : result.capability.backend === "core_audio_process_tap"
+                ? "Working. Records all audio playing on this Mac, including other apps and notification sounds, with or without headphones."
+                : `Heard the test tone${device ? ` through ${device}` : ""}.`,
+          detail:
+            result.verificationMethod === "external_audio"
+              ? "Verified non-silent external audio."
+              : `Verified a ${Math.round(result.expectedToneHz)} Hz tone.`,
+        });
         await refreshMeetingSetup();
+      } else {
+        setSystemAudioTestResult({
+          outcome: "failed",
+          message:
+            result.capability.backend === "virtual_loopback"
+              ? "Plainsong did not hear anything through that device. Play some audio through it, then check again."
+              : describeMeetingAudio(result.capability).sentence,
+          detail: result.capability.actionableReason ?? result.capability.reason ?? null,
+        });
       }
     } catch (error) {
-      setSystemAudioTestStatus(error instanceof Error ? error.message : String(error));
+      if (!mountedRef.current) {
+        return;
+      }
+      setSystemAudioTestResult({
+        outcome: "failed",
+        message: "The test could not run. Try again in a moment.",
+        detail: userFacingErrorMessage(error, "Couldn't check meeting audio. Try again."),
+      });
     } finally {
-      setSystemAudioTestLoading(false);
+      if (mountedRef.current) {
+        setSystemAudioTestLoading(false);
+      }
     }
   }, [refreshMeetingSetup]);
 
   useEffect(() => {
     if (step === "meeting-setup") {
       void refreshMeetingSetup();
+      // The meeting summary shows the microphone too; in meetings-only setup
+      // nothing earlier has read it.
+      void refreshPerms();
     }
-  }, [refreshMeetingSetup, step]);
+  }, [refreshMeetingSetup, refreshPerms, step]);
+
+  // The built-in notes model's size and whether this Mac can run it: the
+  // meetings step counts it in the total, and the notes step offers it.
+  useEffect(() => {
+    if (step !== "meeting-setup" && step !== "ai-notes") return;
+    let active = true;
+    void getNativeTextModelStatus().then((status) => {
+      if (active) { setNotesDownloadStatus(status); setNotesStatusFailed(false); }
+    }).catch(() => {
+      if (active) setNotesStatusFailed(true);
+    });
+    return () => { active = false; };
+  }, [step]);
 
   const requestPermissionsNow = useCallback(async () => {
     setPermissionRequestBusy(true);
@@ -832,7 +1453,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       setPerms(diagnostics);
       setPermissionRequestStatus("Asked macOS for permission and checked again.");
     } catch (error) {
-      setPermissionRequestError(error instanceof Error ? error.message : String(error));
+      setPermissionRequestError(userFacingErrorMessage(error, "Couldn't check permissions. Try again."));
     } finally {
       setPermissionRequestBusy(false);
     }
@@ -860,7 +1481,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
           `Opened macOS ${gate.settingsLabel} settings. Plainsong re-checks when you come back.`,
         );
       } catch (error) {
-        setPermissionRequestError(error instanceof Error ? error.message : String(error));
+        setPermissionRequestError(userFacingErrorMessage(error, "Couldn't open System Settings. Open it from the Apple menu and try again."));
       }
     },
     []
@@ -891,51 +1512,65 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       await openInstalledPlainsongApp();
       setPermissionRequestStatus("Opened the installed Plainsong app from /Applications.");
     } catch (error) {
-      setPermissionRequestError(error instanceof Error ? error.message : String(error));
+      setPermissionRequestError(userFacingErrorMessage(error, "Couldn't open the installed app. Open Plainsong from Applications."));
     }
   }, []);
 
   const startScratchDictation = useCallback(async () => {
+    if (scratchSessionRef.current && !scratchSessionRef.current.terminal) return;
+    const owner: NonNullable<typeof scratchSessionRef.current> = {
+      sessionId: null, terminal: null, stopPending: false,
+    };
+    scratchSessionRef.current = owner;
     setScratchState("starting");
     setScratchText("");
-    setScratchError(null);
     try {
       await startDictation({
-        saveToInbox: true,
+        saveToInbox: false,
         projectId: "inbox",
         profile: "normal_speed",
         contextSource: "none",
         livePreviewEnabled: true,
         deliveryMode: "preview",
       });
-      if (mountedRef.current) {
+      if (mountedRef.current && scratchSessionRef.current === owner
+        && !owner.terminal && !owner.stopPending) {
         setScratchState("listening");
       }
     } catch (error) {
-      if (!mountedRef.current) {
+      if (!mountedRef.current || scratchSessionRef.current !== owner || owner.terminal) {
         return;
       }
+      owner.terminal = "error";
       setScratchState("error");
-      setScratchError(error instanceof Error ? error.message : String(error));
+      setScratchMemoryRefused(isDictationMemoryAdmissionRefusal(error instanceof Error ? error.message : String(error)));
+      setScratchError(sanitizeUserFacingDictationMessage(error instanceof Error ? error.message : String(error), { phase: "error", inSetup: true }));
     }
   }, []);
 
   const finishScratchDictation = useCallback(async () => {
+    const owner = scratchSessionRef.current;
+    if (!owner || owner.terminal || owner.stopPending) return;
+    owner.stopPending = true;
     setScratchState("transcribing");
-    setScratchError(null);
     try {
       const text = (await stopDictation()).trim();
-      if (!mountedRef.current) {
+      if (!mountedRef.current || scratchSessionRef.current !== owner || owner.terminal) {
         return;
       }
+      owner.terminal = "complete";
       setScratchText(text);
       setScratchState("complete");
+      setScratchError(null);
+      setScratchMemoryRefused(false);
     } catch (error) {
-      if (!mountedRef.current) {
+      if (!mountedRef.current || scratchSessionRef.current !== owner || owner.terminal) {
         return;
       }
+      owner.terminal = "error";
       setScratchState("error");
-      setScratchError(error instanceof Error ? error.message : String(error));
+      setScratchMemoryRefused(isDictationMemoryAdmissionRefusal(error instanceof Error ? error.message : String(error)));
+      setScratchError(sanitizeUserFacingDictationMessage(error instanceof Error ? error.message : String(error), { phase: "error", inSetup: true }));
     }
   }, []);
 
@@ -966,35 +1601,118 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     };
   }, []);
 
-  const startModelDownload = useCallback(async (modelId?: string) => {
+  useEffect(() => {
+    let disposed = false;
+    const unlisteners: (() => void)[] = [];
+    const retain = (unlisten: () => void) => {
+      if (disposed) unlisten();
+      else unlisteners.push(unlisten);
+    };
+    void listen<DictationStateChangedEvent>("dictation-state-changed", ({ payload }) => {
+      if (disposed) return;
+      const owner = scratchSessionRef.current;
+      if (!owner || typeof payload.sessionId !== "number"
+        || !Number.isSafeInteger(payload.sessionId) || payload.sessionId <= 0) return;
+      if (owner.sessionId === null && !owner.terminal && payload.phase === "preparing") {
+        owner.sessionId = payload.sessionId;
+      }
+      if (owner.sessionId !== payload.sessionId || owner.terminal) return;
+      switch (payload.phase) {
+        case "recording":
+          setScratchState("listening");
+          break;
+        case "stopping":
+        case "transcribing":
+        case "delivering":
+          owner.stopPending = true;
+          setScratchState("transcribing");
+          break;
+        case "done":
+          owner.terminal = "complete";
+          if (payload.preview !== undefined && payload.preview !== null) {
+            setScratchText(payload.preview.trim());
+          }
+          setScratchState("complete");
+          setScratchError(null);
+          setScratchMemoryRefused(false);
+          break;
+        case "error":
+        case "idle":
+          owner.terminal = "error";
+          setScratchMemoryRefused(isDictationMemoryAdmissionRefusal(payload.message));
+          setScratchError(sanitizeUserFacingDictationMessage(payload.message, { phase: "error", inSetup: true }) ?? (payload.phase === "idle"
+            ? "The dictation test was cancelled. You can try again or continue setup."
+            : "The dictation test failed. You can try again or continue setup."));
+          setScratchState("error");
+          break;
+      }
+    }).then(retain);
+    type PracticeTextEvent = NonNullable<ReturnType<typeof useDictationRuntime>["textReadyEvent"]>;
+    void listen<PracticeTextEvent>("dictation-text-ready", ({ payload }) => {
+      if (disposed) return;
+      const owner = scratchSessionRef.current;
+      if (!owner || owner.sessionId === null || owner.sessionId !== payload.sessionId
+        || owner.terminal === "error") return;
+      owner.terminal = "complete";
+      setScratchText(payload.text.trim());
+      setScratchState("complete");
+      setScratchError(null);
+      setScratchMemoryRefused(false);
+    }).then(retain);
+    return () => {
+      disposed = true;
+      scratchSessionRef.current = null;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, []);
+
+  const startModelDownload = useCallback(async (routeId: string | null) => {
     if (modelSelectionHydration !== "ready") {
       return false;
     }
-    const option = powerModelOption(modelId);
+    const route = routeSummaryFor(routeId);
+    if (!route) {
+      return false;
+    }
+    const { providerType, modelId: id } = route;
     modelInteractionStartedRef.current = true;
     setModelSkipped(false);
     setModelState("downloading");
     setModelError(null);
     setDownloadPercent(0);
-    downloadingProviderTypeRef.current = option.providerType;
+    downloadingProviderTypeRef.current = providerType;
     try {
-      await downloadAsrModels(option.providerType, option.id);
-      // Read settings *after* the download, never before it. save_settings is
-      // a whole-struct replace, so a snapshot taken before a multi-minute
-      // fetch would roll back everything written while it ran -- the hotkey
-      // this wizard just taught the user, the auto-request-permissions
-      // toggle, the meeting storage/retention answers, the repaired meeting
-      // route. Only the ASR fields this step actually owns are mutated on the
-      // fresh copy. It saves even if the wizard has closed meanwhile: Ready
-      // lets the reader finish while this runs, and the finished model is
-      // only any use once it is the dictation route.
-      const settings = await getSettings();
-      settings.transcription.useSharedAsrSelection = false;
-      settings.transcription.defaultProvider = option.providerType;
-      settings.transcription.selectedModelId = option.id;
-      settings.transcription.dictationProvider = option.providerType;
-      settings.transcription.dictationModelId = option.id;
-      await saveSettings(settings);
+      // Decided before the download, from what the step showed: "One
+      // download covers dictation and meetings" is what the reader agreed to.
+      const meetingsFollow = meetingsFollowDictation(route);
+      await downloadAsrModels(providerType, id);
+      // Persist only this completed download's route, even if the wizard closed.
+      await updateSettings((settings) => {
+        settings.transcription.useSharedAsrSelection = false;
+        // The shared default is the sidecar's second dictation fallback and
+        // the nearest substitute for GGUF Parakeet in meetings, so it stays
+        // where it was (ONNX Parakeet on a new install) rather than naming
+        // GGUF everywhere.
+        if (providerType !== RECOMMENDED_SPEECH_ROUTE.providerType) {
+          settings.transcription.defaultProvider = providerType;
+          settings.transcription.selectedModelId = id;
+        }
+        settings.transcription.dictationProvider = providerType;
+        settings.transcription.dictationModelId = id;
+        // A model that covers meetings takes them too, unless meetings
+        // already use another model that works here (`meetingsFollow`). A
+        // dictation-only model leaves the meeting slot to the meetings
+        // picker beside it.
+        if (meetingsFollow) {
+          settings.transcription.meetingProvider = providerType;
+          settings.transcription.meetingModelId = id;
+        }
+        // GGUF Parakeet is now on this Mac and verified, so a meeting slot
+        // still on the ONNX build of the same model moves with dictation.
+        if (isRecommendedSpeechRoute(providerType, id)) {
+          settings.transcription = withParakeetUpgrade(settings).transcription;
+        }
+      });
       if (!mountedRef.current) {
         return false;
       }
@@ -1005,12 +1723,51 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         return false;
       }
       setModelState("error");
-      setModelError(error instanceof Error ? error.message : String(error));
+      setModelError(describeModelDownloadError(error));
       return false;
     } finally {
       downloadingProviderTypeRef.current = null;
     }
-  }, [modelSelectionHydration]);
+  }, [meetingsFollowDictation, modelSelectionHydration, routeSummaryFor]);
+
+  /**
+   * Save the meetings model picked beside a dictation-only model, fetching it
+   * first when it is not on this Mac. Runs only from the step's primary
+   * button, after the dictation model, so each click downloads what the
+   * button named and nothing else.
+   */
+  const savePairedMeetingModel = useCallback(async (choice: SpeechChoice) => {
+    const { providerType, modelId, routeId } = choice.route;
+    const needsDownload = !availableRouteIds.has(routeId);
+    setPairedMeetingState("downloading");
+    setPairedMeetingError(null);
+    if (needsDownload) {
+      setMeetingDownloadPercent(0);
+      meetingDownloadingProviderTypeRef.current = providerType;
+    }
+    try {
+      if (needsDownload) {
+        await downloadAsrModels(providerType, modelId);
+      }
+      await updateSettings((settings) => setMeetingSlot(settings, providerType, modelId));
+      if (!mountedRef.current) {
+        return false;
+      }
+      setAvailableRouteIds((previous) => new Set(previous).add(routeId));
+      setPairedMeetingSaved(routeId);
+      setPairedMeetingState("done");
+      return true;
+    } catch (error) {
+      if (!mountedRef.current) {
+        return false;
+      }
+      setPairedMeetingState("error");
+      setPairedMeetingError(describeModelDownloadError(error));
+      return false;
+    } finally {
+      meetingDownloadingProviderTypeRef.current = null;
+    }
+  }, [availableRouteIds]);
 
   // Advancing past the visible model surface starts the selected fast default
   // in the background so the user can continue setting up the shortcut. The
@@ -1032,88 +1789,150 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       existingProvider === "whisper" &&
       existingModelId.length > 0 &&
       existingModelId !== "base.en";
+    // GGUF Parakeet is the Apple Silicon default, so it counts as one here.
+    const isGgufDefault =
+      existingProvider !== null &&
+      isRecommendedSpeechRoute(existingProvider as AsrProviderType, existingModelId);
     const hasExistingNonDefaultRoute =
       Boolean(existingProvider) &&
       existingProvider !== "parakeet" &&
+      !isGgufDefault &&
       (existingProvider !== "whisper" || hasCustomWhisperModel);
     if (hasExistingNonDefaultRoute && !modelSelectionChangedRef.current) {
       return;
     }
     if (modelState === "idle" || modelState === "error") {
       // Already corrected to match the actual configured/default provider
-      // by the settings-load effect above -- parakeet-tdt-0.6b-v3 for a
-      // fresh install, base.en for a pre-upgrade whisper install -- so this
+      // by the settings-load effect above -- GGUF Parakeet for a fresh Apple
+      // Silicon install, ONNX Parakeet for any other fresh install, base.en
+      // for a pre-upgrade whisper install -- so this
       // downloads whichever default route the user is really on instead of
       // assuming parakeet unconditionally.
-      void startModelDownload(selectedModelId);
+      void startModelDownload(selectedRouteId);
     }
-  }, [modelState, selectedModelId, startModelDownload]);
+  }, [modelState, selectedRouteId, startModelDownload]);
 
   const persistDictationStep = useCallback(async () => {
     setSaveBusy(true);
     setSaveError(null);
     setSaveErrorContext(null);
     try {
-      const settings = await getSettings();
-      const toggleDictation = normalizeShortcut(shortcutValue);
-      const conflictMessage = dictationShortcutConflictMessage(
-        settings.shortcuts,
-        toggleDictation
-      );
-      if (conflictMessage) {
-        throw new Error(conflictMessage);
-      }
-      settings.shortcuts.toggleDictation = toggleDictation;
-      settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
-      // The same two fields Settings writes for this choice.
-      settings.transcription.dictationPushToTalk = hotkeyMode === "hold_to_talk";
-      settings.transcription.dictationHandsFreeEnabled = hotkeyMode === "hands_free";
-      if (hotkeyMode === "hold_to_talk") {
-        settings.transcription.dictationTapToLock = tapToLock;
-      }
-      await saveSettings(settings);
+      await updateSettings((settings) => {
+        const toggleDictation = normalizeShortcut(shortcutValue);
+        const conflictMessage = dictationShortcutConflictMessage(
+          settings.shortcuts,
+          toggleDictation
+        );
+        if (conflictMessage) {
+          throw new Error(conflictMessage);
+        }
+        settings.shortcuts.toggleDictation = toggleDictation;
+        settings.transcription.dictationAutoRequestPermissions = autoRequestPermissions;
+        // The same two fields Settings writes for this choice.
+        settings.transcription.dictationPushToTalk = hotkeyMode === "hold_to_talk";
+        settings.transcription.dictationHandsFreeEnabled = hotkeyMode === "hands_free";
+        if (hotkeyMode === "hold_to_talk") {
+          settings.transcription.dictationTapToLock = tapToLock;
+          settings.transcription.dictationDoubleTapToLock = doubleTapToLock;
+        }
+        settings.ui.muteMediaWhileDictating = muteMediaWhileDictating;
+      });
       return true;
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error));
+      setSaveError(userFacingErrorMessage(error, "Couldn't save these settings. Try again."));
       setSaveErrorContext("hotkey");
       return false;
     } finally {
       setSaveBusy(false);
     }
-  }, [autoRequestPermissions, hotkeyMode, shortcutValue, tapToLock]);
+  }, [autoRequestPermissions, hotkeyMode, shortcutValue, tapToLock, doubleTapToLock, muteMediaWhileDictating]);
+
+  // --- The meetings model on the meeting step --------------------------------
+  // The step names the model meetings use and lets the reader change it. What
+  // it shows by default: the model settings name when it works, else the
+  // recommended one (which Continue then downloads). A different pick becomes
+  // the target Continue saves and, when it is not on this Mac, downloads.
+  const meetingDefaultTargetId = meetingRouteReady
+    ? configuredMeeting?.routeId ?? null
+    : meetingRecommendedRoute
+      ? routeIdFor(meetingRecommendedRoute.providerType, meetingRecommendedRoute.modelId)
+      : null;
+  const meetingPickChoice =
+    meetingStepPick !== null && meetingStepPick !== meetingDefaultTargetId
+      ? meetingChoices.find((choice) => choice.route.routeId === meetingStepPick) ?? null
+      : null;
+  const meetingTarget: MeetingRecommendedRoute | null = meetingPickChoice
+    ? {
+        providerType: meetingPickChoice.route.providerType,
+        modelId: meetingPickChoice.route.modelId,
+        label: meetingPickChoice.route.label,
+        recommended: meetingPickChoice.recommended,
+        needsDownload: !availableRouteIds.has(meetingPickChoice.route.routeId),
+        sizeMib: meetingPickChoice.sizeMib,
+        sameAsDictation: selectedRoute?.routeId === meetingPickChoice.route.routeId,
+      }
+    : meetingRecommendedRoute;
+  // A pick that differs from a working model is a change still to save.
+  const meetingTargetReady = meetingPickChoice ? false : meetingRouteReady;
+  const meetingPickerValue = meetingStepPick ?? meetingDefaultTargetId;
 
   const applyRecommendedMeetingRoute = useCallback(async () => {
-    if (!meetingRecommendedRoute) {
+    const target = meetingTarget;
+    if (!target) {
       return false;
     }
     setSaveBusy(true);
     setSaveError(null);
     setSaveErrorContext(null);
     try {
-      const settings = await getSettings();
-      settings.transcription.useSharedAsrSelection = false;
-      settings.transcription.meetingProvider = meetingRecommendedRoute.providerType;
-      settings.transcription.meetingModelId = meetingRecommendedRoute.modelId;
-      if (!settings.transcription.dictationProvider) {
-        settings.transcription.dictationProvider = settings.transcription.defaultProvider;
-      }
-      if (!settings.transcription.dictationModelId) {
-        settings.transcription.dictationModelId = settings.transcription.selectedModelId;
-      }
-      await saveSettings(settings);
+      await updateSettings((settings) => {
+        setMeetingSlot(settings, target.providerType, target.modelId);
+        if (!settings.transcription.dictationProvider) {
+          settings.transcription.dictationProvider = settings.transcription.defaultProvider;
+        }
+        if (!settings.transcription.dictationModelId) {
+          settings.transcription.dictationModelId = settings.transcription.selectedModelId;
+        }
+      });
       await refreshMeetingSetup();
       return true;
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error));
+      setSaveError(userFacingErrorMessage(error, "Couldn't save these settings. Try again."));
       setSaveErrorContext("meeting-route");
       return false;
     } finally {
       setSaveBusy(false);
     }
-  }, [meetingRecommendedRoute, refreshMeetingSetup]);
+  }, [meetingTarget, refreshMeetingSetup]);
+
+  const speakerModelNeeded =
+    speakerSeparationOn && speakerModelPlan !== null && !speakerModelPlan.selectedInstalled;
+
+  const startSpeakerModelDownload = useCallback(async () => {
+    const plan = speakerModelPlan;
+    if (!plan) return true;
+    setSpeakerModelState("downloading");
+    setSpeakerModelError(null);
+    try {
+      await downloadDiarizationModel(plan.selectedModelId);
+      const after = await loadSpeakerModelPlan();
+      if (!mountedRef.current) return false;
+      if (after) setSpeakerModelPlan(after);
+      if (after && !after.selectedInstalled) {
+        throw new Error("The download finished, but the speaker model did not pass its check.");
+      }
+      setSpeakerModelState("done");
+      return true;
+    } catch (error) {
+      if (!mountedRef.current) return false;
+      setSpeakerModelState("error");
+      setSpeakerModelError(describeModelDownloadError(error));
+      return false;
+    }
+  }, [speakerModelPlan]);
 
   const startMeetingModelDownload = useCallback(async () => {
-    const route = meetingRecommendedRoute;
+    const route = meetingTarget;
     if (!route) {
       setMeetingModelState("error");
       setMeetingModelError(
@@ -1133,7 +1952,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       if (!routeSaved) {
         setMeetingModelState("error");
         setMeetingModelError(
-          "The recommended meeting route could not be saved. Retry after resolving the settings error above."
+          "The meeting model couldn't be saved. Try again after fixing the settings error above."
         );
         return false;
       }
@@ -1162,7 +1981,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       }
       if (!afterDownload.routeReady) {
         throw new Error(
-          "The download finished, but the meeting route is still not ready. Re-check the route or choose another model in Settings."
+          "The download finished, but the meeting model still isn't ready. Check again, or choose another model in Settings."
         );
       }
 
@@ -1173,12 +1992,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         return false;
       }
       setMeetingModelState("error");
-      setMeetingModelError(error instanceof Error ? error.message : String(error));
+      setMeetingModelError(describeModelDownloadError(error));
       return false;
     } finally {
       meetingDownloadingProviderTypeRef.current = null;
     }
-  }, [applyRecommendedMeetingRoute, meetingRecommendedRoute, refreshMeetingSetup]);
+  }, [applyRecommendedMeetingRoute, meetingTarget, refreshMeetingSetup]);
 
   /**
    * Ask whether the local analysis runtime is actually answering. A probe that
@@ -1186,57 +2005,107 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
    * could not ask" are different claims and only one of them is actionable.
    */
   const checkLocalAiRuntime = useCallback(async () => {
+    const probeId = ++localAiProbeIdRef.current;
     setLocalAiChecking(true);
+    setLocalAiReady(null);
+    setLocalAiMessage(null);
+    setLocalAiNeedsSetup(false);
     try {
-      const ready = await getOllamaStatus();
-      if (mountedRef.current) {
-        setLocalAiReady(typeof ready === "boolean" ? ready : null);
+      const settings = await getSettings();
+      if (aiNotesChoice === "native_text") {
+        const facts = await probeMeetingNotesRoute(settings);
+        const readiness = resolveMeetingNotesRoute({
+          ...facts,
+          optedOut: false,
+          provider: "native_text",
+          remoteProcessingEnabled: settings.privacy.remoteProcessingEnabled,
+        });
+        if (mountedRef.current && probeId === localAiProbeIdRef.current) {
+          setLocalAiReady(
+            readiness.state === "ready" ? true : readiness.state === "unknown" ? null : false,
+          );
+          setLocalAiMessage(readiness.reason);
+        }
+        return;
+      }
+      const savedMeetingAi = settings.privacy.meetingsAi;
+      const selectedModelId =
+        savedMeetingAi?.provider === "ollama" ? savedMeetingAi.modelId : null;
+      const readiness = await probeOllamaModelReadiness(
+        selectedModelId,
+        {
+          getRuntimeStatus: getOllamaStatus,
+          listInstalledModels: listOllamaModels,
+          listCatalog: listOllamaModelCatalog,
+          remoteProcessingEnabled: settings.privacy.remoteProcessingEnabled,
+        },
+      );
+      const ready =
+        readiness.runtimeReady === true && readiness.modelReady === true
+          ? readiness.executionReady
+          : readiness.runtimeReady === false || readiness.modelReady === false
+            ? false
+            : null;
+      if (mountedRef.current && probeId === localAiProbeIdRef.current) {
+        setLocalAiReady(ready);
+        setLocalAiMessage(readiness.executionMessage);
+        setLocalAiNeedsSetup(readiness.runtimeReady === false || readiness.modelReady === false);
       }
     } catch {
-      if (mountedRef.current) {
+      if (mountedRef.current && probeId === localAiProbeIdRef.current) {
         setLocalAiReady(null);
+        setLocalAiMessage(aiNotesChoice === "native_text"
+          ? "Plainsong could not confirm the built-in text model."
+          : null);
+        setLocalAiNeedsSetup(false);
       }
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && probeId === localAiProbeIdRef.current) {
         setLocalAiChecking(false);
       }
     }
-  }, []);
+  }, [aiNotesChoice]);
 
   useEffect(() => {
-    if (step === "ai-notes") {
+    if (step === "ai-notes" && (aiNotesChoice === "ollama" || aiNotesChoice === "native_text")) {
       void checkLocalAiRuntime();
     }
-  }, [checkLocalAiRuntime, step]);
+    return () => {
+      localAiProbeIdRef.current += 1;
+    };
+  }, [aiNotesChoice, checkLocalAiRuntime, step]);
 
   const persistAiNotesStep = useCallback(async () => {
     setSaveBusy(true);
     setSaveError(null);
     setSaveErrorContext(null);
     try {
-      if (aiNotesChoice === "ollama" || aiNotesChoice === "none") {
-        const settings = await getSettings();
+      const wasOptedOut = readAiNotesOptOut();
+      await updateSettings((settings) => {
         if (aiNotesChoice === "none") {
-          // These Rust-backed settings are the authoritative gates used by
-          // post-transcription processing. The renderer-only preference below
-          // cannot prevent either transcript analysis or title generation.
+          // These backend gates control automatic analysis and title generation.
           settings.transcription.enableAutoAnalysis = false;
           settings.transcription.meetingAutoNameEnabled = false;
-          await saveSettings(settings);
-        } else if (settings.privacy.meetingsAi.provider !== "ollama") {
-          // A provider change invalidates the model id with it: a model name
-          // from OpenAI means nothing to Ollama, and null asks for the
-          // provider's own default rather than a name that cannot resolve.
-          settings.privacy.meetingsAi = { provider: "ollama", modelId: null };
-          await saveSettings(settings);
+        } else {
+          if (wasOptedOut) {
+            settings.transcription.enableAutoAnalysis = true;
+            settings.transcription.meetingAutoNameEnabled = true;
+          }
+          if (aiNotesChoice === "ollama" && settings.privacy.meetingsAi.provider !== "ollama") {
+            // A model id from another provider cannot resolve in Ollama.
+            settings.privacy.meetingsAi = { provider: "ollama", modelId: null };
+          }
+          if (aiNotesChoice === "native_text" && settings.privacy.meetingsAi.provider !== "native_text") {
+            settings.privacy.meetingsAi = { provider: "native_text", modelId: null };
+          }
         }
-      }
+      });
       // Written last so a failed settings save cannot leave the app believing
       // notes were declined when they were not.
       writeAiNotesOptOut(aiNotesChoice === "none");
       return true;
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error));
+      setSaveError(userFacingErrorMessage(error, "Couldn't save these settings. Try again."));
       setSaveErrorContext("ai-notes");
       return false;
     } finally {
@@ -1249,12 +2118,12 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     setSaveError(null);
     setSaveErrorContext(null);
     try {
-      const settings = await getSettings();
-      settings.transcription.meetingAudioStorageMode = meetingAudioStorageMode;
-      settings.transcription.meetingRetentionPreset = meetingRetentionPreset;
-      settings.transcription.meetingRetentionCustomMonths = Math.max(1, meetingRetentionCustomMonths);
-      settings.transcription.meetingRetentionDeleteMode = meetingRetentionDeleteMode;
-      await saveSettings(settings);
+      await updateSettings((settings) => {
+        settings.transcription.meetingAudioStorageMode = meetingAudioStorageMode;
+        settings.transcription.meetingRetentionPreset = meetingRetentionPreset;
+        settings.transcription.meetingRetentionCustomMonths = Math.max(1, meetingRetentionCustomMonths);
+        settings.transcription.meetingRetentionDeleteMode = meetingRetentionDeleteMode;
+      });
       // Replaces the write-only `nautilus_meeting_onboarding_complete` flag,
       // which lived in a localStorage nothing ever read back and which every
       // development build shared with the packaged app.
@@ -1265,7 +2134,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       });
       return true;
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error));
+      setSaveError(userFacingErrorMessage(error, "Couldn't save these settings. Try again."));
       setSaveErrorContext("meeting-settings");
       return false;
     } finally {
@@ -1304,12 +2173,23 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
     if (step === "dictation-model") {
       if (mode === "full" && modelState !== "done") {
-        const downloaded = await startModelDownload(selectedModelId);
+        const downloaded = await startModelDownload(selectedRouteId);
         if (!downloaded) {
           return;
         }
       } else if (mode !== "full") {
         ensureDefaultModelDownloading();
+      }
+      if (pairedMeetingPending && pairedMeetingChoice) {
+        const saved = await savePairedMeetingModel(pairedMeetingChoice);
+        if (!saved) {
+          return;
+        }
+      }
+      if (memoryRefusedRouteId !== null) {
+        setMemoryRefusedRouteId(null);
+        goToStep("try-dictation");
+        return;
       }
     }
 
@@ -1323,7 +2203,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     if (step === "ready") {
       completeWizard({
         markOnboardingComplete: true,
-        meetingsCompleted: mode === "full",
+        meetingsCompleted: mode === "full" && !meetingsSkipped,
       });
       return;
     }
@@ -1336,9 +2216,23 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     }
 
     if (step === "meeting-setup") {
-      if (meetingRouteReady === false) {
+      if (meetingSetupCheckFailed) {
+        await refreshMeetingSetup();
+        return;
+      }
+      setMeetingsSkipped(false);
+      if (meetingTargetReady === false) {
         const fixed = await startMeetingModelDownload();
         if (!fixed) {
+          return;
+        }
+      }
+      // The same click is the consent for the speaker model the button
+      // named. A failed speaker download stops here once, so the reader sees
+      // why; the next press continues without speaker labels.
+      if (speakerModelNeeded && speakerModelState !== "error") {
+        const fetched = await startSpeakerModelDownload();
+        if (!fetched) {
           return;
         }
       }
@@ -1357,7 +2251,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
     const nextIndex = steps.indexOf(step) + 1;
     if (nextIndex < steps.length) {
-      setStep(steps[nextIndex]);
+      goToStep(steps[nextIndex]);
       return;
     }
 
@@ -1367,31 +2261,143 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
     });
   };
 
+  const skipMeetingSetup = () => {
+    setMeetingsSkipped(true);
+    setSaveError(null);
+    setSaveErrorContext(null);
+    if (steps.includes("ready")) {
+      goToStep("ready");
+      return;
+    }
+    completeWizard({ markOnboardingComplete: true, meetingsCompleted: false });
+  };
+
+  const previousStep = stepHistory.length > 0 ? stepHistory[stepHistory.length - 1] : null;
+  // Back waits for anything this step is in the middle of: a practice
+  // dictation, a save, or a download this step started and shows. A speech
+  // model download that began earlier keeps running and is shown again on
+  // the model step.
+  const backDisabled =
+    saveBusy ||
+    permissionRequestBusy ||
+    systemAudioTestLoading ||
+    scratchState === "starting" ||
+    scratchState === "listening" ||
+    scratchState === "transcribing" ||
+    pairedMeetingState === "downloading" ||
+    meetingModelState === "downloading" ||
+    speakerModelState === "downloading" ||
+    (step === "dictation-model" && modelState === "downloading");
+  const goBack = () => {
+    if (previousStep === null || backDisabled) {
+      return;
+    }
+    setStepHistory((history) => history.slice(0, -1));
+    setSaveError(null);
+    setSaveErrorContext(null);
+    setStep(previousStep);
+  };
+
   const skipModelDownload = () => {
     setModelSkipped(true);
     const nextIndex = steps.indexOf(step) + 1;
     if (nextIndex < steps.length) {
-      setStep(steps[nextIndex]);
+      goToStep(steps[nextIndex]);
     }
   };
 
   const subtitle = `Step ${stepIndex + 1} of ${steps.length}`;
+  const meetingModelDownloadSize = formatDownloadSize(meetingTarget?.sizeMib);
+  const speakerModelSize = speakerModelPlan?.selectedDownloadSize ?? null;
+  // The speaker model rides along with the meeting model's download unless it
+  // already failed once; then Continue means "without speaker labels".
+  const speakerModelRidesAlong = speakerModelNeeded && speakerModelState !== "error";
+  const meetingSpeechDownloadPending =
+    step === "meeting-setup" &&
+    meetingTargetReady === false &&
+    // A model already on this Mac only needs choosing, which is what
+    // Continue does; "Download" would promise a fetch that never runs.
+    meetingTarget?.needsDownload !== false;
+
+  const meetingSpeechBytes = meetingSpeechDownloadPending
+    ? meetingTarget?.sizeMib == null ? null : meetingTarget.sizeMib * 1024 * 1024
+    : meetingTargetReady === null ? null : 0;
+  const speakerSizeMatch = speakerModelSize?.match(/^(\d+(?:\.\d+)?) (MB|GB)$/);
+  const meetingSpeakerBytes = speakerModelRidesAlong
+    ? speakerSizeMatch ? Number(speakerSizeMatch[1]) * (speakerSizeMatch[2] === "GB" ? 1_000_000_000 : 1_000_000) : null
+    : 0;
+  const meetingDownloadBytes = meetingSpeechBytes === null || meetingSpeakerBytes === null
+    ? null : meetingSpeechBytes + meetingSpeakerBytes;
+  const notesDownloadBytes = aiNotesChoice !== "native_text" ? 0
+    : notesDownloadStatus === null ? null
+    : notesDownloadStatus.ready || !notesDownloadStatus.runtimePresent ? 0 : notesDownloadStatus.downloadBytes;
+  const totalDownloadBytes = meetingDownloadBytes === null || notesDownloadBytes === null
+    ? null : meetingDownloadBytes + notesDownloadBytes;
+  const downloadSizeForBytes = (bytes: number) => formatDownloadSize(bytes / (1024 * 1024));
+  const meetingSetupDownloadSummary =
+    meetingDownloadBytes !== null && notesDownloadBytes === null && notesStatusFailed
+      ? `${meetingDownloadBytes > 0
+          ? `This step downloads ${downloadSizeForBytes(meetingDownloadBytes)} for speech and speaker labels.`
+          : "Speech and speaker models are already on this Mac."} Plainsong couldn't check the meeting notes model's size; the next step shows it. Nothing downloads until you click a Download button.`
+      : totalDownloadBytes === null || meetingDownloadBytes === null || notesDownloadBytes === null
+      ? "Plainsong is still checking how much meetings need to download."
+      : totalDownloadBytes === 0
+        ? "Meetings need no downloads: these models are already on this Mac."
+        : [
+            `Meeting setup downloads ${downloadSizeForBytes(totalDownloadBytes)} in all.`,
+            meetingDownloadBytes > 0
+              ? `This step downloads ${downloadSizeForBytes(meetingDownloadBytes)} for speech and speaker labels.`
+              : "Speech and speaker models are already on this Mac.",
+            notesDownloadBytes > 0
+              ? `Meeting notes need ${downloadSizeForBytes(notesDownloadBytes)} more, offered in the next step.`
+              : null,
+            "Nothing downloads until you click a Download button.",
+          ].filter(Boolean).join(" ");
 
   const nextLabel =
-    step === "dictation-model" && mode === "full" && modelState !== "done"
-      ? modelState === "error"
+    step === "dictation-model" &&
+    memoryRefusedRouteId !== null &&
+    memoryRefusedRouteId === selectedRouteId &&
+    modelState !== "downloading"
+      ? "Try this model again"
+      : step === "dictation-model" && mode === "full" && (modelState !== "done" || pairedMeetingPending)
+      ? modelState === "error" || pairedMeetingState === "error"
         ? "Retry download"
-        : modelState === "downloading"
+        : modelState === "downloading" || pairedMeetingState === "downloading"
           ? "Downloading…"
-          : "Download and continue"
+          : downloadAndContinueLabel([
+              // Built-in speech has nothing to fetch, so it adds no size.
+              ...(modelState !== "done" && selectedRoute?.sizeMib !== 0
+                ? [selectedRoute?.sizeMib ?? null]
+                : []),
+              ...(pairedMeetingDownloadMib !== undefined ? [pairedMeetingDownloadMib] : []),
+            ])
+      : step === "use-everywhere" && mode === "full"
+        ? "Start dictating"
+      : step === "meeting-setup" && meetingSetupCheckFailed
+        ? "Check meeting setup again"
       : step === "ready"
         ? "Start using Plainsong"
-        : step === "meeting-setup" && meetingRouteReady === false
+        : step === "meeting-setup" && speakerModelState === "downloading"
+          ? "Downloading speaker model…"
+        : meetingSpeechDownloadPending
           ? meetingModelState === "error"
             ? "Retry meeting model download"
             : meetingModelState === "downloading"
               ? "Downloading meeting model…"
-              : "Download meeting model"
+              : speakerModelRidesAlong
+                ? meetingModelDownloadSize && speakerModelSize
+                  ? `Download meeting models (${meetingModelDownloadSize} + ${speakerModelSize})`
+                  : "Download meeting models"
+                : meetingModelDownloadSize
+                  ? `Download meeting model (${meetingModelDownloadSize})`
+                  : "Download meeting model"
+        : step === "meeting-setup" && speakerModelRidesAlong
+          ? speakerModelSize
+            ? `Download speaker model (${speakerModelSize})`
+            : "Download speaker model"
+        : step === "meeting-setup" && speakerModelNeeded && speakerModelState === "error"
+          ? "Continue without speaker labels"
           : isLastStep
             ? mode === "meetings" || step === "meeting-setup"
               ? "Finish meeting setup"
@@ -1410,13 +2416,26 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
       onModeChange={setHotkeyMode}
       offerHandsFree={handsFreeConfigured}
       holdToTalkAvailable={holdToTalkAvailable}
+      nativeOnlyTrigger={["fn", "function", "rightcommand", "rightoption"].includes(shortcutValue.trim().toLowerCase())}
       tapToLock={tapToLock}
       onTapToLockChange={setTapToLock}
+      doubleTapToLock={doubleTapToLock}
+      onDoubleTapToLockChange={setDoubleTapToLock}
     />
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+    <DialogPrimitive.Root open>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80">
+      <DialogPrimitive.Content asChild aria-describedby={undefined}
+        onOpenAutoFocus={(event) => { event.preventDefault(); stepHeadingRef.current?.focus(); }}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          previouslyFocusedRef.current?.focus({ preventScroll: true });
+        }}
+        onEscapeKeyDown={(event) => event.preventDefault()}
+        onInteractOutside={(event) => event.preventDefault()}
+      >
       <div
         ref={dialogRef}
         role="dialog"
@@ -1431,7 +2450,11 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         <div className="flex shrink-0 items-center justify-between gap-4 border-b border-border/60 px-8 pb-5 pt-7">
           <div className="min-w-0 space-y-1">
             <p className="rubric">
-              {mode === "meetings" ? "MEETINGS" : mode === "dictation" ? "DICTATION" : "ONBOARDING"}
+              {mode === "meetings"
+                ? "MEETING SETUP"
+                : mode === "dictation"
+                  ? "DICTATION SETUP"
+                  : "SETUP"}
             </p>
             <h2
               ref={stepHeadingRef}
@@ -1484,6 +2507,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
 
             {step === "try-dictation" ? (
               <TryDictationStep
+                modelName={selectedRoute?.label ?? "Speech model"}
                 perms={perms}
                 permsLoading={permsLoading}
                 onRefreshPermissions={() => void refreshPerms()}
@@ -1497,11 +2521,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 modelState={modelState}
                 modelError={modelError}
                 modelPercent={downloadPercent}
-                modelSize={powerModelSize(selectedModelOption)}
-                onDownloadModel={() => void startModelDownload(selectedModelId)}
+                modelSize={formatDownloadSize(selectedRoute?.sizeMib)}
+                onDownloadModel={() => void startModelDownload(selectedRouteId)}
                 scratchState={scratchState}
                 scratchText={scratchText}
                 scratchError={scratchError}
+                onChooseSmallerModel={scratchMemoryRefused ? () => {
+                  setMemoryRefusedRouteId(selectedRouteId);
+                  goToStep("dictation-model");
+                } : undefined}
                 onStartScratch={() => void startScratchDictation()}
                 onFinishScratch={() => void finishScratchDictation()}
                 displayShortcut={displayShortcut}
@@ -1519,7 +2547,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 displayShortcut={displayShortcut}
                 onShortcutChange={setShortcutValue}
                 modeChoice={hotkeyModeChoice}
+                nativeShortcutAvailable={holdToTalkAvailable === true}
                 saveError={saveError}
+                muteMedia={muteMediaWhileDictating}
+                onMuteMediaChange={setMuteMediaWhileDictating}
               />
             ) : null}
 
@@ -1527,14 +2558,21 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
               <ReadyStep
                 shortcutValue={shortcutValue}
                 displayShortcut={displayShortcut}
-                tapToLock={tapToLock}
+                tapToLock={tapToLock && !doubleTapToLock}
+                doubleTapToLock={doubleTapToLock}
                 micHeardOn={micHeard}
                 aiNotesChoice={aiNotesChoice}
                 hotkeyMode={hotkeyMode}
                 modelState={modelState}
                 modelError={modelError}
+                modelPercent={downloadPercent}
+                modelSize={formatDownloadSize(selectedRoute?.sizeMib)}
                 modelSkipped={modelSkipped}
-                onRetryModel={() => void startModelDownload(selectedModelId)}
+                onRetryModel={() => void startModelDownload(selectedRouteId)}
+                onOpenAccessibilitySettings={() =>
+                  void openAccessibilitySettingsFromWizard()
+                }
+                meetingsSkipped={meetingsSkipped}
                 microphoneReady={
                   perms?.microphonePermissionReady ?? perms?.microphoneReady
                 }
@@ -1574,26 +2612,102 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             {step === "dictation-model" ? (
               <>
                 <DictationModelStep
+                  choices={speechChoices}
+                  memoryRefusedLabel={routeSummaryFor(memoryRefusedRouteId)?.label ?? null}
                   state={modelState}
                   error={modelError}
                   percent={downloadPercent}
-                  selectedId={selectedModelId}
+                  selectedRouteId={selectedRouteId}
+                  preservedRoute={preservedDictationRoute}
+                  upgradingFromOnnxParakeet={
+                    upgradingFromOnnxParakeet &&
+                    selectedRoute !== null &&
+                    isRecommendedSpeechRoute(selectedRoute.providerType, selectedRoute.modelId) &&
+                    modelState !== "done"
+                  }
+                  savedModelUnavailable={savedModelUnavailable}
                   downloadFromFooter={mode === "full"}
-                  downloadDisabled={modelSelectionHydration !== "ready"}
-                  onSelect={(modelId) => {
+                  downloadDisabled={modelSelectionHydration !== "ready" || selectedRoute === null}
+                  busy={modelState === "downloading" || pairedMeetingState === "downloading"}
+                  meetingCoverage={
+                    mode !== "full" || selectedRoute === null || !selectedRoute.meetingCapable
+                      ? null
+                      : meetingsFollowDictation(selectedRoute)
+                        ? modelState === "done"
+                          ? `Meetings will use ${selectedRoute.label} too.`
+                          : "One download covers dictation and meetings."
+                        : configuredMeeting
+                          ? `Meetings keep using ${configuredMeeting.label}${
+                              configuredMeeting.hosting === "local" ? ", already on this Mac" : ""
+                            }.`
+                          : null
+                  }
+                  meetingPairing={
+                    offerPairedMeeting && selectedRoute
+                      ? {
+                          dictationLabel: selectedRoute.label,
+                          options: meetingChoices.map((choice) => ({
+                            value: choice.route.routeId,
+                            label: meetingOptionLabel(
+                              choice,
+                              availableRouteIds.has(choice.route.routeId),
+                            ),
+                          })),
+                          value: pairedMeetingValue,
+                          meetingLabel: pairedMeetingChoice?.route.label ?? null,
+                          state: pairedMeetingState,
+                          error: pairedMeetingError,
+                          percent: meetingDownloadPercent,
+                          onChange: (value) => {
+                            setPairedMeetingPick(value);
+                            setPairedMeetingState("idle");
+                            setPairedMeetingError(null);
+                          },
+                        }
+                      : null
+                  }
+                  onSelect={(routeId) => {
                     modelSelectionChangedRef.current = true;
-                    setSelectedModelId(modelId);
+                    if (routeId !== selectedRouteId) {
+                      if (routeId !== preservedDictationRoute?.routeId) {
+                        setPreservedDictationRoute(null);
+                      }
+                      setModelState("idle");
+                      setModelError(null);
+                      setDownloadPercent(null);
+                    }
+                    setSelectedRouteId(routeId);
+                    if (pairedMeetingState === "error") {
+                      setPairedMeetingState("idle");
+                      setPairedMeetingError(null);
+                    }
                   }}
-                  onDownload={() => void startModelDownload(selectedModelId)}
+                  onDownload={() => void startModelDownload(selectedRouteId)}
                 />
-                {modelSelectionHydration === "error" ? (
-                  <p
-                    role="alert"
-                    aria-label="Model setup unavailable"
-                    className="text-sm text-destructive"
-                  >
-                    Model setup could not be loaded. Reopen onboarding and try again.
+                {modelSelectionHydration === "loading" ? (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    Checking model setup…
                   </p>
+                ) : null}
+                {modelSelectionHydration === "error" ? (
+                  <div className="space-y-3">
+                    <p
+                      role="alert"
+                      aria-label="Model setup unavailable"
+                      className="text-sm text-destructive"
+                    >
+                      Model setup could not be loaded. Check again after startup or any system prompt finishes.
+                    </p>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setModelSelectionHydration("loading");
+                        setModelHydrationAttempt((attempt) => attempt + 1);
+                      }}
+                    >
+                      Check model setup again
+                    </Button>
+                  </div>
                 ) : null}
               </>
             ) : null}
@@ -1603,23 +2717,87 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 displayShortcut={displayShortcut}
                 onShortcutChange={setShortcutValue}
                 modeChoice={hotkeyModeChoice}
+                nativeShortcutAvailable={holdToTalkAvailable === true}
                 saveError={saveError}
               />
             ) : null}
 
             {step === "meeting-setup" ? (
+              <>
+              <p className="text-sm text-muted-foreground" aria-live="polite">
+                {meetingSetupDownloadSummary}
+              </p>
               <MeetingSetupStep
                 loading={meetingSetupLoading}
+                checkFailed={meetingSetupCheckFailed}
                 routeSummary={meetingRouteSummary}
-                routeReady={meetingRouteReady}
+                routeReady={meetingTargetReady}
                 routeError={meetingRouteError}
                 verificationDetails={meetingVerificationDetails}
+                recommendedModel={
+                  meetingTarget
+                    ? {
+                        label: meetingTarget.label,
+                        recommended: meetingTarget.recommended,
+                        needsDownload: meetingTarget.needsDownload,
+                        size: meetingModelDownloadSize,
+                        sameAsDictation: meetingTarget.sameAsDictation,
+                      }
+                    : null
+                }
+                modelPicker={
+                  !meetingSetupCheckFailed && meetingChoices.length > 0 && meetingPickerValue
+                    ? {
+                        value: meetingPickerValue,
+                        options: [
+                          ...(meetingChoices.some((choice) => choice.route.routeId === meetingPickerValue)
+                            ? []
+                            : [{ value: meetingPickerValue, label: meetingRouteSummary }]),
+                          ...meetingChoices.map((choice) => ({
+                            value: choice.route.routeId,
+                            label: meetingOptionLabel(
+                              choice,
+                              availableRouteIds.has(choice.route.routeId),
+                            ),
+                          })),
+                        ],
+                        disabled:
+                          meetingModelState === "downloading" ||
+                          speakerModelState === "downloading" ||
+                          saveBusy,
+                        onChange: (value) => {
+                          setMeetingStepPick(value);
+                          setMeetingModelState("idle");
+                          setMeetingModelError(null);
+                        },
+                      }
+                    : null
+                }
+                microphoneReady={perms?.microphonePermissionReady ?? perms?.microphoneReady}
+                microphoneChecking={permsLoading && perms === null}
+                onOpenMicrophoneSettings={() =>
+                  void openMicrophoneSettingsFromWizard()
+                }
                 systemAudioCapability={meetingSystemAudioCapability}
                 systemAudioTestLoading={systemAudioTestLoading}
-                systemAudioTestStatus={systemAudioTestStatus}
+                systemAudioTestResult={systemAudioTestResult}
                 meetingModelState={meetingModelState}
                 meetingModelError={meetingModelError}
                 meetingDownloadPercent={meetingDownloadPercent}
+                speakerModel={
+                  speakerModelPlan
+                    ? {
+                        name: speakerModelDownloadName(speakerModelPlan),
+                        installed: speakerModelPlan.selectedInstalled,
+                        separationOn: speakerSeparationOn,
+                        ridesWithSpeechModel:
+                          meetingSpeechDownloadPending && meetingModelState !== "done",
+                      }
+                    : null
+                }
+                speakerModelState={speakerModelState}
+                speakerModelError={speakerModelError}
+                onRetrySpeakerModel={() => void startSpeakerModelDownload()}
                 onTestSystemAudio={() => void testMeetingSystemAudio()}
                 meetingAudioStorageMode={meetingAudioStorageMode}
                 onMeetingAudioStorageModeChange={setMeetingAudioStorageMode}
@@ -1629,22 +2807,14 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 onMeetingRetentionCustomMonthsChange={setMeetingRetentionCustomMonths}
                 meetingRetentionDeleteMode={meetingRetentionDeleteMode}
                 onMeetingRetentionDeleteModeChange={setMeetingRetentionDeleteMode}
-                onRefresh={() => void refreshMeetingSetup()}
-                onApplyRecommendedRoute={
-                  meetingRecommendedRoute ? () => void applyRecommendedMeetingRoute() : undefined
-                }
-                recommendedRouteSummary={
-                  meetingRecommendedRoute
-                    ? summarizeMeetingRoute(
-                        meetingRecommendedRoute.providerType,
-                        meetingRecommendedRoute.modelId,
-                        []
-                      )
-                    : null
-                }
+                onRefresh={() => {
+                  void refreshMeetingSetup();
+                  void refreshPerms();
+                }}
                 saveError={saveError}
                 saveErrorContext={saveErrorContext}
               />
+              </>
             ) : null}
 
             {step === "ai-notes" ? (
@@ -1652,7 +2822,10 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                 choice={aiNotesChoice}
                 onChoiceChange={setAiNotesChoice}
                 configuredProvider={aiNotesProvider}
+                nativeTextAvailable={notesDownloadStatus?.runtimePresent === true}
                 localAiReady={localAiReady}
+                localAiMessage={localAiMessage}
+                localAiNeedsSetup={localAiNeedsSetup}
                 localAiChecking={localAiChecking}
                 onRecheckLocalAi={() => void checkLocalAiRuntime()}
                 onOpenAiSettings={() => {
@@ -1680,14 +2853,15 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
         <div className="flex shrink-0 justify-between gap-2 border-t border-border/60 px-8 py-4">
           <div className="flex gap-2">
             {mode === "full" ? (
-              // The last step has nothing left to skip.
-              step === "ready" ? null : step === "dictation-model" &&
+              // The last step has nothing left to skip, and meeting setup has
+              // its own "Skip meetings" beside the main button.
+              step === "ready" || step === "meeting-setup" ? null : step === "dictation-model" &&
                 modelState !== "done" ? (
                 <Button
                   variant="ghost"
                   onClick={skipModelDownload}
                   className="text-muted-foreground"
-                  disabled={modelState === "downloading"}
+                  disabled={modelState === "downloading" || pairedMeetingState === "downloading"}
                 >
                   Skip model download
                 </Button>
@@ -1697,7 +2871,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                   onClick={() =>
                     // Not a completion. Recorded as a deferral against exactly
                     // what is unmet right now, so this stays quiet until
-                    // something else breaks -- and Settings > General > Setup
+                    // something else breaks -- and Settings > General > Setup guide
                     // still reopens it on demand.
                     completeWizard({
                       markOnboardingComplete: false,
@@ -1706,10 +2880,7 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
                     })
                   }
                   className="text-muted-foreground"
-                  disabled={
-                    scratchBusy ||
-                    (step === "meeting-setup" && meetingModelState === "downloading")
-                  }
+                  disabled={scratchBusy}
                 >
                   Skip setup for now
                 </Button>
@@ -1722,38 +2893,68 @@ export function FirstRunWizard({ mode = "full", onComplete }: Props) {
             {step === "meeting-setup" && mode !== "meetings" ? (
               <Button
                 variant="outline"
-                onClick={() => completeWizard({ markOnboardingComplete: true, meetingsCompleted: false })}
-                disabled={meetingModelState === "downloading"}
+                onClick={() => skipMeetingSetup()}
+                disabled={
+                  meetingModelState === "downloading" ||
+                  speakerModelState === "downloading" ||
+                  saveBusy
+                }
               >
-                Finish with dictation only
+                Skip meetings
               </Button>
             ) : null}
           </div>
-          <Button
-            onClick={() => void nextStep()}
-            disabled={
-              saveBusy ||
-              permissionRequestBusy ||
-              scratchBusy ||
-              (step === "dictation-model" && modelSelectionHydration !== "ready") ||
-              (step === "meeting-setup" && meetingModelState === "downloading") ||
-              // Only block Continue for a download in progress while the
-              // user is still on a model surface they have to wait on. Ready
-              // never blocks: it is the last step and has no Skip, so a slow
-              // or failed download would otherwise hold the reader in the
-              // modal. The download carries on, and Dictation retries it.
-              (modelState === "downloading" &&
-                (step === "dictation-model" || step === "try-dictation")) ||
-              meetingSetupLoading
-            }
-          >
-            {saveBusy || meetingSetupLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            {nextLabel}
-            <ChevronRight className="ml-1 h-4 w-4" />
-          </Button>
+          <div className="flex gap-2">
+            {previousStep !== null ? (
+              <Button variant="ghost" onClick={goBack} disabled={backDisabled}>
+                <ChevronLeft className="mr-1 h-4 w-4" />
+                Back
+              </Button>
+            ) : null}
+            {step === "use-everywhere" && mode === "full" ? (
+              <Button variant="outline" onClick={() => void nextStep()} disabled={saveBusy || permissionRequestBusy}>
+                Set up meetings
+              </Button>
+            ) : null}
+            <Button
+              onClick={() => {
+                if (step === "use-everywhere" && mode === "full") {
+                  // Through Ready, not straight out: it is the only step that
+                  // warns about a skipped or failed model download and about
+                  // insertion that is not ready yet.
+                  void persistDictationStep().then((saved) => { if (saved) skipMeetingSetup(); });
+                } else {
+                  void nextStep();
+                }
+              }}
+              disabled={
+                saveBusy ||
+                permissionRequestBusy ||
+                scratchBusy ||
+                (step === "dictation-model" && (modelSelectionHydration !== "ready" || selectedRoute === null)) ||
+                (step === "meeting-setup" &&
+                  (meetingModelState === "downloading" || speakerModelState === "downloading")) ||
+                // Only block Continue for a download in progress while the
+                // user is still on a model surface they have to wait on. Ready
+                // never blocks: it is the last step and has no Skip, so a slow
+                // or failed download would otherwise hold the reader in the
+                // modal. The download carries on, and Dictation retries it.
+                (modelState === "downloading" &&
+                  (step === "dictation-model" || step === "try-dictation")) ||
+                (step === "dictation-model" && pairedMeetingState === "downloading") ||
+                meetingSetupLoading
+              }
+            >
+              {saveBusy || meetingSetupLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              {nextLabel}
+              <ChevronRight className="ml-1 h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
+      </DialogPrimitive.Content>
     </div>
+    </DialogPrimitive.Root>
   );
 }
 
@@ -1766,6 +2967,7 @@ function TryDictationStep({
   permissionRequestBusy,
   permissionRequestError,
   permissionRequestStatus,
+  modelName,
   modelState,
   modelError,
   modelPercent,
@@ -1774,6 +2976,7 @@ function TryDictationStep({
   scratchState,
   scratchText,
   scratchError,
+  onChooseSmallerModel,
   onStartScratch,
   onFinishScratch,
   displayShortcut,
@@ -1786,14 +2989,16 @@ function TryDictationStep({
   permissionRequestBusy: boolean;
   permissionRequestError: string | null;
   permissionRequestStatus: string | null;
+  modelName: string;
   modelState: "idle" | "downloading" | "done" | "error";
   modelError: string | null;
   modelPercent: number | null;
-  modelSize: string;
+  modelSize: string | null;
   onDownloadModel(): void;
   scratchState: ScratchDictationState;
   scratchText: string;
   scratchError: string | null;
+  onChooseSmallerModel?: () => void;
   onStartScratch(): void;
   onFinishScratch(): void;
   displayShortcut: string;
@@ -1805,6 +3010,9 @@ function TryDictationStep({
   // The rows only earn their place when something still blocks the test.
   const setupNeeded = !microphoneReady || modelState !== "done";
   const wordCount = scratchText ? scratchText.split(/\s+/).filter(Boolean).length : 0;
+  // The test runs on the speech model, so until it is on this Mac the whole
+  // practice surface stays quiet: no gold, and a sentence saying why.
+  const modelReady = modelState === "done";
 
   // While the test listens, the meter follows the level the dictation engine
   // itself hears (the same reading the dictation pill uses), not a second
@@ -1901,8 +3109,11 @@ function TryDictationStep({
                 <div>
                   <p className="text-sm font-medium">Speech model</p>
                   <p className="text-sm text-muted-foreground">
-                    The test needs your speech model first: a {modelSize}{" "}
-                    download that runs on this Mac.
+                    {modelState === "downloading"
+                      ? "Downloading the speech model you chose. The test is ready when it finishes."
+                      : modelSize
+                        ? `The test needs the speech model you chose first. It is a one-time ${modelSize} download.`
+                        : "The test needs the speech model you chose first. It is a one-time download."}
                   </p>
                 </div>
               </div>
@@ -1920,17 +3131,15 @@ function TryDictationStep({
         </div>
       ) : null}
 
-      {modelState === "downloading" ? (
-        <Progress value={modelPercent} className="h-1.5" />
-      ) : null}
+      <ModelDownloadProgress name={modelName} active={modelState === "downloading"} value={modelPercent} className="h-1.5" />
       {modelError ? (
-        <p className="text-xs text-destructive" role="alert">
-          Model download failed: {modelError}
+        <p className="text-sm text-destructive" role="alert">
+          The download didn&apos;t finish. {modelError}
         </p>
       ) : null}
       {permissionRequestStatus || permissionRequestError ? (
         <p
-          className={`text-xs ${permissionRequestError ? "text-destructive" : "text-muted-foreground"}`}
+          className={`text-sm ${permissionRequestError ? "text-destructive" : "text-muted-foreground"}`}
           role={permissionRequestError ? "alert" : "status"}
         >
           {permissionRequestError ?? permissionRequestStatus}
@@ -1941,7 +3150,9 @@ function TryDictationStep({
         className={`rounded-xl border p-6 transition-colors motion-reduce:transition-none ${
           scratchState === "complete" && scratchText
             ? "border-gold/40 bg-gold/5"
-            : "border-primary/30 bg-primary/5"
+            : modelReady
+              ? "border-primary/30 bg-primary/5"
+              : "border-border bg-muted/10"
         }`}
       >
         <div className="flex flex-col items-center text-center">
@@ -1972,7 +3183,7 @@ function TryDictationStep({
                 ? "Writing it down"
                 : scratchState === "complete"
                   ? scratchText
-                    ? "That worked"
+                    ? "Your transcript"
                     : "Nothing came through"
                   : "Say one sentence"}
           </p>
@@ -1985,6 +3196,16 @@ function TryDictationStep({
                   : "Try: “Um, let’s meet on Tuesday, no wait, Wednesday.” Plainsong drops the um and keeps the day you meant."}
             </p>
           )}
+          {!modelReady && scratchState === "idle" ? (
+            <p
+              id="first-run-scratch-unavailable"
+              className="mt-2 max-w-md text-sm text-muted-foreground"
+            >
+              {modelState === "downloading"
+                ? "You can try this once the download finishes."
+                : "Download the speech model above to try this."}
+            </p>
+          ) : null}
 
           {scratchState === "complete" ? (
             <div
@@ -1998,10 +3219,10 @@ function TryDictationStep({
                   <blockquote className="rounded-lg border border-border border-l-2 border-l-gold bg-background/80 px-4 py-3 font-serif text-base leading-relaxed text-foreground">
                     {scratchText}
                   </blockquote>
-                  <p className="mt-2 text-xs text-muted-foreground">
+                  <p className="mt-2 text-sm text-muted-foreground">
                     {wordCount === 1 ? "1 word" : `${wordCount} words`}, written
-                    on this Mac. Soon you will do this in any app with{" "}
-                    {displayShortcut}.
+                    on this Mac. Check that it matches what you said before
+                    continuing. Use {displayShortcut} to dictate in other apps.
                   </p>
                 </>
               ) : (
@@ -2018,9 +3239,20 @@ function TryDictationStep({
               <Button onClick={onFinishScratch}>Finish and transcribe</Button>
             ) : (
               <Button
-                variant={scratchState === "complete" && scratchText ? "outline" : "default"}
+                // Unavailable reads as unavailable: a disabled gilded button
+                // still looks like the thing to press.
+                variant={
+                  !modelReady || (scratchState === "complete" && scratchText)
+                    ? "outline"
+                    : "default"
+                }
                 onClick={onStartScratch}
-                disabled={scratchInFlight || modelState !== "done"}
+                disabled={scratchInFlight || !modelReady}
+                aria-describedby={
+                  !modelReady && scratchState === "idle"
+                    ? "first-run-scratch-unavailable"
+                    : undefined
+                }
               >
                 {scratchState === "complete" || scratchState === "error"
                   ? "Try again"
@@ -2033,9 +3265,14 @@ function TryDictationStep({
         </div>
 
         {scratchError ? (
-          <p className="mt-4 text-center text-sm text-destructive" role="alert">
-            {scratchError}
-          </p>
+          <div className="mt-4 space-y-2 text-center">
+            <p className="text-sm text-destructive" role="alert">{scratchError}</p>
+            {onChooseSmallerModel ? (
+              <Button variant="outline" onClick={onChooseSmallerModel} disabled={scratchInFlight}>
+                Choose a smaller model
+              </Button>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </div>
@@ -2051,15 +3288,21 @@ function HotkeyModeChoice({
   onModeChange,
   offerHandsFree,
   holdToTalkAvailable,
+  nativeOnlyTrigger,
   tapToLock,
   onTapToLockChange,
+  doubleTapToLock,
+  onDoubleTapToLockChange,
 }: {
   mode: HotkeyMode;
   onModeChange(mode: HotkeyMode): void;
   offerHandsFree: boolean;
   holdToTalkAvailable: boolean | null;
+  nativeOnlyTrigger: boolean;
   tapToLock: boolean;
   onTapToLockChange(next: boolean): void;
+  doubleTapToLock: boolean;
+  onDoubleTapToLockChange(next: boolean): void;
 }) {
   const options: HotkeyMode[] = offerHandsFree
     ? ["hold_to_talk", "toggle", "hands_free"]
@@ -2069,29 +3312,33 @@ function HotkeyModeChoice({
       <p className="text-sm font-medium" id="first-run-hotkey-mode-label">
         How the shortcut works
       </p>
-      <div
-        role="radiogroup"
+      <RadioGroup<HotkeyMode>
+        value={mode}
+        onValueChange={onModeChange}
         aria-labelledby="first-run-hotkey-mode-label"
         className={`grid gap-2 ${options.length === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}
       >
         {options.map((option) => (
-          <button
+          <Radio.Root
             key={option}
-            type="button"
-            role="radio"
-            aria-checked={mode === option}
-            onClick={() => onModeChange(option)}
-            className={`rounded-lg border-2 p-3 text-left transition-colors motion-reduce:transition-none ${
+            value={option}
+            nativeButton
+            render={<button type="button" />}
+            // A <button> centres its content vertically by default, so a
+            // one-line hint floated to the middle of a card stretched to
+            // match a two-line neighbour. Flex from the top keeps every card
+            // the same height with its text on the same top line.
+            className={`flex h-full flex-col items-start justify-start gap-0.5 rounded-lg border-2 p-3 text-left transition-colors motion-reduce:transition-none ${
               mode === option
                 ? "border-primary bg-primary/5"
                 : "border-border hover:border-primary/40"
             }`}
           >
-            <p className="text-sm font-medium">{HOTKEY_MODE_LABELS[option].name}</p>
-            <p className="text-xs text-muted-foreground">{HOTKEY_MODE_LABELS[option].hint}</p>
-          </button>
+            <span className="text-sm font-medium">{HOTKEY_MODE_LABELS[option].name}</span>
+            <span className="text-sm text-muted-foreground">{HOTKEY_MODE_LABELS[option].hint}</span>
+          </Radio.Root>
         ))}
-      </div>
+      </RadioGroup>
       {mode === "hold_to_talk" ? (
         <>
           <label className="flex items-start gap-2 pt-1 text-sm">
@@ -2103,16 +3350,28 @@ function HotkeyModeChoice({
             />
             <span>
               <span className="font-medium">Tap to lock</span>
-              <span className="block text-xs text-muted-foreground">
+              <span className="block text-sm text-muted-foreground">
                 A quick tap keeps listening without holding the key. Tap again to
                 finish.
               </span>
             </span>
           </label>
+          <label className="flex items-start gap-2 pt-1 text-sm">
+            <input type="checkbox" className="mt-0.5 accent-gold"
+              checked={doubleTapToLock}
+              onChange={(event) => onDoubleTapToLockChange(event.target.checked)} />
+            <span>
+              <span className="font-medium">Double-tap to lock</span>
+              <span className="block text-sm text-muted-foreground">
+                Two quick taps keep listening. Press again to finish. Replaces single-tap locking, including for Fn.
+              </span>
+            </span>
+          </label>
           {holdToTalkAvailable === false ? (
-            <p className="text-xs text-rust">
-              Hold to talk is not available on this Mac right now, so the
-              shortcut works as press to toggle until it is.
+            <p className="text-sm text-rust">
+              {nativeOnlyTrigger
+                ? "This shortcut works once Accessibility is on for Plainsong."
+                : "Hold to talk is not available on this Mac right now, so the shortcut works as press to toggle until it is."}
             </p>
           ) : null}
         </>
@@ -2124,10 +3383,12 @@ function HotkeyModeChoice({
 function ShortcutRecorder({
   inputId,
   displayShortcut,
+  nativeShortcutAvailable,
   onShortcutChange,
 }: {
   inputId: string;
   displayShortcut: string;
+  nativeShortcutAvailable: boolean;
   onShortcutChange(value: string): void;
 }) {
   return (
@@ -2152,9 +3413,22 @@ function ShortcutRecorder({
         }}
         className="font-mono text-center"
       />
-      <p id={`${inputId}-hint`} className="text-xs text-muted-foreground">
-        To change it, click the field and press the keys you want, with at
-        least one of Command, Control, Option or Shift.
+      <div className="flex flex-wrap gap-2" aria-label="Shortcut presets">
+        {["Cmd+Shift+Space", "Fn", "RightCommand", "RightOption"].map((shortcut) => (
+          <Button key={shortcut} type="button" size="sm" variant="outline"
+            onClick={() => onShortcutChange(shortcut)}>
+            {shortcut === "Fn" ? "Fn" : formatShortcutForDisplay(shortcut)}
+          </Button>
+        ))}
+      </div>
+      {nativeShortcutAvailable ? null : (
+        <p className="text-sm text-muted-foreground">
+          Fn and right-side modifier keys work once Accessibility is on for Plainsong.
+        </p>
+      )}
+      <p id={`${inputId}-hint`} className="text-sm text-muted-foreground">
+        Pick one above, or click the field and press your own combination
+        with at least one of Command, Control, Option or Shift.
       </p>
     </div>
   );
@@ -2166,15 +3440,21 @@ function UseEverywhereStep({
   onRefreshPermissions,
   onOpenAccessibilitySettings,
   displayShortcut,
+  nativeShortcutAvailable,
   onShortcutChange,
   modeChoice,
   saveError,
+  muteMedia,
+  onMuteMediaChange,
 }: {
+  muteMedia: boolean;
+  onMuteMediaChange(value: boolean): void;
   perms: PermissionDiagnostics | null;
   permsLoading: boolean;
   onRefreshPermissions(): void;
   onOpenAccessibilitySettings(): void;
   displayShortcut: string;
+  nativeShortcutAvailable: boolean;
   onShortcutChange(value: string): void;
   modeChoice: ReactNode;
   saveError: string | null;
@@ -2215,15 +3495,31 @@ function UseEverywhereStep({
 
       <div className="space-y-4 border-t border-border pt-5">
         <ShortcutRecorder
+          nativeShortcutAvailable={nativeShortcutAvailable}
           inputId="first-run-everywhere-shortcut"
           displayShortcut={displayShortcut}
           onShortcutChange={onShortcutChange}
         />
         {modeChoice}
+        <label className="flex items-start gap-3 text-sm">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4"
+            checked={muteMedia}
+            onChange={(event) => onMuteMediaChange(event.target.checked)}
+          />
+          <span>
+            <span className="font-medium">Mute other audio while you dictate</span>
+            <span className="block text-muted-foreground">
+              Mutes your Mac's sound output while the microphone is live, including calls,
+              music and notifications, then turns back on only what Plainsong muted.
+            </span>
+          </span>
+        </label>
       </div>
 
       {saveError ? (
-        <p className="text-xs text-destructive" role="alert">
+        <p className="text-sm text-destructive" role="alert">
           Failed to save shortcut: {saveError}
         </p>
       ) : null}
@@ -2236,15 +3532,24 @@ function ShortcutKeys({ shortcut }: { shortcut: string }) {
   const keys = normalizeShortcut(shortcut).split("+").filter(Boolean);
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5" aria-label={formatShortcutForDisplay(shortcut)}>
-      {keys.map((key, index) => (
-        <kbd
-          key={`${key}-${index}`}
-          aria-hidden="true"
-          className="min-w-9 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-center font-mono text-base font-medium text-gold-text shadow-sm"
-        >
-          {formatShortcutForDisplay(key)}
-        </kbd>
-      ))}
+      {keys.map((key, index) => {
+        const label = formatShortcutForDisplay(key);
+        // ⌘ ⇧ ⌥ ⌃ render small in the mono face; give single symbols the
+        // system font at a larger size so they match "Space" beside them.
+        const isSymbol = [...label].length === 1 && !/[A-Za-z0-9]/.test(label);
+        return (
+          <kbd
+            key={`${key}-${index}`}
+            aria-hidden="true"
+            className={cn(
+              "min-w-9 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-center font-medium text-gold-text shadow-sm",
+              isSymbol ? "font-sans text-lg leading-6" : "font-mono text-base",
+            )}
+          >
+            {label}
+          </kbd>
+        );
+      })}
     </span>
   );
 }
@@ -2254,34 +3559,48 @@ function ReadyStep({
   displayShortcut,
   hotkeyMode,
   tapToLock,
+  doubleTapToLock,
   micHeardOn,
   aiNotesChoice,
   modelState,
   modelError,
+  modelPercent,
+  modelSize,
   modelSkipped,
   onRetryModel,
+  onOpenAccessibilitySettings,
   microphoneReady,
   insertionReady,
   scratchCompleted,
   meetingReady,
+  meetingsSkipped,
   fullMeetingCaptureReady,
 }: {
   shortcutValue: string;
   displayShortcut: string;
   hotkeyMode: HotkeyMode;
   tapToLock: boolean;
+  doubleTapToLock: boolean;
   micHeardOn: { deviceName: string | null } | null;
   aiNotesChoice: AiNotesChoice;
   modelState: "idle" | "downloading" | "done" | "error";
   modelError: string | null;
+  modelPercent: number | null;
+  modelSize: string | null;
   modelSkipped: boolean;
   onRetryModel(): void;
+  onOpenAccessibilitySettings(): void;
   microphoneReady: boolean | undefined;
   insertionReady: boolean;
   scratchCompleted: boolean;
   meetingReady: boolean;
+  /** The reader chose "Skip meetings" on the meeting step. */
+  meetingsSkipped: boolean;
   fullMeetingCaptureReady: boolean;
 }) {
+  // Dictation only works once the model is on this Mac. Until then the
+  // shortcut card must not read as "go ahead and press it".
+  const dictationUsable = scratchCompleted || modelState === "done";
   const localDictation =
     scratchCompleted
       ? {
@@ -2290,7 +3609,9 @@ function ReadyStep({
         }
       : modelState === "downloading"
         ? {
-            detail: "Still downloading. You can finish setup; dictation works once it is done.",
+            detail: `Still downloading${
+              modelPercent === null ? "" : ` (${Math.round(modelPercent)}%)`
+            }. You can finish setup now; the download must finish before you can try dictation.`,
             tone: "progress" as const,
           }
         : modelState === "error"
@@ -2298,14 +3619,14 @@ function ReadyStep({
               detail: modelSkipped
                 ? "The download was skipped after it failed. Download the model here or from Dictation before using the shortcut."
                 : modelError
-                  ? `Model download failed: ${modelError.replace(/\.$/, "")}. Try again here or later from Dictation.`
+                  ? `The model didn't download. ${modelError} You can also download it later from Dictation.`
                   : "The model download needs another try, here or later from Dictation.",
               tone: "attention" as const,
             }
           : modelState === "done"
             ? {
-                detail: "Ready, and it runs on this Mac.",
-                tone: "ready" as const,
+                detail: "Downloaded. Practice dictation has not been verified.",
+                tone: "neutral" as const,
               }
             : {
                 detail: modelSkipped
@@ -2313,8 +3634,25 @@ function ReadyStep({
                   : "The model has not been downloaded yet. Download it here or later from Dictation.",
                 tone: "attention" as const,
               };
+  const meetingsRow = meetingsSkipped
+    ? {
+        label: "Meetings",
+        detail: "Not set up, as you chose. Set them up any time from More > Setup in the sidebar.",
+        tone: "neutral" as const,
+      }
+    : {
+        label: "Meetings",
+        detail: fullMeetingCaptureReady
+          ? "Records both you and the other people on the call."
+          : meetingReady
+            ? "Records your microphone. Set up meeting audio later from More > Setup in the sidebar to record the other people too."
+            : "Needs the meeting model. You can download it later from More > Setup in the sidebar.",
+        tone: meetingReady ? ("ready" as const) : ("attention" as const),
+      };
   const modeSummary =
-    hotkeyMode === "hold_to_talk" && tapToLock
+    hotkeyMode === "hold_to_talk" && doubleTapToLock
+      ? `${HOTKEY_MODE_LABELS[hotkeyMode].hint} Two quick taps lock it on.`
+      : hotkeyMode === "hold_to_talk" && tapToLock
       ? `${HOTKEY_MODE_LABELS[hotkeyMode].hint} A quick tap locks it on.`
       : HOTKEY_MODE_LABELS[hotkeyMode].hint;
   const rows = [
@@ -2337,35 +3675,47 @@ function ReadyStep({
       label: "Typing into other apps",
       detail: insertionReady
         ? "Accessibility is on, so your words land at the cursor."
-        : "Turn on Accessibility first. Until then your words are copied for you to paste.",
+        : "Accessibility is off, so your words are copied for you to paste instead of typed in. Turn it on in System Settings.",
       tone: insertionReady ? ("ready" as const) : ("attention" as const),
+      action: insertionReady
+        ? null
+        : { label: "Open System Settings", onClick: onOpenAccessibilitySettings },
     },
-    {
-      label: "Meetings",
-      detail: fullMeetingCaptureReady
-        ? "Records both you and the other people on the call."
-        : meetingReady
-          ? "Records your microphone. Check system audio later in Setup to capture the other side."
-          : "Needs the meeting model. You can download it later in Setup.",
-      tone: meetingReady ? ("ready" as const) : ("attention" as const),
-    },
-    {
-      label: "Meeting notes",
-      detail:
-        aiNotesChoice === "none"
-          ? "Off. Meetings get transcripts only."
-          : aiNotesChoice === "byok"
-            ? "Written by the cloud provider you set up in AI & Keys."
-            : "Written on this Mac with Ollama, when it is running.",
-      tone: "neutral" as const,
-    },
-  ];
+    meetingsRow,
+    // Notes are only about meetings; someone who skipped meetings was never
+    // asked, so there is nothing to report.
+    ...(meetingsSkipped
+      ? []
+      : [
+          {
+            label: "Meeting notes",
+            detail:
+              aiNotesChoice === "none"
+                ? "Off. Meetings get transcripts only."
+                : aiNotesChoice === "byok"
+                  ? "Written by the cloud service you set up in Search & AI."
+                  : aiNotesChoice === "native_text"
+                    ? "Written on this Mac with the built-in text model, when it is ready."
+                    : "Written on this Mac with Ollama, when it is running.",
+            tone: "neutral" as const,
+          },
+        ]),
+  ] as Array<{
+    label: string;
+    detail: string;
+    tone: "ready" | "progress" | "attention" | "neutral";
+    action?: { label: string; onClick(): void } | null;
+  }>;
 
   return (
     <div className="space-y-5">
       <div className="rounded-xl border border-gold/30 bg-gold/5 p-5 text-center">
         <p className="text-sm text-muted-foreground">
-          Put the cursor in any text field and press
+          {dictationUsable
+            ? "Put the cursor in any text field and press"
+            : modelState === "downloading"
+              ? "When the download finishes, put the cursor in any text field and press"
+              : "Once the speech model is downloaded, put the cursor in any text field and press"}
         </p>
         <div className="mt-3 flex justify-center">
           <ShortcutKeys shortcut={shortcutValue} />
@@ -2383,9 +3733,16 @@ function ReadyStep({
             key={row.label}
             className="flex items-start justify-between gap-4 p-4"
           >
-            <div>
-              <p className="text-sm font-medium">{row.label}</p>
-              <p className="text-xs text-muted-foreground">{row.detail}</p>
+            <div className="min-w-0 space-y-2">
+              <div>
+                <p className="text-sm font-medium">{row.label}</p>
+                <p className="text-sm text-muted-foreground">{row.detail}</p>
+              </div>
+              {row.action ? (
+                <Button size="sm" variant="outline" onClick={row.action.onClick}>
+                  {row.action.label}
+                </Button>
+              ) : null}
             </div>
             <span
               className={
@@ -2404,8 +3761,10 @@ function ReadyStep({
       {modelState === "idle" || modelState === "error" ? (
         <Button size="sm" variant="outline" onClick={onRetryModel}>
           {modelState === "error"
-            ? "Retry local model download"
-            : "Download local model"}
+            ? "Retry speech model download"
+            : modelSize
+              ? `Download speech model (${modelSize})`
+              : "Download speech model"}
         </Button>
       ) : null}
 
@@ -2413,10 +3772,10 @@ function ReadyStep({
         <Users className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         <div>
           <p className="text-sm font-medium">Both ways of working stay local by default</p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-sm text-muted-foreground">
             Dictation and meeting audio stay on this Mac unless you turn on a
-            cloud provider. Every dictation is also saved in History, so nothing
-            is lost if an app refuses the paste.
+            cloud provider. Review and copy the latest dictation result in
+            Plainsong. History follows your retention settings.
           </p>
         </div>
       </div>
@@ -2630,6 +3989,10 @@ function PermRow({
             />
           )}
           <span
+            // Polite and atomic, so a grant switched on in System Settings is
+            // read out as "Accessibility: Granted" when the row catches up.
+            aria-live="polite"
+            aria-atomic="true"
             className={
               ready === true
                 ? "text-sm text-gold-text"
@@ -2638,6 +4001,7 @@ function PermRow({
                   : "text-sm text-muted-foreground"
             }
           >
+            <span className="sr-only">{gate.label}: </span>
             {stateLabel}
           </span>
         </span>
@@ -2659,70 +4023,341 @@ function PermRow({
   );
 }
 
-function DictationModelStep({
-  state,
-  error,
-  percent,
-  selectedId,
-  downloadFromFooter,
-  downloadDisabled,
-  onSelect,
-  onDownload,
-}: {
+/** The meetings picker the speech step shows beside a dictation-only model. */
+type MeetingPairing = {
+  /** The dictation model selected above, by name. */
+  dictationLabel: string;
+  /** Every model that can transcribe meetings, with what choosing it costs. */
+  options: { value: string; label: string }[];
+  /** A model's route id, or `MEETINGS_LATER`. */
+  value: string;
+  /** The model picked, by name; null when meetings are left for later. */
+  meetingLabel: string | null;
   state: "idle" | "downloading" | "done" | "error";
   error: string | null;
   percent: number | null;
-  selectedId: string;
+  onChange(value: string): void;
+};
+
+/**
+ * One section of the speech list: a heading that says what the models in it
+ * cover, the recommended model as a card when it is in this section, and
+ * every other model as one line with what sets it apart.
+ */
+function SpeechChoiceSection({
+  headingId,
+  title,
+  hint,
+  choices,
+  selectedRouteId,
+}: {
+  headingId: string;
+  title: string;
+  hint: string;
+  choices: SpeechChoice[];
+  selectedRouteId: string | null;
+}) {
+  if (choices.length === 0) {
+    return null;
+  }
+  const recommended = choices.find((choice) => choice.recommended) ?? null;
+  const others = choices.filter((choice) => !choice.recommended);
+  return (
+    <div role="group" aria-labelledby={headingId} aria-describedby={`${headingId}-hint`} className="space-y-2">
+      <p className="flex flex-wrap items-baseline gap-x-2 px-1 text-xs">
+        <span id={headingId} className="font-semibold uppercase tracking-wide text-card-foreground/80">
+          {title}
+        </span>
+        <span id={`${headingId}-hint`} className="text-muted-foreground">
+          {hint}
+        </span>
+      </p>
+      {recommended ? (
+        <Radio.Root
+          value={recommended.route.routeId}
+          nativeButton
+          render={<button type="button" />}
+          className={`flex w-full items-start justify-between gap-4 rounded-lg border-2 p-3 text-left ${
+            selectedRouteId === recommended.route.routeId
+              ? "border-primary bg-primary/5"
+              : "border-border hover:border-primary/40"
+          }`}
+        >
+          <span className="min-w-0 space-y-0.5">
+            <span className="flex flex-wrap items-center gap-x-2 text-sm font-medium">
+              <span className="inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-gold-text">
+                <span className="neume neume-lit" aria-hidden="true" />
+                Recommended
+              </span>
+              {/* A space for the radio's accessible name; flex drops it visually. */}
+              {" "}
+              {recommended.route.label}
+            </span>
+            <span className="block text-sm text-muted-foreground">
+              {isOnnxParakeetRoute(recommended.route.providerType, recommended.route.modelId) ||
+              isRecommendedSpeechRoute(recommended.route.providerType, recommended.route.modelId)
+                ? PARAKEET_LANGUAGE_NOTE
+                : recommended.note}
+            </span>
+          </span>
+          {formatDownloadSize(recommended.sizeMib) ? (
+            <span className="shrink-0 pt-0.5 text-xs tabular-nums text-muted-foreground">
+              {formatDownloadSize(recommended.sizeMib)}
+            </span>
+          ) : null}
+        </Radio.Root>
+      ) : null}
+      {others.length > 0 ? (
+        <div
+          role="presentation"
+          className="divide-y divide-border/60 overflow-hidden rounded-lg border border-border"
+        >
+          {others.map((choice) => {
+            const selected = selectedRouteId === choice.route.routeId;
+            const size = formatDownloadSize(choice.sizeMib);
+            return (
+              <Radio.Root
+                key={choice.route.routeId}
+                value={choice.route.routeId}
+                nativeButton
+                render={<button type="button" />}
+                className={`flex w-full items-baseline gap-3 px-3 py-2 text-left text-[13px] leading-5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/60 ${
+                  selected ? "bg-primary/10" : "hover:bg-muted/40"
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className={`relative top-0.5 h-3 w-3 shrink-0 rounded-full border ${
+                    selected ? "border-primary bg-primary" : "border-muted-foreground/50"
+                  }`}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="font-medium">{choice.route.label}</span>
+                  <span className="text-muted-foreground">{" — "}{choice.note}</span>
+                </span>
+                <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                  {size ?? (choice.route.hosting === "platform" ? "Built in" : "")}
+                </span>
+              </Radio.Root>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * "Whisper Tiny is for dictation only. Meetings will use: [Parakeet v3]".
+ * Directly under the list, so choosing a dictation-only model shows on the
+ * same screen that meetings need their own, which one they get, and that
+ * they can wait. The primary button below counts its download.
+ */
+function MeetingPairingRow({ pairing }: { pairing: MeetingPairing }) {
+  const selectId = useId();
+  const sentenceId = useId();
+  const later = pairing.value === MEETINGS_LATER;
+  return (
+    <div className="space-y-2 rounded-lg border border-gold/40 bg-gold/5 p-3">
+      <p id={sentenceId} className="text-sm">
+        <span className="font-medium">{pairing.dictationLabel} is for dictation only.</span>{" "}
+        <span className="text-muted-foreground">
+          Meetings need a model of their own.
+        </span>
+      </p>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <label htmlFor={selectId} className="shrink-0 text-sm font-medium">
+          Meetings will use
+        </label>
+        <select
+          id={selectId}
+          aria-describedby={sentenceId}
+          className="min-w-0 flex-1 rounded-md border border-border bg-background p-2 text-sm"
+          value={pairing.value}
+          disabled={pairing.state === "downloading"}
+          onChange={(event) => pairing.onChange(event.target.value)}
+        >
+          {pairing.options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+          <option value={MEETINGS_LATER}>Set up meetings later</option>
+        </select>
+      </div>
+      {later ? (
+        <p className="text-sm text-muted-foreground">
+          Dictation works without it. Meeting setup, a few steps on, offers a
+          meetings model again, and Settings &gt; Models lists them all.
+        </p>
+      ) : null}
+      <ModelDownloadProgress name={pairing.meetingLabel ?? "Meetings speech model"} active={pairing.state === "downloading"} value={pairing.percent} className="h-2" />
+      {pairing.state === "downloading" ? (
+        <div className="space-y-2">
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            Getting {pairing.meetingLabel} for meetings
+            {pairing.percent !== null ? `: ${Math.round(pairing.percent)}%` : "…"}
+          </div>
+        </div>
+      ) : null}
+      {pairing.state === "error" ? (
+        <p className="flex items-start gap-2 text-sm text-destructive" role="alert">
+          <XCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          <span>
+            {pairing.meetingLabel ?? "The meetings model"} didn&apos;t download. {pairing.error}{" "}
+            Or choose Set up meetings later.
+          </span>
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function DictationModelStep({
+  choices,
+  savedModelUnavailable,
+  state,
+  error,
+  percent,
+  selectedRouteId,
+  preservedRoute,
+  upgradingFromOnnxParakeet,
+  downloadFromFooter,
+  downloadDisabled,
+  busy,
+  meetingCoverage,
+  meetingPairing,
+  memoryRefusedLabel,
+  onSelect,
+  onDownload,
+}: {
+  /** Every distinct model this Mac can run, recommended first (`speechChoicesForLane`). */
+  choices: SpeechChoice[];
+  /** The model a practice dictation just ran out of memory with, if any. */
+  memoryRefusedLabel: string | null;
+  savedModelUnavailable: boolean;
+  state: "idle" | "downloading" | "done" | "error";
+  error: string | null;
+  percent: number | null;
+  selectedRouteId: string | null;
+  preservedRoute: PreservedDictationRoute | null;
+  /** The selected model replaces the ONNX build of the same Parakeet v3. */
+  upgradingFromOnnxParakeet: boolean;
   downloadFromFooter: boolean;
   downloadDisabled: boolean;
-  onSelect(id: string): void;
+  /** A download is running: the list holds still until it finishes. */
+  busy: boolean;
+  /** What the selected model means for meetings, when it covers them. */
+  meetingCoverage: string | null;
+  /** The meetings picker, shown while the selected model is for dictation only. */
+  meetingPairing: MeetingPairing | null;
+  onSelect(routeId: string): void;
   onDownload(): void;
 }) {
-  const selectedOption = POWER_MODEL_OPTIONS.find((option) => option.id === selectedId);
+  const { dictationAndMeetings, dictationOnly } = groupSpeechChoices(choices);
+  const sectionId = useId();
+  const selectedLabel =
+    choices.find((choice) => choice.route.routeId === selectedRouteId)?.route.label ??
+    (preservedRoute?.routeId === selectedRouteId ? preservedRoute.label : null);
   return (
     <div className="space-y-4">
+      {/* What each model covers is on its own line; the intro does not repeat it. */}
       <p className="text-sm text-muted-foreground">
         Plainsong turns your voice into text on this Mac, so it needs a speech
-        model first. The recommended one suits most people and downloads on
-        demand. You can switch later in Settings.
+        model first. It's a one-time download, and you can change it later in
+        Settings.
       </p>
+      {memoryRefusedLabel ? (
+        <p role="alert" className="rounded-lg border border-rust/40 bg-rust/5 p-3 text-sm">
+          {memoryRefusedLabel} needed more free memory than this Mac had just
+          now. Pick a smaller model below, or close memory-heavy apps and try
+          again.
+        </p>
+      ) : null}
+      {savedModelUnavailable ? (
+        <p className="text-sm text-muted-foreground">
+          Your previous speech model is unavailable in this version. Choose a model below to continue.
+        </p>
+      ) : null}
 
-      <div className="space-y-2">
-        {POWER_MODEL_OPTIONS.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            aria-pressed={selectedId === option.id}
-            onClick={() => {
-              if (state !== "downloading") {
-                onSelect(option.id);
-              }
-            }}
-            className={`flex w-full items-start justify-between gap-4 rounded-lg border-2 p-3 text-left transition-all ${
-              selectedId === option.id
+      {/* No colour transitions on these options. A pointer moving over the
+          list crosses a row edge every few frames, and each crossing started
+          two 150 ms transitions, so a window left open on this step repainted
+          almost continuously whenever the mouse passed over it. Hover changes
+          are instant instead. */}
+      <RadioGroup<string>
+        value={selectedRouteId ?? ""}
+        onValueChange={(value) => {
+          if (!busy && value) {
+            onSelect(value);
+          }
+        }}
+        disabled={busy}
+        aria-label="Speech model"
+        className="space-y-4"
+      >
+        {preservedRoute ? (
+          <Radio.Root
+            value={preservedRoute.routeId}
+            nativeButton
+            render={<button type="button" />}
+            className={`flex w-full items-start justify-between gap-4 rounded-lg border-2 p-3 text-left ${
+              selectedRouteId === preservedRoute.routeId
                 ? "border-primary bg-primary/5"
                 : "border-border hover:border-primary/40"
             }`}
           >
-            <div className="min-w-0 space-y-0.5">
-              <p className="flex flex-wrap items-center gap-x-2 text-sm font-medium">
-                {option.recommended ? (
-                  <span className="inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-gold-text">
-                    <span className="neume neume-lit" aria-hidden="true" />
-                    Recommended
-                  </span>
-                ) : null}
-                {option.title}
-              </p>
-              <p className="text-xs text-muted-foreground">{option.desc}</p>
-            </div>
-            <span className="flex shrink-0 flex-col items-end pt-0.5 text-xs text-muted-foreground">
-              <span>{option.label}</span>
-              <span>{powerModelSize(option)}</span>
+            <span className="min-w-0 space-y-0.5">
+              <span className="block text-sm font-medium">Current model</span>
+              <span className="block text-sm text-muted-foreground">
+                Already set up and ready on this Mac.
+              </span>
             </span>
-          </button>
-        ))}
-      </div>
+            <span className="flex shrink-0 flex-col items-end pt-0.5 text-xs text-muted-foreground">
+              {preservedRoute.label}
+            </span>
+          </Radio.Root>
+        ) : null}
+
+        {/* Two sections, so whether a model also does meetings is said once,
+            where the reader chooses, instead of on every line. */}
+        <SpeechChoiceSection
+          headingId={`${sectionId}-both`}
+          title="Dictation and meetings"
+          hint="One model does both"
+          choices={dictationAndMeetings}
+          selectedRouteId={selectedRouteId}
+        />
+        <SpeechChoiceSection
+          headingId={`${sectionId}-dictation`}
+          title="Dictation only"
+          hint="Meetings need a second model"
+          choices={dictationOnly}
+          selectedRouteId={selectedRouteId}
+        />
+      </RadioGroup>
+
+      {meetingPairing ? (
+        <MeetingPairingRow pairing={meetingPairing} />
+      ) : meetingCoverage ? (
+        <p className="text-sm text-muted-foreground">{meetingCoverage}</p>
+      ) : null}
+      {/* Said once when the meetings picker appears, so a screen reader hears
+          that meetings now need their own model. */}
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {meetingPairing
+          ? `${meetingPairing.dictationLabel} is for dictation only. Choose a model for meetings below the list.`
+          : ""}
+      </p>
+
+      {upgradingFromOnnxParakeet ? (
+        <p className="text-sm text-muted-foreground">
+          Your current Parakeet v3 keeps working until this finishes. This is a
+          faster, more accurate version of the same model, and Plainsong
+          switches to it once it's downloaded.
+        </p>
+      ) : null}
 
       {state === "idle" && !downloadFromFooter ? (
         <Button
@@ -2732,33 +4367,34 @@ function DictationModelStep({
           disabled={downloadDisabled}
         >
           <Download className="h-4 w-4" />
-          Download {selectedOption?.label}
+          Download {selectedLabel}
         </Button>
       ) : null}
 
+      <ModelDownloadProgress name={selectedLabel ?? "Speech model"} active={state === "downloading"} value={percent} className="h-2" />
       {state === "downloading" ? (
         <div className="space-y-2">
           <div className="flex items-center gap-3 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
-            Downloading {selectedOption?.label}
+            Downloading {selectedLabel}
             {percent !== null ? `: ${Math.round(percent)}%` : "…"}
           </div>
-          <Progress value={percent} className="h-2" />
         </div>
       ) : null}
 
       {state === "done" ? (
         <div className="flex items-center gap-2 text-sm text-gold-text" role="status">
           <CheckCircle2 className="h-4 w-4" />
-          Downloaded and ready to use.
+          {/* Also the state on a second run, when nothing was downloaded now. */}
+          {selectedLabel ? `${selectedLabel} is on this Mac and ready.` : "The model is on this Mac and ready."}
         </div>
       ) : null}
 
       {state === "error" ? (
         <div className="space-y-2">
-          <div className="flex items-center gap-2 text-sm text-destructive">
-            <XCircle className="h-4 w-4" />
-            Download failed: {error}
+          <div className="flex items-start gap-2 text-sm text-destructive" role="alert">
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>The download didn&apos;t finish. {error}</span>
           </div>
           {!downloadFromFooter ? (
             <Button
@@ -2773,22 +4409,28 @@ function DictationModelStep({
         </div>
       ) : null}
 
-      <p className="text-sm text-muted-foreground">
-        {downloadFromFooter
-          ? "You can skip this and download later, but dictation will not work until a model is ready."
-          : "Start the download here, or keep the model you already use. You can change models later in Settings."}
-      </p>
+      {state === "done" && !preservedRoute ? null : (
+        <p className="text-sm text-muted-foreground">
+          {preservedRoute
+            ? "Continue to keep your current model, or choose a replacement above."
+            : downloadFromFooter
+            ? "You can skip this and download later, but dictation won't work until a speech model is downloaded."
+            : "Start the download here, or keep the model you already use. You can change models later in Settings."}
+        </p>
+      )}
     </div>
   );
 }
 
 function HotkeyStep({
   displayShortcut,
+  nativeShortcutAvailable,
   onShortcutChange,
   modeChoice,
   saveError,
 }: {
   displayShortcut: string;
+  nativeShortcutAvailable: boolean;
   onShortcutChange(value: string): void;
   modeChoice: ReactNode;
   saveError: string | null;
@@ -2797,10 +4439,11 @@ function HotkeyStep({
     <div className="space-y-5">
       <p className="text-sm text-muted-foreground">
         Choose the shortcut you press to dictate in any app, and how it works.
-        Both can be changed later in Settings &gt; Dictation.
+        Both can be changed later in Settings &gt; Shortcuts.
       </p>
 
       <ShortcutRecorder
+        nativeShortcutAvailable={nativeShortcutAvailable}
         inputId="first-run-dictation-shortcut"
         displayShortcut={displayShortcut}
         onShortcutChange={onShortcutChange}
@@ -2809,8 +4452,8 @@ function HotkeyStep({
       {modeChoice}
 
       {saveError ? (
-        <p className="text-xs text-destructive" role="alert">
-          Failed to save hotkey: {saveError}
+        <p className="text-sm text-destructive" role="alert">
+          Failed to save shortcut: {saveError}
         </p>
       ) : null}
     </div>
@@ -2823,20 +4466,25 @@ const AI_NOTES_OPTIONS: Array<{
   detail: string;
 }> = [
   {
+    id: "native_text",
+    label: "Use the built-in text model for meeting notes",
+    detail: "Download it here when you choose. Runs on this Mac without an account.",
+  },
+  {
     id: "ollama",
-    label: "Write notes on this Mac with Ollama",
+    label: "Use Ollama for meeting notes",
     detail:
-      "Nothing leaves the machine. Ollama is a separate free download and has to be running.",
+      "Ollama's local models run on this Mac. Its cloud models send text off this Mac and need cloud AI processing allowed in Privacy & data. Ollama is a separate free download.",
   },
   {
     id: "byok",
     label: "Use my own API key",
     detail:
-      "Transcripts are sent to the provider you pick. Add the key under AI & Keys.",
+      "Transcripts are sent to the service you pick. Add the key under Search & AI.",
   },
   {
     id: "none",
-    label: "Transcripts only, no AI notes",
+    label: "Transcripts only, no automatic notes",
     detail:
       "Meetings are still recorded, transcribed and searchable. No summary, action items or auto-title.",
   },
@@ -2847,15 +4495,18 @@ const AI_NOTES_OPTIONS: Array<{
  *
  * A default install points the meetings lane at an Ollama nobody installed, so
  * the summary, action items and title of the first meeting all failed silently.
- * The three answers here are the only honest ones: run it locally, bring a key,
- * or say plainly that you do not want notes — and the last one is remembered so
+ * The choices are local notes, a provider key, or transcripts only. A saved
+ * built-in model remains available, and transcripts only is remembered so
  * readiness reports a decision instead of a fault.
  */
 function AiNotesStep({
   choice,
   onChoiceChange,
   configuredProvider,
+  nativeTextAvailable,
   localAiReady,
+  localAiMessage,
+  localAiNeedsSetup,
   localAiChecking,
   onRecheckLocalAi,
   onOpenAiSettings,
@@ -2865,7 +4516,11 @@ function AiNotesStep({
   choice: AiNotesChoice;
   onChoiceChange(choice: AiNotesChoice): void;
   configuredProvider: string;
+  /** This Mac can run the built-in text model, so the step offers it. */
+  nativeTextAvailable: boolean;
   localAiReady: boolean | null;
+  localAiMessage: string | null;
+  localAiNeedsSetup: boolean;
   localAiChecking: boolean;
   onRecheckLocalAi(): void;
   onOpenAiSettings(): void;
@@ -2880,33 +4535,29 @@ function AiNotesStep({
         way.
       </p>
 
-      {/*
-        Dictation cleanup is a different lane with a different answer, and
-        saying so here stops the most common misreading of this step: that
-        picking "Transcripts only" also turns dictation cleanup off. The
-        built-in model ships as the default for that lane and needs nothing
-        from this screen -- but it is a normalizer, so it is not one of the
-        three answers below.
-      */}
       <p className="text-sm text-muted-foreground">
-        Dictation cleanup is separate and already works. A small built-in model
-        tidies punctuation, filler words and spoken numbers on this Mac, with
-        nothing to install. It does not write meeting notes. You can change
-        either one later in Models.
+        Dictation cleanup is separate from meeting notes. Basic formatting
+        handles punctuation and spoken corrections locally. AI cleanup depends
+        on the provider and model you select.
       </p>
 
-      <div
+      <RadioGroup<AiNotesChoice>
         className="space-y-2"
-        role="radiogroup"
+        value={choice}
+        onValueChange={onChoiceChange}
         aria-label="How meeting notes are written"
       >
-        {AI_NOTES_OPTIONS.map((option) => (
-          <button
+        {AI_NOTES_OPTIONS.filter(
+          (option) =>
+            option.id !== "native_text" ||
+            nativeTextAvailable ||
+            configuredProvider === "native_text",
+        ).map((option) => (
+          <Radio.Root
             key={option.id}
-            type="button"
-            role="radio"
-            aria-checked={choice === option.id}
-            onClick={() => onChoiceChange(option.id)}
+            value={option.id}
+            nativeButton
+            render={<button type="button" />}
             className={`flex w-full items-start justify-between gap-3 rounded-lg border-2 p-3 text-left transition-all ${
               choice === option.id
                 ? "border-primary bg-primary/5"
@@ -2917,23 +4568,33 @@ function AiNotesStep({
               <p className="text-sm font-medium">{option.label}</p>
               <p className="text-sm text-muted-foreground">{option.detail}</p>
             </div>
-          </button>
+          </Radio.Root>
         ))}
-      </div>
+      </RadioGroup>
 
-      {choice === "ollama" ? (
+      {choice === "ollama" || choice === "native_text" ? (
         <div className="rounded-lg border border-border p-3">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="text-sm font-medium">Ollama on this Mac</p>
+              <p className="text-sm font-medium">
+                {choice === "native_text" ? "Built-in text model on this Mac" : "Ollama on this Mac"}
+              </p>
               <p className="text-sm text-muted-foreground" aria-live="polite">
                 {localAiChecking
-                  ? "Checking whether Ollama is running…"
-                  : localAiReady === true
-                    ? "Ollama answered. Meeting notes can be written locally."
+                  ? choice === "native_text"
+                    ? "Checking the built-in text model…"
+                    : "Checking Ollama and the selected model…"
+                  : localAiMessage ?? (localAiReady === true
+                    ? choice === "native_text"
+                      ? "The built-in text model is ready for meeting notes on this Mac."
+                      : "Ollama and the selected model are ready for meeting notes on this Mac."
                     : localAiReady === false
-                      ? "Ollama is not running, so notes will not be written yet."
-                      : "Plainsong could not reach Ollama to check."}
+                      ? choice === "native_text"
+                        ? "The built-in text model is not ready, so notes will not be written yet."
+                        : "Ollama or the selected model is not ready, so notes will not be written yet."
+                      : choice === "native_text"
+                        ? "Plainsong could not confirm the built-in text model."
+                        : "Plainsong could not confirm Ollama and the selected model.")}
               </p>
             </div>
             {localAiChecking ? (
@@ -2949,7 +4610,7 @@ function AiNotesStep({
           </div>
           {localAiReady === true ? null : (
             <div className="mt-3 space-y-2">
-              <p className="text-sm text-muted-foreground">
+              {localAiNeedsSetup && <p className="text-sm text-muted-foreground">
                 Install Ollama from{" "}
                 <code className="rounded bg-muted px-1">ollama.com/download</code>
                 , start it, then pull a model with{" "}
@@ -2957,7 +4618,7 @@ function AiNotesStep({
                   ollama pull qwen3.5:4b
                 </code>
                 .
-              </p>
+              </p>}
               <Button
                 size="sm"
                 variant="outline"
@@ -2966,15 +4627,17 @@ function AiNotesStep({
               >
                 Check again
               </Button>
-              <p className="text-sm text-muted-foreground">
+              {localAiNeedsSetup && <p className="text-sm text-muted-foreground">
                 You can continue now. Meetings will record and transcribe, and
                 Plainsong will say plainly that notes are unavailable until
-                Ollama answers.
-              </p>
+                Ollama and the selected model are ready.
+              </p>}
             </div>
           )}
         </div>
       ) : null}
+
+      {choice === "native_text" ? <NativeTextModelRow onChanged={onRecheckLocalAi} /> : null}
 
       {choice === "byok" ? (
         <div className="rounded-lg border border-border p-3 space-y-2">
@@ -2984,13 +4647,13 @@ function AiNotesStep({
               : "No cloud provider is selected yet"}
           </p>
           <p className="text-sm text-muted-foreground">
-            Add the key under AI &amp; Keys and turn cloud AI on. Until then,
+            Add the key in Settings &gt; Search &amp; AI and turn cloud AI on. Until then,
             meetings still record and transcribe, and Plainsong reports notes as
             unavailable rather than pretending they were written.
           </p>
           <Button size="sm" variant="outline" onClick={onOpenAiSettings}>
             <KeyRound className="mr-2 h-4 w-4" />
-            Open AI &amp; Keys settings
+            Open Search &amp; AI settings
           </Button>
         </div>
       ) : null}
@@ -2998,8 +4661,8 @@ function AiNotesStep({
       {choice === "none" ? (
         <div className="rounded-lg border border-border p-3">
           <p className="text-sm text-muted-foreground">
-            Plainsong will remember this and stop reporting a missing AI route as
-            a problem. Change it any time in AI &amp; Keys.
+            Plainsong will remember this and will not flag missing meeting notes
+            as a problem. Change it any time in Settings &gt; Meetings.
           </p>
         </div>
       ) : null}
@@ -3013,18 +4676,79 @@ function AiNotesStep({
   );
 }
 
+type MeetingSaveErrorContext =
+  | "hotkey"
+  | "meeting-route"
+  | "meeting-settings"
+  | "ai-notes"
+  | null;
+
+/**
+ * One line of the meeting summary: what it is, where it stands in a sentence,
+ * and a neume. "Not yet" is hollow and quiet -- a model nobody has downloaded
+ * on a first run is the normal state, not a fault. Rust is kept for something
+ * that is actually wrong.
+ */
+function MeetingStatusRow({
+  label,
+  tone,
+  busy,
+  children,
+}: {
+  label: string;
+  tone: "ready" | "not-yet" | "problem";
+  busy?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <li className="flex items-start justify-between gap-4 p-4">
+      <div className="min-w-0 flex-1 space-y-2">
+        <p className="text-sm font-medium">{label}</p>
+        {children}
+      </div>
+      {busy ? (
+        <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-muted-foreground" aria-hidden="true" />
+      ) : (
+        <span
+          className={`neume mt-1 shrink-0 ${
+            tone === "ready" ? "neume-lit" : tone === "problem" ? "neume-rust" : "neume-hollow"
+          }`}
+          aria-hidden="true"
+        />
+      )}
+    </li>
+  );
+}
+
+/**
+ * Meeting setup, as a first-time reader needs it: can Plainsong transcribe a
+ * meeting, hear you, and hear the other people -- each in one plain sentence
+ * with the one action that fixes it. What the sidecar reports verbatim (audio
+ * backends, sample rates, route ids, settings paths) is kept under Details for
+ * support, not put in front of someone setting the app up for the first time.
+ */
 function MeetingSetupStep({
   loading,
+  checkFailed,
   routeSummary,
   routeReady,
   routeError,
   verificationDetails,
+  recommendedModel,
+  modelPicker,
+  microphoneReady,
+  microphoneChecking,
+  onOpenMicrophoneSettings,
   systemAudioCapability,
   systemAudioTestLoading,
-  systemAudioTestStatus,
+  systemAudioTestResult,
   meetingModelState,
   meetingModelError,
   meetingDownloadPercent,
+  speakerModel,
+  speakerModelState,
+  speakerModelError,
+  onRetrySpeakerModel,
   onTestSystemAudio,
   meetingAudioStorageMode,
   onMeetingAudioStorageModeChange,
@@ -3035,315 +4759,436 @@ function MeetingSetupStep({
   meetingRetentionDeleteMode,
   onMeetingRetentionDeleteModeChange,
   onRefresh,
-  onApplyRecommendedRoute,
-  recommendedRouteSummary,
   saveError,
   saveErrorContext,
 }: {
   loading: boolean;
+  checkFailed: boolean;
   routeSummary: string;
   routeReady: boolean | null;
   routeError: string | null;
   verificationDetails: string[];
+  /** The model Continue saves for meetings: the recommended one, or the reader's pick. */
+  recommendedModel: {
+    label: string;
+    recommended: boolean;
+    needsDownload: boolean;
+    size: string | null;
+    sameAsDictation: boolean;
+  } | null;
+  /** Which model meetings use, changeable here; null while it can't be read. */
+  modelPicker: {
+    value: string;
+    options: { value: string; label: string }[];
+    disabled: boolean;
+    onChange(value: string): void;
+  } | null;
+  microphoneReady: boolean | undefined;
+  microphoneChecking: boolean;
+  onOpenMicrophoneSettings(): void;
   systemAudioCapability: SystemAudioCapability | null;
   systemAudioTestLoading: boolean;
-  systemAudioTestStatus: string | null;
+  systemAudioTestResult: SystemAudioTestOutcome | null;
   meetingModelState: "idle" | "downloading" | "done" | "error";
   meetingModelError: string | null;
   meetingDownloadPercent: number | null;
+  speakerModel: {
+    /** "speaker model (33 MB)" (`speakerModelDownloadName`). */
+    name: string;
+    installed: boolean;
+    separationOn: boolean;
+    /** The meeting speech model downloads in the same click. */
+    ridesWithSpeechModel: boolean;
+  } | null;
+  speakerModelState: "idle" | "downloading" | "done" | "error";
+  speakerModelError: string | null;
+  onRetrySpeakerModel(): void;
   onTestSystemAudio(): void;
   meetingAudioStorageMode: "always" | "transcript_only";
   onMeetingAudioStorageModeChange(value: "always" | "transcript_only"): void;
-  meetingRetentionPreset: "1m" | "2m" | "3m" | "custom" | "never";
-  onMeetingRetentionPresetChange(value: "1m" | "2m" | "3m" | "custom" | "never"): void;
+  meetingRetentionPreset: "1w" | "1m" | "2m" | "3m" | "custom" | "never";
+  onMeetingRetentionPresetChange(value: "1w" | "1m" | "2m" | "3m" | "custom" | "never"): void;
   meetingRetentionCustomMonths: number;
   onMeetingRetentionCustomMonthsChange(value: number): void;
   meetingRetentionDeleteMode: "audio_only" | "audio_and_transcript";
   onMeetingRetentionDeleteModeChange(value: "audio_only" | "audio_and_transcript"): void;
   onRefresh(): void;
-  onApplyRecommendedRoute?: () => void;
-  recommendedRouteSummary: string | null;
   saveError: string | null;
-  saveErrorContext:
-    | "hotkey"
-    | "meeting-route"
-    | "meeting-settings"
-    | "ai-notes"
-    | null;
+  saveErrorContext: MeetingSaveErrorContext;
 }) {
-  const systemAudioBackendLabel =
-    systemAudioCapability?.backend === "core_audio_process_tap"
-      ? "macOS audio capture"
-      : systemAudioCapability?.backend === "virtual_loopback"
-        ? "a virtual loopback device"
-        : null;
   const systemAudioRouteAvailable =
     Boolean(systemAudioCapability) && systemAudioCapability?.backend !== "none";
+  const systemAudioReady = systemAudioCapability?.ready === true;
+  const meetingAudio = describeMeetingAudio(systemAudioCapability);
+  const systemAudioTestFailed =
+    !systemAudioReady && systemAudioTestResult?.outcome === "failed";
+
+  // --- Speech model for meetings -------------------------------------------
+  const modelChecking = loading && routeReady === null;
+  const modelDownloading = meetingModelState === "downloading";
+  const modelTone: "ready" | "not-yet" | "problem" = routeReady
+    ? "ready"
+    : checkFailed || meetingModelError || (!recommendedModel && routeReady === false)
+      ? "problem"
+      : "not-yet";
+  const modelSentence = modelChecking
+    ? "Checking…"
+    : routeReady
+      ? "Ready. Meetings are transcribed on this Mac."
+      : checkFailed
+        ? "Plainsong could not check this just now. Check again in a moment."
+        : modelDownloading
+          ? `Downloading the meeting model${
+              meetingDownloadPercent === null ? "…" : `: ${Math.round(meetingDownloadPercent)}%`
+            }`
+          : !recommendedModel
+            ? "No meeting model is available for this Mac yet. Dictation still works."
+            : !recommendedModel.needsDownload
+              ? recommendedModel.sameAsDictation
+                ? `${
+                    recommendedModel.recommended ? "The recommended model" : recommendedModel.label
+                  } is already on this Mac. It is the one you dictate with, so meetings need no second download. Continue to use it for meetings.`
+                : `${
+                    recommendedModel.recommended ? "The recommended model" : recommendedModel.label
+                  } is already on this Mac. Continue to use it for meetings.`
+              : `Not downloaded yet. It is a one-time${
+                  recommendedModel.size ? ` ${recommendedModel.size}` : ""
+                } download, and after that meetings are transcribed on this Mac.`;
+
+  // --- Speaker model -------------------------------------------------------
+  const speakerTone: "ready" | "not-yet" | "problem" =
+    speakerModelState === "error"
+      ? "problem"
+      : speakerModel?.installed && speakerModel.separationOn
+        ? "ready"
+        : "not-yet";
+  const speakerSentence = !speakerModel
+    ? null
+    : !speakerModel.separationOn
+      ? "Telling speakers apart is off, so meetings are saved without speaker labels. You can turn it on in Settings > Meetings."
+      : speakerModelState === "downloading"
+        ? "Downloading the speaker model…"
+        : speakerModel.installed
+          ? "Ready. The speaker model labels who said what, on this Mac."
+          : speakerModelState === "error"
+            ? "The speaker model didn't download. You can continue: meetings are saved without speaker labels until it's downloaded, and each of those meetings offers the download."
+            : speakerModel.ridesWithSpeechModel
+              ? `Not downloaded yet. The ${speakerModel.name} tells voices apart, so the transcript shows who said what. Download meeting models gets it with the speech model; nothing downloads until you choose that.`
+              : `Not downloaded yet. The ${speakerModel.name} tells voices apart, so the transcript shows who said what. Nothing downloads until you choose Download speaker model.`;
+
+  // --- Microphone ----------------------------------------------------------
+  const microphoneTone: "ready" | "not-yet" | "problem" =
+    microphoneReady === true ? "ready" : microphoneReady === false ? "problem" : "not-yet";
+
+  // --- System audio --------------------------------------------------------
+  const systemAudioTone: "ready" | "not-yet" | "problem" = systemAudioReady
+    ? "ready"
+    : systemAudioTestFailed
+      ? "problem"
+      : meetingAudio.tone;
+  const systemAudioSentence =
+    systemAudioCapability === null
+      ? loading
+        ? "Checking…"
+        : "Not checked yet."
+      : meetingAudio.sentence;
+
+  // Everything the sidecar said, once each, for support.
+  const details = Array.from(
+    new Set(
+      [
+        `Meeting model: ${routeSummary}`,
+        routeError,
+        ...verificationDetails,
+        systemAudioCapability?.actionableReason ?? null,
+        systemAudioTestResult?.detail ?? null,
+      ].filter((line): line is string => Boolean(line && line.trim())),
+    ),
+  );
 
   return (
-    <div className="space-y-4">
-      <p className="text-sm text-muted-foreground">
-        Plainsong can also record and transcribe meetings on this Mac. It hears
-        you through the microphone and the other people through your Mac&apos;s
-        sound output. Parakeet is the recommended meeting model; for a language
-        it does not cover, choose a Whisper model later in Models.
+    <div className="space-y-5">
+      <p className="max-w-xl text-sm text-muted-foreground">
+        Plainsong can also record and transcribe your calls, on this Mac.{" "}
+        {MEETING_AUDIO_EXPLAINER} This part is optional: you can skip it now and
+        set it up later from More &gt; Setup in the sidebar.
       </p>
 
-      <div className="space-y-3">
-        <div className="rounded-lg border border-border p-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium">Meeting transcription</p>
-              <p className="text-xs text-muted-foreground">{routeSummary}</p>
+      <div className="space-y-2">
+        <ul className="divide-y divide-border rounded-xl border border-border" aria-busy={loading}>
+          <MeetingStatusRow
+            label="Speech model for meetings"
+            tone={modelTone}
+            busy={modelChecking}
+          >
+            {modelPicker ? (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                <label htmlFor="first-run-meeting-model" className="shrink-0 text-sm text-muted-foreground">
+                  Meetings use
+                </label>
+                <select
+                  id="first-run-meeting-model"
+                  className="min-w-0 flex-1 rounded-md border border-border bg-background p-2 text-sm"
+                  value={modelPicker.value}
+                  disabled={modelPicker.disabled}
+                  onChange={(event) => modelPicker.onChange(event.target.value)}
+                >
+                  {modelPicker.options.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            <p className="text-sm text-muted-foreground" aria-live="polite">
+              {modelSentence}
+            </p>
+            <ModelDownloadProgress name={recommendedModel?.label ?? "Meetings speech model"} active={modelDownloading} value={meetingDownloadPercent} className="h-1.5" />
+            {meetingModelError ? (
+              <p className="text-sm text-destructive" role="alert">
+                The meeting model didn&apos;t download. {meetingModelError}
+              </p>
+            ) : null}
+            {saveError && saveErrorContext === "meeting-route" ? (
+              <p className="text-sm text-destructive" role="alert">
+                Couldn&apos;t choose the meeting model: {saveError}. Try again;
+                your other choices on this page are kept.
+              </p>
+            ) : null}
+          </MeetingStatusRow>
+
+          {speakerModel && speakerSentence ? (
+            <MeetingStatusRow
+              label="Telling speakers apart"
+              tone={speakerTone}
+              busy={speakerModelState === "downloading"}
+            >
+              <p className="text-sm text-muted-foreground" aria-live="polite">
+                {speakerSentence}
+              </p>
+              {speakerModelState === "error" && speakerModelError ? (
+                <p className="text-sm text-destructive" role="alert">
+                  {speakerModelError}
+                </p>
+              ) : null}
+              {speakerModelState === "error" ? (
+                <Button size="sm" variant="outline" onClick={onRetrySpeakerModel}>
+                  Try the download again
+                </Button>
+              ) : null}
+            </MeetingStatusRow>
+          ) : null}
+
+          <MeetingStatusRow
+            label="Your voice"
+            tone={microphoneTone}
+            busy={microphoneChecking}
+          >
+            <p className="text-sm text-muted-foreground">
+              {microphoneReady === true
+                ? "Microphone access is on."
+                : microphoneReady === false
+                  ? "Microphone access is off, so meetings could not record you. Turn it on in System Settings."
+                  : microphoneChecking
+                    ? "Checking…"
+                    : "Not checked yet."}
+            </p>
+            {microphoneReady === false ? (
+              <Button size="sm" variant="outline" onClick={onOpenMicrophoneSettings}>
+                Open System Settings
+              </Button>
+            ) : null}
+          </MeetingStatusRow>
+
+          <MeetingStatusRow
+            label="Other people on the call"
+            tone={systemAudioTone}
+            busy={systemAudioTestLoading || (loading && systemAudioCapability === null)}
+          >
+            <p className="text-sm text-muted-foreground" aria-live="polite">
+              {systemAudioTestLoading
+                ? "Checking the meeting audio. If macOS asks, choose Allow."
+                : systemAudioTestFailed && meetingAudio.state !== "denied"
+                  ? systemAudioTestResult?.message
+                  : systemAudioSentence}
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              {meetingAudio.action !== "open_settings" ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={systemAudioTestLoading || !systemAudioRouteAvailable}
+                  onClick={onTestSystemAudio}
+                >
+                  {systemAudioTestLoading ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : null}
+                  {systemAudioTestLoading
+                    ? "Checking…"
+                    : systemAudioReady
+                      ? "Check meeting audio again"
+                      : meetingAudio.actionLabel ?? "Check meeting audio"}
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void openPermissionSettings("system_audio")}
+                  >
+                    Open System Settings
+                  </Button>
+                  <Button type="button" size="sm" variant="ghost" onClick={onRefresh}>
+                    Check again
+                  </Button>
+                </>
+              )}
             </div>
-            {loading ? (
-              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-            ) : routeReady ? (
-              <span className="neume neume-lit" aria-hidden="true" />
-            ) : (
-              <span className="neume neume-rust" aria-hidden="true" />
-            )}
-          </div>
-          {routeError ? <p className="mt-2 text-xs text-rust">{routeError}</p> : null}
-          {verificationDetails.length > 0 ? (
-            <div className="mt-2 space-y-1">
-              {verificationDetails.map((detail) => (
-                <p key={detail} className="text-xs text-muted-foreground">
-                  {detail}
+            {systemAudioTestResult?.outcome === "passed" ? (
+              <p className="text-sm text-gold-text" role="status">
+                {systemAudioTestResult.message}
+              </p>
+            ) : null}
+          </MeetingStatusRow>
+        </ul>
+
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <details className="min-w-0 flex-1 text-sm">
+            <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              Details
+            </summary>
+            <div className="mt-2 space-y-1 rounded-lg bg-muted/20 p-3">
+              <p className="text-sm text-muted-foreground">
+                What Plainsong&apos;s own check reported, for troubleshooting.
+              </p>
+              {details.map((line) => (
+                <p key={line} className="break-words font-mono text-xs text-muted-foreground">
+                  {line}
                 </p>
               ))}
             </div>
-          ) : null}
-          {recommendedRouteSummary && !routeReady ? (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="outline" onClick={onApplyRecommendedRoute}>
-                Use recommended route
-              </Button>
-              <span className="text-xs text-muted-foreground">{recommendedRouteSummary}</span>
-            </div>
-          ) : null}
-          {saveError && saveErrorContext === "meeting-route" ? (
-            <p className="mt-2 text-xs text-destructive" role="alert">
-              Couldn&apos;t save the recommended meeting route: {saveError}. Retry the route;
-              your storage and retention choices are still here.
-            </p>
-          ) : null}
-          {meetingModelState === "downloading" ? (
-            <div className="mt-3 space-y-1.5" aria-live="polite">
-              <Progress value={meetingDownloadPercent} className="h-1.5" />
-              <p className="text-xs text-muted-foreground">
-                Downloading the local meeting model
-                {meetingDownloadPercent === null
-                  ? "…"
-                  : ` · ${Math.round(meetingDownloadPercent)}%`}
-              </p>
-            </div>
-          ) : null}
-          {meetingModelError ? (
-            <p className="mt-2 text-xs text-destructive" role="alert">
-              Meeting model download failed: {meetingModelError}
-            </p>
-          ) : null}
-        </div>
-
-        <div className="rounded-lg border border-border p-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium">System audio capture</p>
-              {systemAudioCapability === null ? (
-                <p className="text-xs text-muted-foreground">Checking…</p>
-              ) : systemAudioCapability.ready ? (
-                <p className="text-xs text-gold-text">
-                  Working. Plainsong can hear the other people on a call
-                  {systemAudioCapability.routeDevice
-                    ? ` through ${systemAudioCapability.routeDevice}`
-                    : ""}
-                  .
-                </p>
-              ) : systemAudioRouteAvailable ? (
-                <p className="text-xs text-rust">
-                  Found {systemAudioBackendLabel ?? "a way to capture it"}, but
-                  permission and non-silent audio are not verified yet. Run the
-                  test below.
-                </p>
-              ) : (
-                <p className="text-xs text-rust">
-                  No way to capture your Mac&apos;s sound yet. Meetings still
-                  record your microphone.
-                </p>
-              )}
-            </div>
-            {loading || systemAudioTestLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-            ) : systemAudioCapability?.ready ? (
-              <span className="neume neume-lit" aria-hidden="true" />
-            ) : systemAudioCapability === null ? (
-              <span className="neume neume-hollow" aria-hidden="true" />
-            ) : (
-              <span className="neume neume-rust" aria-hidden="true" />
-            )}
-          </div>
-          {systemAudioCapability?.actionableReason ? (
-            <p className="mt-2 text-xs text-muted-foreground">
-              {systemAudioCapability.actionableReason}
-            </p>
-          ) : null}
-          <p className="mt-2 text-xs text-muted-foreground">
-            {systemAudioCapability?.backend === "virtual_loopback"
-              ? "Play some audio through that device during the test. It is marked ready only once Plainsong actually hears it."
-              : "The test plays a short, quiet tone and checks that Plainsong hears it. macOS may ask for permission the first time."}
-          </p>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={systemAudioTestLoading || !systemAudioRouteAvailable}
-              onClick={onTestSystemAudio}
-            >
-              {systemAudioTestLoading ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : null}
-              Test system audio
-            </Button>
-            {systemAudioCapability?.backend === "core_audio_process_tap" &&
-            !systemAudioCapability.ready ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                onClick={() => void openPermissionSettings("system_audio")}
-              >
-                Open system-audio privacy settings
-              </Button>
-            ) : null}
-          </div>
-          {systemAudioTestStatus ? (
-            <p
-              className={`mt-2 text-xs ${systemAudioCapability?.ready ? "text-gold-text" : "text-muted-foreground"}`}
-              role="status"
-            >
-              {systemAudioTestStatus}
-            </p>
-          ) : null}
+          </details>
+          <Button variant="ghost" size="sm" onClick={onRefresh} disabled={loading}>
+            Check again
+          </Button>
         </div>
       </div>
 
-      <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-3">
-        <p className="text-xs font-medium">What Plainsong keeps</p>
-        {/* One sentence, because it is the one thing here the reader did not
-            ask for: the app will notice a call and offer. It never records
-            without a click. */}
-        <p className="text-sm text-muted-foreground">
-          Plainsong also notices when a Zoom, Teams, Meet, Webex, Slack,
-          Discord or FaceTime call is in progress on this Mac and offers to
-          record it. It never starts on its own, and you can turn the offer off
-          in Settings &gt; General.
-        </p>
-        <div className="space-y-2">
-          <label
-            htmlFor="first-run-meeting-audio-storage"
-            className="text-xs text-muted-foreground"
-          >
-            Meeting audio storage
-          </label>
-          <select
-            id="first-run-meeting-audio-storage"
-            aria-label="Meeting audio storage"
-            className="w-full rounded-md border border-border bg-background p-2 text-sm"
-            value={meetingAudioStorageMode}
-            onChange={(event) =>
-              onMeetingAudioStorageModeChange(event.target.value as "always" | "transcript_only")
-            }
-          >
-            <option value="always">Always keep audio</option>
-            <option value="transcript_only">Transcript only (delete audio after transcription)</option>
-          </select>
+      <section
+        aria-labelledby="first-run-meeting-keeps"
+        className="space-y-3 border-t border-border pt-5"
+      >
+        <div className="space-y-1">
+          <p id="first-run-meeting-keeps" className="section-heading text-sm">
+            What Plainsong keeps
+          </p>
+          {/* One sentence, because it is the one thing here the reader did not
+              ask for: the app will notice a call and offer. It never records
+              without a click. */}
+          <p className="text-sm text-muted-foreground">
+            These defaults are fine for most people, and you can change them
+            later in Settings. Plainsong also notices when a Zoom, Teams, Meet,
+            Webex, Slack, Discord or FaceTime call starts and offers to record
+            it. It never starts on its own.
+          </p>
         </div>
 
-        <div className="space-y-2">
-          <label htmlFor="first-run-meeting-retention" className="text-xs text-muted-foreground">
-            Meeting retention
-          </label>
-          <select
-            id="first-run-meeting-retention"
-            aria-label="Meeting retention"
-            className="w-full rounded-md border border-border bg-background p-2 text-sm"
-            value={meetingRetentionPreset}
-            onChange={(event) =>
-              onMeetingRetentionPresetChange(
-                event.target.value as "1m" | "2m" | "3m" | "custom" | "never"
-              )
-            }
-          >
-            <option value="1m">After 1 month</option>
-            <option value="2m">After 2 months</option>
-            <option value="3m">After 3 months</option>
-            <option value="never">Never</option>
-            <option value="custom">Custom</option>
-          </select>
-        </div>
-
-        {meetingRetentionPreset === "custom" ? (
-          <div className="space-y-2">
-            <label
-              htmlFor="first-run-custom-retention-months"
-              className="text-xs text-muted-foreground"
-            >
-              Custom retention months
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <label htmlFor="first-run-meeting-audio-storage" className="text-sm text-muted-foreground">
+              Meeting audio
             </label>
-            <Input
-              id="first-run-custom-retention-months"
-              aria-label="Custom retention months"
-              type="number"
-              min={1}
-              value={meetingRetentionCustomMonths}
+            <select
+              id="first-run-meeting-audio-storage"
+              className="w-full rounded-md border border-border bg-background p-2 text-sm"
+              value={meetingAudioStorageMode}
               onChange={(event) =>
-                onMeetingRetentionCustomMonthsChange(Math.max(1, Number(event.target.value) || 1))
+                onMeetingAudioStorageModeChange(event.target.value as "always" | "transcript_only")
               }
-            />
+            >
+              <option value="always">Keep it with the transcript</option>
+              <option value="transcript_only">Delete it once transcribed</option>
+            </select>
           </div>
-        ) : null}
 
-        <div className="space-y-2">
-          <label
-            htmlFor="first-run-retention-delete-mode"
-            className="text-xs text-muted-foreground"
-          >
-            Retention delete mode
-          </label>
-          <select
-            id="first-run-retention-delete-mode"
-            aria-label="Retention delete mode"
-            className="w-full rounded-md border border-border bg-background p-2 text-sm"
-            value={meetingRetentionDeleteMode}
-            onChange={(event) =>
-              onMeetingRetentionDeleteModeChange(
-                event.target.value as "audio_only" | "audio_and_transcript"
-              )
-            }
-          >
-            <option value="audio_only">Delete audio only</option>
-            <option value="audio_and_transcript">Delete audio and transcript</option>
-          </select>
+          <div className="space-y-1.5">
+            <label htmlFor="first-run-meeting-retention" className="text-sm text-muted-foreground">
+              Delete old meetings
+            </label>
+            <select
+              id="first-run-meeting-retention"
+              className="w-full rounded-md border border-border bg-background p-2 text-sm"
+              value={meetingRetentionPreset}
+              onChange={(event) =>
+                onMeetingRetentionPresetChange(
+                  event.target.value as "1w" | "1m" | "2m" | "3m" | "custom" | "never"
+                )
+              }
+            >
+              <option value="never">Never</option>
+              <option value="1w">After 1 week</option>
+              <option value="1m">After 1 month</option>
+              <option value="2m">After 2 months</option>
+              <option value="3m">After 3 months</option>
+              <option value="custom">After a number of months you choose</option>
+            </select>
+          </div>
+
+          {meetingRetentionPreset === "custom" ? (
+            <div className="space-y-1.5">
+              <label
+                htmlFor="first-run-custom-retention-months"
+                className="text-sm text-muted-foreground"
+              >
+                Months to keep
+              </label>
+              <Input
+                id="first-run-custom-retention-months"
+                type="number"
+                min={1}
+                value={meetingRetentionCustomMonths}
+                onChange={(event) =>
+                  onMeetingRetentionCustomMonthsChange(Math.max(1, Number(event.target.value) || 1))
+                }
+              />
+            </div>
+          ) : null}
+
+          {meetingRetentionPreset === "never" ? null : (
+            <div className="space-y-1.5">
+              <label
+                htmlFor="first-run-retention-delete-mode"
+                className="text-sm text-muted-foreground"
+              >
+                What gets deleted
+              </label>
+              <select
+                id="first-run-retention-delete-mode"
+                className="w-full rounded-md border border-border bg-background p-2 text-sm"
+                value={meetingRetentionDeleteMode}
+                onChange={(event) =>
+                  onMeetingRetentionDeleteModeChange(
+                    event.target.value as "audio_only" | "audio_and_transcript"
+                  )
+                }
+              >
+                <option value="audio_only">The audio only</option>
+                <option value="audio_and_transcript">The audio and the transcript</option>
+              </select>
+            </div>
+          )}
         </div>
 
         {saveError && saveErrorContext === "meeting-settings" ? (
-          <p className="text-xs text-destructive" role="alert">
-            Meeting storage and retention weren&apos;t saved: {saveError}. Your selections are
-            still here; choose Finish meeting setup to retry.
+          <p className="text-sm text-destructive" role="alert">
+            Meeting storage and retention weren&apos;t saved: {saveError}. Your
+            choices are still here; try again.
           </p>
         ) : null}
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <Button variant="outline" size="sm" onClick={onRefresh}>
-          Re-check meeting setup
-        </Button>
-        <span className="text-xs text-muted-foreground self-center">
-          You can come back to this any time from Setup.
-        </span>
-      </div>
+      </section>
     </div>
   );
 }

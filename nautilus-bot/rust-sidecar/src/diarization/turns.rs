@@ -1,5 +1,5 @@
 //! Speaker-turn normalization shared by the end-to-end diarization backends
-//! (speakrs / pyannote community-1 and Nemotron 3 Diarization).
+//! (pyannote community-1 and Nemotron 3 Diarization).
 //!
 //! Both report hard speaker turns with their own opaque labels. This module
 //! turns those into Plainsong segments with one set of rules: stable `S1..Sn`
@@ -17,8 +17,8 @@ use super::{Speaker, SpeakerSegment};
 pub(crate) const MODEL_SEGMENT_CONFIDENCE: f64 = 0.0;
 
 /// Two turns of the same speaker separated by less than this are one turn.
-/// Both backends emit frame-resolution turns (~16 ms for speakrs at its default
-/// 1 s segmentation step, 10 ms for Nemotron), so a speaker who pauses for breath comes back as two
+/// Both backends emit frame-resolution turns (16.875 ms frames for community-1,
+/// 10 ms for Nemotron), so a speaker who pauses for breath comes back as two
 /// turns a few tens of milliseconds apart. Merging under a third of a second
 /// keeps genuine back-and-forth intact — the shortest real turn exchange in a
 /// meeting is on the order of a second — while collapsing breath gaps.
@@ -38,12 +38,12 @@ pub(crate) const MIN_TURN_SECONDS: f64 = 0.2;
 pub(crate) struct RawTurn {
     pub(crate) start: f64,
     pub(crate) end: f64,
-    /// The backend's own label, e.g. speakrs's `SPEAKER_00`. Opaque here: only its identity
+    /// The backend's own label, e.g. community-1's `SPEAKER_00`. Opaque here: only its identity
     /// across turns matters, never its numbering.
     pub(crate) speaker: String,
 }
 
-/// Turn speakrs's raw turns into Plainsong speaker segments.
+/// Turn a backend's raw turns into Plainsong speaker segments.
 ///
 /// Pure so the rules below are testable without hardware:
 /// - non-finite, empty, and inverted turns are dropped;
@@ -54,13 +54,24 @@ pub(crate) struct RawTurn {
 ///   a speaker who is split across two sub-threshold turns is not lost;
 /// - ids are `S1..Sn` assigned by **first appearance in time among the turns
 ///   that survived**, so the same audio always produces the same ids
-///   regardless of how speakrs numbered its clusters, and a discarded flicker
+///   regardless of how the backend numbered its clusters, and a discarded flicker
 ///   at the head of a recording does not push the only real speaker to `S2`;
 /// - gaps are left alone. Nothing is stretched to cover them and no
 ///   placeholder turn is invented, so uncovered audio stays unattributed.
+#[cfg(test)]
 pub(crate) fn normalize_turns(turns: &[RawTurn], duration: f64) -> Vec<SpeakerSegment> {
+    normalize_turns_with_ids(turns, duration).0
+}
+
+pub(crate) fn normalize_turns_with_ids(
+    turns: &[RawTurn],
+    duration: f64,
+) -> (
+    Vec<SpeakerSegment>,
+    std::collections::HashMap<String, String>,
+) {
     if !duration.is_finite() || duration <= 0.0 {
-        return Vec::new();
+        return (Vec::new(), std::collections::HashMap::new());
     }
 
     let mut clamped: Vec<RawTurn> = turns
@@ -132,7 +143,7 @@ pub(crate) fn normalize_turns(turns: &[RawTurn], duration: f64) -> Vec<SpeakerSe
     // map because a recording has a handful of speakers and insertion order
     // *is* the answer.
     let mut order: Vec<String> = Vec::new();
-    merged
+    let segments = merged
         .into_iter()
         .map(|turn| {
             let index = match order.iter().position(|label| label == &turn.speaker) {
@@ -149,7 +160,13 @@ pub(crate) fn normalize_turns(turns: &[RawTurn], duration: f64) -> Vec<SpeakerSe
                 confidence: MODEL_SEGMENT_CONFIDENCE,
             }
         })
-        .collect()
+        .collect();
+    let ids = order
+        .into_iter()
+        .enumerate()
+        .map(|(i, label)| (label, format!("S{}", i + 1)))
+        .collect();
+    (segments, ids)
 }
 
 /// Spans of `[0, duration]` that no segment covers — the audio the pipeline
@@ -188,6 +205,56 @@ pub(crate) fn uncovered_spans(
     gaps
 }
 
+/// Stretch turns into the silence beside them, by up to `pad` seconds on each
+/// side, never past the middle of a gap between two turns and never outside
+/// `[0, duration]`. Only edges that face silence move; an edge inside or
+/// touching another turn stays where it is.
+///
+/// For a backend whose turns stop where its segmentation hears no speech
+/// (community-1): the speech recognizer still finds words in those gaps,
+/// mostly the first or last syllable of the turn beside them, and without
+/// this they had no speaker.
+#[cfg(any(test, feature = "diarization"))]
+pub(crate) fn pad_into_silence(segments: &mut [SpeakerSegment], pad: f64, duration: f64) {
+    if pad.is_nan() || pad <= 0.0 || !duration.is_finite() {
+        return;
+    }
+    // Covered spans: the union of every turn, sorted.
+    let mut spans: Vec<(f64, f64)> = segments
+        .iter()
+        .map(|segment| (segment.start_time, segment.end_time))
+        .collect();
+    spans.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let mut covered: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in spans {
+        match covered.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => covered.push((start, end)),
+        }
+    }
+    // Each gap edge is shared by the turns that end (or start) exactly there.
+    for (index, &(start, end)) in covered.iter().enumerate() {
+        let previous_end = index.checked_sub(1).map(|i| covered[i].1);
+        let next_start = covered.get(index + 1).map(|span| span.0);
+        let new_start = match previous_end {
+            Some(previous) => (start - pad).max((previous + start) / 2.0),
+            None => (start - pad).max(0.0),
+        };
+        let new_end = match next_start {
+            Some(next) => (end + pad).min((end + next) / 2.0),
+            None => (end + pad).min(duration),
+        };
+        for segment in segments.iter_mut() {
+            if segment.start_time == start {
+                segment.start_time = new_start.min(segment.start_time);
+            }
+            if segment.end_time == end {
+                segment.end_time = new_end.max(segment.end_time);
+            }
+        }
+    }
+}
+
 /// Speaker roster for the ids [`normalize_turns`] produced, in first-appearance
 /// order. Colors come from the same palette the embedding backend uses so the
 /// two backends do not paint the same recording differently.
@@ -215,6 +282,55 @@ pub(crate) fn speakers_for(segments: &[SpeakerSegment]) -> Vec<Speaker> {
 mod tests {
     use super::*;
 
+    fn segment(start_time: f64, end_time: f64, id: &str) -> SpeakerSegment {
+        SpeakerSegment {
+            start_time,
+            end_time,
+            speaker_id: id.to_string(),
+            confidence: MODEL_SEGMENT_CONFIDENCE,
+        }
+    }
+
+    fn spans(segments: &[SpeakerSegment]) -> Vec<(f64, f64, &str)> {
+        segments
+            .iter()
+            .map(|s| (s.start_time, s.end_time, s.speaker_id.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn padding_fills_silence_up_to_its_middle_and_leaves_touching_edges() {
+        let mut segments = vec![
+            segment(5.0, 10.0, "S1"),
+            segment(10.0, 12.0, "S2"),
+            // A 1 s gap: split at 12.5.
+            segment(13.0, 20.0, "S1"),
+            // A 6 s gap: each side moves by the pad only.
+            segment(26.0, 29.5, "S2"),
+        ];
+        pad_into_silence(&mut segments, 1.0, 30.0);
+        assert_eq!(
+            spans(&segments),
+            vec![
+                (4.0, 10.0, "S1"),
+                (10.0, 12.5, "S2"),
+                (12.5, 21.0, "S1"),
+                (25.0, 30.0, "S2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn padding_moves_only_the_outer_edges_of_overlapping_turns() {
+        let mut segments = vec![segment(2.0, 8.0, "S1"), segment(6.0, 9.0, "S2")];
+        pad_into_silence(&mut segments, 0.5, 20.0);
+        assert_eq!(spans(&segments), vec![(1.5, 8.0, "S1"), (6.0, 9.5, "S2")]);
+        // No pad, nothing moves.
+        let mut same = vec![segment(2.0, 8.0, "S1")];
+        pad_into_silence(&mut same, 0.0, 20.0);
+        assert_eq!(spans(&same), vec![(2.0, 8.0, "S1")]);
+    }
+
     fn turn(start: f64, end: f64, speaker: &str) -> RawTurn {
         RawTurn {
             start,
@@ -224,8 +340,8 @@ mod tests {
     }
 
     #[test]
-    fn assigns_stable_ids_by_first_appearance_not_by_speakrs_numbering() {
-        // speakrs numbers clusters by internal index, so the speaker who talks
+    fn assigns_stable_ids_by_first_appearance_not_by_backend_numbering() {
+        // Backends number clusters by internal index, so the speaker who talks
         // first can be SPEAKER_01. Plainsong's S1 must still be the first
         // voice heard, or the same recording renames its speakers between runs.
         let turns = vec![

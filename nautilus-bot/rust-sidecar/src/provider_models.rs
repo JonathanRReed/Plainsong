@@ -60,6 +60,21 @@ pub(crate) async fn list_openai_models() -> Result<Vec<String>, String> {
     client.list_models().await.map_err(|e| e.to_string())
 }
 
+pub(crate) async fn chatgpt_plan_status() -> Result<llm::chatgpt_plan::ChatGptPlanStatus, String> {
+    llm::ChatGptPlanClient::from_startup_env()
+        .status()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) async fn list_chatgpt_plan_models(
+) -> Result<Vec<llm::chatgpt_plan::ChatGptPlanModel>, String> {
+    llm::ChatGptPlanClient::from_startup_env()
+        .list_models()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) async fn list_openai_asr_models() -> Result<Vec<String>, String> {
     let secret = provider_secret_or_env("openai", "OPENAI_API_KEY")?;
 

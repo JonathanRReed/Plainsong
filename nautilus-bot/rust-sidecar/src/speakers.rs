@@ -82,6 +82,86 @@ pub(crate) fn infer_speaker_aliases_from_segments(
     aliases
 }
 
+/// Which earlier speaker each re-run speaker is, judged by the stretches of
+/// the recording they both cover: new id -> old id.
+///
+/// A re-run renumbers speakers by first appearance, and since small clusters
+/// fold into real voices the numbering can change between runs: the person
+/// who was S3 may now be S2. Names the user chose were stored against the old
+/// id, so reusing them by id would give one person's name to another. A new
+/// speaker inherits an old one's name only when each is the other's largest
+/// overlap and the old voice covers more than half of the new one's time;
+/// any less certain pairing gets no carried name, so the user sees a plain
+/// "Speaker N" to name again rather than a wrong name.
+pub(crate) fn match_rerun_speakers(
+    before: &[(f64, f64, Option<String>)],
+    after: &[models::TranscriptSegment],
+) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    let mut old: Vec<(f64, f64, &str)> = before
+        .iter()
+        .filter_map(|(start, end, id)| {
+            id.as_deref()
+                .filter(|id| !id.trim().is_empty() && end > start)
+                .map(|id| (*start, *end, id))
+        })
+        .collect();
+    old.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut overlap: HashMap<(&str, &str), f64> = HashMap::new();
+    let mut new_total: HashMap<&str, f64> = HashMap::new();
+    let mut first = 0usize;
+    let mut new: Vec<&models::TranscriptSegment> = after
+        .iter()
+        .filter(|segment| {
+            segment.end_time > segment.start_time
+                && segment
+                    .speaker_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+        })
+        .collect();
+    new.sort_by(|a, b| a.start_time.total_cmp(&b.start_time));
+    for segment in new {
+        let id = segment.speaker_id.as_deref().unwrap_or_default();
+        *new_total.entry(id).or_default() += segment.end_time - segment.start_time;
+        // New rows arrive in start order, so an old row that ends before this
+        // one starts can never overlap a later one either.
+        while first < old.len() && old[first].1 <= segment.start_time {
+            first += 1;
+        }
+        for (start, end, old_id) in old[first..].iter() {
+            if *start >= segment.end_time {
+                break;
+            }
+            let shared = end.min(segment.end_time) - start.max(segment.start_time);
+            if shared > 0.0 {
+                *overlap.entry((*old_id, id)).or_default() += shared;
+            }
+        }
+    }
+    let best_new_for_old = |old_id: &str| {
+        overlap
+            .iter()
+            .filter(|((o, _), _)| *o == old_id)
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .map(|((_, n), _)| *n)
+    };
+    let mut matches = HashMap::new();
+    for (new_id, total) in &new_total {
+        let Some(((old_id, _), shared)) = overlap
+            .iter()
+            .filter(|((_, n), _)| n == new_id)
+            .max_by(|a, b| a.1.total_cmp(b.1))
+        else {
+            continue;
+        };
+        if *shared * 2.0 > *total && best_new_for_old(old_id) == Some(*new_id) {
+            matches.insert((*new_id).to_string(), (*old_id).to_string());
+        }
+    }
+    matches
+}
+
 pub(crate) fn resolve_speaker_name(
     speaker_id: &str,
     existing_name: Option<&str>,
@@ -427,6 +507,29 @@ mod cluster_voice_context_tests {
     }
 }
 
+/// Drop every voice signature of `recording_id` that a new diarization run
+/// has made stale, whether or not remembering voices is on and whichever model
+/// ran: the voices held in memory under the old run's speaker ids, and every
+/// stored signature, including ones the same model computed last time. The
+/// caller then stores the new run's signatures, so a recording only ever
+/// carries the latest run's. Without this an old signature for S1 could
+/// outrank the new one when matching, and naming a speaker could save someone
+/// else's voice under that name.
+pub(crate) async fn forget_superseded_cluster_voices(
+    state: &AppState,
+    recording_id: &str,
+) -> Result<(), String> {
+    state
+        .session_cluster_voices
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .forget(recording_id);
+    let mut db = state.db.lock().await;
+    db.clear_cluster_voice_signatures(recording_id)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub(crate) async fn store_and_match_cluster_voices(
     state: &AppState,
     recording_id: &str,
@@ -548,6 +651,8 @@ pub(crate) fn normalize_person_name(raw: &str) -> Option<String> {
         "they",
         "we",
         "going",
+        "not",
+        "gonna",
         "to",
         "be",
         "talk",
@@ -642,9 +747,11 @@ pub(crate) fn normalize_person_name(raw: &str) -> Option<String> {
         "sound",
     ];
 
+    // A blocked prefix means this is ordinary speech, not a name. Stop at
+    // trailing introduction words rather than deleting words inside a phrase.
     let parts: Vec<&str> = cleaned
         .split_whitespace()
-        .filter(|token| !blocked_words.contains(token) && token.len() >= 2)
+        .take_while(|token| !blocked_words.contains(token) && token.len() >= 2)
         .take(2)
         .collect();
 
@@ -677,4 +784,81 @@ pub(crate) fn is_generic_speaker_name(name: &str) -> bool {
         || Regex::new(r"^speaker\s*\d+$")
             .expect("valid speaker regex")
             .is_match(&trimmed)
+}
+
+#[cfg(test)]
+mod rerun_speaker_tests {
+    use super::*;
+
+    fn rows(spans: &[(f64, f64, &str)]) -> Vec<models::TranscriptSegment> {
+        spans
+            .iter()
+            .enumerate()
+            .map(|(index, (start, end, speaker))| models::TranscriptSegment {
+                id: format!("seg-{index}"),
+                start_time: *start,
+                end_time: *end,
+                text: "words".to_string(),
+                speaker_id: (!speaker.is_empty()).then(|| speaker.to_string()),
+                confidence: 0.9,
+            })
+            .collect()
+    }
+
+    fn before(spans: &[(f64, f64, &str)]) -> Vec<(f64, f64, Option<String>)> {
+        rows(spans)
+            .into_iter()
+            .map(|row| (row.start_time, row.end_time, row.speaker_id))
+            .collect()
+    }
+
+    #[test]
+    fn a_renumbered_voice_keeps_its_name_and_its_old_number_does_not() {
+        // First run: S1 Ana, S2 a one-sentence blip, S3 Ben. After folding
+        // the blip into Ana, Ben is renumbered S2.
+        let first = before(&[
+            (0.0, 10.0, "S1"),
+            (10.0, 12.0, "S2"),
+            (12.0, 30.0, "S3"),
+            (30.0, 40.0, "S1"),
+        ]);
+        let second = rows(&[(0.0, 12.0, "S1"), (12.0, 30.0, "S2"), (30.0, 40.0, "S1")]);
+        let matches = match_rerun_speakers(&first, &second);
+        assert_eq!(matches.get("S1").map(String::as_str), Some("S1"));
+        assert_eq!(
+            matches.get("S2").map(String::as_str),
+            Some("S3"),
+            "Ben's name must follow Ben, not stay on the id S2"
+        );
+    }
+
+    #[test]
+    fn an_uncertain_pairing_carries_no_name() {
+        // New S2 is half S1 and half S2 of the earlier run: neither name is
+        // safe to keep on it.
+        let first = before(&[(0.0, 10.0, "S1"), (10.0, 20.0, "S2"), (20.0, 30.0, "S1")]);
+        let second = rows(&[(0.0, 5.0, "S1"), (5.0, 15.0, "S2"), (15.0, 30.0, "S1")]);
+        let matches = match_rerun_speakers(&first, &second);
+        assert_eq!(matches.get("S1").map(String::as_str), Some("S1"));
+        assert_eq!(matches.get("S2"), None);
+        // No earlier speakers at all: nothing to carry.
+        assert!(match_rerun_speakers(&before(&[(0.0, 9.0, "")]), &second).is_empty());
+    }
+
+    #[test]
+    fn word_rows_are_matched_against_the_earlier_segments() {
+        // The measured-word merge splits a segment into word rows; overlap is
+        // by time, so the split does not matter.
+        let first = before(&[(0.0, 4.0, "S2"), (4.0, 8.0, "S1")]);
+        let second = rows(&[
+            (0.0, 1.0, "S1"),
+            (1.0, 2.5, "S1"),
+            (2.5, 4.0, "S1"),
+            (4.0, 6.0, "S2"),
+            (6.0, 8.0, "S2"),
+        ]);
+        let matches = match_rerun_speakers(&first, &second);
+        assert_eq!(matches.get("S1").map(String::as_str), Some("S2"));
+        assert_eq!(matches.get("S2").map(String::as_str), Some("S1"));
+    }
 }

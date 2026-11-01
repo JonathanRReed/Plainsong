@@ -21,37 +21,27 @@ const BUNDLED_CLEANUP_WHAT_IT_DOES =
   "Removes filler words, fixes false starts, adds punctuation and capitalization, and writes spoken numbers, dates and email addresses in written form. English only.";
 
 const BUNDLED_CLEANUP_WHAT_IT_CANNOT_DO =
-  "It does not summarize, answer questions, or follow a custom prompt, so meeting notes, saved profiles and dictation commands need Ollama or a cloud service.";
+  "It does not summarize, answer questions, or follow custom prompts in saved profiles. Use the built-in text model, Ollama, or an optional cloud service for those.";
 
-/**
- * What the machine underneath actually delivers.
- *
- * Measured on an M4 Pro (artifacts/qa/bundled-cleanup-receipt-2026-09-02.md):
- * on the GPU a 200-word dictation cleans up in 1.8 s, on the CPU in 11-13 s
- * against a 6 second limit. That is not a footnote — on CPU every long
- * dictation ends in a "took too long" warning and the unedited text — so the
- * row says it here rather than letting the user learn it one warning at a
- * time. The sidecar reports the backend it would actually use, probed without
- * loading the weights.
- */
+/** Describe the available backend without promising timing from another build or Mac. */
 function describeBackend(status: BundledCleanupModelStatus): {
   text: string;
   slow: boolean;
 } {
   if (status.backendMeetsBudget) {
     return {
-      text: "Runs on this Mac's GPU, where a long dictation is cleaned up in about two seconds.",
+      text: "Cleanup time depends on the length of the dictation and free memory.",
       slow: false,
     };
   }
   if (!status.backendPresent) {
     return {
-      text: "This build has no runtime for the built-in model, so cleanup here is skipped and your words are inserted unchanged. Choose Ollama or a cloud service.",
+      text: "The built-in cleanup model isn't available on this Mac, so AI cleanup is skipped and your words are inserted unchanged. Choose Ollama or a cloud service.",
       slow: true,
     };
   }
   return {
-    text: "This Mac runs it on the CPU, not the GPU. A short dictation still finishes in about five seconds, but a 200-word one takes 11 to 13 — past the six-second limit, so long dictations arrive as spoken with a “took too long” warning. Ollama or a cloud service is the better choice here.",
+    text: "On this Mac, longer dictations can run past the cleanup time limit. If that happens, your words are kept with basic formatting.",
     slow: true,
   };
 }
@@ -68,11 +58,11 @@ interface BundledCleanupModelRowProps {
 /**
  * The built-in dictation cleanup model's download, size and delete action.
  *
- * Readiness here is the sidecar's answer -- "every pinned file carries a
- * trusted integrity receipt" -- rather than "the folder is not empty". A
- * partially downloaded or tampered file reads as not ready and offers the
- * download again, because that is what the sidecar will do when asked to run
- * it.
+ * Readiness here is the sidecar's answer -- "every pinned file is present and
+ * this session has not found it wrong" -- rather than "the folder is not
+ * empty". A partial download, or a file that failed its check when this
+ * session loaded it, reads as not ready and offers the download again,
+ * because the sidecar will not run it.
  */
 export function BundledCleanupModelRow({
   status,
@@ -86,8 +76,8 @@ export function BundledCleanupModelRow({
     return (
       <div className="rounded-md border bg-muted/20 p-3 text-sm">
         <p className="text-muted-foreground">
-          Could not read the built-in model&apos;s state, so there is nothing
-          measured to show here.
+          Couldn&apos;t read the built-in cleanup model&apos;s state, so
+          there&apos;s nothing to show here yet.
         </p>
       </div>
     );
@@ -146,9 +136,10 @@ export function BundledCleanupModelRow({
       {partial && !busy ? (
         <p className="mt-2 text-sm leading-6 text-rust">
           {status.missingFiles.length}{" "}
-          {status.missingFiles.length === 1 ? "file is" : "files are"} missing
-          or failed verification ({status.missingFiles.join(", ")}), so the
-          model will not load. Downloading again replaces them.
+          {status.missingFiles.length === 1 ? "model file is" : "model files are"}{" "}
+          missing or didn&apos;t pass verification, so the model won&apos;t
+          load. Downloading again replaces{" "}
+          {status.missingFiles.length === 1 ? "it" : "them"}.
         </p>
       ) : null}
 
@@ -167,18 +158,19 @@ export function BundledCleanupModelRow({
       </p>
 
       <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-        Downloaded once from Hugging Face and verified against a pinned
-        checksum. After that it runs on this Mac with no network, no account
-        and nothing to install. It holds about{" "}
-        {formatModelSize(bytesToMib(status.residentBytes))} of memory while it
-        is loaded, and stays loaded between dictations while “Keep the model
-        warm” is on.
+        Downloaded once from Hugging Face and checked before use. After that
+        it runs on this Mac with no network, no account and nothing to
+        install. Estimated memory while kept warm:{" "}
+        {formatModelSize(bytesToMib(status.residentBytes))}, plus working memory during cleanup. Plainsong checks free
+        memory first and skips AI cleanup if there isn&apos;t enough. Turning
+        “Keep the model warm” off frees it after each dictation.
       </p>
     </section>
   );
 }
 
 interface AppleLanguageModelRowProps {
+  purpose?: "dictation" | "notes";
   availability: AppleLanguageModelAvailability | null;
   checking: boolean;
   onRecheck: () => void;
@@ -210,6 +202,7 @@ function availabilityLabel(
  * the sidecar's probe already distinguishes them.
  */
 export function AppleLanguageModelRow({
+  purpose = "dictation",
   availability,
   checking,
   onRecheck,
@@ -223,9 +216,7 @@ export function AppleLanguageModelRow({
         <div className="min-w-0">
           <p className="text-sm font-semibold">Apple on-device model</p>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Nothing to download: this is the model macOS 26 and newer ships
-            with Apple Intelligence. It runs on this Mac and never reaches
-            Apple&apos;s servers.
+            Runs on this Mac. macOS manages its memory.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -248,8 +239,7 @@ export function AppleLanguageModelRow({
         <p className="mt-2 max-w-2xl text-sm leading-6 text-rust">
           {availability.detail ??
             "Plainsong could not reach the Apple on-device model on this Mac."}{" "}
-          Dictation cleanup will be skipped and your words inserted unchanged
-          until this resolves.
+          {purpose === "notes" ? "Your transcript stays available." : "AI cleanup is skipped and your words are inserted unchanged."}
         </p>
       ) : null}
     </section>

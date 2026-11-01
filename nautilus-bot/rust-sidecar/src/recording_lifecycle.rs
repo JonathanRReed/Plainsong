@@ -28,7 +28,7 @@ pub(crate) fn require_verified_system_audio_for_meeting(
     }
 
     Err(
-        "Me + Them capture is not verified ready. Run Test system audio in Setup, or start this meeting in Mic only mode."
+        "Me + Them isn't ready: Plainsong hasn't confirmed it can hear the meeting audio. Choose Check meeting audio in Setup, or start this meeting in Mic only."
             .to_string(),
     )
 }
@@ -38,7 +38,10 @@ pub(crate) fn require_recording_vault_ready(
     vault_state: &VaultRuntimeState,
 ) -> Result<(), String> {
     if vault_initialized && (!vault_state.unlocked || vault_state.recording_key.is_none()) {
-        return Err("Unlock the vault before starting a meeting".to_string());
+        return Err(
+            "The vault is locked. Unlock vault in Settings > Privacy & data, then start the meeting again."
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -320,11 +323,43 @@ pub(crate) fn revalidated_recording_audio_update(
     }
 }
 
+/// Repair the header of a plaintext asset that never reached `ready`, so the
+/// probe below reads the audio that is on disk rather than the sizes the
+/// writer last stamped. A meeting that crashed before its first checkpoint has
+/// a header declaring no audio at all.
+///
+/// Only reached by startup reconciliation and the explicit re-check, both of
+/// which run when no writer can still be appending to the file. A `ready`
+/// asset is never touched: its header is final and its hash is recorded.
+fn repair_unsettled_plaintext_header(asset: &recording_audio::RecordingAudioAsset) {
+    if asset.lifecycle == recording_audio::RecordingAudioLifecycle::Ready
+        || asset.protection != recording_audio::RecordingAudioProtection::Plaintext
+    {
+        return;
+    }
+    match recording_audio::repair_plaintext_wav_header(&asset.path) {
+        Ok(recording_audio::WavHeaderRepair::Repaired { data_bytes }) => tracing::warn!(
+            "Repaired the WAV header of the {} audio of {} to cover {} bytes on disk",
+            asset.role.as_str(),
+            asset.recording_id,
+            data_bytes
+        ),
+        Ok(recording_audio::WavHeaderRepair::Unchanged) => {}
+        Err(error) => tracing::warn!(
+            "Could not repair the WAV header of the {} audio of {}: {:#}",
+            asset.role.as_str(),
+            asset.recording_id,
+            error
+        ),
+    }
+}
+
 pub(crate) fn probe_recording_audio_asset(
     asset: &recording_audio::RecordingAudioAsset,
 ) -> RecordingAudioProbe {
     match asset.protection {
         recording_audio::RecordingAudioProtection::Plaintext => {
+            repair_unsettled_plaintext_header(asset);
             RecordingAudioProbe::Plaintext(recording_audio::validate_plaintext_wav(&asset.path))
         }
         recording_audio::RecordingAudioProtection::Encrypted => RecordingAudioProbe::Encrypted {
@@ -375,6 +410,111 @@ pub(crate) fn revalidated_recording_audio_is_recoverable(
 /// The recording's own status is deliberately left alone. Re-validating audio is
 /// evidence about files, not about whether the meeting was transcribed; the user
 /// re-transcribes from here if the audio came back ready.
+fn audio_revalidation_message(recoverable: bool, capture_warning: Option<&str>) -> &'static str {
+    if !recoverable {
+        "Saved meeting audio was re-checked and some of it could not be read."
+    } else if capture_warning.is_some_and(|warning| !warning.trim().is_empty()) {
+        "Saved meeting audio can be read. Known missing conversation remains missing. Re-transcription can retry transcription failures, but cannot restore audio lost during capture."
+    } else {
+        "Saved meeting audio was re-checked and is intact. Re-transcribe this meeting to finish it."
+    }
+}
+
+#[cfg(test)]
+mod crashed_capture_recovery_tests {
+    use super::*;
+
+    fn asset(
+        path: &std::path::Path,
+        lifecycle: recording_audio::RecordingAudioLifecycle,
+    ) -> recording_audio::RecordingAudioAsset {
+        recording_audio::RecordingAudioAsset {
+            recording_id: "crashed".to_string(),
+            role: recording_audio::RecordingAudioRole::Primary,
+            path: path.to_path_buf(),
+            lifecycle,
+            protection: recording_audio::RecordingAudioProtection::Plaintext,
+            plaintext_bytes: None,
+            plaintext_sha256: None,
+            last_error: None,
+        }
+    }
+
+    /// Two seconds of audio under the header a writer stamps at creation: the
+    /// file a crash in the first seconds of a meeting leaves behind.
+    fn crashed_wav(path: &std::path::Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for index in 0..32_000_i32 {
+            writer
+                .write_sample((index % 300 - 150) as i16 * 40)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        let mut bytes = std::fs::read(path).unwrap();
+        bytes[4..8].fill(0);
+        bytes[40..44].fill(0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn startup_revalidation_recovers_audio_from_a_crash_before_the_first_checkpoint() {
+        let dir = crate::test_fs::TempDir::new("crashed-capture");
+        let path = dir.path().join("meeting.wav");
+        crashed_wav(&path);
+        let mut bundle = recording_audio::RecordingAudioBundle::empty("crashed");
+        bundle
+            .insert(asset(
+                &path,
+                recording_audio::RecordingAudioLifecycle::Writing,
+            ))
+            .unwrap();
+
+        let updates = revalidated_recording_audio_updates(&bundle);
+
+        assert_eq!(updates.len(), 1);
+        let (_, lifecycle, metadata, error) = &updates[0];
+        assert_eq!(*lifecycle, recording_audio::RecordingAudioLifecycle::Ready);
+        assert_eq!(error, &None);
+        assert_eq!(metadata.as_ref().unwrap().duration_seconds, 2);
+        assert!(revalidated_recording_audio_is_recoverable(&updates));
+    }
+
+    #[test]
+    fn a_ready_asset_header_is_never_rewritten() {
+        let dir = crate::test_fs::TempDir::new("ready-header");
+        let path = dir.path().join("meeting.wav");
+        crashed_wav(&path);
+        let before = std::fs::read(&path).unwrap();
+        repair_unsettled_plaintext_header(&asset(
+            &path,
+            recording_audio::RecordingAudioLifecycle::Ready,
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[cfg(test)]
+mod audio_revalidation_message_tests {
+    use super::audio_revalidation_message;
+
+    #[test]
+    fn readable_audio_preserves_known_capture_loss() {
+        assert!(
+            audio_revalidation_message(true, Some("dropped chunks")).contains("remains missing")
+        );
+        assert!(audio_revalidation_message(true, Some(" ")).contains("is intact"));
+        assert!(
+            audio_revalidation_message(false, Some("dropped chunks")).contains("could not be read")
+        );
+    }
+}
+
 pub(crate) async fn revalidate_recording_audio_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
@@ -455,11 +595,8 @@ pub(crate) async fn revalidate_recording_audio_for_sidecar(
         );
     }
 
-    let message = if recoverable {
-        "Saved meeting audio was re-checked and is intact. Re-transcribe this meeting to finish it."
-    } else {
-        "Saved meeting audio was re-checked and some of it could not be read."
-    };
+    let message =
+        audio_revalidation_message(recoverable, recording.capture_degraded_summary.as_deref());
     handle.emit_event(
         "recording-status-changed",
         serde_json::json!({
@@ -562,6 +699,136 @@ pub(crate) fn meeting_start_failure_is_out_of_space(message: &str) -> bool {
         || normalized.contains("free space")
 }
 
+/// Code and reader-facing sentence for a failure while opening the capture
+/// devices, from the whole error chain (`format!("{error:#}")`).
+///
+/// The outermost context alone ("Failed to prepare mixed audio capture") hid
+/// both a full disk and a meeting-audio failure, so both were reported as a
+/// disconnected microphone. The chain itself stays in the log and the
+/// recording row; the reader gets the sentence.
+pub(crate) fn classify_capture_start_failure(chain: &str) -> (MeetingStartErrorCode, String) {
+    if meeting_start_failure_is_out_of_space(chain) {
+        return (
+            MeetingStartErrorCode::DiskFull,
+            "There is not enough free disk space to save this meeting's audio.".to_string(),
+        );
+    }
+    if chain.contains("Failed to start system stream") {
+        let message = if chain.contains("(PermissionDenied)") {
+            "Plainsong isn't allowed to record the sound playing on this Mac. Turn on Plainsong in System Settings → Privacy & Security → Screen & System Audio Recording, then try again."
+        } else {
+            "Plainsong couldn't start recording the meeting audio. Test meeting audio in Setup, or start this meeting in Mic only."
+        };
+        return (
+            MeetingStartErrorCode::SystemAudioUnavailable,
+            message.to_string(),
+        );
+    }
+    let lower = chain.to_ascii_lowercase();
+    if lower.contains("no microphone input device") || lower.contains("device not found") {
+        return (
+            MeetingStartErrorCode::AudioDeviceNotFound,
+            "The microphone Plainsong was set to use is no longer connected.".to_string(),
+        );
+    }
+    if lower.contains("microphone") {
+        return (
+            MeetingStartErrorCode::AudioDeviceNotFound,
+            "The microphone could not start. Check that it is connected and not in use by another app, then try again."
+                .to_string(),
+        );
+    }
+    (
+        MeetingStartErrorCode::Unknown,
+        "Plainsong could not start this meeting.".to_string(),
+    )
+}
+
+/// Code and sentence for a refused capture lease. Only another meeting is
+/// "already recording"; a backup, restore, vault lock or storage task is a
+/// short wait, and saying a meeting was recording sent people looking for it.
+pub(crate) fn classify_capture_lease_refusal(error: &str) -> (MeetingStartErrorCode, String) {
+    if error.contains("while meeting capture") || error.contains(", meeting capture") {
+        return (
+            MeetingStartErrorCode::AlreadyRecording,
+            "A meeting is already being recorded.".to_string(),
+        );
+    }
+    if error.contains("Backup restore recovery is required") {
+        return (MeetingStartErrorCode::Unknown, error.to_string());
+    }
+    (
+        MeetingStartErrorCode::Unknown,
+        "Plainsong is finishing a backup, restore or storage task. Try again in a moment."
+            .to_string(),
+    )
+}
+
+#[cfg(test)]
+mod meeting_start_classification_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_disk_behind_the_capture_context_is_a_full_disk() {
+        let (code, message) = classify_capture_start_failure(
+            "Failed to prepare mixed audio capture: Failed to create WAV: No space left on device (os error 28)",
+        );
+        assert_eq!(code.as_str(), "disk_full");
+        assert!(!message.contains("os error"));
+    }
+
+    #[test]
+    fn a_meeting_audio_failure_is_not_a_missing_microphone() {
+        let (code, message) = classify_capture_start_failure(
+            "Failed to prepare mixed audio capture: Failed to start system stream (StreamConstruction): Creating the system-audio tap failed with Core Audio status -10877. The meeting-audio recording could not start.",
+        );
+        assert_eq!(code.as_str(), "system_audio_unavailable");
+        assert!(
+            !message.to_ascii_lowercase().contains("core audio"),
+            "{message}"
+        );
+        assert!(!message.contains("StreamConstruction"), "{message}");
+
+        let (code, message) = classify_capture_start_failure(
+            "Failed to prepare mixed audio capture: Failed to start system stream (PermissionDenied): denied. Plainsong isn't allowed",
+        );
+        assert_eq!(code.as_str(), "system_audio_unavailable");
+        assert!(message.contains("System Settings"), "{message}");
+    }
+
+    #[test]
+    fn a_busy_microphone_says_so() {
+        let (code, message) = classify_capture_start_failure(
+            "Failed to prepare mixed audio capture: Failed to start microphone stream: device busy",
+        );
+        assert_eq!(code.as_str(), "audio_device_not_found");
+        assert!(message.contains("not in use by another app"), "{message}");
+        let (code, _) = classify_capture_start_failure("No microphone input device available");
+        assert_eq!(code.as_str(), "audio_device_not_found");
+    }
+
+    #[test]
+    fn only_another_meeting_is_already_recording() {
+        let (code, _) = classify_capture_lease_refusal(
+            "Cannot start meeting capture while meeting capture is active.",
+        );
+        assert_eq!(code.as_str(), "already_recording");
+        let (code, message) = classify_capture_lease_refusal(
+            "Cannot start meeting capture while backup, native speech model release are active.",
+        );
+        assert_eq!(code.as_str(), "unknown");
+        assert!(message.contains("Try again"), "{message}");
+        assert!(!message.contains("native"), "{message}");
+    }
+
+    #[test]
+    fn a_locked_vault_is_not_a_consent_problem() {
+        let state = VaultRuntimeState::default();
+        let message = require_recording_vault_ready(true, &state).unwrap_err();
+        assert!(message.contains("Unlock vault"), "{message}");
+    }
+}
+
 /// Announce a meeting-start failure with its typed code, and hand back the
 /// human-readable message for the command's `Err`.
 ///
@@ -581,6 +848,8 @@ pub(crate) fn fail_meeting_start(
             overlay.dismissed = false;
             overlay.recording_id = Some(recording_id.to_string());
             overlay.message = Some(message.clone());
+            overlay.microphone_input = None;
+            overlay.microphone_warning_dismissed = false;
         }
     }
     handle.emit_event(
@@ -635,7 +904,129 @@ pub(crate) fn emit_meeting_lifecycle_phase(
 }
 
 pub(crate) fn meeting_stop_is_already_terminal_or_processing(status: &str) -> bool {
-    matches!(status, "processing" | "completed" | "error")
+    matches!(status, "processing" | "pending" | "completed" | "error")
+}
+
+static CAPTURE_START_ROLLBACKS: std::sync::LazyLock<StdMutex<Vec<tokio::task::JoinHandle<()>>>> =
+    std::sync::LazyLock::new(|| StdMutex::new(Vec::new()));
+
+pub(crate) fn track_capture_start_rollback(task: tokio::task::JoinHandle<()>) {
+    let mut tasks = CAPTURE_START_ROLLBACKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
+}
+
+pub(crate) async fn finish_cancelled_capture_starts() {
+    let tasks: Vec<_> = CAPTURE_START_ROLLBACKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .drain(..)
+        .collect();
+    if tokio::time::timeout(Duration::from_secs(10), async {
+        for task in tasks {
+            if let Err(error) = task.await {
+                tracing::warn!("Meeting start rollback failed: {}", error);
+            }
+        }
+    })
+    .await
+    .is_err()
+    {
+        tracing::warn!("Meeting start rollback exceeded shutdown budget; startup reconciliation must finish storage recovery");
+    }
+}
+
+/// An aborted IPC future must also undo the capture it prepared. Cleanup
+/// retains the capture lease until device and storage work finish.
+struct UnfinishedMeetingStart {
+    lease: Option<operation_coordinator::OperationLease>,
+    rollback: Option<Box<dyn FnOnce(Option<operation_coordinator::OperationLease>) + Send>>,
+}
+
+impl UnfinishedMeetingStart {
+    fn take_lease(&mut self) -> operation_coordinator::OperationLease {
+        self.lease
+            .take()
+            .expect("unfinished start owns its capture lease")
+    }
+
+    fn disarm(&mut self) {
+        self.rollback = None;
+    }
+}
+
+impl Drop for UnfinishedMeetingStart {
+    fn drop(&mut self) {
+        if let Some(rollback) = self.rollback.take() {
+            rollback(self.lease.take());
+        }
+    }
+}
+
+async fn rollback_cancelled_meeting_start(
+    state: Arc<AppState>,
+    handle: crate::sidecar_handle::SidecarHandle,
+    plan: recording_audio::RecordingCapturePlan,
+    _lease: Option<operation_coordinator::OperationLease>,
+) {
+    let id = &plan.recording_id;
+    // Stop devices before waiting for storage. The ID check prevents delayed
+    // cancellation of A from stopping a later capture B.
+    let stopped = state
+        .audio_capture
+        .lock()
+        .await
+        .abort_recording_if_matches(id);
+    let stored_lease = {
+        let mut active = state.active_capture_lease.lock().await;
+        if active
+            .as_ref()
+            .is_some_and(|(active_id, _)| active_id == id)
+        {
+            active.take()
+        } else {
+            None
+        }
+    };
+    if stopped || stored_lease.is_some() {
+        state.recording_stream_stop.store(true, Ordering::SeqCst);
+    }
+    let storage = state.audio_storage_gate.lock().await;
+    persist_or_rollback_recording_activation_failure(&state, &plan, "Meeting start was cancelled")
+        .await;
+    let remains = {
+        let db = state.db.lock().await;
+        !matches!(db.get_recording(id), Ok(None))
+    };
+    drop(storage);
+    if let Ok(mut templates) = state.recording_templates.lock() {
+        templates.remove(id);
+    }
+    let owns_overlay = state
+        .recording_overlay_state
+        .lock()
+        .map(|overlay| overlay.recording_id.as_deref() == Some(id.as_str()))
+        .unwrap_or(false);
+    if owns_overlay {
+        emit_meeting_lifecycle_phase(
+            &state,
+            &handle,
+            if remains { "error" } else { "cancelled" },
+            id,
+            Some("Meeting start was cancelled"),
+        );
+    }
+    handle.emit_event(
+        "recording-status-changed",
+        serde_json::json!({
+            "recordingId": id, "status": if remains { "error" } else { "cancelled" },
+            "message": "Meeting start was cancelled", "updatedAt": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+    reconcile_hands_free_monitor(&state, &handle).await;
+    drop(stored_lease);
 }
 
 pub(crate) async fn start_recording_for_sidecar(
@@ -643,29 +1034,21 @@ pub(crate) async fn start_recording_for_sidecar(
     handle: &crate::sidecar_handle::SidecarHandle,
     mut options: models::RecordingOptions,
 ) -> Result<String, String> {
-    {
-        let dictation_state = state.dictation_runtime_state.lock().await;
-        if *dictation_state != DictationSessionState::Idle {
-            return Err(fail_meeting_start(
-                state,
-                handle,
-                None,
-                MeetingStartErrorCode::AlreadyRecording,
-                "Cannot start recording while dictation is active".to_string(),
-            ));
-        }
-    }
     let capture_lease = state
         .operation_coordinator
-        .try_acquire(operation_coordinator::OperationKind::Capture)
+        .acquire_capture(|| async {
+            *state.dictation_runtime_state.lock().await == DictationSessionState::Idle
+        })
+        .await
         .map_err(|error| {
-            fail_meeting_start(
-                state,
-                handle,
-                None,
-                MeetingStartErrorCode::AlreadyRecording,
-                error,
-            )
+            tracing::warn!("Meeting capture lease refused: {error}");
+            let (code, message) = if error == operation_coordinator::DICTATION_ACTIVE_CAPTURE_ERROR
+            {
+                (MeetingStartErrorCode::AlreadyRecording, error)
+            } else {
+                classify_capture_lease_refusal(&error)
+            };
+            fail_meeting_start(state, handle, None, code, message)
         })?;
     let _storage_guard = state.audio_storage_gate.try_lock().map_err(|_| {
         fail_meeting_start(
@@ -767,13 +1150,7 @@ pub(crate) async fn start_recording_for_sidecar(
         let vault_state = state.vault_state.lock().await;
         require_recording_vault_ready(settings_snapshot.privacy.vault_initialized, &vault_state)
             .map_err(|error| {
-                fail_meeting_start(
-                    state,
-                    handle,
-                    None,
-                    MeetingStartErrorCode::ConsentRequired,
-                    error,
-                )
+                fail_meeting_start(state, handle, None, MeetingStartErrorCode::Unknown, error)
             })?;
     }
 
@@ -862,6 +1239,21 @@ pub(crate) async fn start_recording_for_sidecar(
             })?;
     }
 
+    let cleanup_state = Arc::clone(state);
+    let cleanup_handle = handle.clone();
+    let cleanup_plan = plan.clone();
+    let mut start_guard = UnfinishedMeetingStart {
+        lease: Some(capture_lease),
+        rollback: Some(Box::new(move |lease| {
+            track_capture_start_rollback(tokio::spawn(rollback_cancelled_meeting_start(
+                cleanup_state,
+                cleanup_handle,
+                cleanup_plan,
+                lease,
+            )));
+        })),
+    };
+
     if let Ok(mut overlay) = state.recording_overlay_state.lock() {
         overlay.phase = "preparing".to_string();
         overlay.dismissed = false;
@@ -870,6 +1262,8 @@ pub(crate) async fn start_recording_for_sidecar(
         overlay.system_audio_active = Some(options.system_audio);
         overlay.consent_prompt_shown = Some(options.consent_prompt_shown);
         overlay.message = Some("Preparing meeting audio capture".to_string());
+        overlay.microphone_input = None;
+        overlay.microphone_warning_dismissed = false;
     }
     handle.emit_event(
         "meeting-recording-state-changed",
@@ -895,25 +1289,28 @@ pub(crate) async fn start_recording_for_sidecar(
             settings_snapshot.privacy.vault_initialized,
         )
     };
-    if let Err(error) = preparation_result {
-        reconcile_hands_free_monitor(state.as_ref(), handle).await;
-        let message = error.to_string();
-        persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
-        // Opening the capture devices is where a missing or busy input device
-        // shows up, and where a full disk first refuses to create the WAV.
-        let code = if meeting_start_failure_is_out_of_space(&message) {
-            MeetingStartErrorCode::DiskFull
-        } else {
-            MeetingStartErrorCode::AudioDeviceNotFound
-        };
-        return Err(fail_meeting_start(
-            state,
-            handle,
-            Some(&recording_id),
-            code,
-            message,
-        ));
-    }
+    let prepared_recording = match preparation_result {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            reconcile_hands_free_monitor(state.as_ref(), handle).await;
+            let message = format!("{error:#}");
+            persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
+            start_guard.disarm();
+            // Opening the capture devices is where a missing or busy input device
+            // shows up, where meeting audio fails, and where a full disk first
+            // refuses to create the WAV.
+            tracing::warn!("Meeting capture could not start: {message}");
+            let (code, reader_message) = classify_capture_start_failure(&message);
+            return Err(fail_meeting_start(
+                state,
+                handle,
+                Some(&recording_id),
+                code,
+                reader_message,
+            ));
+        }
+    };
+    debug_assert_eq!(prepared_recording.recording_id, recording_id);
 
     if let Err(error) = {
         let mut db = state.db.lock().await;
@@ -926,6 +1323,7 @@ pub(crate) async fn start_recording_for_sidecar(
         }
         reconcile_hands_free_monitor(state.as_ref(), handle).await;
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
+        start_guard.disarm();
         let code = if meeting_start_failure_is_out_of_space(&message) {
             MeetingStartErrorCode::DiskFull
         } else {
@@ -946,22 +1344,23 @@ pub(crate) async fn start_recording_for_sidecar(
     };
     if let Err(error) = activation_result {
         reconcile_hands_free_monitor(state.as_ref(), handle).await;
-        let message = error.to_string();
+        let message = format!("{error:#}");
         persist_or_rollback_recording_activation_failure(state, &plan, &message).await;
-        let code = if meeting_start_failure_is_out_of_space(&message) {
-            MeetingStartErrorCode::DiskFull
-        } else {
-            MeetingStartErrorCode::AudioDeviceNotFound
-        };
+        start_guard.disarm();
+        tracing::warn!("Meeting capture could not activate: {message}");
+        let (code, reader_message) = classify_capture_start_failure(&message);
         return Err(fail_meeting_start(
             state,
             handle,
             Some(&recording_id),
             code,
-            message,
+            reader_message,
         ));
     }
-    *state.active_capture_lease.lock().await = Some((recording_id.clone(), capture_lease));
+    {
+        let mut active = state.active_capture_lease.lock().await;
+        *active = Some((recording_id.clone(), start_guard.take_lease()));
+    }
 
     let maybe_stream_info = {
         let audio = state.audio_capture.lock().await;
@@ -1002,6 +1401,11 @@ pub(crate) async fn start_recording_for_sidecar(
         }
     }
 
+    // During a call only capture and live transcription may hold memory. The
+    // search model may still be loaded from indexing just before the call;
+    // drop it now instead of when its idle timer runs out mid-meeting.
+    tokio::spawn(crate::llm::builtin_embeddings::release_now());
+
     if let Some((stream_queue, sample_rate)) = maybe_stream_info {
         state.recording_stream_stop.store(false, Ordering::SeqCst);
         let stop_flag = Arc::clone(&state.recording_stream_stop);
@@ -1041,13 +1445,13 @@ pub(crate) async fn start_recording_for_sidecar(
                     pending.extend_from_slice(&chunk);
                 }
                 if pending.len() >= chunk_threshold {
-                    let feed_slice = std::mem::take(&mut pending);
                     if let Err(e) = streaming_transcriber
-                        .feed_audio(&session_id, &feed_slice)
+                        .feed_audio(&session_id, &pending)
                         .await
                     {
                         tracing::warn!("Live streaming feed error: {}", e);
                     }
+                    pending.clear();
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
@@ -1083,6 +1487,8 @@ pub(crate) async fn start_recording_for_sidecar(
         overlay.system_audio_active = Some(options.system_audio);
         overlay.consent_prompt_shown = Some(options.consent_prompt_shown);
         overlay.message = None;
+        overlay.microphone_input = prepared_recording.microphone_input.clone();
+        overlay.microphone_warning_dismissed = false;
         overlay.paused = false;
         overlay.closed_paused_ms = 0;
         overlay.pause_started_at_ms = None;
@@ -1093,6 +1499,8 @@ pub(crate) async fn start_recording_for_sidecar(
         serde_json::json!({
             "phase": "recording", "recordingId": &recording_id,
             "startedAtMs": started_at_ms,
+            "microphoneInput": &prepared_recording.microphone_input,
+            "microphoneWarningDismissed": false,
             "systemAudioActive": options.system_audio,
             "consentPromptShown": options.consent_prompt_shown,
         }),
@@ -1116,6 +1524,7 @@ pub(crate) async fn start_recording_for_sidecar(
         options.detected_call_id,
     );
 
+    start_guard.disarm();
     Ok(recording_id)
 }
 
@@ -1202,60 +1611,83 @@ pub(crate) async fn set_recording_paused_for_sidecar(
 
 /// Why the capture monitor ended a meeting on its own.
 pub(crate) enum MeetingAutoStopReason {
-    CallEnded { app: &'static str },
-    Silence { minutes: u32 },
+    CallEnded {
+        app: &'static str,
+    },
+    Silence {
+        minutes: u32,
+    },
+    DurationLimit {
+        minutes: u32,
+    },
+    /// A mic-only meeting's microphone went away (unplugged, a headset that
+    /// dropped, a sleep that invalidated the device). Nothing more can be
+    /// recorded, so saving what was captured beats recording nothing.
+    MicrophoneLost,
 }
 
-/// End a running meeting for `reason`, saying so on every surface first.
-///
-/// The `meeting-auto-stopped` event goes out before the stop so the shell can
-/// post its notification against a meeting that is still the active one; the
-/// stop itself is the ordinary stop path, so the audio lands, is hashed, and
-/// goes to transcription exactly as a click on Stop would have it.
+/// End through the ordinary save and transcription path. Announce the attempt
+/// first; report an automatic stop only after storage confirms saved audio.
+fn auto_stop_saved_status(status: &str) -> bool {
+    matches!(status, "processing" | "completed")
+}
+
+#[cfg(test)]
+mod auto_stop_saved_status_tests {
+    use super::auto_stop_saved_status;
+
+    #[test]
+    fn auto_stop_success_requires_saved_processing_or_completed_status() {
+        for status in ["processing", "completed"] {
+            assert!(auto_stop_saved_status(status));
+        }
+        for status in ["recording", "paused", "error", "", "stopping"] {
+            assert!(!auto_stop_saved_status(status));
+        }
+    }
+}
+
 pub(crate) async fn auto_stop_meeting(
     state: &Arc<AppState>,
     handle: &crate::sidecar_handle::SidecarHandle,
     recording_id: &str,
     reason: MeetingAutoStopReason,
 ) {
-    let (reason_key, message, app, silence_minutes) = match reason {
-        MeetingAutoStopReason::CallEnded { app } => (
-            "call_ended",
-            format!("{app} closed, so Plainsong stopped the meeting and is saving what it captured."),
-            Some(app),
-            None,
-        ),
+    let (reason_key, trigger, app, silence_minutes, duration_minutes) = match reason {
+        MeetingAutoStopReason::CallEnded { app } => {
+            ("call_ended", format!("{app} closed"), Some(app), None, None)
+        }
         MeetingAutoStopReason::Silence { minutes } => (
             "silence",
-            format!("Nothing audible for {minutes} minutes, so Plainsong stopped the meeting and is saving what it captured."),
+            format!("Nothing audible for {minutes} minutes"),
+            None,
+            Some(minutes),
+            None,
+        ),
+        MeetingAutoStopReason::DurationLimit { minutes } => (
+            "duration_limit",
+            format!("Captured audio reached the {minutes}-minute limit"),
+            None,
             None,
             Some(minutes),
         ),
+        MeetingAutoStopReason::MicrophoneLost => (
+            "microphone_lost",
+            "The microphone stopped sending sound".to_string(),
+            None,
+            None,
+            None,
+        ),
     };
-    tracing::info!("Auto-stopping meeting {}: {}", recording_id, message);
-    handle.emit_event(
-        "meeting-auto-stopped",
-        serde_json::json!({
-            "recordingId": recording_id,
-            "reason": reason_key,
-            "app": app,
-            "silenceMinutes": silence_minutes,
-            "message": &message,
-        }),
+    let stopping_message =
+        format!("{trigger}. Plainsong is stopping this meeting and saving what it captured.");
+    tracing::info!(
+        "Auto-stopping meeting {}: {}",
+        recording_id,
+        stopping_message
     );
-    emit_meeting_capture_warning(state.as_ref(), handle, recording_id, &message);
-    {
-        let mut db = state.db.lock().await;
-        let _ = db.log_audit_event(
-            "recording_auto_stopped",
-            Some(serde_json::json!({
-                "recording_id": recording_id,
-                "reason": reason_key,
-                "app": app,
-                "silence_minutes": silence_minutes,
-            })),
-            "info",
-        );
+    if !emit_meeting_capture_warning(state.as_ref(), handle, recording_id, &stopping_message) {
+        return;
     }
     if let Err(error) = stop_recording_for_sidecar(state, handle, recording_id.to_string()).await {
         tracing::error!(
@@ -1264,7 +1696,46 @@ pub(crate) async fn auto_stop_meeting(
             reason_key,
             error
         );
+        return;
     }
+    {
+        let mut db = state.db.lock().await;
+        let saved = db
+            .get_recording(recording_id)
+            .ok()
+            .flatten()
+            .is_some_and(|recording| auto_stop_saved_status(&recording.status));
+        if !saved {
+            tracing::warn!(
+                "Auto-stop for meeting {} did not confirm saved audio",
+                recording_id
+            );
+            return;
+        }
+        let _ = db.log_audit_event(
+            "recording_auto_stopped",
+            Some(serde_json::json!({
+                "recording_id": recording_id,
+                "reason": reason_key,
+                "app": app,
+                "silence_minutes": silence_minutes,
+                "durationMinutes": duration_minutes,
+            })),
+            "info",
+        );
+    }
+    let message = format!("{trigger}. Plainsong stopped the meeting and saved what it captured.");
+    handle.emit_event(
+        "meeting-auto-stopped",
+        serde_json::json!({
+            "recordingId": recording_id,
+            "reason": reason_key,
+            "app": app,
+            "silenceMinutes": silence_minutes,
+            "durationMinutes": duration_minutes,
+            "message": &message,
+        }),
+    );
 }
 
 /// How often the running applications are looked at for a live call.
@@ -1361,14 +1832,15 @@ pub(crate) async fn sample_call_detection(
             accessibility_granted,
             mic_running_elsewhere,
             active_call_bundle_id.as_deref(),
-        );
-        meeting_detect::DetectorSample {
+        )?;
+        Some(meeting_detect::DetectorSample {
             apps,
             mic_running_elsewhere,
-        }
+        })
     })
     .await
     .ok()
+    .flatten()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1443,6 +1915,14 @@ pub fn spawn_meeting_call_detection(
     });
 }
 
+fn owns_meeting_capture_warning(
+    phase: &str,
+    active_recording_id: Option<&str>,
+    recording_id: &str,
+) -> bool {
+    phase == "recording" && active_recording_id == Some(recording_id)
+}
+
 /// Announce a mid-meeting problem on both channels the user can actually see.
 ///
 /// The lifecycle event deliberately re-asserts the `recording` phase rather than
@@ -1455,7 +1935,21 @@ pub(crate) fn emit_meeting_capture_warning(
     handle: &crate::sidecar_handle::SidecarHandle,
     recording_id: &str,
     message: &str,
-) {
+) -> bool {
+    let Ok(mut overlay) = state.recording_overlay_state.lock() else {
+        return false;
+    };
+    if !owns_meeting_capture_warning(
+        &overlay.phase,
+        overlay.recording_id.as_deref(),
+        recording_id,
+    ) {
+        return false;
+    }
+    overlay.message = Some(message.to_string());
+    overlay.dismissed = false;
+    // Emit both channels while the ownership guard is held. A stopped or
+    // replacement recording must never receive this session's warning.
     tracing::error!("Meeting {} capture warning: {}", recording_id, message);
     handle.emit_event(
         "recording-status-changed",
@@ -1466,7 +1960,96 @@ pub(crate) fn emit_meeting_capture_warning(
             "updatedAt": chrono::Utc::now().to_rfc3339(),
         }),
     );
-    emit_meeting_lifecycle_phase(state, handle, "recording", recording_id, Some(message));
+    handle.emit_event(
+        "meeting-recording-state-changed",
+        serde_json::json!({
+            "phase": "recording",
+            "recordingId": recording_id,
+            "message": message,
+        }),
+    );
+    true
+}
+
+fn owns_duration_warning(
+    phase: &str,
+    active_recording_id: Option<&str>,
+    current_message: Option<&str>,
+    recording_id: &str,
+    owned_message: &str,
+) -> bool {
+    owns_meeting_capture_warning(phase, active_recording_id, recording_id)
+        && current_message == Some(owned_message)
+}
+
+fn clear_owned_duration_warning(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: &str,
+    owned_message: &str,
+) {
+    if let Ok(mut overlay) = state.recording_overlay_state.lock() {
+        if owns_duration_warning(
+            &overlay.phase,
+            overlay.recording_id.as_deref(),
+            overlay.message.as_deref(),
+            recording_id,
+            owned_message,
+        ) {
+            overlay.message = None;
+            // Keep the state check, mutation and event together so a newer
+            // writer warning cannot be cleared between them.
+            handle.emit_event(
+                "meeting-recording-state-changed",
+                serde_json::json!({
+                    "phase": "recording",
+                    "recordingId": recording_id,
+                    "message": null,
+                }),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod duration_warning_ownership_tests {
+    use super::{owns_duration_warning, owns_meeting_capture_warning};
+
+    #[test]
+    fn capture_warning_requires_matching_active_recording() {
+        assert!(owns_meeting_capture_warning("recording", Some("r1"), "r1"));
+        for phase in ["processing", "completed", "error", "idle", "stopping"] {
+            assert!(!owns_meeting_capture_warning(phase, Some("r1"), "r1"));
+        }
+        assert!(!owns_meeting_capture_warning("recording", Some("r2"), "r1"));
+        assert!(!owns_meeting_capture_warning("recording", None, "r1"));
+    }
+
+    #[test]
+    fn duration_warning_clear_requires_exact_recording_phase_and_message() {
+        assert!(owns_duration_warning(
+            "recording",
+            Some("r1"),
+            Some("duration warning"),
+            "r1",
+            "duration warning"
+        ));
+        for (phase, recording, message) in [
+            ("processing", Some("r1"), Some("duration warning")),
+            ("recording", Some("r2"), Some("duration warning")),
+            ("recording", None, Some("duration warning")),
+            ("recording", Some("r1"), Some("writer failed")),
+            ("recording", Some("r1"), None),
+        ] {
+            assert!(!owns_duration_warning(
+                phase,
+                recording,
+                message,
+                "r1",
+                "duration warning"
+            ));
+        }
+    }
 }
 
 /// Watch a running meeting's writer threads and the disk they are writing to.
@@ -1496,8 +2079,12 @@ pub(crate) fn spawn_meeting_capture_monitor(
         });
     tokio::spawn(async move {
         let mut writer_failure_reported = false;
+        let mut previous_recorded_seconds: Option<f64> = None;
         let mut low_space_reported = false;
         let mut silence_warning_reported = false;
+        let mut duration_warning = audio::MeetingDurationWarning::default();
+        let mut duration_warning_message: Option<String> = None;
+        let mut configured_duration_minutes = 0;
         loop {
             tokio::time::sleep(MEETING_CAPTURE_MONITOR_INTERVAL).await;
 
@@ -1538,6 +2125,32 @@ pub(crate) fn spawn_meeting_capture_monitor(
                     return;
                 }
             }
+            let duration_minutes = meetings_settings.max_recording_minutes;
+            if duration_minutes != configured_duration_minutes {
+                if let Some(message) = duration_warning_message.take() {
+                    clear_owned_duration_warning(state.as_ref(), &handle, &recording_id, &message);
+                }
+                configured_duration_minutes = duration_minutes;
+            }
+            if audio::duration_auto_stop_due(&health, duration_minutes) {
+                auto_stop_meeting(
+                    &state,
+                    &handle,
+                    &recording_id,
+                    MeetingAutoStopReason::DurationLimit {
+                        minutes: duration_minutes,
+                    },
+                )
+                .await;
+                return;
+            }
+            if duration_warning.take_due(&health, duration_minutes) {
+                let message = format!(
+                    "Captured audio is nearing the {duration_minutes}-minute limit. Plainsong will stop and save this meeting at the limit. Change or disable the limit in Settings to keep recording. Paused time does not count.",
+                );
+                emit_meeting_capture_warning(state.as_ref(), &handle, &recording_id, &message);
+                duration_warning_message = Some(message);
+            }
             let silence_minutes = meetings_settings.auto_stop_after_silence_minutes;
             if audio::silence_auto_stop_due(&health, silence_minutes) {
                 auto_stop_meeting(
@@ -1575,16 +2188,44 @@ pub(crate) fn spawn_meeting_capture_monitor(
                 }
             }
 
+            if audio::microphone_lost(&health, previous_recorded_seconds) {
+                let reason = health.capture_failure.clone().unwrap_or_default();
+                {
+                    let mut db = state.db.lock().await;
+                    let _ = db.log_audit_event(
+                        "recording_microphone_lost",
+                        Some(serde_json::json!({
+                            "recording_id": &recording_id,
+                            "error": reason,
+                            "recorded_seconds": health.recorded_seconds,
+                        })),
+                        "error",
+                    );
+                }
+                // A mic-only stream does not come back on its own, so keep
+                // what was captured rather than "record" silence until Stop.
+                auto_stop_meeting(
+                    &state,
+                    &handle,
+                    &recording_id,
+                    MeetingAutoStopReason::MicrophoneLost,
+                )
+                .await;
+                return;
+            }
+            if !health.paused {
+                previous_recorded_seconds = Some(health.recorded_seconds);
+            }
+
             if !writer_failure_reported {
                 if let Some(reason) = health.writer_failure.as_deref() {
                     writer_failure_reported = true;
+                    // The reason is an OS error for the log, not the banner.
                     emit_meeting_capture_warning(
                         state.as_ref(),
                         &handle,
                         &recording_id,
-                        &format!(
-                            "Plainsong stopped being able to save this meeting's audio, so nothing recorded from now on is kept. Stop the meeting to keep what was already saved. ({reason})"
-                        ),
+                        "Plainsong stopped being able to save this meeting's audio, so nothing recorded from now on is kept. Stop the meeting to keep what was already saved.",
                     );
                     let mut db = state.db.lock().await;
                     let _ = db.log_audit_event(
@@ -1686,9 +2327,18 @@ pub(crate) fn describe_recording_capture_degradation(
 ) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(reason) = capture_failure {
-        parts.push(format!(
-            "A capture stream stopped sending audio during this meeting, so the recording ends early. Audio captured before that point was saved. ({reason})"
-        ));
+        // A Me + Them session (the one that reports per-source silence)
+        // reopens a source that drops out and keeps recording, so "ends
+        // early" is only true of a mic-only meeting.
+        parts.push(if degradation.is_some() {
+            format!(
+                "A capture source stopped sending audio during this meeting and Plainsong reopened it. ({reason})"
+            )
+        } else {
+            format!(
+                "A capture stream stopped sending audio during this meeting, so the recording ends early. Audio captured before that point was saved. ({reason})"
+            )
+        });
     }
     if let Some(degradation) = degradation {
         for (label, silent_seconds) in [
@@ -1706,6 +2356,205 @@ pub(crate) fn describe_recording_capture_degradation(
         }
     }
     (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+pub(crate) fn describe_recording_stop_capture_degradation(
+    capture_failure: Option<&str>,
+    degradation: Option<&audio::RecordingSourceDegradation>,
+    dropped_writer_chunks: u64,
+    dropped_mixed_chunks: u64,
+) -> Option<String> {
+    let mut parts: Vec<String> =
+        describe_recording_capture_degradation(capture_failure, degradation)
+            .into_iter()
+            .collect();
+    if dropped_writer_chunks > 0 {
+        parts.push("Part of this conversation was not saved in the microphone recording. The missing audio cannot be recovered from the retained recordings.".to_string());
+    }
+    if dropped_mixed_chunks > 0 {
+        parts.push("Part of this conversation was not saved in the meeting recording or its separate audio tracks. The missing audio cannot be recovered from the retained tracks.".to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn join_capture_notes(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} {second}")),
+        (first, second) => first.or(second),
+    }
+}
+
+/// The note a meeting carries when one of its tracks stopped saving before
+/// Stop. Plain words about which source it was and what was kept.
+///
+/// `separate_tracks` is whether the meeting had its own microphone and
+/// meeting-audio tracks (Me + Them); a mic-only meeting has only the one.
+pub(crate) fn describe_track_write_failures(
+    failed: &[recording_audio::RecordingAudioRole],
+    unreadable: &[recording_audio::RecordingAudioRole],
+    separate_tracks: bool,
+) -> Option<String> {
+    use recording_audio::RecordingAudioRole::{Mic, Primary, System};
+    if failed.is_empty() {
+        return None;
+    }
+    let every_track = failed.contains(&Primary)
+        && (!separate_tracks || (failed.contains(&Mic) && failed.contains(&System)));
+    if every_track {
+        return Some(
+            "Plainsong stopped being able to save this meeting's audio partway through. What it saved before then is kept."
+                .to_string(),
+        );
+    }
+    let kept_or_removed = |role| {
+        if unreadable.contains(&role) {
+            "Nothing readable was saved on that track, so it was removed."
+        } else {
+            "What that track saved before then is kept."
+        }
+    };
+    let mut parts = Vec::new();
+    if failed.contains(&Primary) {
+        parts.push(
+            "The combined meeting recording stopped saving partway through, so playback ends early. Your microphone (Me) and the meeting audio (Them) kept saving on their own tracks, and the transcript uses them."
+                .to_string(),
+        );
+    }
+    if failed.contains(&Mic) {
+        parts.push(format!(
+            "Your microphone's own track (Me) stopped saving partway through. The combined recording kept both sides, and the transcript uses it. {}",
+            kept_or_removed(Mic)
+        ));
+    }
+    if failed.contains(&System) {
+        parts.push(format!(
+            "The meeting audio's own track (Them) stopped saving partway through. The combined recording kept both sides, and the transcript uses it. {}",
+            kept_or_removed(System)
+        ));
+    }
+    Some(parts.join(" "))
+}
+
+/// Remove the files and rows of failed separate tracks that saved nothing
+/// readable. Anything that cannot be removed fails the stop, as any other
+/// finalization failure does, rather than leaving an asset that will never be
+/// ready.
+async fn remove_unreadable_failed_tracks(
+    state: &AppState,
+    recording_id: &str,
+    roles: &[recording_audio::RecordingAudioRole],
+) -> Result<(), String> {
+    let bundle = {
+        let db = state.db.lock().await;
+        db.load_recording_audio_bundle(recording_id)
+            .map_err(|error| error.to_string())?
+    };
+    let mut unreadable = recording_audio::RecordingAudioBundle::empty(recording_id);
+    for asset in bundle.assets().filter(|asset| roles.contains(&asset.role)) {
+        unreadable
+            .insert(asset.clone())
+            .map_err(|error| error.to_string())?;
+    }
+    let deletion = remove_owned_recording_audio(&unreadable, "unreadable failed meeting track");
+    if !deletion.failures.is_empty() {
+        return Err(format!(
+            "Could not remove a meeting track that saved nothing readable: {}",
+            deletion.failures.join("; ")
+        ));
+    }
+    let mut db = state.db.lock().await;
+    db.delete_recording_audio_assets(recording_id, &deletion.cleared_roles)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod track_write_failure_note_tests {
+    use super::describe_track_write_failures;
+    use crate::recording_audio::RecordingAudioRole::{Mic, Primary, System};
+
+    #[test]
+    fn no_failed_track_means_no_note() {
+        assert_eq!(describe_track_write_failures(&[], &[], true), None);
+    }
+
+    #[test]
+    fn a_failed_microphone_track_says_which_source_and_what_was_kept() {
+        let note = describe_track_write_failures(&[Mic], &[], true).unwrap();
+        assert!(note.contains("microphone"), "{note}");
+        assert!(note.contains("(Me)"), "{note}");
+        assert!(note.contains("is kept"), "{note}");
+        assert!(!note.contains("Them"), "{note}");
+
+        let removed = describe_track_write_failures(&[System], &[System], true).unwrap();
+        assert!(
+            removed.contains("meeting audio's own track (Them)"),
+            "{removed}"
+        );
+        assert!(removed.contains("was removed"), "{removed}");
+        assert!(!removed.contains("(Me)"), "{removed}");
+    }
+
+    #[test]
+    fn a_failed_combined_track_points_at_the_separate_tracks() {
+        let note = describe_track_write_failures(&[Primary], &[], true).unwrap();
+        assert!(note.contains("combined meeting recording"), "{note}");
+        assert!(note.contains("playback ends early"), "{note}");
+    }
+
+    #[test]
+    fn every_track_failing_is_one_plain_sentence() {
+        let all = describe_track_write_failures(&[Primary, Mic, System], &[], true).unwrap();
+        assert!(all.starts_with("Plainsong stopped being able to save this meeting's audio"));
+        let mic_only = describe_track_write_failures(&[Primary], &[], false).unwrap();
+        assert_eq!(mic_only, all);
+    }
+}
+
+#[cfg(test)]
+mod writer_loss_degradation_tests {
+    use super::*;
+
+    #[test]
+    fn clean_capture_has_no_degradation() {
+        assert_eq!(
+            describe_recording_stop_capture_degradation(None, None, 0, 0),
+            None
+        );
+    }
+
+    #[test]
+    fn writer_loss_without_failure_or_padding_is_degraded() {
+        let mic = describe_recording_stop_capture_degradation(None, None, 2, 0).unwrap();
+        assert!(mic.contains("not saved in the microphone recording"));
+        assert!(mic.contains("cannot be recovered"));
+        assert!(!mic.contains("chunk"));
+        assert!(!mic.contains("separate audio tracks"));
+        let mixed = describe_recording_stop_capture_degradation(None, None, 0, 3).unwrap();
+        assert!(mixed.contains("cannot be recovered from the retained tracks"));
+        assert!(!mixed.contains("chunk"));
+        assert!(mixed.contains("separate audio tracks"));
+    }
+
+    #[test]
+    fn writer_loss_preserves_failure_and_padding_details() {
+        let padding = audio::RecordingSourceDegradation {
+            mic_silent_seconds: 2.0,
+            system_silent_seconds: 0.5,
+            captured_seconds: 10.0,
+        };
+        for failure in [None, Some("device disconnected")] {
+            for degradation in [None, Some(&padding)] {
+                let summary =
+                    describe_recording_stop_capture_degradation(failure, degradation, 1, 2)
+                        .unwrap();
+                assert_eq!(summary.contains("device disconnected"), failure.is_some());
+                assert_eq!(summary.contains("delivered nothing"), degradation.is_some());
+                assert!(!summary.contains("System audio delivered nothing"));
+                assert!(summary.contains("microphone recording"));
+                assert!(summary.contains("separate audio tracks"));
+            }
+        }
+    }
 }
 
 /// Sidecar-compatible stop_recording. Triggers transcription in a background task.
@@ -1753,6 +2602,110 @@ pub(crate) async fn stop_recording_for_sidecar(
     result
 }
 
+pub(crate) const EMPTY_MEETING_DISCARDED_MESSAGE: &str =
+    "Nothing was recorded, so this meeting wasn't saved.";
+
+/// Whether a stop failed only because the main audio track has no frames.
+pub(crate) fn stop_failed_because_nothing_was_recorded(message: &str) -> bool {
+    message.contains("'primary' recording audio")
+        && (message.contains("contains zero audio frames")
+            || message.contains("Audio file is empty"))
+}
+
+/// Remove a meeting that ended before any audio was written: its (empty) audio
+/// files and its row. Only when every owned track is empty or absent; a track
+/// that holds audio keeps the meeting so nothing heard is thrown away.
+async fn discard_empty_recording(state: &AppState, recording_id: &str, reason: &str) -> bool {
+    let roots = match approved_path_roots() {
+        Ok(roots) => roots,
+        Err(error) => {
+            tracing::warn!("Kept empty meeting {recording_id}: {error}");
+            return false;
+        }
+    };
+    let mut db = state.db.lock().await;
+    discard_empty_recording_in(&mut db, recording_id, reason, &roots)
+}
+
+pub(crate) fn discard_empty_recording_in(
+    db: &mut db::Database,
+    recording_id: &str,
+    reason: &str,
+    approved_roots: &[std::path::PathBuf],
+) -> bool {
+    let bundle = match db.load_recording_audio_bundle(recording_id) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            tracing::warn!("Could not load the audio of empty meeting {recording_id}: {error}");
+            return false;
+        }
+    };
+    let every_track_empty = bundle.assets().all(|asset| {
+        !asset.path.exists()
+            || matches!(
+                recording_audio::validate_plaintext_wav(&asset.path),
+                recording_audio::RecordingAudioValidation::Missing(_)
+            )
+    });
+    if !every_track_empty {
+        return false;
+    }
+    let deletion =
+        remove_owned_recording_audio_in_roots(&bundle, "empty meeting discard", approved_roots);
+    if !deletion.failures.is_empty() {
+        tracing::warn!(
+            "Kept empty meeting {recording_id} because its audio files could not be removed: {}",
+            deletion.failures.join("; ")
+        );
+        return false;
+    }
+    // A live meeting's row cannot be deleted; it has ended now.
+    let deleted = db
+        .update_recording_status(recording_id, "error")
+        .and_then(|_| db.delete_recording(recording_id));
+    match deleted {
+        Ok(_) => {
+            let _ = db.log_audit_event(
+                "recording_discarded_empty",
+                Some(serde_json::json!({
+                    "recording_id": recording_id,
+                    "reason": reason,
+                    "deleted_audio_files": deletion.deleted_files,
+                })),
+                "info",
+            );
+            true
+        }
+        Err(error) => {
+            tracing::warn!("Could not remove empty meeting {recording_id}: {error}");
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod empty_meeting_tests {
+    use super::stop_failed_because_nothing_was_recorded;
+
+    #[test]
+    fn only_an_empty_main_track_counts_as_nothing_recorded() {
+        assert!(stop_failed_because_nothing_was_recorded(
+            "Failed to finalize recording: Failed to validate 'primary' recording audio '/x/r.wav': Audio file contains zero audio frames"
+        ));
+        assert!(stop_failed_because_nothing_was_recorded(
+            "Failed to finalize recording: Failed to validate 'primary' recording audio '/x/r.wav': Audio file is empty: eof"
+        ));
+        // An empty side track while the main track validated is not this case,
+        // and neither is a damaged main track.
+        assert!(!stop_failed_because_nothing_was_recorded(
+            "Failed to finalize recording: Failed to validate 'mic' recording audio '/x/r.mic.wav': Audio file contains zero audio frames"
+        ));
+        assert!(!stop_failed_because_nothing_was_recorded(
+            "Failed to finalize recording: Failed to validate 'primary' recording audio '/x/r.wav': Nonempty audio file is not a readable WAV"
+        ));
+    }
+}
+
 /// How long stopping a meeting will wait for the audio storage gate before it
 /// ends capture anyway.
 ///
@@ -1770,6 +2723,57 @@ pub(crate) async fn acquire_storage_gate_for_stop(
     timeout: Duration,
 ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
     tokio::time::timeout(timeout, gate.lock()).await.ok()
+}
+
+/// The longest a meeting stop waits for an aside's capture to end. The
+/// dictation's own stop waits out its 120 ms capture tail and then detaches;
+/// this only bounds a stop that is stuck.
+const MEETING_STOP_ASIDE_WAIT: Duration = Duration::from_secs(2);
+
+/// A meeting stopped mid-aside lets the dictation finish first: it stops as if
+/// the user had stopped it, and the meeting keeps capturing until the
+/// dictation has taken its last frame. Recognition and delivery carry on
+/// afterwards; they no longer need the meeting's microphone.
+async fn finish_meeting_aside_before_stop(
+    state: &Arc<AppState>,
+    handle: &crate::sidecar_handle::SidecarHandle,
+) {
+    let session_id = {
+        let audio = state.audio_capture.lock().await;
+        audio.refuse_new_meeting_asides();
+        audio.meeting_aside_session()
+    };
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let stop_state = Arc::clone(state);
+    let stop_handle = handle.clone();
+    tokio::spawn(async move {
+        if let Err(error) = crate::dictation_session::stop_dictation_for_sidecar(
+            &stop_state,
+            &stop_handle,
+            "meeting_stopped",
+            Some(session_id),
+            None,
+        )
+        .await
+        {
+            tracing::warn!(
+                "Dictation {session_id} did not stop cleanly before its meeting: {error}"
+            );
+        }
+    });
+    let deadline = tokio::time::Instant::now() + MEETING_STOP_ASIDE_WAIT;
+    while tokio::time::Instant::now() < deadline {
+        if state.audio_capture.lock().await.meeting_aside_session() != Some(session_id) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tracing::warn!(
+        "Dictation {session_id} still held the meeting's microphone after {:?}; the meeting stops under it",
+        MEETING_STOP_ASIDE_WAIT
+    );
 }
 
 pub(crate) async fn stop_recording_for_sidecar_inner(
@@ -1821,6 +2825,8 @@ pub(crate) async fn stop_recording_for_sidecar_inner(
         Some("Stopping capture and saving audio"),
     );
 
+    finish_meeting_aside_before_stop(state, handle).await;
+
     state.recording_stream_stop.store(true, Ordering::SeqCst);
 
     // Ending data acquisition must not wait behind a storage sweep. The gate
@@ -1861,9 +2867,44 @@ pub(crate) async fn stop_recording_for_sidecar_inner(
     let _storage_guard = storage_guard;
 
     let stop_result = match stop_result {
-        Ok(result) => result,
+        Ok(result) => {
+            state
+                .db
+                .lock()
+                .await
+                .finish_recording_asides(&recording_id, &result.aside_spans)
+                .map_err(|e| format!("Could not save aside boundaries: {e}"))?;
+            result
+        }
         Err(error) => {
             let message = format!("Failed to finalize recording: {error}");
+            // Stop pressed straight after Start, or a meeting paused from its
+            // first second: no frames were written. That is not a broken
+            // meeting to re-check forever, it is no meeting at all.
+            if stop_failed_because_nothing_was_recorded(&message)
+                && discard_empty_recording(state.as_ref(), &recording_id, &message).await
+            {
+                if let Ok(mut templates) = state.recording_templates.lock() {
+                    templates.remove(&recording_id);
+                }
+                emit_meeting_lifecycle_phase(
+                    state.as_ref(),
+                    handle,
+                    "cancelled",
+                    &recording_id,
+                    Some(EMPTY_MEETING_DISCARDED_MESSAGE),
+                );
+                handle.emit_event(
+                    "recording-status-changed",
+                    serde_json::json!({
+                        "recordingId": &recording_id,
+                        "status": "cancelled",
+                        "message": EMPTY_MEETING_DISCARDED_MESSAGE,
+                        "updatedAt": chrono::Utc::now().to_rfc3339(),
+                    }),
+                );
+                return Ok(());
+            }
             persist_recording_finalization_failure(state.as_ref(), &recording_id, &message).await;
             return Err(message);
         }
@@ -1880,9 +2921,18 @@ pub(crate) async fn stop_recording_for_sidecar_inner(
     // way to say it for a "me and them" meeting: a mixed session keeps running
     // when one source dies, and the padded silence in the file is
     // indistinguishable from a quiet room.
-    let capture_degradation = describe_recording_capture_degradation(
-        stop_result.capture_failure.as_deref(),
-        stop_result.source_degradation.as_ref(),
+    let capture_degradation = join_capture_notes(
+        describe_recording_stop_capture_degradation(
+            stop_result.capture_failure.as_deref(),
+            stop_result.source_degradation.as_ref(),
+            stop_result.dropped_writer_chunks,
+            stop_result.dropped_mixed_chunks,
+        ),
+        describe_track_write_failures(
+            &stop_result.failed_tracks,
+            &stop_result.unreadable_tracks,
+            stop_result.mic_audio_path.is_some() || stop_result.system_audio_path.is_some(),
+        ),
     );
     if let Some(message) = capture_degradation.as_deref() {
         tracing::error!(
@@ -1901,7 +2951,18 @@ pub(crate) async fn stop_recording_for_sidecar_inner(
         );
     }
 
-    let audio_path = stop_result.audio_path.clone();
+    // A separate track that failed before it saved anything readable is
+    // removed, file and row, so the meeting is transcribed from the combined
+    // recording instead of being refused for a track that is not ready.
+    if !stop_result.unreadable_tracks.is_empty() {
+        remove_unreadable_failed_tracks(
+            state.as_ref(),
+            &recording_id,
+            &stop_result.unreadable_tracks,
+        )
+        .await?;
+    }
+
     let duration_seconds = stop_result
         .validated_assets
         .iter()
@@ -1929,10 +2990,17 @@ pub(crate) async fn stop_recording_for_sidecar_inner(
             );
         }
         let details = serde_json::json!({
-            "recording_id": &recording_id, "audio_path": &audio_path,
+            "recording_id": &recording_id,
             "duration_seconds": duration_seconds,
             "dropped_stream_chunks": stop_result.dropped_stream_chunks,
+            "dropped_writer_chunks": stop_result.dropped_writer_chunks,
+            "dropped_mixed_chunks": stop_result.dropped_mixed_chunks,
             "capture_degraded_summary": &capture_degradation,
+            "failed_tracks": stop_result
+                .failed_tracks
+                .iter()
+                .map(|role| role.as_str())
+                .collect::<Vec<_>>(),
             "pause_count": stop_result.pause_spans.len(),
             "paused_ms": recording_pause::paused_total_ms(
                 &stop_result.pause_spans,
@@ -1974,9 +3042,10 @@ pub(crate) async fn stop_recording_for_sidecar_inner(
     let pipeline_state = Arc::clone(state);
     let pipeline_handle = handle.clone();
     let pipeline_recording_id = recording_id.clone();
-    let postprocessing_lease = state
-        .operation_coordinator
-        .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+    let postprocessing_lease = state.operation_coordinator.try_acquire_named(
+        operation_coordinator::OperationKind::PostProcess,
+        "meeting transcription and speaker labelling",
+    )?;
     let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::coordinated(
         Arc::clone(&state.active_meeting_audio_postprocessing),
         &recording_id,
@@ -1993,4 +3062,109 @@ pub(crate) async fn stop_recording_for_sidecar_inner(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod start_cancellation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_joins_registered_rollback_without_aborting_it() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&finished);
+        track_capture_start_rollback(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            marker.store(true, Ordering::SeqCst);
+        }));
+        finish_cancelled_capture_starts().await;
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(CAPTURE_START_ROLLBACKS.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn aborted_start_keeps_capture_reserved_until_rollback_finishes() {
+        let coordinator = operation_coordinator::OperationCoordinator::new();
+        let lease = coordinator
+            .try_acquire(operation_coordinator::OperationKind::Capture)
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = UnfinishedMeetingStart {
+                lease: Some(lease),
+                rollback: Some(Box::new(move |lease| {
+                    tokio::spawn(async move {
+                        let _lease = lease;
+                        let _ = cleanup_tx.send(());
+                        let _ = finish_rx.await;
+                    });
+                })),
+            };
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        cleanup_rx.await.unwrap();
+        assert!(coordinator
+            .try_acquire(operation_coordinator::OperationKind::Capture)
+            .is_err());
+        finish_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(coordinator
+            .try_acquire(operation_coordinator::OperationKind::Capture)
+            .is_ok());
+    }
+
+    #[test]
+    fn successful_start_transfers_lease_and_never_runs_rollback() {
+        let coordinator = operation_coordinator::OperationCoordinator::new();
+        let cleanup_called = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&cleanup_called);
+        let mut guard = UnfinishedMeetingStart {
+            lease: Some(
+                coordinator
+                    .try_acquire(operation_coordinator::OperationKind::Capture)
+                    .unwrap(),
+            ),
+            rollback: Some(Box::new(move |_| {
+                called.store(true, Ordering::SeqCst);
+            })),
+        };
+        let active_lease = guard.take_lease();
+        guard.disarm();
+        drop(guard);
+        assert!(!cleanup_called.load(Ordering::SeqCst));
+        assert!(coordinator
+            .try_acquire(operation_coordinator::OperationKind::Capture)
+            .is_err());
+        drop(active_lease);
+        assert!(coordinator
+            .try_acquire(operation_coordinator::OperationKind::Capture)
+            .is_ok());
+    }
+
+    #[test]
+    fn cancellation_after_lease_transfer_still_runs_rollback() {
+        let coordinator = operation_coordinator::OperationCoordinator::new();
+        let called = Arc::new(AtomicBool::new(false));
+        let cleanup_called = Arc::clone(&called);
+        let mut guard = UnfinishedMeetingStart {
+            lease: Some(
+                coordinator
+                    .try_acquire(operation_coordinator::OperationKind::Capture)
+                    .unwrap(),
+            ),
+            rollback: Some(Box::new(move |lease| {
+                assert!(lease.is_none(), "active capture owns the transferred lease");
+                cleanup_called.store(true, Ordering::SeqCst);
+            })),
+        };
+        let active_lease = guard.take_lease();
+        drop(guard);
+        assert!(called.load(Ordering::SeqCst));
+        drop(active_lease);
+    }
 }

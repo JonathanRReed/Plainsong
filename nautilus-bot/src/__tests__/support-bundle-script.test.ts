@@ -10,9 +10,9 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-const scriptPath = path.resolve(process.cwd(), "scripts/capture-support-bundle.mjs");
+const scriptPath = path.resolve(process.cwd(), "scripts/capture-support-bundle.ts");
 
-describe("capture-support-bundle.mjs", () => {
+describe("capture-support-bundle.ts", () => {
   it("keeps useful readiness facts while excluding content, credentials, and full paths", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "plainsong-support-bundle-"));
     try {
@@ -53,7 +53,7 @@ describe("capture-support-bundle.mjs", () => {
       );
 
       const result = spawnSync(
-        "node",
+        "bun",
         [
           scriptPath,
           "--settings",
@@ -72,6 +72,8 @@ describe("capture-support-bundle.mjs", () => {
       const output = readFileSync(outPath, "utf8");
       const bundle = JSON.parse(output);
       expect(bundle.safeToShare).toBe(true);
+      expect(bundle.pass).toBe(true);
+      expect(bundle.candidateIdentity).toBeUndefined();
       expect(bundle.settings.transcription.dictationProvider).toBe("whisper");
       expect(bundle.readiness.microphoneReady).toBe(true);
       expect(bundle.inventory.audioFiles).toBe(1);
@@ -98,16 +100,60 @@ describe("capture-support-bundle.mjs", () => {
     try {
       const outPath = path.join(root, "support-bundle.json");
       const result = spawnSync(
-        "node",
+        "bun",
         [scriptPath, "--settings", path.join(root, "missing.json"), "--out", outPath],
         { encoding: "utf8" },
       );
       expect(result.status).toBe(1);
       const bundle = JSON.parse(readFileSync(outPath, "utf8"));
       expect(bundle.safeToShare).toBe(false);
+      expect(bundle.pass).toBe(false);
       expect(bundle.errors[0]).toMatch(/settings source is missing/i);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("binds an explicit app without disclosing its path", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "plainsong-support-binding-"));
+    try {
+      const appPath = path.join(root, "Private Candidate.app");
+      mkdirSync(path.join(appPath, "Contents"), { recursive: true });
+      writeFileSync(path.join(appPath, "Contents", "Info.plist"), "fabricated app");
+      const outPath = path.join(root, "bundle.json");
+      const result = spawnSync("bun", [scriptPath, "--app", appPath, "--out", outPath], {
+        encoding: "utf8",
+      });
+      const output = readFileSync(outPath, "utf8");
+      const bundle = JSON.parse(output);
+      expect(result.status).toBe(0);
+      expect(bundle.safeToShare).toBe(true);
+      expect(bundle.pass).toBe(true);
+      expect(bundle.candidateAppUnchanged).toBe(true);
+      expect(bundle.candidateIdentity.appBundle.sha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(output).not.toContain(appPath);
+      expect(output).not.toContain("Private Candidate");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps privacy success distinct from a missing app binding", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "plainsong-support-binding-"));
+    try {
+      const outPath = path.join(root, "bundle.json");
+      const result = spawnSync("bun", [scriptPath, "--app", path.join(root, "missing.app"), "--out", outPath], {
+        encoding: "utf8",
+      });
+      const bundle = JSON.parse(readFileSync(outPath, "utf8"));
+      expect(result.status).toBe(1);
+      expect(bundle.safeToShare).toBe(true);
+      expect(bundle.pass).toBe(false);
+      expect(bundle.candidateAppUnchanged).toBe(false);
+      expect(bundle.candidateIdentity.appBundle.sha256).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
 });

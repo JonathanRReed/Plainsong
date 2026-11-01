@@ -4,8 +4,7 @@ Research pass plus the first round of changes, prompted by Typeless
 (typeless.com) and the NVIDIA Nemotron 3 Diarization release. Decisions taken
 with Jonathan on 2026-09-24:
 
-- Local models stay the default. Cloud routes stay bring-your-own-key. A paid
-  hosted tier is a later idea, not part of this work.
+- Local models stay the default. Cloud routes stay bring-your-own-key.
 - The finishing animation is an estimated progress bar that eases out and
   only completes when the text lands.
 - There are no real users yet, so defaults may move once a change is built.
@@ -306,8 +305,3 @@ kept, and a dictation of only "um" is never emptied.
 2. ~~Quiet-speech mode.~~ Shipped in round 3: the noise gate is off and
    dictation audio is loudness-normalized with a soft limiter.
 3. Smart Format on by default once the cleanup model is downloaded (§6).
-
-## 8. Round 3: premium and Plainsong Plus
-
-The paid tier's model picks, economics, architecture and launch checklist,
-plus the remaining gaps against Typeless, are in `docs/plainsong-plus.md`.

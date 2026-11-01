@@ -104,11 +104,11 @@ export const PERMISSION_GATES: PermissionGate[] = [
   },
   {
     key: "keyboard_fallback",
-    label: "Keyboard fallback",
+    label: "Typing when paste is blocked",
     purpose:
       "Plainsong types the words in when an app refuses direct insertion.",
     consequence:
-      "Without it dictation into apps that reject direct insertion falls back to copying instead of typing. It is granted from the same Accessibility list as the row above.",
+      "Turned on by the same Accessibility switch. If this stays \"Still needed\", quit and reopen Plainsong. Without it, apps that refuse direct insertion get the text on the clipboard instead.",
     settingsLabel: "Accessibility",
     destination: { kind: "settings_pane", section: "accessibility" },
     optional: false,
@@ -121,9 +121,9 @@ export const PERMISSION_GATES: PermissionGate[] = [
     key: "system_audio",
     label: "Screen & System Audio",
     purpose:
-      "Meetings capture the other side of a call: what comes out of your speakers.",
+      "Me + Them records your microphone and all audio playing on this Mac, including other apps and notification sounds. Works with headphones on macOS 14.7+.",
     consequence:
-      "Without it meetings still record, from your microphone only, so the people on the call are not in the transcript.",
+      "Without it, meetings record your microphone only. Other people are captured only if the microphone hears them.",
     settingsLabel: "Screen & System Audio Recording",
     destination: { kind: "settings_pane", section: "system_audio" },
     optional: true,
@@ -135,9 +135,9 @@ export const PERMISSION_GATES: PermissionGate[] = [
     key: "speech",
     label: "Speech Recognition",
     purpose:
-      "Records your consent to macOS transcribing on this Mac, for the Apple Speech route only. Nothing is sent to Apple: both engines run here with the server fallback switched off.",
+      "Lets macOS transcribe on this Mac, used only when Apple Speech is your speech model. Nothing is sent to Apple: it runs here with the server fallback switched off.",
     consequence:
-      "Without it the Apple Speech route refuses to transcribe. Every other dictation route is unaffected, and Plainsong never falls back to this one on its own.",
+      "Without it Apple Speech can't transcribe. Every other speech model is unaffected, and Plainsong never switches to Apple Speech on its own.",
     settingsLabel: "Speech Recognition",
     destination: { kind: "settings_pane", section: "speech" },
     optional: true,

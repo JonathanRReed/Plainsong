@@ -7,7 +7,7 @@ import { dispatcher } from "./sidecar-source";
 /**
  * The renderer↔sidecar contract for pause/resume and live-call detection.
  *
- * `scripts/verify-ipc-contract.mjs` proves every allowlisted command has a
+ * `scripts/verify-ipc-contract.ts` proves every allowlisted command has a
  * handler; this pins the other direction for these four — that the renderer
  * is actually allowed to call them, and that the two the UI waits on
  * synchronously get the fast timeout — so a refactor that drops one from the

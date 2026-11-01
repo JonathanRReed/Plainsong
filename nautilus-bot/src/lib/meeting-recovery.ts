@@ -15,6 +15,7 @@
  */
 
 import type { Recording } from "@/types";
+import { containsTechnicalTerms } from "@/lib/meeting-ui-message";
 
 export interface MeetingIntegrity {
   /**
@@ -26,7 +27,6 @@ export interface MeetingIntegrity {
   degradedReason: string | null;
   /** When the reader accepted losing the audio, if they have. */
   acknowledgedAt: string | null;
-  /** Which capture sources went quiet mid-meeting, and for how long. */
   captureDegradedSummary: string | null;
 }
 
@@ -101,6 +101,16 @@ export function transcriptIsIncomplete(integrity: MeetingIntegrity): boolean {
   return integrity.transcriptComplete === false;
 }
 
+export function describeAnalysisSourceReview(integrity: MeetingIntegrity): string | null {
+  if (integrity.captureDegradedSummary) {
+    return "Part of this meeting was not captured. Review this result against the available transcript and notes before sharing.";
+  }
+  if (transcriptIsIncomplete(integrity)) {
+    return "This transcript is incomplete. Review this result against the available transcript and notes before sharing.";
+  }
+  return null;
+}
+
 export interface IncompleteTranscriptNotice {
   title: string;
   message: string;
@@ -120,22 +130,37 @@ export function describeIncompleteTranscript(
     return null;
   }
 
-  const reason = integrity.degradedReason;
+  // The stored reason can be a raw chunk error written for the log; the
+  // generic sentences below say the same thing in plain words.
+  const reason = containsTechnicalTerms(integrity.degradedReason)
+    ? null
+    : integrity.degradedReason;
   if (integrity.acknowledgedAt) {
+    const loss = integrity.captureDegradedSummary
+      ? "Re-transcription cannot restore conversation that was not captured. "
+      : "";
     return {
       title: "Transcript incomplete — you accepted losing the audio",
       message: reason
-        ? `${reason} Storage cleanup may now delete this meeting's audio; the transcript stays as it is.`
-        : "Storage cleanup may now delete this meeting's audio; the transcript stays as it is.",
+        ? `${reason} ${loss}Storage cleanup may now delete this meeting's audio; the transcript stays as it is.`
+        : `${loss}Storage cleanup may now delete this meeting's audio; the transcript stays as it is.`,
       audioHeld: false,
+    };
+  }
+
+  if (integrity.captureDegradedSummary) {
+    return {
+      title: "Transcript incomplete. Partial audio kept",
+      message: `${reason ? `${reason} ` : ""}The saved audio is partial. Re-transcription cannot restore conversation that was not captured. Cleanup is keeping what was saved until you accept losing it.`,
+      audioHeld: true,
     };
   }
 
   return {
     title: "Transcript incomplete — audio kept for re-transcription",
     message: reason
-      ? `${reason} The saved audio is the only complete record of this meeting, so cleanup is holding it back until you re-transcribe or accept losing it.`
-      : "Part of this meeting was never transcribed. The saved audio is the only complete record of it, so cleanup is holding it back until you re-transcribe or accept losing it.",
+      ? `${reason} The saved audio may contain words missing from this transcript. Cleanup is holding it back until you re-transcribe or accept losing it.`
+      : "Part of this meeting was never transcribed. The saved audio may contain missing words. Cleanup is holding it back until you re-transcribe or accept losing it.",
     audioHeld: true,
   };
 }
@@ -147,9 +172,14 @@ export function describeCaptureDegradation(
   if (!integrity.captureDegradedSummary) {
     return null;
   }
+  // The summary may end with the audio system's own account in brackets,
+  // which is for the log when it names internals.
+  const summary = containsTechnicalTerms(integrity.captureDegradedSummary)
+    ? integrity.captureDegradedSummary.replace(/\s*\([^()]*\)/g, "")
+    : integrity.captureDegradedSummary;
   return {
     title: "Some of this meeting was not captured",
-    message: `${integrity.captureDegradedSummary} Anything those sources would have carried is not in the recording or the transcript.`,
+    message: `${summary} Anything those sources would have carried is not in the recording or the transcript.`,
   };
 }
 

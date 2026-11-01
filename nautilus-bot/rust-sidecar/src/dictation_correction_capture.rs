@@ -29,15 +29,25 @@ use std::collections::HashSet;
 /// How long after an insertion Plainsong is still willing to read the
 /// destination field back.
 ///
-/// Eight seconds is the window in which a correction is still plausibly a
-/// *correction*. Users who spot a wrong word do it as the text appears —
-/// they fix it in the first few seconds and move on. Read back much earlier
-/// and the fix has not happened yet; read back much later and the field has
-/// filled with new sentences the user is composing, which is a rewrite, not a
-/// correction, and is exactly the content this feature must not be reading.
-/// A short window is also the privacy story: Plainsong looks once, briefly,
-/// at a field it just wrote into, and never again.
+/// Event observation and its value probes must finish within this window.
 pub const POST_INSERT_READBACK_WINDOW_SECS: i64 = 8;
+
+/// One-shot fallback delay for destinations without value-change observation.
+pub const POST_INSERT_READBACK_DELAY_SECS: u64 = 4;
+
+/// Round elapsed time up so a fractional second past the deadline expires.
+/// Negative elapsed time fails closed, including fractions of a second.
+pub fn readback_elapsed_secs(elapsed: chrono::Duration) -> i64 {
+    if elapsed < chrono::Duration::zero() {
+        return -1;
+    }
+    let seconds = elapsed.num_seconds();
+    if elapsed > chrono::Duration::seconds(seconds) {
+        seconds.saturating_add(1)
+    } else {
+        seconds
+    }
+}
 
 /// How long a queued suggestion survives without being approved or dismissed.
 /// A week is long enough to cover "I'll deal with this on Monday" and short
@@ -148,6 +158,9 @@ pub struct FocusedFieldFrame {
 pub struct FocusedFieldFingerprint {
     /// Owning process id of the focused element.
     pub pid: Option<i32>,
+    /// Native AX identity captured before reading insertion text. Internal only.
+    /// Synthetic readers can omit it and retain the identifier/frame checks.
+    pub native_element_hash: Option<u64>,
     /// `AXRole`, e.g. `AXTextArea`.
     pub role: Option<String>,
     /// `AXIdentifier` when the app publishes one.
@@ -184,14 +197,18 @@ impl FocusedFieldFingerprint {
     /// concerned. Erring towards "not the same" costs a suggestion; erring the
     /// other way reads a stranger's field.
     ///
-    /// At least one field-specific discriminator must be available on both
-    /// reads. App, window, role, and content overlap are not field identity:
-    /// sibling controls can share all of them. If Accessibility publishes
-    /// neither an identifier nor a frame, fail closed rather than risk reading
-    /// a different control.
+    /// Native anchors require the same native element hash. Synthetic anchors
+    /// require an identifier or frame on both reads. Every metadata comparison
+    /// still applies, including window identity and field position. App, window,
+    /// role, and content overlap alone cannot identify sibling controls.
     pub fn matches_insertion(&self, insertion: &FocusedFieldFingerprint) -> bool {
-        let has_field_identity = (self.identifier.is_some() && insertion.identifier.is_some())
-            || (self.frame.is_some() && insertion.frame.is_some());
+        let has_field_identity = match insertion.native_element_hash {
+            Some(hash) => self.native_element_hash == Some(hash),
+            None => {
+                (self.identifier.is_some() && insertion.identifier.is_some())
+                    || (self.frame.is_some() && insertion.frame.is_some())
+            }
+        };
 
         has_field_identity
             && self.pid == insertion.pid
@@ -239,6 +256,15 @@ pub trait FocusedFieldReader {
     /// `Ok(None)` means "nothing focused / nothing readable", which is a
     /// silent abort rather than an error.
     fn read_focused_field(&self) -> Result<Option<FocusedFieldSnapshot>, String>;
+
+    /// Native readers verify identity before accessing the field value.
+    /// The default preserves the pure snapshot readers used by fixtures.
+    fn read_focused_field_matching(
+        &self,
+        _insertion: &FocusedFieldFingerprint,
+    ) -> Result<Option<FocusedFieldSnapshot>, String> {
+        self.read_focused_field()
+    }
 }
 
 /// Whether the field a reader just looked at is plausibly the one Plainsong
@@ -289,6 +315,10 @@ pub fn capture_insertion_anchor(
             return None;
         }
     };
+
+    if snapshot.text.chars().count() > MAX_READBACK_CHARS {
+        return None;
+    }
 
     if frontmost_is_self(
         snapshot.fingerprint.frontmost_app_name.as_deref(),
@@ -414,7 +444,7 @@ pub fn evaluate_post_insert_readback(
         return ReadbackOutcome::Aborted(abort);
     }
 
-    let snapshot = match reader.read_focused_field() {
+    let snapshot = match reader.read_focused_field_matching(&request.insertion_fingerprint) {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => return ReadbackOutcome::Aborted(ReadbackAbort::ReadbackEmpty),
         Err(error) => return ReadbackOutcome::Aborted(ReadbackAbort::ReadbackFailed(error)),
@@ -986,6 +1016,7 @@ mod tests {
     fn fingerprint() -> FocusedFieldFingerprint {
         FocusedFieldFingerprint {
             pid: Some(742),
+            native_element_hash: None,
             role: Some("AXTextArea".to_string()),
             identifier: Some("message-input".to_string()),
             title: None,
@@ -1008,6 +1039,7 @@ mod tests {
     fn anonymous_sibling_field(y: i64) -> FocusedFieldFingerprint {
         FocusedFieldFingerprint {
             pid: Some(742),
+            native_element_hash: None,
             role: Some("AXTextArea".to_string()),
             identifier: None,
             title: None,
@@ -1062,6 +1094,63 @@ mod tests {
     }
 
     // ── Span anchoring ──────────────────────────────────────────────────────
+
+    #[test]
+    fn readback_uses_identity_guard_before_reading_value() {
+        struct GuardedReader;
+        impl FocusedFieldReader for GuardedReader {
+            fn read_focused_field(&self) -> Result<Option<FocusedFieldSnapshot>, String> {
+                panic!("readback must use the guarded reader");
+            }
+
+            fn read_focused_field_matching(
+                &self,
+                insertion: &FocusedFieldFingerprint,
+            ) -> Result<Option<FocusedFieldSnapshot>, String> {
+                assert_eq!(insertion, &fingerprint());
+                Ok(None)
+            }
+        }
+        assert_eq!(
+            evaluate_post_insert_readback(&GuardedReader, &request("send it to cuban netties")),
+            ReadbackOutcome::Aborted(ReadbackAbort::ReadbackEmpty),
+        );
+    }
+
+    #[test]
+    fn readback_timing_keeps_delay_inside_deadline() {
+        assert!(POST_INSERT_READBACK_DELAY_SECS < POST_INSERT_READBACK_WINDOW_SECS as u64);
+        assert_eq!(readback_elapsed_secs(chrono::Duration::seconds(4)), 4);
+        assert_eq!(readback_elapsed_secs(chrono::Duration::seconds(8)), 8);
+        assert_eq!(
+            readback_elapsed_secs(chrono::Duration::seconds(8) + chrono::Duration::nanoseconds(1)),
+            9
+        );
+        assert_eq!(readback_elapsed_secs(chrono::Duration::nanoseconds(-1)), -1);
+    }
+
+    #[test]
+    fn readback_timing_rejects_fractional_expiry_before_reading() {
+        let mut request = request("send it to cuban netties");
+        request.elapsed_secs =
+            readback_elapsed_secs(chrono::Duration::seconds(8) + chrono::Duration::nanoseconds(1));
+        assert_eq!(
+            should_attempt_readback(&request),
+            Err(ReadbackAbort::WindowExpired)
+        );
+        request.elapsed_secs = 4;
+        request.delivery_is_current = false;
+        assert_eq!(
+            should_attempt_readback(&request),
+            Err(ReadbackAbort::DeliverySuperseded)
+        );
+        request.delivery_is_current = true;
+        request.enabled = false;
+        assert_eq!(
+            should_attempt_readback(&request),
+            Err(ReadbackAbort::SettingDisabled)
+        );
+    }
 
     #[test]
     fn locates_an_insertion_surrounded_by_the_users_own_text() {
@@ -1430,6 +1519,7 @@ mod tests {
         // the control.
         let indistinguishable = FocusedFieldFingerprint {
             pid: Some(742),
+            native_element_hash: None,
             role: None,
             identifier: None,
             title: None,
@@ -1689,6 +1779,20 @@ mod tests {
     }
 
     #[test]
+    fn insertion_anchor_accepts_the_character_limit_and_rejects_one_more() {
+        let at_limit = format!("{} ping", "界".repeat(MAX_READBACK_CHARS - 5));
+        assert_eq!(at_limit.chars().count(), MAX_READBACK_CHARS);
+        assert_eq!(
+            capture_insertion_anchor(&reader_returning(&at_limit), "ping", &never_self),
+            Some(fingerprint())
+        );
+        let oversized = format!("界{at_limit}");
+        assert!(
+            capture_insertion_anchor(&reader_returning(&oversized), "ping", &never_self,).is_none()
+        );
+    }
+
+    #[test]
     fn refuses_to_anchor_to_a_field_that_does_not_hold_the_insertion() {
         // The paste went somewhere else, or nowhere. Without evidence that
         // this is the right field, no readback may be scheduled against it.
@@ -1899,5 +2003,35 @@ mod tests {
         let mut readback = fingerprint();
         readback.identifier = None;
         assert!(!readback.matches_insertion(&fingerprint()));
+    }
+    #[test]
+    fn insertion_native_identity_rejects_a_replacement_with_identical_metadata() {
+        let mut insertion = fingerprint();
+        insertion.native_element_hash = Some(100);
+        let mut observed = insertion.clone();
+        observed.native_element_hash = Some(101);
+        assert!(!observed.matches_insertion(&insertion));
+    }
+
+    #[test]
+    fn insertion_native_identity_rejects_a_missing_observed_hash() {
+        let mut insertion = fingerprint();
+        insertion.native_element_hash = Some(100);
+        let mut observed = insertion.clone();
+        observed.native_element_hash = None;
+        assert!(!observed.matches_insertion(&insertion));
+    }
+
+    #[test]
+    fn matching_native_identity_still_requires_unchanged_field_metadata() {
+        let mut insertion = fingerprint();
+        insertion.native_element_hash = Some(100);
+        assert!(insertion.matches_insertion(&insertion));
+        let mut moved = insertion.clone();
+        moved.frame.as_mut().unwrap().y += 1;
+        assert!(!moved.matches_insertion(&insertion));
+        let mut renamed = insertion.clone();
+        renamed.window_title = Some("other window".to_string());
+        assert!(!renamed.matches_insertion(&insertion));
     }
 }

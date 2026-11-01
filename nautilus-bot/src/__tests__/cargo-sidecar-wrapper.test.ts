@@ -3,10 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { sidecarCargoFeatureArgs } from "../../scripts/sidecar-cargo-features.mjs";
+import { sidecarCargoFeatureArgs } from "../../scripts/sidecar-cargo-features.ts";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const wrapper = path.join(repoRoot, "scripts/cargo-sidecar.mjs");
+const wrapper = path.join(repoRoot, "scripts/cargo-sidecar.ts");
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-cargo-wrapper-"));
 const argsFile = path.join(tempRoot, "cargo-args.txt");
 
@@ -44,7 +44,7 @@ afterAll(() => {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 });
 
-describe.skipIf(process.platform === "win32")("scripts/cargo-sidecar.mjs", () => {
+describe.skipIf(process.platform === "win32")("scripts/cargo-sidecar.ts", () => {
   it("adds the manifest and the host feature set and passes `--` args through untouched", () => {
     const result = runWrapper("status", [
       "clippy",
@@ -63,6 +63,31 @@ describe.skipIf(process.platform === "win32")("scripts/cargo-sidecar.mjs", () =>
       sidecarCargoFeatureArgs(),
     );
     expect(recorded.slice(-5)).toEqual(["--locked", "--all-targets", "--", "-D", "warnings"]);
+  });
+
+  it("keeps explicit feature-matrix checks free of host release features", () => {
+    const result = runWrapper("ok", ["check", "--locked", "--no-default-features", "--features", "asr-whisper", "--lib", "--tests"]);
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual([
+      "check", "--manifest-path", path.join(repoRoot, "rust-sidecar", "Cargo.toml"),
+      "--locked", "--no-default-features", "--features", "asr-whisper", "--lib", "--tests",
+    ]);
+  });
+
+  it("runs fmt without unsupported feature flags", () => {
+    const result = runWrapper("ok", ["fmt", "--check"]);
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual([
+      "fmt", "--manifest-path", path.join(repoRoot, "rust-sidecar", "Cargo.toml"), "--check",
+    ]);
+  });
+
+  it("checks the separate text helper without sidecar-only features", () => {
+    const result = runWrapper("ok", ["--text-helper", "test", "--locked"]);
+    expect(result.status).toBe(0);
+    expect(fs.readFileSync(argsFile, "utf8").trimEnd().split("\n")).toEqual([
+      "test", "--manifest-path", path.join(repoRoot, "rust-sidecar", "text-helper", "Cargo.toml"), "--locked",
+    ]);
   });
 
   it("relays a signal-terminated cargo instead of reporting exit 1", () => {

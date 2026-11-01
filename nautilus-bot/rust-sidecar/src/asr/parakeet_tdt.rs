@@ -149,6 +149,29 @@ fn run_decoder(
     })
 }
 
+/// Seconds of audio per encoder frame: a 10 ms mel hop, subsampled 8x by the
+/// FastConformer encoder. Same for the v2 and v3 exports.
+pub const ENCODER_FRAME_SECONDS: f64 = 0.08;
+
+/// One emitted token and where the decoder was when it emitted it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimedToken {
+    pub id: usize,
+    /// Encoder frame the token was emitted at.
+    pub frame: usize,
+    /// Frames the duration head said the token spans (0 means "same frame").
+    pub duration: usize,
+}
+
+/// One detokenized word with its span, in seconds from the start of the audio
+/// that was encoded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimedWord {
+    pub text: String,
+    pub start: f64,
+    pub end: f64,
+}
+
 /// Greedy TDT decode over one encoded utterance.
 ///
 /// `encoder_out` is `[1, 1024, frames]` flattened in the encoder's own order;
@@ -162,6 +185,25 @@ pub fn greedy_decode(
     frames: usize,
     blank_id: usize,
 ) -> Result<Vec<usize>> {
+    Ok(
+        greedy_decode_timed(decoder, joiner, encoder_out, encoder_dim, frames, blank_id)?
+            .into_iter()
+            .map(|token| token.id)
+            .collect(),
+    )
+}
+
+/// [`greedy_decode`], keeping the encoder frame and predicted duration of
+/// every token. The decode itself is identical; the frame cursor it already
+/// walks is simply recorded, which is what NeMo's TDT timestamps are.
+pub fn greedy_decode_timed(
+    decoder: &mut Session,
+    joiner: &mut Session,
+    encoder_out: &[f32],
+    encoder_dim: usize,
+    frames: usize,
+    blank_id: usize,
+) -> Result<Vec<TimedToken>> {
     if frames == 0 || encoder_dim == 0 {
         return Ok(Vec::new());
     }
@@ -175,7 +217,7 @@ pub fn greedy_decode(
         ));
     }
 
-    let mut tokens: Vec<usize> = Vec::new();
+    let mut tokens: Vec<TimedToken> = Vec::new();
     let mut state_h = zero_state();
     let mut state_c = zero_state();
 
@@ -186,6 +228,10 @@ pub fn greedy_decode(
     state_h = primed.state_h;
     state_c = primed.state_c;
 
+    #[cfg(test)]
+    let trace_path = std::env::var("PLAINSONG_PARAKEET_DECODER_TRACE").ok();
+    #[cfg(test)]
+    let mut trace = trace_path.as_ref().map(|_| Vec::new());
     let mut frame = 0usize;
     while frame < frames {
         let mut symbols_at_frame = 0usize;
@@ -222,9 +268,17 @@ pub fn greedy_decode(
             let head = split_joiner_row(&row)?;
             let token = argmax(head.tokens);
             let duration = argmax(head.durations);
+            #[cfg(test)]
+            if let Some(trace) = trace.as_mut() {
+                trace.push(serde_json::json!({"frame":frame,"token":token,"blank":token == blank_id,"duration":duration}));
+            }
 
             if token != blank_id {
-                tokens.push(token);
+                tokens.push(TimedToken {
+                    id: token,
+                    frame,
+                    duration,
+                });
                 let step = run_decoder(decoder, token as i32, state_h, state_c)?;
                 decoder_out = step.projection;
                 state_h = step.state_h;
@@ -246,6 +300,14 @@ pub fn greedy_decode(
         }
     }
 
+    #[cfg(test)]
+    if let (Some(path), Some(trace)) = (trace_path, trace) {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&trace).expect("serialize public decoder trace"),
+        )
+        .expect("write explicitly selected public decoder trace");
+    }
     Ok(tokens)
 }
 
@@ -284,9 +346,113 @@ pub fn detokenize(vocab: &[String], token_ids: &[usize]) -> String {
     text.trim().to_string()
 }
 
+/// [`detokenize`], word by word, with each word spanning from the frame of
+/// its first piece to the end of its last.
+///
+/// The words are exactly `detokenize(..).split_whitespace()`: the same pieces
+/// open a word here as insert a space there, so a caller can rely on the
+/// timed words and the text agreeing.
+pub fn detokenize_timed(vocab: &[String], tokens: &[TimedToken]) -> Vec<TimedWord> {
+    let mut words: Vec<TimedWord> = Vec::new();
+    let mut open = false;
+    for token in tokens {
+        let Some(piece) = vocab.get(token.id) else {
+            continue;
+        };
+        let start = token.frame as f64 * ENCODER_FRAME_SECONDS;
+        let end = (token.frame + token.duration.max(1)) as f64 * ENCODER_FRAME_SECONDS;
+        let (opens_word, rest) = match piece.strip_prefix('\u{2581}') {
+            Some(rest) => (true, rest),
+            None => (false, piece.as_str()),
+        };
+        if opens_word || !open {
+            words.push(TimedWord {
+                text: String::new(),
+                start,
+                end,
+            });
+            open = true;
+        }
+        let word = words.last_mut().expect("a word was opened above");
+        if word.text.is_empty() {
+            word.start = start;
+        }
+        word.text.push_str(rest);
+        word.end = word.end.max(end);
+    }
+    // A piece that is only "▁" (or text that is only whitespace) makes no word
+    // in `detokenize` either.
+    words
+        .into_iter()
+        .flat_map(|word| {
+            let pieces: Vec<String> = word.text.split_whitespace().map(str::to_string).collect();
+            let (start, end) = (word.start, word.end);
+            pieces
+                .into_iter()
+                .map(move |text| TimedWord { text, start, end })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn timed(id: usize, frame: usize, duration: usize) -> TimedToken {
+        TimedToken {
+            id,
+            frame,
+            duration,
+        }
+    }
+
+    #[test]
+    fn timed_words_agree_with_the_text_and_span_their_pieces() {
+        let vocab = vec![
+            "\u{2581}hello".to_string(),
+            "\u{2581}wor".to_string(),
+            "ld".to_string(),
+            "!".to_string(),
+            "\u{2581}".to_string(),
+        ];
+        let tokens = [
+            timed(0, 2, 3),
+            timed(4, 6, 1),
+            timed(1, 10, 2),
+            timed(2, 12, 2),
+            timed(3, 14, 0),
+            timed(999, 20, 1),
+        ];
+        let words = detokenize_timed(&vocab, &tokens);
+        let ids: Vec<usize> = tokens.iter().map(|token| token.id).collect();
+        assert_eq!(
+            words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>(),
+            detokenize(&vocab, &ids)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+        );
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(words[0].start, 0.16) && close(words[0].end, 0.40));
+        // "wor" + "ld" + "!" is one word from frame 10 to frame 15.
+        assert!(close(words[1].start, 0.80) && close(words[1].end, 1.20));
+    }
+
+    #[test]
+    fn a_leading_continuation_piece_still_opens_a_word() {
+        let vocab = vec!["ing".to_string(), "\u{2581}on".to_string()];
+        let words = detokenize_timed(&vocab, &[timed(0, 0, 1), timed(1, 4, 1)]);
+        assert_eq!(
+            words
+                .iter()
+                .map(|word| word.text.as_str())
+                .collect::<Vec<_>>(),
+            ["ing", "on"]
+        );
+        assert_eq!(detokenize(&vocab, &[0, 1]), "ing on");
+    }
 
     #[test]
     fn joiner_row_splits_vocabulary_from_duration_bins() {

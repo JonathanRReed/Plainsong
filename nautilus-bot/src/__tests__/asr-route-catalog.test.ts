@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  efficientParakeetOffered,
   buildAsrRouteCatalog,
   getLaneRoutes,
   getRecommendedLaneRoute,
+  isRecommendedLaneRoute,
+  isRecommendedSpeechRoute,
   laneProviderOrder,
 } from "@/lib/asr-route-catalog";
 import type {
@@ -73,6 +76,7 @@ const providers: AsrProviderInfo[] = [
     modelOptions: [
       { id: "parakeet-tdt-0.6b-v3", label: "Parakeet TDT 0.6B v3" },
       { id: "parakeet-tdt-0.6b-v2", label: "Parakeet TDT 0.6B v2" },
+      { id: "orukeet-v0.1.0-int8", label: "Orukeet v0.1.0 int8 (experimental)" },
       { id: "parakeet-tdt-ctc-110m", label: "Parakeet TDT CTC 110M legacy" },
     ],
     downloadStatus: "Downloaded",
@@ -191,12 +195,11 @@ const qwen3Provider: AsrProviderInfo = {
   runtimeDetails: {},
 };
 
-// The transcribe.cpp spike route, as the sidecar reports it when it was built
-// with `--features asr-transcribe-cpp`. No shipped build sends this; the
-// renderer still has to place it honestly when a developer build does.
+// The transcribe.cpp GGUF Parakeet route, as the macOS build reports it
+// (`--features asr-transcribe-cpp`).
 const transcribeCppProvider: AsrProviderInfo = {
   providerType: "transcribe_cpp",
-  name: "transcribe.cpp (experimental)",
+  name: "transcribe.cpp",
   description: "Parakeet TDT 0.6B v3 GGUF on Metal via transcribe.cpp",
   isAvailable: true,
   inferenceEnabled: true,
@@ -302,58 +305,255 @@ describe("asr-route-catalog", () => {
   });
 
 
-  it("offers the transcribe.cpp spike as an experimental route that never outranks the shipped Parakeet one", () => {
+  it("sizes a route by what its download fetches on this Mac when the sidecar reports it", () => {
+    const fileOnly = buildAsrRouteCatalog([transcribeCppProvider], "prefer_local")[0];
+    expect(fileOnly.capability?.sizeMib).toBe(705);
+    expect(fileOnly.capabilitySummary).toMatch(/^739 MB\./);
+
+    // The Neural Engine build and the vocabulary model, in place of the GGUF.
+    const bytes = 632_169_729 + 102_802_576;
+    const sized = buildAsrRouteCatalog(
+      [{ ...transcribeCppProvider, modelDownloadBytes: { "parakeet-tdt-0.6b-v3-q8_0": bytes } }],
+      "prefer_local",
+    )[0];
+    expect(sized.capability?.sizeMib).toBe(bytes / (1024 * 1024));
+    expect(sized.capabilitySummary).toMatch(/^735 MB\./);
+    // Only the size changes; a nonsense figure is ignored.
+    expect(sized.capability?.tradeoff).toBe(fileOnly.capability?.tradeoff);
+    const ignored = buildAsrRouteCatalog(
+      [{ ...transcribeCppProvider, modelDownloadBytes: { "parakeet-tdt-0.6b-v3-q8_0": -1 } }],
+      "prefer_local",
+    )[0];
+    expect(ignored.capability?.sizeMib).toBe(705);
+  });
+
+  it("ranks GGUF Parakeet ahead of ONNX Parakeet for dictation and meetings, and behind it in the shared lane", () => {
     const routes = buildAsrRouteCatalog(
       [...providers, transcribeCppProvider],
       "prefer_local",
     );
-    const spike = routes.find((route) => route.providerType === "transcribe_cpp");
+    const gguf = routes.find((route) => route.providerType === "transcribe_cpp");
 
-    expect(spike).toBeDefined();
-    expect(spike?.experimental).toBe(true);
-    expect(spike?.readiness).toBe("ready");
-    expect(spike?.hosting).toBe("local");
-    expect(spike?.downloadable).toBe(true);
-    // Same weights as the shipped Parakeet meeting route, so the same lanes.
-    expect(spike?.laneCompatibility).toEqual({
+    expect(gguf).toBeDefined();
+    expect(isRecommendedSpeechRoute(gguf!.providerType, gguf!.modelId)).toBe(true);
+    expect(gguf?.experimental).toBe(false);
+    expect(gguf?.readiness).toBe("ready");
+    expect(gguf?.hosting).toBe("local");
+    expect(gguf?.downloadable).toBe(true);
+    // Same weights as the ONNX Parakeet meeting route, so the same lanes.
+    expect(gguf?.laneCompatibility).toEqual({
       dictation: true,
       meeting: true,
       shared: true,
     });
-    expect(spike?.summary).toContain("transcribe.cpp");
-    // Honest about the cost: it is a second download of a model you may
-    // already have.
-    expect(spike?.capabilitySummary).toContain("second");
+    expect(gguf?.label).toBe("Parakeet v3");
+    expect(gguf?.summary).toMatch(/recommended for dictation and meetings on this Mac/i);
+    expect(gguf?.summary).toMatch(/one download covers both/i);
+    // No build details or internal scheduling on a choice.
+    expect(gguf?.summary).not.toMatch(/transcribe\.cpp|GPU|GGUF|one recording at a time/i);
+    // Measured on word errors and memory, not speed.
+    expect(gguf?.summary).not.toMatch(/faster/i);
+    expect(gguf?.summary).not.toMatch(/meetings use/i);
+    // The only Parakeet v3 offered here, so nothing to compare it with.
+    expect(gguf?.capabilitySummary).not.toMatch(/Compatible|second copy/);
+    expect(gguf?.capabilitySummary).not.toMatch(/meetings still use/i);
 
-    for (const lane of ["dictation", "meeting", "shared"] as const) {
-      const laneRoutes = getLaneRoutes(routes, lane, "prefer_local");
-      expect(
-        laneRoutes.some((route) => route.providerType === "transcribe_cpp"),
-      ).toBe(true);
-      expect(
-        getRecommendedLaneRoute(routes, lane, "prefer_local")?.providerType,
-      ).not.toBe("transcribe_cpp");
-      const parakeetIndex = laneRoutes.findIndex(
-        (route) => route.providerType === "parakeet",
+    const indexIn = (
+      lane: "dictation" | "meeting" | "shared",
+      provider: string,
+      policy: "prefer_local" | "best_available" = "prefer_local",
+    ) =>
+      getLaneRoutes(routes, lane, policy).findIndex(
+        (route) => route.providerType === provider,
       );
-      const spikeIndex = laneRoutes.findIndex(
-        (route) => route.providerType === "transcribe_cpp",
+    for (const policy of ["prefer_local", "best_available"] as const) {
+      for (const lane of ["dictation", "meeting"] as const) {
+        // ONNX Parakeet is the same model: never offered beside GGUF Parakeet.
+        expect(indexIn(lane, "transcribe_cpp", policy)).toBeGreaterThanOrEqual(0);
+        expect(
+          getLaneRoutes(routes, lane, policy).some(
+            (route) => route.routeId === "parakeet:parakeet-tdt-0.6b-v3",
+          ),
+        ).toBe(false);
+      }
+      expect(getRecommendedLaneRoute(routes, "meeting", policy)?.routeId).toBe(
+        "transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0",
       );
-      expect(parakeetIndex).toBeLessThan(spikeIndex);
+      // The shared default stays ONNX Parakeet, the sidecar's nearest
+      // substitute when the GGUF model is missing.
+      expect(indexIn("shared", "transcribe_cpp", policy)).toBeGreaterThan(
+        indexIn("shared", "parakeet", policy),
+      );
+      expect(getRecommendedLaneRoute(routes, "shared", policy)?.routeId).toBe(
+        "parakeet:parakeet-tdt-0.6b-v3",
+      );
     }
   });
 
-  it("recommends nothing rather than the transcribe.cpp spike when it is the only ready route", () => {
+  it("recommends ONNX Parakeet for meetings when the build does not list GGUF Parakeet", () => {
+    const routes = buildAsrRouteCatalog(providers, "prefer_local");
+    expect(getRecommendedLaneRoute(routes, "meeting", "prefer_local")?.routeId).toBe(
+      "parakeet:parakeet-tdt-0.6b-v3",
+    );
+  });
+
+  it("recommends GGUF Parakeet even while only the ONNX build is on disk", () => {
+    // An older install with ONNX Parakeet on disk keeps using it (the slot
+    // still names it), but it is never recommended beside the GGUF build:
+    // Settings offers the GGUF download instead.
+    const routes = buildAsrRouteCatalog(
+      [
+        providers[2],
+        { ...transcribeCppProvider, downloadStatus: "NotDownloaded", runtimeStatus: "missing_model" },
+      ],
+      "prefer_local",
+    );
+    expect(getRecommendedLaneRoute(routes, "meeting", "prefer_local")?.routeId).toBe(
+      "transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0",
+    );
+    const onnx = routes.find((route) => route.providerType === "parakeet");
+    expect(onnx?.superseded).toBe(true);
+    expect(onnx?.label).toBe("Parakeet v3");
+  });
+
+  it("prefers GGUF Parakeet already on disk over an ONNX Parakeet that needs downloading", () => {
+    const routes = buildAsrRouteCatalog(
+      [
+        { ...providers[2], downloadStatus: "NotDownloaded", runtimeStatus: "missing_model" },
+        transcribeCppProvider,
+      ],
+      "prefer_local",
+    );
+    expect(getRecommendedLaneRoute(routes, "meeting", "prefer_local")?.routeId).toBe(
+      "transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0",
+    );
+  });
+
+  it("recommends GGUF Parakeet for dictation and meetings but never for the shared lane", () => {
     const routes = buildAsrRouteCatalog([transcribeCppProvider], "prefer_local");
-    for (const lane of ["dictation", "meeting", "shared"] as const) {
-      expect(
-        getLaneRoutes(routes, lane, "prefer_local").map(
-          (route) => route.providerType,
-        ),
-      ).toEqual(["transcribe_cpp"]);
-      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")).toBeNull();
-      expect(getRecommendedLaneRoute(routes, lane, "best_available")).toBeNull();
+    for (const lane of ["dictation", "meeting"] as const) {
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")?.modelId).toBe(
+        "parakeet-tdt-0.6b-v3-q8_0",
+      );
+      expect(isRecommendedLaneRoute(lane, "transcribe_cpp", "parakeet-tdt-0.6b-v3-q8_0")).toBe(true);
     }
+    expect(
+      getLaneRoutes(routes, "shared", "prefer_local").map((route) => route.providerType),
+    ).toEqual(["transcribe_cpp"]);
+    expect(getRecommendedLaneRoute(routes, "shared", "prefer_local")).toBeNull();
+    expect(getRecommendedLaneRoute(routes, "shared", "best_available")).toBeNull();
+    expect(isRecommendedLaneRoute("shared", "transcribe_cpp", "parakeet-tdt-0.6b-v3-q8_0")).toBe(false);
+  });
+
+  it("keeps every other transcribe.cpp route experimental in every lane", () => {
+    const unified = {
+      ...transcribeCppProvider,
+      selectedModelId: "parakeet-unified-en-0.6b-q8_0",
+      modelOptions: [
+        { id: "parakeet-unified-en-0.6b-q8_0", label: "Parakeet Unified EN 0.6B (experimental)" },
+      ],
+    };
+    const routes = buildAsrRouteCatalog([unified], "prefer_local");
+    expect(routes[0]?.experimental).toBe(true);
+    // Meeting-eligible, yet never the recommendation there either.
+    expect(routes[0]?.laneCompatibility.meeting).toBe(true);
+    expect(isRecommendedSpeechRoute("transcribe_cpp", "parakeet-unified-en-0.6b-q8_0")).toBe(false);
+    expect(isRecommendedSpeechRoute("parakeet", "parakeet-tdt-0.6b-v3-q8_0")).toBe(false);
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      expect(isRecommendedLaneRoute(lane, "transcribe_cpp", "parakeet-unified-en-0.6b-q8_0")).toBe(false);
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")).toBeNull();
+    }
+    // Beside ONNX Parakeet it still sorts behind it in the meeting lane.
+    const withOnnx = buildAsrRouteCatalog([unified, providers[2]], "prefer_local");
+    const meeting = getLaneRoutes(withOnnx, "meeting", "prefer_local").map((route) => route.routeId);
+    expect(meeting.indexOf("parakeet:parakeet-tdt-0.6b-v3")).toBeLessThan(
+      meeting.indexOf("transcribe_cpp:parakeet-unified-en-0.6b-q8_0"),
+    );
+  });
+
+  it.each([
+    [
+      "fluid-speech-mini-q8_0",
+      "Fluid Speech Mini by FluidVoice (GGUF Q8_0, optional, English)",
+      "Fluid Speech Mini by FluidVoice",
+      "English only. Fewer stray words when someone else talks nearby in our synthetic audio tests; can miss very short replies.",
+      "Fluid Speech Mini by FluidVoice. Built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra.",
+    ],
+    [
+      "underdog-bark-3.0-pro-q8_0",
+      "Underdog Bark 3.0 Pro by Conway Research (GGUF Q8_0, optional, English)",
+      "Underdog Bark 3.0 Pro by Conway Research",
+      "English only. Did better on short distant-microphone meeting clips in our tests; dictation may lose capitals and punctuation.",
+      "Underdog Bark 3.0 Pro by Conway Research. Built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra; post-trained and compressed by Conway Research.",
+    ],
+  ])("offers optional English %s for dictation and meetings, never recommended", (model, label, displayLabel, summary, credit) => {
+    const optional = {
+      ...transcribeCppProvider,
+      selectedModelId: model,
+      modelOptions: [{ id: model, label }],
+    };
+    const routes = buildAsrRouteCatalog([optional], "prefer_local");
+    const route = routes[0];
+    expect(route).toMatchObject({
+      routeId: `transcribe_cpp:${model}`,
+      label: displayLabel,
+      summary,
+      experimental: true,
+      hosting: "local",
+      downloadable: true,
+      laneCompatibility: { dictation: true, meeting: true, shared: true },
+    });
+    expect(route?.capability?.languages).toMatchObject({ englishOnly: true, label: "English only" });
+    expect(route?.capability?.tier).toBe("more");
+    expect(`${route?.summary} ${route?.capabilitySummary}`).not.toMatch(/\b(best|strongest)\b/i);
+    expect(route?.capabilitySummary).toContain(credit);
+    expect(route?.capabilitySummary).toContain("CC BY 4.0");
+    expect(isRecommendedSpeechRoute("transcribe_cpp", model)).toBe(false);
+    for (const lane of ["dictation", "meeting", "shared"] as const) {
+      expect(isRecommendedLaneRoute(lane, "transcribe_cpp", model)).toBe(false);
+      expect(getRecommendedLaneRoute(routes, lane, "prefer_local")).toBeNull();
+    }
+    // Beside the GGUF default it never becomes the recommendation.
+    const both = buildAsrRouteCatalog(
+      [{ ...transcribeCppProvider, modelOptions: [...transcribeCppProvider.modelOptions, { id: model, label }] }],
+      "prefer_local",
+    );
+    for (const lane of ["dictation", "meeting"] as const) {
+      expect(getRecommendedLaneRoute(both, lane, "prefer_local")?.modelId).toBe("parakeet-tdt-0.6b-v3-q8_0");
+      const order = getLaneRoutes(both, lane, "prefer_local").map((entry) => entry.modelId);
+      expect(order.indexOf("parakeet-tdt-0.6b-v3-q8_0")).toBeLessThan(order.indexOf(model));
+    }
+  });
+
+  it.each([
+    ["qwen3-asr-1.7b-q8_0", "Qwen3-ASR 1.7B", "Qwen3-ASR 1.7B (experimental)"],
+    ["qwen3-asr-0.6b-q6_k", "Qwen3-ASR 0.6B", "Qwen3-ASR 0.6B Lite (experimental)"],
+  ])("keeps native %s experimental and out of meeting and shared lanes", (model, name, displayLabel) => {
+    const provider = { ...transcribeCppProvider, selectedModelId: model,
+      modelOptions: [{ id: model, label: `${name} (experimental)` }] };
+    const routes = buildAsrRouteCatalog([...providers, provider], "prefer_local");
+    const route = routes.find(entry => entry.modelId === model);
+    expect(route).toMatchObject({ experimental: true, hosting: "local", downloadable: true });
+    expect(route?.laneCompatibility).toEqual({ dictation: true, meeting: false, shared: false });
+    expect(route?.label).toBe(displayLabel);
+    expect(route?.summary).toContain("Experimental English dictation");
+    expect(route?.summary).not.toMatch(/GGUF|Q6_K|weights/);
+    expect(getRecommendedLaneRoute(routes, "dictation", "prefer_local")?.providerType).not.toBe("transcribe_cpp");
+  });
+
+  it("keeps native Orukeet experimental and out of meeting and shared lanes", () => {
+    const nativeOrukeet = {
+      ...transcribeCppProvider,
+      selectedModelId: "orukeet-r3-q8_0",
+      modelOptions: [{ id: "orukeet-r3-q8_0", label: "Orukeet r3 GGUF Q8_0 (experimental)" }],
+    };
+    const routes = buildAsrRouteCatalog([...providers, nativeOrukeet], "prefer_local");
+    const route = routes.find((entry) => entry.modelId === "orukeet-r3-q8_0");
+    expect(route).toMatchObject({ experimental: true, hosting: "local", downloadable: true });
+    expect(route?.laneCompatibility).toEqual({ dictation: true, meeting: false, shared: false });
+    expect(route?.summary).toContain("Orukeet");
+    expect(route?.summary).not.toContain("Parakeet weights");
+    expect(getRecommendedLaneRoute(routes, "dictation", "prefer_local")?.providerType).not.toBe("transcribe_cpp");
   });
 
   it("offers a ready Qwen3-ASR route for both lanes as experimental and never recommends it over Parakeet", () => {
@@ -365,7 +565,7 @@ describe("asr-route-catalog", () => {
     expect(qwen3?.readiness).toBe("ready");
     expect(qwen3?.selectable).toBe(true);
     expect(qwen3?.laneCompatibility).toEqual({ dictation: true, meeting: true, shared: true });
-    expect(qwen3?.summary).toContain("Chinese, Japanese and Korean");
+    expect(qwen3?.summary).toBe("Experimental. Built for 30 languages and 22 Chinese dialects. Tested in English in Plainsong.");
 
     for (const lane of ["dictation", "meeting", "shared"] as const) {
       const laneRoutes = getLaneRoutes(routes, lane, "prefer_local");
@@ -427,11 +627,25 @@ describe("asr-route-catalog", () => {
         route.modelId === "parakeet-tdt-0.6b-v2",
     );
     expect(v2?.summary).toContain("Experimental");
-    expect(v2?.summary).toContain("qualification is pending");
+    expect(v2?.summary).toContain("Not yet tested on real recordings");
     expect(v2?.recommendedRank.meeting).toBeNull();
+
+    const orukeet = routes.find((route) => route.modelId === "orukeet-v0.1.0-int8");
+    expect(orukeet).toMatchObject({
+      label: "Orukeet v0.1 (experimental)",
+      selectable: true,
+      downloadable: true,
+      experimental: true,
+    });
+    expect(orukeet?.laneCompatibility).toEqual({
+      dictation: true,
+      meeting: false,
+      shared: false,
+    });
+    expect(orukeet?.summary).not.toContain("NVIDIA Parakeet");
   });
 
-  it("does not repeat an unqualified language count in the Parakeet route label", () => {
+  it("names the any-Mac Parakeet build plainly, without an unqualified language count", () => {
     const parakeet = {
       ...providers[2],
       modelOptions: [
@@ -441,12 +655,30 @@ describe("asr-route-catalog", () => {
         },
       ],
     };
-    const route = buildAsrRouteCatalog([parakeet], "prefer_local")[0];
-
-    expect(route.label).toBe("Parakeet TDT 0.6B v3");
-    expect(route.capabilitySummary).toContain(
-      "25 European languages listed upstream",
+    // On its own (Intel Macs, other platforms) it is simply Parakeet v3,
+    // with nothing to be compared against.
+    const alone = buildAsrRouteCatalog([parakeet], "prefer_local")[0];
+    expect(alone.label).toBe("Parakeet v3");
+    expect(alone.capabilitySummary).toContain(
+      "Tested in English. Also built for 24 other European languages.",
     );
+    expect(`${alone.summary} ${alone.capabilitySummary}`).not.toMatch(
+      /Compatible|any Mac|more mistakes|twice the memory/,
+    );
+
+    expect(alone.superseded).toBe(false);
+
+    // Beside GGUF Parakeet it keeps the same name, and is never offered.
+    const beside = buildAsrRouteCatalog([parakeet, transcribeCppProvider], "prefer_local").find(
+      (route) => route.providerType === "parakeet",
+    );
+    expect(beside?.label).toBe("Parakeet v3");
+    expect(beside?.superseded).toBe(true);
+
+    // A build that lists GGUF Parakeet but cannot run it offers the ONNX one.
+    expect(
+      efficientParakeetOffered([{ ...transcribeCppProvider, inferenceEnabled: false }]),
+    ).toBe(false);
   });
 
   it("recommends the fastest local route for dictation when it is ready", () => {
@@ -568,7 +800,8 @@ describe("asr-route-catalog", () => {
     const turbo = buildAsrRouteCatalog([whisper], "prefer_local").find(
       (route) => route.routeId === "whisper:large-v3-turbo",
     );
-    expect(turbo?.summary).toContain("100 languages, runs on the GPU, slower than Parakeet");
+    expect(turbo?.label).toBe("Whisper Large Turbo");
+    expect(turbo?.summary).toContain("About 100 languages, slower than Parakeet");
     expect(turbo?.laneCompatibility.meeting).toBe(true);
     expect(turbo?.experimental).toBe(false);
   });
@@ -630,9 +863,9 @@ describe("asr-route-catalog", () => {
   it.each([
     ["authorization_not_determined", "Permission required", "request_permission"],
     ["authorization_denied", "Permission denied", "open_system_setup"],
-    ["unsupported_locale", "Locale unsupported", "fix_setup"],
-    ["helper_missing", "Helper missing", "fix_setup"],
-    ["on_device_unavailable", "On-device unavailable", "fix_setup"],
+    ["unsupported_locale", "Language not supported", "fix_setup"],
+    ["helper_missing", "Needs repair", "fix_setup"],
+    ["on_device_unavailable", "Not available offline", "fix_setup"],
   ] as const)(
     "keeps Apple Speech unselectable for %s with an actionable status",
     (status, label, action) => {
@@ -651,7 +884,7 @@ describe("asr-route-catalog", () => {
     const route = buildAsrRouteCatalog([appleProvider("ready")], "prefer_local")[0];
 
     expect(route.readiness).toBe("ready");
-    expect(route.readinessLabel).toBe("Ready on-device");
+    expect(route.readinessLabel).toBe("Ready on this Mac");
     expect(route.selectable).toBe(true);
     expect(route.action).toBeNull();
     expect(route.hosting).toBe("platform");
@@ -663,7 +896,9 @@ describe("asr-route-catalog", () => {
       "prefer_local",
     )[0];
 
-    expect(route.readinessDetail).toContain("Runs SpeechAnalyzer");
+    expect(route.readinessDetail).toContain("Uses Apple's current speech recognizer");
+    expect(route.readinessDetail).toContain("American English installed");
+    expect(route.readinessDetail).not.toContain("..");
     expect(route.readinessDetail).toContain("macOS 27.0.0");
     expect(route.readinessDetail).toContain("Nothing to download");
   });
@@ -675,16 +910,16 @@ describe("asr-route-catalog", () => {
     provider.platformReadiness!.engine = "sf_speech_recognizer";
     const route = buildAsrRouteCatalog([provider], "prefer_local")[0];
 
-    expect(route.readinessDetail).toContain("Runs SFSpeechRecognizer");
-    expect(route.readinessDetail).toContain("Install the en_US language");
+    expect(route.readinessDetail).toContain("Uses Apple's older speech recognizer");
+    expect(route.readinessDetail).toContain("Install American English");
     expect(route.laneCompatibility.meeting).toBe(false);
   });
 
   it("says SpeechAnalyzer needs a newer macOS when the API is absent", () => {
     const route = buildAsrRouteCatalog([appleProvider("ready")], "prefer_local")[0];
 
-    expect(route.readinessDetail).toContain("Runs SFSpeechRecognizer");
-    expect(route.readinessDetail).toContain("needs macOS 26 or later");
+    expect(route.readinessDetail).toContain("Uses Apple's older speech recognizer");
+    expect(route.readinessDetail).toContain("Meetings need macOS 26 or later");
   });
 
   it("keeps Apple Speech out of the meeting lane on the SFSpeechRecognizer path", () => {
@@ -693,7 +928,7 @@ describe("asr-route-catalog", () => {
     expect(route.laneCompatibility.dictation).toBe(true);
     expect(route.laneCompatibility.meeting).toBe(false);
     expect(route.laneCompatibility.shared).toBe(false);
-    expect(route.capabilityBadge).toBe("Best for dictation");
+    expect(route.capabilityBadge).toBe("Dictation only");
     expect(route.summary).toContain("dictation only");
     expect(
       getLaneRoutes([route], "meeting", "prefer_local").map((entry) => entry.routeId),
@@ -709,8 +944,8 @@ describe("asr-route-catalog", () => {
 
     expect(route.laneCompatibility.meeting).toBe(true);
     expect(route.laneCompatibility.shared).toBe(true);
-    expect(route.capabilityBadge).toBe("Shared");
-    expect(route.summary).toContain("per-segment timestamps");
+    expect(route.capabilityBadge).toBe("Dictation and meetings");
+    expect(route.summary).toContain("works for meetings");
     expect(
       getLaneRoutes(routes, "meeting", "prefer_local").map((entry) => entry.routeId),
     ).toEqual([route.routeId]);
@@ -740,4 +975,12 @@ describe("asr-route-catalog", () => {
       order.indexOf("openai_cloud"),
     );
   });
+});
+
+it.each(["GGUF", "transcribe.cpp", "ONNX", "Metal", "CoreML"])("keeps %s details out of model recovery copy", (detail) => {
+  const routes = buildAsrRouteCatalog([{ ...transcribeCppProvider,
+    runtimeStatus: "missing_model", downloadStatus: "NotDownloaded",
+    runtimeMessage: `The ${detail} speech model is missing.`,
+  }], "prefer_local");
+  expect(routes[0].readinessDetail).toBe("The speech model is missing or couldn't be verified. Download it again in Settings > Models.");
 });

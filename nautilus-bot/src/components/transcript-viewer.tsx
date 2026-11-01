@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useId, useRef, useState, useMemo, mem
 import { cn } from "@/lib/utils";
 import { formatTimeWithMs } from "@/lib/format-time";
 import { rangeIndexAtTime, SEEK_STEP_SECONDS } from "@/lib/playback";
+import { findTranscriptMatches, type TranscriptHighlightRange } from "@/lib/transcript-search";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,8 +52,23 @@ export interface TranscriptMatch {
   startTime: number;
 }
 
+export interface TranscriptDeleteExpectation {
+  id: string;
+  text: string;
+  startTime: number;
+  endTime: number;
+  speakerId: string | null;
+}
+
 export interface TranscriptViewerProps {
   segments: TranscriptSegment[];
+  /**
+   * What to say when there are no segments. Defaults to "still processing";
+   * a finished meeting in which nothing was heard says so instead of
+   * promising a transcript that will never arrive.
+   */
+  emptyState?: { title: string; message: string };
+  compactHeader?: boolean;
   /**
    * Pauses taken while recording. The audio skips them, so the timeline
    * marks where each one sat: "[Paused 2 min 10 s]" before the first turn
@@ -62,6 +78,8 @@ export interface TranscriptViewerProps {
   className?: string;
   onSegmentClick?: (segment: TranscriptSegment) => void;
   currentTime?: number;
+  /** Explicit source jump, including repeated requests for the same moment. */
+  sourceNavigation?: { time: number; requestId: number; segmentId?: string | null };
   /** Play or pause the meeting audio; bound to Space over the transcript. */
   onTogglePlayback?: () => void;
   /** Skip the meeting audio; bound to ← → over the transcript. */
@@ -115,12 +133,16 @@ export interface TranscriptViewerProps {
    * Save an edited speaker turn. Receives every segment id in the turn so the
    * caller can replace the first and remove the rest as one atomic mutation.
    */
-  onEditSegment?: (segmentIds: string[], newText: string) => Promise<void> | void;
+  onReloadTranscriptForEdit?: () => Promise<TranscriptSegment[] | null>;
+  onEditSegment?: (segmentIds: string[], newText: string, expectedSegments: TranscriptDeleteExpectation[]) => Promise<void> | void;
   /**
    * Remove a whole speaker turn. Always asked about first — the viewer will not
    * call this until the reader has confirmed the named turn in the dialog.
    */
-  onDeleteSegments?: (segmentIds: string[]) => Promise<void> | void;
+  onDeleteSegments?: (
+    segmentIds: string[],
+    expectedSegments: TranscriptDeleteExpectation[],
+  ) => Promise<void> | void;
   /**
    * One sentence the caller can prove about getting the words back (e.g. the
    * audio is still on disk and the meeting can be re-transcribed). Shown in the
@@ -129,8 +151,23 @@ export interface TranscriptViewerProps {
   deleteRecoveryNote?: string;
 }
 
+function canGroupSegments(previous: TranscriptSegment, segment: TranscriptSegment): boolean {
+  const sameSpeaker = previous.speakerId === segment.speakerId && previous.speakerId != null;
+  const closeInTime = segment.startTime - previous.endTime < 2;
+  return sameSpeaker || (!previous.speakerId && !segment.speakerId && closeInTime);
+}
+
+function selectedPassage(segments: TranscriptSegment[], ids: string[]): TranscriptDeleteExpectation[] | null {
+  if (ids.length === 0) return null;
+  const indices = ids.map(id => segments.findIndex(segment => segment.id === id));
+  if (indices.some((index, offset) => index < 0 || segments.filter(segment => segment.id === ids[offset]).length !== 1 || (offset > 0 && index !== indices[offset - 1] + 1))) return null;
+  const selected = indices.map(index => segments[index]);
+  if (selected.some((segment, offset) => offset > 0 && !canGroupSegments(selected[offset - 1], segment))) return null;
+  return selected.map(({ id, text, startTime, endTime, speakerId }) => ({ id, text, startTime, endTime, speakerId: speakerId ?? null }));
+}
+
 /** Word count for a turn, counted the same way the info strip counts them. */
-function countWords(segments: TranscriptSegment[]): number {
+function countWords(segments: ReadonlyArray<{ text: string }>): number {
   return segments.reduce(
     (total, segment) => total + segment.text.trim().split(/\s+/).filter(Boolean).length,
     0
@@ -186,6 +223,12 @@ function defaultSpeakerLabel(speakerId: string | null | undefined) {
   if (normalized.toLowerCase() === "them") {
     return "Them";
   }
+  // The diarizer's own ids (S1, S2, …) read as "Speaker 1", matching the
+  // names the sidecar and every export give an unnamed speaker.
+  const numbered = /^S([1-9]\d*)$/.exec(normalized);
+  if (numbered) {
+    return `Speaker ${numbered[1]}`;
+  }
   return normalized;
 }
 
@@ -193,14 +236,54 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
   const [isEditMode, setIsEditMode] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [editValue, setEditValue] = useState(speakerName || defaultSpeakerLabel(speakerId));
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const isEditModeRef = useRef(false);
+  const isSavingRef = useRef(false);
+  const isDirtyRef = useRef(false);
+  const mountedRef = useRef(true);
+  const previousSpeakerIdRef = useRef(speakerId);
+  const ownerRef = useRef({ speakerId, revision: 0 });
+  if (ownerRef.current.speakerId !== speakerId) {
+    ownerRef.current = {
+      speakerId,
+      revision: ownerRef.current.revision + 1,
+    };
+  }
   const nameListId = useId();
   // Checked by default only when voiceprints are on; turning the feature off
   // has to leave the rename flow exactly as it was before it existed.
   const [rememberVoice, setRememberVoice] = useState(Boolean(canRememberVoice));
 
   useEffect(() => {
-    setEditValue(speakerName || defaultSpeakerLabel(speakerId));
+    const storedName = speakerName || defaultSpeakerLabel(speakerId);
+    if (previousSpeakerIdRef.current !== speakerId) {
+      previousSpeakerIdRef.current = speakerId;
+      isEditModeRef.current = false;
+      isSavingRef.current = false;
+      isDirtyRef.current = false;
+      setIsEditMode(false);
+      setIsSaving(false);
+      setSaveError(null);
+      setEditValue(storedName);
+      return;
+    }
+    if (!isEditModeRef.current || !isDirtyRef.current) {
+      setEditValue(storedName);
+    }
   }, [speakerId, speakerName]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isSavingRef.current) return;
+    isSavingRef.current = false;
+    setIsSaving(false);
+  }, [speakerId]);
 
   useEffect(() => {
     setRememberVoice(Boolean(canRememberVoice));
@@ -208,21 +291,46 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
 
   const handleSave = async () => {
     const trimmedName = editValue.trim();
-    if (!onRename || !trimmedName || isSaving) {
+    if (!onRename || !trimmedName || isSavingRef.current) {
       return;
     }
 
+    const requestOwner = ownerRef.current;
+    isSavingRef.current = true;
     setIsSaving(true);
+    setSaveError(null);
     try {
       await onRename(trimmedName, Boolean(canRememberVoice) && rememberVoice);
+      if (!mountedRef.current || ownerRef.current !== requestOwner) return;
+      isDirtyRef.current = false;
+      isEditModeRef.current = false;
       setIsEditMode(false);
     } catch (error) {
-      // The caller owns the visible error treatment. Keep the editor and the
-      // attempted value open so a failed persistence request never looks saved.
       console.error("Failed to rename transcript speaker:", error);
+      if (!mountedRef.current || ownerRef.current !== requestOwner) return;
+      setSaveError("Could not save this speaker name. Try again.");
     } finally {
-      setIsSaving(false);
+      if (mountedRef.current && ownerRef.current === requestOwner) {
+        isSavingRef.current = false;
+        setIsSaving(false);
+      }
     }
+  };
+
+  const beginEditing = () => {
+    isDirtyRef.current = false;
+    isEditModeRef.current = true;
+    setSaveError(null);
+    setEditValue(speakerName || defaultSpeakerLabel(speakerId));
+    setIsEditMode(true);
+  };
+
+  const cancelEditing = () => {
+    if (isSavingRef.current) return;
+    isDirtyRef.current = false;
+    isEditModeRef.current = false;
+    setSaveError(null);
+    setIsEditMode(false);
   };
 
   // One list, two sources: the ranked options the sidecar produced for this
@@ -253,15 +361,19 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
         <div className="flex items-center gap-1">
           <Input
             value={editValue}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setEditValue(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+              isDirtyRef.current = true;
+              setSaveError(null);
+              setEditValue(e.target.value);
+            }}
             className="h-6 w-24 text-xs"
             aria-label="Speaker name"
             list={offeredNames.length > 0 ? nameListId : undefined}
             autoFocus
             disabled={isSaving}
             onKeyDown={(e) => {
-              if (e.key === "Enter") void handleSave();
-              if (e.key === "Escape" && !isSaving) setIsEditMode(false);
+              if (e.key === "Enter" && !e.nativeEvent.isComposing) void handleSave();
+              if (e.key === "Escape") cancelEditing();
             }}
           />
           <Button
@@ -275,6 +387,11 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
             <Check className="h-3 w-3" />
           </Button>
         </div>
+        {saveError && (
+          <p role="alert" className="text-xs text-destructive">
+            {saveError}
+          </p>
+        )}
         {offeredNames.length > 0 && (
           <datalist id={nameListId} data-testid="speaker-name-options">
             {offeredNames.map((name) => (
@@ -330,7 +447,7 @@ const SpeakerBadge = memo(function SpeakerBadge({ speakerId, speakerName, isEdit
           size="icon"
           className="h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
           aria-label="Edit speaker name"
-          onClick={() => setIsEditMode(true)}
+          onClick={beginEditing}
         >
           <Edit2 className="h-3 w-3" />
         </Button>
@@ -413,34 +530,15 @@ function SpeakerVoiceSuggestion({
 }
 
 /** Split `text` into plain runs and case-insensitive hits on `query`. */
-function splitOnQuery(
-  text: string,
-  query: string
-): Array<{ text: string; isMatch: boolean }> {
-  if (!query) {
-    return [{ text, isMatch: false }];
-  }
-
-  const parts: Array<{ text: string; isMatch: boolean }> = [];
-  const haystack = text.toLowerCase();
-  const needle = query.toLowerCase();
+function splitOnHighlightRanges(text: string, ranges: readonly TranscriptHighlightRange[]) {
+  const parts: Array<{ text: string; matchIndex?: number; isStart?: boolean }> = [];
   let cursor = 0;
-
-  for (;;) {
-    const found = haystack.indexOf(needle, cursor);
-    if (found === -1) {
-      break;
-    }
-    if (found > cursor) {
-      parts.push({ text: text.slice(cursor, found), isMatch: false });
-    }
-    parts.push({ text: text.slice(found, found + needle.length), isMatch: true });
-    cursor = found + needle.length;
+  for (const range of ranges) {
+    if (range.start > cursor) parts.push({ text: text.slice(cursor, range.start) });
+    parts.push({ text: text.slice(range.start, range.end), matchIndex: range.matchIndex, isStart: range.isStart });
+    cursor = range.end;
   }
-
-  if (cursor < text.length) {
-    parts.push({ text: text.slice(cursor), isMatch: false });
-  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor) });
   return parts;
 }
 
@@ -458,7 +556,6 @@ function formatTranscriptLength(seconds: number): string {
 const DEFER_OFFSCREEN_TURNS = 300;
 
 /** What every turn but the one being edited is handed for "save". */
-const noopSaveEdit = async () => {};
 
 interface TranscriptTurnProps {
   group: TranscriptSegment[];
@@ -481,24 +578,19 @@ interface TranscriptTurnProps {
    */
   playheadTime?: number;
   isLastRead: boolean;
-  /** Lowercased search term; empty when no search is running. */
-  highlightQuery: string;
-  /** Which of this turn's own hits is the current one, or -1. */
-  activeMatchInTurn: number;
+  highlightRanges: ReadonlyMap<string, readonly TranscriptHighlightRange[]>;
+  activeMatchIndex: number;
   activeMatchRef: React.RefObject<HTMLElement | null>;
   activeGroupRef: React.RefObject<HTMLDivElement | null>;
   deferOffscreen: boolean;
   isClickable: boolean;
   onSelect: (segment: TranscriptSegment) => void;
   canEdit: boolean;
+  editBlocked: boolean;
   isEditingText: boolean;
   /** Only the turn being edited receives the draft and the save state. */
-  editingText: string;
-  isSavingEdit: boolean;
+  editor: React.ReactNode;
   onBeginEdit: (group: TranscriptSegment[]) => void;
-  onEditingTextChange: (text: string) => void;
-  onCancelEdit: () => void;
-  onSaveEdit: (group: TranscriptSegment[]) => Promise<void>;
   onRequestDelete?: (group: TranscriptSegment[], speakerLabel: string) => void;
 }
 
@@ -525,32 +617,31 @@ const TranscriptTurn = memo(function TranscriptTurn({
   isActive,
   playheadTime,
   isLastRead,
-  highlightQuery,
-  activeMatchInTurn,
+  highlightRanges,
+  activeMatchIndex,
   activeMatchRef,
   activeGroupRef,
   deferOffscreen,
   isClickable,
   onSelect,
   canEdit,
+  editBlocked,
   isEditingText,
-  editingText,
-  isSavingEdit,
+  editor,
   onBeginEdit,
-  onEditingTextChange,
-  onCancelEdit,
-  onSaveEdit,
   onRequestDelete,
 }: TranscriptTurnProps) {
   const firstSegment = group[0];
   const speakerLabel = speakerName || defaultSpeakerLabel(speakerId);
   const timestampLabel = formatTimeWithMs(firstSegment.startTime);
-  const editHintId = `transcript-edit-hint-${groupIndex}`;
   const canRenameSpeaker = Boolean(speakerId && onRenameSpeaker);
-  const renameSpeakerForGroup =
-    speakerId && onRenameSpeaker
-      ? (name: string, remember: boolean) => onRenameSpeaker(speakerId, name, remember)
-      : undefined;
+  const renameSpeakerForGroup = useMemo(
+    () =>
+      speakerId && onRenameSpeaker
+        ? (name: string, remember: boolean) => onRenameSpeaker(speakerId, name, remember)
+        : undefined,
+    [onRenameSpeaker, speakerId],
+  );
   // Remembering a voice needs a signature for this cluster, and
   // only clusters the sidecar has one for appear in `speakerVoices`.
   // Without that check the switch showed up on a meeting diarized
@@ -560,14 +651,14 @@ const TranscriptTurn = memo(function TranscriptTurn({
   // The very first group opens the leaf with a gilded versal.
   const isLeafOpening = groupIndex === 0;
 
-  // Hits inside this turn, walked in the same order `matches` lists them.
-  let matchInTurn = 0;
 
   return (
     <div
       ref={isActive ? activeGroupRef : undefined}
+      data-transcript-turn={groupIndex}
+      tabIndex={-1}
       className={cn(
-        "group relative flex gap-3 rounded-lg p-3 transition-colors",
+        "transcript-turn-layout group relative flex gap-3 rounded-lg p-3 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         // Faint gold-ambient hairline separating speaker turns.
         groupIndex > 0 && "border-t border-gold-ambient/15",
         isActive ? "bg-gold/5" : "hover:bg-muted/50",
@@ -591,7 +682,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
         />
       )}
       {/* Timestamp & Speaker */}
-      <div className="flex flex-col gap-1 min-w-[100px]">
+      <div className="transcript-turn-meta flex flex-col gap-1 min-w-[100px]">
         <span className="rubric-muted time-spec">
           {timestampLabel}
         </span>
@@ -610,7 +701,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
       </div>
 
       {/* Text */}
-      <div className="flex-1">
+      <div className="min-w-0 flex-1">
         {/* The voice offer sits once per speaker, on their first
             turn, so a long meeting is not a wall of chips. */}
         {isFirstSpeakerMention &&
@@ -627,33 +718,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
             />
           )}
         {isEditingText ? (
-          <div className="flex flex-col gap-1">
-            <textarea
-              autoFocus
-              value={editingText}
-              onChange={(e) => onEditingTextChange(e.target.value)}
-              rows={3}
-              aria-label={`Edit transcript for ${speakerLabel} at ${timestampLabel}`}
-              aria-describedby={editHintId}
-              className="w-full text-sm bg-background border border-gold rounded-md px-2 py-1 resize-none focus:outline-none focus:ring-1 focus:ring-gold"
-              onKeyDown={(e) => {
-                if (e.key === "Escape") { onCancelEdit(); }
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  void onSaveEdit(group);
-                }
-              }}
-            />
-            <div className="flex items-center justify-between gap-2">
-              <p id={editHintId} className="text-xs text-muted-foreground">
-                Cmd/Ctrl+Enter to save
-              </p>
-              <div className="flex gap-1">
-                <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={isSavingEdit} onClick={onCancelEdit}>Cancel</Button>
-                <Button size="sm" className="h-6 text-xs" disabled={isSavingEdit || !editingText.trim()} onClick={() => { void onSaveEdit(group); }}><Check className="h-3 w-3 mr-1" />{isSavingEdit ? "Saving…" : "Save"}</Button>
-              </div>
-            </div>
-          </div>
+          editor
         ) : (
           <div className="group/text relative">
             {/* A single click sets the reading ribbon and leaves the
@@ -662,7 +727,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
                 which used to swallow the whole paragraph mid-quote. */}
             <p
               className="manuscript max-w-prose select-text text-[0.95rem] leading-[1.85]"
-              onDoubleClick={(e) => { if (canEdit) { e.stopPropagation(); onBeginEdit(group); } }}
+              onDoubleClick={(e) => { if (canEdit && !editBlocked) { e.stopPropagation(); onBeginEdit(group); } }}
             >
               {group.map((segment, i) => {
                 const isPlaying =
@@ -676,18 +741,18 @@ const TranscriptTurn = memo(function TranscriptTurn({
                 // With no search running the words stay one text node,
                 // exactly as they were; only a live query splits them
                 // so hits can be marked without removing anything.
-                const body = highlightQuery
-                  ? splitOnQuery(segment.text, highlightQuery).map(
+                const ranges = highlightRanges.get(segment.id);
+                const body = ranges?.length
+                  ? splitOnHighlightRanges(segment.text, ranges).map(
                       (part, partIndex) => {
-                        if (!part.isMatch) {
+                        if (part.matchIndex === undefined) {
                           return <span key={partIndex}>{part.text}</span>;
                         }
-                        const isActiveMatch = matchInTurn === activeMatchInTurn;
-                        matchInTurn += 1;
+                        const isActiveMatch = part.matchIndex === activeMatchIndex;
                         return (
                           <mark
                             key={partIndex}
-                            ref={isActiveMatch ? activeMatchRef : undefined}
+                            ref={isActiveMatch && part.isStart ? activeMatchRef : undefined}
                             className={cn(
                               "rounded-sm text-foreground",
                               isActiveMatch
@@ -710,8 +775,10 @@ const TranscriptTurn = memo(function TranscriptTurn({
                   return (
                     <span
                       key={segment.id}
+                      data-transcript-segment={segment.id}
+                      tabIndex={-1}
                       className={cn(
-                        "transition-colors",
+                        "transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                         // Gilded versal drop-cap on the rendered first
                         // letter; the letter itself stays in the text
                         // node so the word reads whole to AT.
@@ -725,7 +792,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
                   );
                 }
                 return (
-                  <span key={segment.id} className={cn("transition-colors", underline)}>
+                  <span key={segment.id} data-transcript-segment={segment.id} tabIndex={-1} className={cn("transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", underline)}>
                     {body}{trailingSpace}
                   </span>
                 );
@@ -740,6 +807,8 @@ const TranscriptTurn = memo(function TranscriptTurn({
                 <button
                   type="button"
                   aria-label="Edit segment"
+                  disabled={editBlocked}
+                  title={editBlocked ? "Save or cancel the current correction first" : undefined}
                   className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-muted focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -752,6 +821,8 @@ const TranscriptTurn = memo(function TranscriptTurn({
                   <button
                     type="button"
                     aria-label="Delete this speaker turn"
+                    disabled={editBlocked}
+                    title={editBlocked ? "Save or cancel the current correction first" : undefined}
                     className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-destructive/10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     onClick={(e) => {
                       e.stopPropagation();
@@ -762,12 +833,6 @@ const TranscriptTurn = memo(function TranscriptTurn({
                   </button>
                 )}
               </div>
-            )}
-            {firstSegment.confidence < 0.8 && (
-              <p className="rubric-muted mt-1 inline-flex items-center gap-1.5">
-                <span className="neume neume-hollow" aria-hidden="true" />
-                Low confidence
-              </p>
             )}
           </div>
         )}
@@ -785,10 +850,13 @@ const TranscriptTurn = memo(function TranscriptTurn({
  */
 export const TranscriptViewer = memo(function TranscriptViewer({
   segments,
+  emptyState,
+  compactHeader = false,
   pauseSpans,
   className,
   onSegmentClick,
   currentTime,
+  sourceNavigation,
   onTogglePlayback,
   onSeekBy,
   speakerNames: externalSpeakerNames,
@@ -804,6 +872,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
   onRejectSpeakerVoice,
   speakerNameOptions,
   onEditSegment,
+  onReloadTranscriptForEdit,
   onDeleteSegments,
   deleteRecoveryNote,
 }: TranscriptViewerProps) {
@@ -812,15 +881,77 @@ export const TranscriptViewer = memo(function TranscriptViewer({
   const [editingSegmentId, setEditingSegmentId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [isSavingSegmentEdit, setIsSavingSegmentEdit] = useState(false);
+  const editOwnerRef = useRef<{ id: string | null; revision: number; text: string; segmentIds: string[]; expectedSegments: TranscriptDeleteExpectation[] }>({ id: null, revision: 0, text: "", segmentIds: [], expectedSegments: [] });
+  type EditReview = { kind: "idle" } | { kind: "loading" } | { kind: "ready"; selected: TranscriptDeleteExpectation[] } | { kind: "unavailable" };
+  const [editReview, setEditReview] = useState<EditReview>({ kind: "idle" });
+  const [editConflict, setEditConflict] = useState(false);
+  const editSessionRef = useRef<object>({});
+  const attachedEditorRef = useRef<{ node: HTMLTextAreaElement; session: object } | null>(null);
+  const detachedEditorRef = useRef<{ session: object; text: string; start: number; end: number; direction: "forward" | "backward" | "none"; focused: boolean } | null>(null);
+  const lastEditorSessionRef = useRef<object | null>(null);
+  const attachDraftEditor = useCallback((node: HTMLTextAreaElement | null) => {
+    if (!node) {
+      const attached = attachedEditorRef.current;
+      if (attached) {
+        detachedEditorRef.current = {
+          session: attached.session,
+          text: attached.node.value,
+          start: attached.node.selectionStart,
+          end: attached.node.selectionEnd,
+          direction: attached.node.selectionDirection,
+          focused: document.activeElement === attached.node,
+        };
+      }
+      attachedEditorRef.current = null;
+      return;
+    }
+    const session = editSessionRef.current;
+    const detached = detachedEditorRef.current;
+    detachedEditorRef.current = null;
+    attachedEditorRef.current = { node, session };
+    if (detached?.session === session && detached.text === node.value) {
+      node.setSelectionRange(detached.start, detached.end, detached.direction);
+      if (detached.focused) node.focus();
+    } else if (lastEditorSessionRef.current !== session) {
+      node.focus();
+    }
+    lastEditorSessionRef.current = session;
+  }, []);
+  const reviewRequestRef = useRef<object | null>(null);
+  const copyRequestRef = useRef<object | null>(null);
+  const originalEditTextRef = useRef("");
+  const pendingEditSaveRef = useRef<object | null>(null);
+  const editMountedRef = useRef(true);
+  const [editFeedback, setEditFeedback] = useState<{ message: string; error: boolean } | null>(null);
+  useEffect(() => {
+    editMountedRef.current = true;
+    return () => { editMountedRef.current = false; ++editOwnerRef.current.revision; };
+  }, []);
   // A delete request parks here until the reader confirms it. The unit removed
   // is a whole speaker turn, which on a single-source recording can be most of
   // the transcript — so the turn is named and counted before anything is cut,
   // and nothing is written until the reader says so.
   const [pendingDelete, setPendingDelete] = useState<{
-    segments: TranscriptSegment[];
+    segments: TranscriptDeleteExpectation[];
     speakerLabel: string;
   } | null>(null);
   const [isDeletingSegments, setIsDeletingSegments] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deletePendingRef = useRef(false);
+  const pendingDeleteIsCurrent = useMemo(() => {
+    if (!pendingDelete) return true;
+    const currentById = new Map(segments.map((segment) => [segment.id, segment]));
+    return pendingDelete.segments.every((expected) => {
+      const current = currentById.get(expected.id);
+      return Boolean(
+        current &&
+          current.text === expected.text &&
+          current.startTime === expected.startTime &&
+          current.endTime === expected.endTime &&
+          (current.speakerId ?? null) === expected.speakerId
+      );
+    });
+  }, [pendingDelete, segments]);
   // Session-scoped ribbon: the last segment the reader played/opened, by id.
   // State only — no persistence backend (honest about what we keep).
   const [lastReadSegmentId, setLastReadSegmentId] = useState<string | null>(null);
@@ -845,15 +976,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
         ? `Transcribed by ${cloudProvider}, a named cloud provider.`
         : "This meeting did not record which transcription provider produced it.";
 
-  // Toolbar figures, all defensible from the actual transcript data.
-  const stats = useMemo(() => {
-    const wordCount = countWords(segments);
-    const avgConfidence =
-      segments.length > 0
-        ? segments.reduce((sum, segment) => sum + segment.confidence, 0) / segments.length
-        : 0;
-    return { wordCount, avgConfidence };
-  }, [segments]);
+  const wordCount = useMemo(() => countWords(segments), [segments]);
 
   useEffect(() => {
     if (externalSpeakerNames) {
@@ -890,27 +1013,56 @@ export const TranscriptViewer = memo(function TranscriptViewer({
 
   const beginEditingGroup = useCallback(
     (group: TranscriptSegment[]) => {
-      if (!onEditSegment) return;
+      if (!onEditSegment || editOwnerRef.current.id !== null || pendingEditSaveRef.current) return;
+      const text = group.map((segment) => segment.text).join(" ");
+      editOwnerRef.current = { id: group[0].id, revision: editOwnerRef.current.revision + 1, text, segmentIds: group.map((segment) => segment.id), expectedSegments: group.map((segment) => ({ id: segment.id, text: segment.text, startTime: segment.startTime, endTime: segment.endTime, speakerId: segment.speakerId ?? null })) };
+      editSessionRef.current = {};
+      originalEditTextRef.current = text;
+      setEditReview({ kind: "idle" });
+      setEditConflict(false);
       setEditingSegmentId(group[0].id);
-      setEditingText(group.map((segment) => segment.text).join(" "));
+      setEditingText(text);
+      setEditFeedback(null);
     },
     [onEditSegment]
   );
 
-  // Await the save and only close the editor on success, so a failed write
-  // never silently discards the user's correction.
-  const saveSegmentEdit = async (group: TranscriptSegment[]) => {
-    if (!onEditSegment || isSavingSegmentEdit || !editingText.trim()) return;
+  const changeEditingText = useCallback((text: string) => {
+    if (editOwnerRef.current.id === null) return;
+    editOwnerRef.current = { ...editOwnerRef.current, revision: editOwnerRef.current.revision + 1, text };
+    setEditingText(text);
+  }, []);
+
+  // A successful earlier write cannot discard a newer editing gesture.
+  const saveSegmentEdit = async () => {
+    const owner = editOwnerRef.current;
+    if (!onEditSegment || pendingEditSaveRef.current || owner.id === null || !selectedPassage(segments, owner.segmentIds) || editConflict || editReview.kind !== "idle" || !owner.text.trim()) return;
+    const request = {};
+    pendingEditSaveRef.current = request;
     setIsSavingSegmentEdit(true);
+    setEditFeedback(null);
     try {
-      await onEditSegment(group.map((segment) => segment.id), editingText);
-      setEditingSegmentId(null);
+      await onEditSegment(owner.segmentIds, owner.text, owner.expectedSegments.map((segment) => ({ ...segment })));
+      if (!editMountedRef.current || editOwnerRef.current.id !== owner.id) return;
+      // The atomic edit keeps the first segment and removes the rest.
+      editOwnerRef.current = { ...editOwnerRef.current, segmentIds: [owner.id], expectedSegments: [{ ...owner.expectedSegments[0], text: owner.text }] };
+      if (editOwnerRef.current.revision === owner.revision) {
+        editOwnerRef.current = { ...editOwnerRef.current, id: null };
+        setEditingSegmentId(null);
+      } else {
+        setEditFeedback({ error: false, message: editOwnerRef.current.text === owner.text
+          ? "Correction saved. The editor is still open for your next change."
+          : "Earlier correction saved. Your newer changes are not saved yet." });
+      }
     } catch (error) {
-      // The caller surfaces the failure (toast); keep the editor open so the
-      // correction is still on screen.
+      if (editMountedRef.current && editOwnerRef.current.id === owner.id) {
+        if (String(error).includes("Transcript changed")) setEditConflict(true);
+        setEditFeedback({ error: true, message: String(error).includes("Transcript changed") ? "Transcript changed. Your correction is still here. Review the current turn before saving again." : "Could not save this correction. Your text is still here. Try again." });
+      }
       console.error("Failed to save transcript segment edit:", error);
     } finally {
-      setIsSavingSegmentEdit(false);
+      if (pendingEditSaveRef.current === request) pendingEditSaveRef.current = null;
+      if (editMountedRef.current) setIsSavingSegmentEdit(false);
     }
   };
 
@@ -918,15 +1070,28 @@ export const TranscriptViewer = memo(function TranscriptViewer({
   // rejects, the dialog is left open with the turn still quoted in it rather
   // than closing on a write that did not happen.
   const confirmDeleteSegments = async () => {
-    if (!onDeleteSegments || !pendingDelete || isDeletingSegments) return;
+    if (
+      !onDeleteSegments ||
+      !pendingDelete ||
+      !pendingDeleteIsCurrent ||
+      deletePendingRef.current
+    ) return;
+    const expectedSegments = pendingDelete.segments.map((segment) => ({ ...segment }));
+    deletePendingRef.current = true;
     setIsDeletingSegments(true);
+    setDeleteError(null);
     try {
-      await onDeleteSegments(pendingDelete.segments.map((segment) => segment.id));
-      setPendingDelete(null);
+      await onDeleteSegments(
+        expectedSegments.map((segment) => segment.id),
+        expectedSegments,
+      );
+      if (editMountedRef.current) setPendingDelete(null);
     } catch (error) {
+      if (editMountedRef.current) setDeleteError("Could not remove this turn. Try again or keep it.");
       console.error("Failed to delete transcript segments:", error);
     } finally {
-      setIsDeletingSegments(false);
+      deletePendingRef.current = false;
+      if (editMountedRef.current) setIsDeletingSegments(false);
     }
   };
 
@@ -954,13 +1119,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
     return segments.reduce((acc, segment, index) => {
       const prevSegment = index > 0 ? segments[index - 1] : null;
       
-      const sameSpeaker = prevSegment && 
-        prevSegment.speakerId === segment.speakerId && 
-        prevSegment.speakerId != null;
-      const closeInTime = prevSegment && segment.startTime - prevSegment.endTime < 2;
-      
-      // Group together if: same speaker with ID, OR no speaker ID but close in time
-      if ((sameSpeaker || (!prevSegment?.speakerId && !segment.speakerId && closeInTime)) && prevSegment) {
+      if (prevSegment && canGroupSegments(prevSegment, segment)) {
         acc[acc.length - 1].push(segment);
       } else {
         acc.push([segment]);
@@ -1021,22 +1180,21 @@ export const TranscriptViewer = memo(function TranscriptViewer({
   // Every hit for the current search term, in reading order. Highlighting is
   // additive: nothing is removed from the transcript, so an empty result set
   // reads as "0 of 0" rather than as a transcript that lost its text.
-  const normalizedHighlightQuery = highlightQuery?.trim().toLowerCase() ?? "";
-  const matches = useMemo(() => {
-    if (!normalizedHighlightQuery) {
-      return [] as TranscriptMatch[];
-    }
-    const found: TranscriptMatch[] = [];
-    for (const segment of segments) {
-      const haystack = segment.text.toLowerCase();
-      let cursor = haystack.indexOf(normalizedHighlightQuery);
-      while (cursor !== -1) {
-        found.push({ segmentId: segment.id, startTime: segment.startTime });
-        cursor = haystack.indexOf(normalizedHighlightQuery, cursor + normalizedHighlightQuery.length);
+  const search = useMemo(
+    () => findTranscriptMatches(segments, highlightQuery ?? ""),
+    [segments, highlightQuery]
+  );
+  const matches = search.matches;
+  const matchIndicesByGroup = useMemo(
+    () => groupedSegments.map(group => {
+      const indices = new Set<number>();
+      for (const segment of group) {
+        for (const range of search.rangesBySegment.get(segment.id) ?? []) indices.add(range.matchIndex);
       }
-    }
-    return found;
-  }, [normalizedHighlightQuery, segments]);
+      return indices;
+    }),
+    [groupedSegments, search.rangesBySegment]
+  );
 
   useEffect(() => {
     onMatchesChange?.(matches);
@@ -1066,10 +1224,35 @@ export const TranscriptViewer = memo(function TranscriptViewer({
   // sits in. `block: "nearest"` so a target already on screen never jumps.
   const activeMatchRef = useRef<HTMLElement | null>(null);
   const activeGroupRef = useRef<HTMLDivElement | null>(null);
+  const transcriptRegionRef = useRef<HTMLDivElement | null>(null);
+
+  const handledSourceRequestRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!sourceNavigation || handledSourceRequestRef.current === sourceNavigation.requestId) return;
+    // A pending transcript has no destination yet. Retry when its turns arrive.
+    if (groupedSegments.length === 0) return;
+    handledSourceRequestRef.current = sourceNavigation.requestId;
+    const sourceSegments = groupedSegments.flat();
+    const segment = sourceNavigation.segmentId
+      ? sourceSegments.find((item) => item.id === sourceNavigation.segmentId)
+      : sourceSegments.find((item) => item.startTime === sourceNavigation.time)
+        ?? sourceSegments.find((item) => sourceNavigation.time >= item.startTime && sourceNavigation.time <= item.endTime);
+    if (!segment) return;
+    const sourceGroup = groupedSegments.find((group) => group.some((item) => item.id === segment.id));
+    if (sourceGroup) setLastReadSegmentId(sourceGroup[0].id);
+    // Match the dataset value directly. Persisted IDs need not be CSS-safe.
+    const target = Array.from(transcriptRegionRef.current?.querySelectorAll<HTMLElement>("[data-transcript-segment]") ?? [])
+      .find((element) => element.dataset.transcriptSegment === segment.id);
+    target?.scrollIntoView({ block: "nearest" });
+    target?.focus({ preventScroll: true });
+  }, [sourceNavigation, groupedSegments]);
 
   useEffect(() => {
     activeMatchRef.current?.scrollIntoView({ block: "nearest" });
-  }, [activeMatchIndex, matches]);
+    const match = matches[activeMatchIndex];
+    const matchGroup = match && groupedSegments.find((group) => group.some((segment) => segment.id === match.segmentId));
+    if (matchGroup) setLastReadSegmentId(matchGroup[0].id);
+  }, [activeMatchIndex, matches, groupedSegments]);
 
   // The reader's own scrolling wins over the playhead for a few seconds: a
   // transcript that snaps back to the current line every time the reader
@@ -1109,30 +1292,14 @@ export const TranscriptViewer = memo(function TranscriptViewer({
           : Math.min(Math.max(currentIndex + direction, 0), groupedSegments.length - 1);
       const nextSegment = groupedSegments[nextIndex][0];
       setLastReadSegmentId(nextSegment.id);
+      const target = Array.from(transcriptRegionRef.current?.querySelectorAll<HTMLElement>("[data-transcript-segment]") ?? [])
+        .find((element) => element.dataset.transcriptSegment === nextSegment.id);
+      target?.scrollIntoView({ block: "nearest" });
+      target?.focus({ preventScroll: true });
       onSegmentClick?.(nextSegment);
     },
     [groupedSegments, lastReadSegmentId, onSegmentClick]
   );
-
-  // Where each turn's hits begin in `matches`, so a turn can tell whether the
-  // current hit is one of its own without walking every turn before it.
-  const matchStartByGroup = useMemo(() => {
-    if (matches.length === 0) {
-      return null;
-    }
-    const countBySegment = new Map<string, number>();
-    for (const match of matches) {
-      countBySegment.set(match.segmentId, (countBySegment.get(match.segmentId) ?? 0) + 1);
-    }
-    let running = 0;
-    return groupedSegments.map((group) => {
-      const first = running;
-      for (const segment of group) {
-        running += countBySegment.get(segment.id) ?? 0;
-      }
-      return first;
-    });
-  }, [groupedSegments, matches]);
 
   // Stable handlers, so a memoized turn re-renders only when its own props do.
   const selectTurn = useCallback(
@@ -1142,10 +1309,115 @@ export const TranscriptViewer = memo(function TranscriptViewer({
     },
     [onSegmentClick]
   );
-  const cancelSegmentEdit = useCallback(() => setEditingSegmentId(null), []);
+  const cancelSegmentEdit = useCallback(() => {
+    if (pendingEditSaveRef.current) return;
+    editOwnerRef.current = { ...editOwnerRef.current, id: null, revision: editOwnerRef.current.revision + 1 };
+    editSessionRef.current = {};
+    setEditReview({ kind: "idle" });
+    setEditConflict(false);
+    setEditingSegmentId(null);
+    setEditFeedback(null);
+  }, []);
+  const reviewSavedText = async () => {
+    if (!onReloadTranscriptForEdit || editOwnerRef.current.id === null) return;
+    const session = editSessionRef.current;
+    const request = {};
+    reviewRequestRef.current = request;
+    const ids = [...editOwnerRef.current.segmentIds];
+    setEditReview({ kind: "loading" });
+    try {
+      const fresh = await onReloadTranscriptForEdit();
+      if (!editMountedRef.current || editSessionRef.current !== session || reviewRequestRef.current !== request) return;
+      const selected = fresh && selectedPassage(fresh, ids);
+      setEditReview(selected ? { kind: "ready", selected } : { kind: "unavailable" });
+    } catch {
+      if (editMountedRef.current && editSessionRef.current === session && reviewRequestRef.current === request) setEditReview({ kind: "unavailable" });
+    }
+  };
+  const copyCorrection = async () => {
+    const session = editSessionRef.current;
+    const revision = editOwnerRef.current.revision;
+    const request = {};
+    copyRequestRef.current = request;
+    try {
+      await navigator.clipboard.writeText(editOwnerRef.current.text);
+      if (editMountedRef.current && editSessionRef.current === session && editOwnerRef.current.revision === revision && copyRequestRef.current === request) setEditFeedback({ error: false, message: "Correction copied." });
+    } catch {
+      if (editMountedRef.current && editSessionRef.current === session && editOwnerRef.current.revision === revision && copyRequestRef.current === request) setEditFeedback({ error: true, message: "Could not copy. Select your correction and copy it manually." });
+    }
+  };
+  const editorOwner = editOwnerRef.current;
+  const sourceAvailable = selectedPassage(segments, editorOwner.segmentIds) !== null;
+  const saveBlocked = isSavingSegmentEdit || !sourceAvailable || editConflict || editReview.kind !== "idle";
+  const editedSpeakerId = normalizePersistedSpeakerId(editorOwner.expectedSegments[0]?.speakerId);
+  const speakerLabel = (editedSpeakerId ? speakerNames[editedSpeakerId] : undefined) || defaultSpeakerLabel(editedSpeakerId);
+  const timestampLabel = formatTimeWithMs(editorOwner.expectedSegments[0]?.startTime ?? 0);
+  const editHintId = useId();
+  const isSavingEdit = isSavingSegmentEdit;
+  const onEditingTextChange = changeEditingText;
+  const onCancelEdit = cancelSegmentEdit;
+  const onSaveEdit = saveSegmentEdit;
+  const draftEditor = (
+          <div className="flex flex-col gap-1">
+            <textarea
+              ref={attachDraftEditor}
+              value={editingText}
+              onChange={(e) => onEditingTextChange(e.target.value)}
+              rows={3}
+              aria-label={`Edit transcript for ${speakerLabel} at ${timestampLabel}`}
+              aria-describedby={editHintId}
+              className="w-full text-sm bg-background border border-gold rounded-md px-2 py-1 resize-none focus:outline-none focus:ring-1 focus:ring-gold"
+              onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing) return;
+                if (e.key === "Escape" && !isSavingEdit) { onCancelEdit(); }
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void onSaveEdit();
+                }
+              }}
+            />
+            <p className="text-xs text-muted-foreground">Unsaved correction</p>
+            {(editConflict || !sourceAvailable || editReview.kind !== "idle") && <div className="text-sm">
+              {!sourceAvailable && editReview.kind === "idle" && <p role="alert">The selected passage is unavailable in this transcript. Your correction is still here to copy.</p>}
+              <p>Originally edited text: {originalEditTextRef.current}</p>
+              {editReview.kind === "ready" && <><p>Current saved selected passage: {editReview.selected.map(segment => segment.text).join(" ")}</p><Button size="sm" onClick={() => {
+                editOwnerRef.current = { ...editOwnerRef.current, expectedSegments: editReview.selected.map(segment => ({ ...segment })) };
+                setEditConflict(false);
+                setEditReview({ kind: "idle" });
+                setEditFeedback(null);
+              }}>Keep my correction</Button></>}
+              {editReview.kind === "unavailable" && <p role="alert">The selected passage is unavailable or changed speaker turns. Your correction is still here. Copy it before discarding.</p>}
+              {onReloadTranscriptForEdit && <Button size="sm" variant="ghost" disabled={editReview.kind === "loading" || isSavingEdit} onClick={() => void reviewSavedText()}>{editReview.kind === "loading" ? "Loading saved text…" : "Review saved text"}</Button>}
+            </div>}
+            <Button size="sm" variant="ghost" onClick={() => void copyCorrection()}>Copy correction</Button>
+            {editFeedback ? <p role={editFeedback.error ? "alert" : "status"} className="text-xs text-muted-foreground">
+              {editFeedback.message}
+            </p> : null}
+            <div className="flex items-center justify-between gap-2">
+              <p id={editHintId} className="text-xs text-muted-foreground">
+                Cmd/Ctrl+Enter to save
+              </p>
+              <div className="flex gap-1">
+                <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={isSavingEdit} onClick={onCancelEdit}>Cancel</Button>
+                <Button size="sm" className="h-6 text-xs" disabled={saveBlocked || !editingText.trim()} onClick={() => { void onSaveEdit(); }}><Check className="h-3 w-3 mr-1" />{isSavingEdit ? "Saving…" : "Save"}</Button>
+              </div>
+            </div>
+          </div>
+  );
   const requestDeleteTurn = useCallback(
-    (group: TranscriptSegment[], speakerLabel: string) =>
-      setPendingDelete({ segments: group, speakerLabel }),
+    (group: TranscriptSegment[], speakerLabel: string) => {
+      setDeleteError(null);
+      setPendingDelete({
+        segments: group.map(({ id, text, startTime, endTime, speakerId }) => ({
+          id,
+          text,
+          startTime,
+          endTime,
+          speakerId: speakerId ?? null,
+        })),
+        speakerLabel,
+      });
+    },
     []
   );
 
@@ -1153,7 +1425,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
   const deferOffscreen = groupedSegments.length > DEFER_OFFSCREEN_TURNS;
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col overflow-hidden", className)}>
+    <div className={cn("transcript-viewer-layout flex h-full min-h-0 flex-col overflow-hidden", className)}>
       {/* Toolbar. One wrapping row: the figures on the left, provenance and
           the rename toggle on the right, so a narrow rail wraps the row
           instead of clipping the button. */}
@@ -1163,18 +1435,15 @@ export const TranscriptViewer = memo(function TranscriptViewer({
               pane "Transcript" with a count under it; repeating the pair read
               as two stacked headers for one pane. This is the readout only,
               every figure defensible from the transcript itself. */}
-          <p className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono text-xs text-muted-foreground tabular-nums">
+          {!compactHeader && <p className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono text-xs text-muted-foreground tabular-nums">
             <span className="whitespace-nowrap text-foreground">{segments.length} segments</span>
             {segments.length > 0 && (
               <>
                 <span className="whitespace-nowrap">{formatTranscriptLength(transcriptLength)} total</span>
-                <span className="whitespace-nowrap">{stats.wordCount} words</span>
-                <span className="whitespace-nowrap">
-                  {Math.round(stats.avgConfidence * 100)}% avg conf
-                </span>
+                <span className="whitespace-nowrap">{wordCount} words</span>
               </>
             )}
-          </p>
+          </p>}
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             {/* Trust badge — provenance, honestly named */}
             <span
@@ -1188,7 +1457,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
                 className={cn("neume", isLocal ? "neume-lit" : "neume-hollow")}
                 aria-hidden="true"
               />
-              {provenanceLabel}
+              {compactHeader ? (isLocal ? "Local" : provenanceLabel) : provenanceLabel}
             </span>
             {canRenameSpeakers && (
               <Button
@@ -1210,6 +1479,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
       <ScrollArea type="always" className="h-full min-h-0 flex-1">
         <div
           className="p-4 space-y-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          ref={transcriptRegionRef}
           role="group"
           aria-label="Transcript turns"
           tabIndex={0}
@@ -1257,12 +1527,15 @@ export const TranscriptViewer = memo(function TranscriptViewer({
             }
           }}
         >
+          {editingSegmentId && !groupedSegments.some(group => group[0].id === editingSegmentId) ? <div className="p-3 border rounded-md">{draftEditor}</div> : null}
           {groupedSegments.length === 0 ? (
             <div className="flex flex-col items-center gap-3 py-16 text-center">
               <span className="neume neume-hollow" aria-hidden="true" />
-              <p className="font-serif text-base text-foreground">No transcript available</p>
+              <p className="font-serif text-base text-foreground">
+                {emptyState?.title ?? "No transcript available"}
+              </p>
               <p className="max-w-xs text-sm text-muted-foreground">
-                Transcription will appear here once processing is complete.
+                {emptyState?.message ?? "Transcription will appear here once processing is complete."}
               </p>
             </div>
           ) : (
@@ -1276,12 +1549,6 @@ export const TranscriptViewer = memo(function TranscriptViewer({
                 currentTime <= range.end
                   ? currentTime
                   : undefined;
-              const firstMatch = matchStartByGroup?.[groupIndex] ?? 0;
-              const endMatch = matchStartByGroup?.[groupIndex + 1] ?? matches.length;
-              const activeMatchInTurn =
-                activeMatchIndex >= firstMatch && activeMatchIndex < endMatch
-                  ? activeMatchIndex - firstMatch
-                  : -1;
               const isEditingText = editingSegmentId === firstSegment.id;
 
               return (
@@ -1304,21 +1571,18 @@ export const TranscriptViewer = memo(function TranscriptViewer({
                     isActive={groupIndex === activeGroupIndex}
                     playheadTime={playheadInTurn}
                     isLastRead={lastReadSegmentId === firstSegment.id}
-                    highlightQuery={normalizedHighlightQuery}
-                    activeMatchInTurn={activeMatchInTurn}
+                    highlightRanges={search.rangesBySegment}
+                    activeMatchIndex={matchIndicesByGroup[groupIndex].has(activeMatchIndex) ? activeMatchIndex : -1}
                     activeMatchRef={activeMatchRef}
                     activeGroupRef={activeGroupRef}
                     deferOffscreen={deferOffscreen}
                     isClickable={Boolean(onSegmentClick)}
                     onSelect={selectTurn}
                     canEdit={Boolean(onEditSegment)}
+                    editBlocked={editingSegmentId !== null || isSavingSegmentEdit}
                     isEditingText={isEditingText}
-                    editingText={isEditingText ? editingText : ""}
-                    isSavingEdit={isEditingText && isSavingSegmentEdit}
+                    editor={isEditingText ? draftEditor : null}
                     onBeginEdit={beginEditingGroup}
-                    onEditingTextChange={setEditingText}
-                    onCancelEdit={cancelSegmentEdit}
-                    onSaveEdit={isEditingText ? saveSegmentEdit : noopSaveEdit}
                     onRequestDelete={onDeleteSegments ? requestDeleteTurn : undefined}
                   />
                 </Fragment>
@@ -1350,6 +1614,13 @@ export const TranscriptViewer = memo(function TranscriptViewer({
               {pendingDeleteSummary.preview}
             </p>
           )}
+          {!pendingDeleteIsCurrent ? (
+            <p role="alert" className="text-sm text-destructive">
+              This turn changed after you opened this confirmation. Keep it, then reopen the current turn to review it before deleting.
+            </p>
+          ) : deleteError ? (
+            <p role="alert" className="text-sm text-destructive">{deleteError}</p>
+          ) : null}
           <DialogFooter>
             <Button
               variant="outline"
@@ -1360,7 +1631,7 @@ export const TranscriptViewer = memo(function TranscriptViewer({
             </Button>
             <Button
               variant="destructive"
-              disabled={isDeletingSegments}
+              disabled={isDeletingSegments || !pendingDeleteIsCurrent}
               onClick={() => {
                 void confirmDeleteSegments();
               }}

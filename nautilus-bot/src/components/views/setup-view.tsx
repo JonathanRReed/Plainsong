@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   Download,
   Loader2,
@@ -28,6 +28,11 @@ import {
 } from "@/lib/backend/settings";
 import { testSystemAudioCapture } from "@/lib/backend/recordings";
 import {
+  describeMeetingAudio,
+  isMeetingAudioReady,
+  MEETING_AUDIO_EXPLAINER,
+} from "@/lib/meeting-audio-status";
+import {
   isCloudProvider,
   isDownloadableProvider,
   isMeetingGradeProvider,
@@ -37,11 +42,13 @@ import {
   providerHostingLabel,
   providerRecommendation,
 } from "@/lib/asr-capabilities";
-import { requestMainView } from "@/lib/navigation";
+import { routeDisplayLabel } from "@/lib/asr-route-catalog";
+import { requestMainView, requestReadinessDestination } from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import type { AsrProviderInfo } from "@/types";
 import { compareStrings } from "@/lib/format-locale";
+import { describeModelDownloadError } from "@/lib/model-download-error";
 
 /**
  * One flat label/value list per readiness card. Bordered detail tiles inside an
@@ -200,8 +207,18 @@ export function SetupView() {
       ? productReadiness.meetings.cause
       : null;
   const fullCaptureReady = productReadiness.fullCapture.state === "ready";
+  const systemAudioVerified = isMeetingAudioReady(systemAudioCapability);
+  const meetingAudio = describeMeetingAudio(systemAudioCapability);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [downloadFailure, setDownloadFailure] = useState<{
+    providerType: string;
+    modelId: string;
+    message: string;
+  } | null>(null);
+  const actionRevision = useRef(0);
+  const currentProviders = useRef(providers);
+  currentProviders.current = providers;
   const dictationInsertionMode = settings?.transcription.dictationInsertionMode ?? "auto";
   const cursorInsertLabel =
     dictationInsertionMode === "clipboard_only"
@@ -229,16 +246,34 @@ export function SetupView() {
     });
   }, [providers]);
 
-  const runAction = async (key: string, action: () => Promise<void>) => {
+  const runAction = async (
+    key: string,
+    action: () => Promise<void>,
+    downloadTarget?: { providerType: string; modelId: string },
+  ) => {
+    const revision = ++actionRevision.current;
+    setDownloadFailure(null);
     setBusyAction(key);
     setStatusMessage(null);
     try {
       await action();
+      if (revision !== actionRevision.current) return;
       await refresh();
     } catch (nextError) {
-      setStatusMessage(nextError instanceof Error ? nextError.message : String(nextError));
+      if (revision !== actionRevision.current) return;
+      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      if (downloadTarget) {
+        const currentProvider = currentProviders.current.find(
+          (provider) => provider.providerType === downloadTarget.providerType,
+        );
+        if (currentProvider?.selectedModelId === downloadTarget.modelId) {
+          setDownloadFailure({ ...downloadTarget, message: describeModelDownloadError(nextError) });
+        }
+      } else {
+        setStatusMessage(message);
+      }
     } finally {
-      setBusyAction(null);
+      if (revision === actionRevision.current) setBusyAction(null);
     }
   };
 
@@ -246,17 +281,21 @@ export function SetupView() {
     key: string,
     action: () => Promise<{ ok: boolean; title: string; summary: string; details: string[] }>
   ) => {
+    const revision = ++actionRevision.current;
+    setDownloadFailure(null);
     setBusyAction(key);
     setStatusMessage(null);
     try {
       const result = await action();
+      if (revision !== actionRevision.current) return;
       const suffix = result.details.length > 0 ? ` ${result.details.join(" ")}` : "";
       setStatusMessage(`${result.title}: ${result.summary}${suffix}`);
       await refresh();
     } catch (nextError) {
+      if (revision !== actionRevision.current) return;
       setStatusMessage(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
-      setBusyAction(null);
+      if (revision === actionRevision.current) setBusyAction(null);
     }
   };
 
@@ -408,10 +447,18 @@ export function SetupView() {
                     ) : null}
                     Reset Accessibility permission
                   </Button>
-                  <Button variant="outline" onClick={() => void openPermissionSettings("microphone")}>
+                  <Button
+                    variant="outline"
+                    onClick={() => void runAction("open-microphone-settings", () => openPermissionSettings("microphone"))}
+                    disabled={busyAction !== null}
+                  >
                     Open Microphone
                   </Button>
-                  <Button variant="outline" onClick={() => void openPermissionSettings("accessibility")}>
+                  <Button
+                    variant="outline"
+                    onClick={() => void runAction("open-accessibility-settings", () => openPermissionSettings("accessibility"))}
+                    disabled={busyAction !== null}
+                  >
                     Open Accessibility
                   </Button>
                 </div>
@@ -425,8 +472,7 @@ export function SetupView() {
                   Meetings
                 </CardTitle>
                 <CardDescription>
-                  Recording a call. Your microphone alone, or your microphone plus what the other
-                  people say.
+                  Recording a call: your microphone alone, or Me + Them. {MEETING_AUDIO_EXPLAINER}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -441,7 +487,7 @@ export function SetupView() {
                       : fullCaptureReady
                         ? "Both sides of a call will be recorded and transcribed."
                         : meetingReady
-                          ? "Mic-only meetings are ready. Test system audio to also capture the other people on the call."
+                          ? "Mic-only meetings are ready. Set up meeting audio to also record the other people on the call."
                           : "Meetings still need microphone input, permission, or a transcription engine that can handle a call."}
                   </span>
                 </p>
@@ -459,40 +505,42 @@ export function SetupView() {
                       value: meetingRoutePolicy === "best_available" ? "Best available" : "Prefer local",
                     },
                     {
-                      label: "System audio",
+                      label: "Meeting audio",
                       value:
-                        systemAudioAvailable === null
-                          ? "Checking"
-                          : fullCaptureReady
-                            ? "Verified"
-                            : systemAudioAvailable
-                              ? "Found, not yet tested"
-                              : "Not detected",
+                        systemAudioCapability === null && systemAudioAvailable === false
+                          ? "Not available"
+                          : meetingAudio.label,
                     },
-                    { label: "Audio device", value: loopbackDevice ?? "Not found" },
+                    ...(systemAudioCapability?.backend === "virtual_loopback" && loopbackDevice
+                      ? [{ label: "Heard through", value: loopbackDevice }]
+                      : []),
                     {
                       label: "Meeting capture mode",
                       value:
-                        meetingCaptureMode === "me_and_them"
+                        meetingCaptureMode === "me_and_them" && fullCaptureReady
                           ? "Me + Them verified"
                           : meetingCaptureMode === "mic_only" && meetingReady
                             ? "Mic only ready"
                             : meetingCaptureMode === "mic_only"
                               ? "Not ready"
-                              : "Checking",
+                              : meetingCaptureMode === "me_and_them"
+                                ? "Not ready"
+                                : "Checking",
                     },
                   ]}
                 />
                 <p className="text-sm text-muted-foreground">
-                  {meetingCaptureMode === "me_and_them"
-                    ? "Microphone, transcription, and sound from the other people were all tested and heard."
-                    : meetingReady && systemAudioAvailable
-                      ? "Mic-only meetings are ready. A way to capture the other people exists but has never been tested; run Test system audio first."
-                      : meetingReady
-                        ? "Mic-only meetings are ready. Only your side of the call is recorded until system audio is set up and tested."
-                        : meetingCaptureMode === "unknown"
-                          ? "Checking the microphone, transcription, and sound from other people."
-                          : "The microphone, its permission, or the transcription engine still needs attention."}
+                  {fullCaptureReady
+                    ? "Your microphone, the meeting audio and meeting transcription are ready."
+                    : meetingReady && systemAudioVerified
+                      ? "Meeting audio is ready. Mic-only meetings are ready; Me + Them needs the items below."
+                      : meetingReady && systemAudioAvailable
+                        ? `Mic-only meetings are ready. ${meetingAudio.sentence}`
+                        : meetingReady
+                          ? "Mic-only meetings are ready. Only your side of the call is recorded until meeting audio is set up."
+                          : meetingCaptureMode === "unknown"
+                            ? "Checking the microphone, transcription, and sound from other people."
+                            : "The microphone, its permission, or the transcription engine still needs attention."}
                 </p>
                 {meetingBlockers.length > 0 ? (
                   <div className="rounded-lg border border-rust/20 bg-rust/5 px-3 py-2 text-sm">
@@ -506,7 +554,7 @@ export function SetupView() {
                 ) : null}
                 {meetingReady && !fullCaptureReady && fullCaptureBlockers.length > 0 ? (
                   <div className="rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-sm">
-                    <p className="mb-1 font-medium">Me + Them not verified</p>
+                    <p className="mb-1 font-medium">Me + Them not ready</p>
                     <ul className="space-y-1">
                       {fullCaptureBlockers.map((blocker) => (
                         <li key={blocker}>• {blocker}</li>
@@ -515,6 +563,20 @@ export function SetupView() {
                   </div>
                 ) : null}
                 <div className="flex flex-wrap gap-2">
+                  {productReadiness.meetingsCapture.state !== "ready" &&
+                    productReadiness.meetingsCapture.cause?.action.id === "open_models" ? (
+                    <Button
+                      variant="secondary"
+                      onClick={() => {
+                        const action = productReadiness.meetingsCapture.cause?.action;
+                        if (action) requestReadinessDestination(action.destination);
+                      }}
+                      disabled={busyAction !== null}
+                    >
+                      <Settings2 className="mr-2 h-4 w-4" aria-hidden="true" />
+                      {productReadiness.meetingsCapture.cause.action.label}
+                    </Button>
+                  ) : null}
                   <Button
                     variant="outline"
                     onClick={() =>
@@ -535,9 +597,7 @@ export function SetupView() {
                       void runAction("test-system-audio", async () => {
                         const result = await testSystemAudioCapture();
                         setStatusMessage(
-                          result.capability.ready
-                            ? `System audio test: Verified ${result.capability.routeDevice ?? "the current route"} for Me + Them capture.`
-                            : `System audio test: ${result.capability.actionableReason ?? "No verified signal was detected. Start in Mic only mode or check the route and try again."}`
+                          `Meeting audio: ${describeMeetingAudio(result.capability).sentence}`
                         );
                       })
                     }
@@ -552,16 +612,15 @@ export function SetupView() {
                     ) : (
                       <MonitorUp className="mr-2 h-4 w-4" />
                     )}
-                    Test system audio
+                    {meetingAudio.action === "allow" ? meetingAudio.actionLabel : "Check meeting audio"}
                   </Button>
-                  {systemAudioCapability?.backend === "core_audio_process_tap" &&
-                  !systemAudioCapability.ready ? (
+                  {meetingAudio.action === "open_settings" ? (
                     <Button
                       variant="ghost"
-                      onClick={() => void openPermissionSettings("system_audio")}
+                      onClick={() => void runAction("open-system-audio-settings", () => openPermissionSettings("system_audio"))}
                       disabled={busyAction !== null}
                     >
-                      Open privacy settings
+                      Open System Settings
                     </Button>
                   ) : null}
                   <Button variant="outline" onClick={() => requestMainView("settings")}>
@@ -577,10 +636,10 @@ export function SetupView() {
               <div className="space-y-1.5">
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Settings2 className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  Transcription engines
+                  Speech models
                 </CardTitle>
                 <CardDescription>
-                  Every route's runtime state, missing files, and recovery action in one place.
+                  What each speech model needs, which files are missing, and how to fix it, in one place.
                 </CardDescription>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -615,7 +674,7 @@ export function SetupView() {
                   ) : (
                     <RefreshCcw className="mr-2 h-4 w-4" />
                   )}
-                  Refresh runtime
+                  Check again
                 </Button>
               </div>
             </CardHeader>
@@ -623,7 +682,7 @@ export function SetupView() {
               {loading ? (
                 <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
                   <Loader2 className="h-4 w-4 animate-spin" />
-                  Checking which engines are ready…
+                  Checking which speech models are ready…
                 </div>
               ) : (
                 sortedProviders.map((provider) => {
@@ -631,10 +690,19 @@ export function SetupView() {
                   const canDownload =
                     provider.runtimeStatus === "missing_model" &&
                     isDownloadableProvider(provider.providerType);
+                  const failure = downloadFailure?.providerType === provider.providerType &&
+                    downloadFailure.modelId === provider.selectedModelId ? downloadFailure : null;
                   const actionVariant = providerActionVariant(provider);
-                  const modelLabel =
+                  const modelLabel = routeDisplayLabel(
+                    provider.providerType,
+                    provider.selectedModelId,
                     provider.modelOptions.find((option) => option.id === provider.selectedModelId)
-                      ?.label ?? provider.selectedModelId;
+                      ?.label ?? provider.selectedModelId,
+                  );
+                  // A local model is named on its own; which program runs it
+                  // is Plainsong's business. A cloud service is named too,
+                  // because that is where the audio goes.
+                  const cloud = isCloudProvider(provider.providerType);
 
                   return (
                     <div
@@ -644,7 +712,7 @@ export function SetupView() {
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="space-y-1">
                           <div className="flex flex-wrap items-center gap-2">
-                            <p className="font-medium">{provider.name}</p>
+                            <p className="font-medium">{cloud ? provider.name : modelLabel}</p>
                             {providerBadge(provider)}
                             <Badge variant="secondary">
                               {providerCapabilityLabel(
@@ -658,7 +726,9 @@ export function SetupView() {
                               {providerHostingLabel(provider.providerType)}
                             </Badge>
                           </div>
-                          <p className="text-sm text-muted-foreground">{modelLabel}</p>
+                          {cloud ? (
+                            <p className="text-sm text-muted-foreground">{modelLabel}</p>
+                          ) : null}
                           <p className="text-sm text-muted-foreground">
                             {providerRecommendation(provider)}
                           </p>
@@ -674,7 +744,7 @@ export function SetupView() {
                                     provider.selectedModelId
                                   );
                                   await refreshAsrRuntimeProbes();
-                                })
+                                }, { providerType: provider.providerType, modelId: provider.selectedModelId })
                               }
                               disabled={busyAction !== null}
                             >
@@ -683,7 +753,7 @@ export function SetupView() {
                               ) : (
                                 <Download className="mr-2 h-4 w-4" />
                               )}
-                              {providerActionLabel(provider)}
+                              {failure ? "Retry download" : providerActionLabel(provider)}
                             </Button>
                           ) : null}
                           {actionVariant === "permission" ? (
@@ -752,10 +822,15 @@ export function SetupView() {
                       </div>
 
                       <div className="mt-3 space-y-2 text-sm">
+                        {failure ? (
+                          <p role="alert" className="text-rust">
+                            Download failed for {modelLabel}. {failure.message}
+                          </p>
+                        ) : null}
                         <p className="text-muted-foreground">
                           {provider.platformReadiness?.message ??
                             provider.runtimeMessage ??
-                            `${provider.name} is not ready yet.`}
+                            `${cloud ? provider.name : modelLabel} is not ready yet.`}
                         </p>
                         {provider.providerType === "macos_apple_speech" ? (
                           <p className="text-sm text-muted-foreground">
@@ -764,7 +839,7 @@ export function SetupView() {
                         ) : null}
                         {isCloudProvider(provider.providerType) && provider.runtimeStatus !== "ready" ? (
                           <p className="text-sm text-muted-foreground">
-                            Cloud engines usually need an API key added in Settings before they work.
+                            Cloud services usually need an API key added in Settings before they work.
                           </p>
                         ) : null}
                         {provider.runtimeDetails.missingFiles?.length ? (

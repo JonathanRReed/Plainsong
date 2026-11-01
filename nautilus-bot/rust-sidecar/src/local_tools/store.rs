@@ -21,14 +21,25 @@ pub struct ReadOnlyStore {
 }
 
 impl ReadOnlyStore {
-    /// Open the live database read-only, keyed from the same keychain entry
-    /// the sidecar uses. A first run from a new binary may prompt macOS for
-    /// keychain access; that prompt is macOS's, not Plainsong's, and refusing
-    /// it simply fails the open.
+    /// Open the live database read-only without allowing macOS credential UI.
+    /// This is the safe default for unattended callers such as the MCP server.
     pub fn open() -> Result<Self> {
+        Self::open_with_credential_access(false)
+    }
+
+    /// Open the live database read-only, allowing macOS credential UI only
+    /// when `allow_credential_access` is explicitly true.
+    pub fn open_with_credential_access(allow_credential_access: bool) -> Result<Self> {
         let path = Database::default_db_path()?;
-        let key = crate::secrets::get_internal_secret(crate::VAULT_DB_KEY_SECRET)
-            .context("Could not read Plainsong's database key from the keychain")?;
+        let key = lookup_internal_secret_with_policy(
+            crate::VAULT_DB_KEY_SECRET,
+            allow_credential_access,
+            crate::secrets::get_internal_secret_noninteractive,
+            crate::secrets::get_internal_secret,
+        )
+        .context(
+            "Could not read Plainsong's database key. Unlock the credential store, or run the human CLI with --allow-credential-access",
+        )?;
         Self::open_at(&path, key.as_deref())
     }
 
@@ -123,6 +134,23 @@ impl ReadOnlyStore {
             segments,
             full_text: transcript.full_text,
         }
+    }
+}
+
+fn lookup_internal_secret_with_policy<N, I>(
+    key: &str,
+    allow_credential_access: bool,
+    noninteractive_lookup: N,
+    interactive_lookup: I,
+) -> Result<Option<String>>
+where
+    N: FnOnce(&str) -> Result<Option<String>>,
+    I: FnOnce(&str) -> Result<Option<String>>,
+{
+    if allow_credential_access {
+        interactive_lookup(key)
+    } else {
+        noninteractive_lookup(key)
     }
 }
 
@@ -325,12 +353,21 @@ impl MeetingSource for ReadOnlyStore {
                 (!name.is_empty()).then_some((speaker_id, name))
             })
             .collect();
+        let completed_action_tasks = self
+            .db
+            .get_meeting_action_completion(id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         Ok(Some(crate::export::export_recording(
             &recording,
             transcript.as_ref(),
             format,
             true,
-            &crate::export::ExportContext { speaker_names },
+            &crate::export::ExportContext {
+                speaker_names,
+                completed_action_tasks,
+            },
         )?))
     }
 }
@@ -340,6 +377,76 @@ mod tests {
     use super::*;
     use crate::models::TranscriptSegment;
     use chrono::{TimeZone, Utc};
+    use std::cell::Cell;
+
+    #[test]
+    fn credential_lookup_defaults_to_noninteractive_only() {
+        let noninteractive_calls = Cell::new(0);
+        let interactive_calls = Cell::new(0);
+
+        let secret = lookup_internal_secret_with_policy(
+            "synthetic-vault-key",
+            false,
+            |key| {
+                assert_eq!(key, "synthetic-vault-key");
+                noninteractive_calls.set(noninteractive_calls.get() + 1);
+                Ok(Some("passive-secret".to_string()))
+            },
+            |_| {
+                interactive_calls.set(interactive_calls.get() + 1);
+                Ok(Some("interactive-secret".to_string()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(secret.as_deref(), Some("passive-secret"));
+        assert_eq!(noninteractive_calls.get(), 1);
+        assert_eq!(interactive_calls.get(), 0);
+    }
+
+    #[test]
+    fn credential_lookup_uses_interactive_only_when_explicitly_allowed() {
+        let noninteractive_calls = Cell::new(0);
+        let interactive_calls = Cell::new(0);
+
+        let secret = lookup_internal_secret_with_policy(
+            "synthetic-vault-key",
+            true,
+            |_| {
+                noninteractive_calls.set(noninteractive_calls.get() + 1);
+                Ok(Some("passive-secret".to_string()))
+            },
+            |key| {
+                assert_eq!(key, "synthetic-vault-key");
+                interactive_calls.set(interactive_calls.get() + 1);
+                Ok(Some("interactive-secret".to_string()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(secret.as_deref(), Some("interactive-secret"));
+        assert_eq!(noninteractive_calls.get(), 0);
+        assert_eq!(interactive_calls.get(), 1);
+    }
+
+    #[test]
+    fn rejected_noninteractive_lookup_does_not_fallback_to_interactive() {
+        let interactive_calls = Cell::new(0);
+
+        let error = lookup_internal_secret_with_policy(
+            "synthetic-vault-key",
+            false,
+            |_| anyhow::bail!("credential store is locked"),
+            |_| {
+                interactive_calls.set(interactive_calls.get() + 1);
+                Ok(Some("interactive-secret".to_string()))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "credential store is locked");
+        assert_eq!(interactive_calls.get(), 0);
+    }
 
     fn recording(id: &str, source_type: &str, hour: u32) -> Recording {
         Recording {
@@ -379,6 +486,7 @@ mod tests {
 
     fn transcript(recording_id: &str, text: &str) -> Transcript {
         Transcript {
+            heard_through_speakers: Vec::new(),
             id: format!("t-{recording_id}"),
             recording_id: recording_id.to_string(),
             segments: vec![TranscriptSegment {
@@ -396,6 +504,7 @@ mod tests {
             model_id: None,
             requested_provider: None,
             actual_provider: None,
+            measured_word_timestamps: false,
             created_at: Utc::now(),
         }
     }

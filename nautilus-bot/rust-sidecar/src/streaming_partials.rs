@@ -31,6 +31,20 @@ pub(crate) const DICTATION_PARTIAL_RECENT_SPEECH_SECONDS: f32 = 0.45;
 /// `[BLANK_AUDIO]`.
 pub(crate) const DICTATION_PARTIAL_MIN_SPEECH_DB: f32 = -40.0;
 
+/// Quieter speech still gets a preview when it stands this far above the
+/// session's own noise floor: a whisper sits near -50 dBFS, under the fixed
+/// threshold above, and would otherwise never show live text.
+const DICTATION_PARTIAL_FLOOR_MARGIN_DB: f32 = 10.0;
+
+/// Nothing quieter than this triggers a preview decode, however quiet the
+/// room, so silence never costs a decode.
+const DICTATION_PARTIAL_ABSOLUTE_MIN_SPEECH_DB: f32 = -60.0;
+
+/// Frame length and percentile for the noise floor: the quietest tenth of the
+/// buffered audio's 30 ms frames is the room between words.
+const DICTATION_PARTIAL_FLOOR_FRAME_SECONDS: f32 = 0.03;
+const DICTATION_PARTIAL_FLOOR_PERCENTILE: f32 = 0.1;
+
 pub(crate) fn partial_should_decode(
     total_samples: u64,
     last_decoded_total_samples: u64,
@@ -76,11 +90,36 @@ pub(crate) fn partial_snapshot_has_speech(samples: &[f32]) -> bool {
     crate::audio::vad::calculate_energy_db(samples) > DICTATION_PARTIAL_MIN_SPEECH_DB
 }
 
+/// Whether the last [`DICTATION_PARTIAL_RECENT_SPEECH_SECONDS`] of `samples`
+/// (the session's buffered preview audio) carry speech: either above the fixed
+/// threshold, or clearly above the floor the rest of the buffer shows.
 pub(crate) fn partial_recent_window_has_speech(samples: &[f32], sample_rate: u32) -> bool {
     let recent_samples =
         (sample_rate.max(1) as f32 * DICTATION_PARTIAL_RECENT_SPEECH_SECONDS).round() as usize;
     let start = samples.len().saturating_sub(recent_samples.max(1));
-    partial_snapshot_has_speech(&samples[start..])
+    let recent = &samples[start..];
+    if partial_snapshot_has_speech(recent) {
+        return true;
+    }
+    let recent_db = crate::audio::vad::calculate_energy_db(recent);
+    recent_db > DICTATION_PARTIAL_ABSOLUTE_MIN_SPEECH_DB
+        && recent_db
+            >= partial_noise_floor_db(samples, sample_rate) + DICTATION_PARTIAL_FLOOR_MARGIN_DB
+}
+
+fn partial_noise_floor_db(samples: &[f32], sample_rate: u32) -> f32 {
+    let frame = ((sample_rate.max(1) as f32 * DICTATION_PARTIAL_FLOOR_FRAME_SECONDS).round()
+        as usize)
+        .max(1);
+    let mut energies: Vec<f32> = samples
+        .chunks(frame)
+        .map(crate::audio::vad::calculate_energy_db)
+        .collect();
+    if energies.is_empty() {
+        return crate::audio::vad::calculate_energy_db(&[]);
+    }
+    energies.sort_by(f32::total_cmp);
+    energies[((energies.len() - 1) as f32 * DICTATION_PARTIAL_FLOOR_PERCENTILE) as usize]
 }
 
 pub(crate) fn mono_samples_to_wav_bytes(
@@ -237,6 +276,56 @@ pub(crate) fn should_emit_streaming_result(result: &streaming::StreamingResult) 
     !result.segment_text.trim().is_empty()
         || result.is_final
         || result.kind == streaming::StreamingSegmentKind::Gap
+}
+
+#[cfg(test)]
+mod preview_speech_gate_tests {
+    use super::partial_recent_window_has_speech;
+
+    const RATE: u32 = 16_000;
+
+    /// A tone whose RMS sits at `db` dBFS.
+    fn tone(db: f32, seconds: f32) -> Vec<f32> {
+        let amplitude = 10f32.powf(db / 20.0) * std::f32::consts::SQRT_2;
+        (0..(RATE as f32 * seconds) as usize)
+            .map(|i| amplitude * (std::f32::consts::TAU * 220.0 * i as f32 / RATE as f32).sin())
+            .collect()
+    }
+
+    fn then(mut head: Vec<f32>, tail: Vec<f32>) -> Vec<f32> {
+        head.extend(tail);
+        head
+    }
+
+    #[test]
+    fn a_whisper_over_a_quiet_room_is_previewed() {
+        let whisper = then(tone(-72.0, 2.0), tone(-50.0, 0.6));
+        assert!(partial_recent_window_has_speech(&whisper, RATE));
+    }
+
+    #[test]
+    fn a_whisper_too_close_to_the_room_is_not() {
+        let near_floor = then(tone(-56.0, 2.0), tone(-50.0, 0.6));
+        assert!(!partial_recent_window_has_speech(&near_floor, RATE));
+    }
+
+    #[test]
+    fn silence_never_triggers_a_decode_however_quiet_the_room() {
+        assert!(!partial_recent_window_has_speech(
+            &vec![0.0; RATE as usize * 2],
+            RATE
+        ));
+        let room_then_quieter_hum = then(vec![0.0; RATE as usize * 2], tone(-62.0, 0.6));
+        assert!(!partial_recent_window_has_speech(
+            &room_then_quieter_hum,
+            RATE
+        ));
+    }
+
+    #[test]
+    fn normal_speech_needs_no_floor_contrast() {
+        assert!(partial_recent_window_has_speech(&tone(-30.0, 0.4), RATE));
+    }
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ export interface MeetingCapturePrefill {
    * window title, never a guest list.
    */
   attendees: MeetingAttendee[];
+  joinConferenceUrl?: string;
 }
 
 /** A calendar event's prefill. Its `eventId` stays in the renderer. */
@@ -47,6 +48,7 @@ export function meetingCapturePrefillFromCalendarEvent(
     videoService: prefill.videoService,
     detectedCallId: null,
     attendees: prefill.attendees,
+    ...(prefill.conferenceUrl ? { joinConferenceUrl: prefill.conferenceUrl } : {}),
   };
 }
 

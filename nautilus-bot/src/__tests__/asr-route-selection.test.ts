@@ -294,4 +294,73 @@ describe("asr-route-selection", () => {
     expect(selection.dictationProvider).toBe("moonshine");
     expect(selection.meetingProvider).toBe("distil_whisper");
   });
+
+  describe("GGUF Parakeet in the meeting lane", () => {
+    const gguf: AsrProviderInfo = {
+      ...providers[0],
+      providerType: "transcribe_cpp",
+      name: "transcribe.cpp",
+      selectedModelId: "parakeet-tdt-0.6b-v3-q8_0",
+      modelOptions: [{ id: "parakeet-tdt-0.6b-v3-q8_0", label: "Parakeet TDT 0.6B v3 GGUF" }],
+    };
+    const onnx: AsrProviderInfo = {
+      ...providers[0],
+      providerType: "parakeet",
+      name: "Parakeet",
+      selectedModelId: "parakeet-tdt-0.6b-v3",
+      modelOptions: [{ id: "parakeet-tdt-0.6b-v3", label: "Parakeet TDT 0.6B v3" }],
+    };
+
+    it("keeps a meeting slot that names it", () => {
+      const selection = selectionStateFromSettings(
+        [gguf, onnx],
+        makeTranscriptionSettings({
+          useSharedAsrSelection: false,
+          defaultProvider: "parakeet",
+          selectedModelId: "parakeet-tdt-0.6b-v3",
+          dictationProvider: "transcribe_cpp",
+          dictationModelId: "parakeet-tdt-0.6b-v3-q8_0",
+          meetingProvider: "transcribe_cpp",
+          meetingModelId: "parakeet-tdt-0.6b-v3-q8_0",
+        })
+      );
+      expect(selection.meetingProvider).toBe("transcribe_cpp");
+      expect(selection.meetingModelId).toBe("parakeet-tdt-0.6b-v3-q8_0");
+    });
+
+    it("never inherits it from the dictation slot or the lane order", () => {
+      // The meeting slot names a dictation-only engine, so the lane falls
+      // back -- to ONNX Parakeet, not to the GGUF route that leads the order.
+      const selection = selectionStateFromSettings(
+        [gguf, onnx, providers[2]],
+        makeTranscriptionSettings({
+          useSharedAsrSelection: false,
+          defaultProvider: "moonshine",
+          selectedModelId: "moonshine-base",
+          dictationProvider: "transcribe_cpp",
+          dictationModelId: "parakeet-tdt-0.6b-v3-q8_0",
+          meetingProvider: "moonshine",
+          meetingModelId: "moonshine-base",
+        })
+      );
+      expect(selection.meetingProvider).toBe("parakeet");
+      expect(selection.meetingModelId).toBe("parakeet-tdt-0.6b-v3");
+    });
+
+    it("falls back to ONNX Parakeet where the build does not list it", () => {
+      const selection = selectionStateFromSettings(
+        [providers[1], onnx],
+        makeTranscriptionSettings({
+          useSharedAsrSelection: false,
+          defaultProvider: "distil_whisper",
+          selectedModelId: "distil-large-v3.5",
+          dictationProvider: "distil_whisper",
+          dictationModelId: "distil-large-v3.5",
+          meetingProvider: "transcribe_cpp",
+          meetingModelId: "parakeet-tdt-0.6b-v3-q8_0",
+        })
+      );
+      expect(selection.meetingProvider).toBe("parakeet");
+    });
+  });
 });

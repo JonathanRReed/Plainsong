@@ -111,14 +111,19 @@ interface SettingsOptionSelectProps {
   children: ReactNode;
   disabled?: boolean;
   className?: string;
-  /** Rendered under the select: a consequence that depends on the value. */
+  /** Width of the menu on the right; long option names can ask for more. */
+  selectClassName?: string;
+  /** Rendered under the row: a consequence that depends on the value. */
   footnote?: ReactNode;
+  /** Anchor for settings search and deep links (`setting-<id>`). */
+  settingId?: string;
 }
 
 /**
  * `SettingsSelect`'s labelled row with the custom menu in place of the native
- * `<select>`. The label and helper sentence stay wired to the trigger, so a
- * screen reader still hears the consequence of a change.
+ * `<select>`: label and sentence on the left, the menu on the right. The
+ * label and helper sentence stay wired to the trigger, so a screen reader
+ * still hears the consequence of a change.
  */
 export function SettingsOptionSelect({
   label,
@@ -128,27 +133,39 @@ export function SettingsOptionSelect({
   children,
   disabled = false,
   className,
+  selectClassName,
   footnote,
+  settingId,
 }: SettingsOptionSelectProps) {
   const selectId = useId();
   const descriptionId = `${selectId}-description`;
 
   return (
-    <div className={cn("space-y-2", className)}>
-      <Label htmlFor={selectId}>{label}</Label>
-      <p id={descriptionId} className="text-sm text-muted-foreground">
-        {description}
-      </p>
-      <OptionSelect
-        id={selectId}
-        aria-describedby={descriptionId}
-        value={value}
-        onValueChange={onChange}
-        disabled={disabled}
-      >
-        {children}
-      </OptionSelect>
-      {footnote}
+    <div
+      id={settingId ? `setting-${settingId}` : undefined}
+      className={cn("py-3.5", className)}
+    >
+      <div className="flex flex-col gap-2 @md:flex-row @md:items-start @md:justify-between @md:gap-6">
+        <div className="min-w-0 space-y-1">
+          <Label htmlFor={selectId} className="text-sm font-medium leading-5">
+            {label}
+          </Label>
+          <p id={descriptionId} className="text-sm leading-5 text-muted-foreground">
+            {description}
+          </p>
+        </div>
+        <OptionSelect
+          id={selectId}
+          aria-describedby={descriptionId}
+          value={value}
+          onValueChange={onChange}
+          disabled={disabled}
+          className={cn("h-9 w-full shrink-0 @md:w-56", selectClassName)}
+        >
+          {children}
+        </OptionSelect>
+      </div>
+      {footnote ? <div className="mt-2">{footnote}</div> : null}
     </div>
   );
 }

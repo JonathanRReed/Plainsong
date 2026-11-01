@@ -14,6 +14,8 @@ function sidecarSource(relativePath: string): string {
 
 const SIDECAR_MODEL_SOURCES = [
   "rust-sidecar/src/llm/bundled_local.rs",
+  "rust-sidecar/src/llm/native_text.rs",
+  "rust-sidecar/src/llm/builtin_embeddings.rs",
   "rust-sidecar/src/asr/whisper.rs",
   "rust-sidecar/src/asr/whisper_candle.rs",
   "rust-sidecar/src/asr/distil_whisper.rs",
@@ -25,6 +27,9 @@ const SIDECAR_MODEL_SOURCES = [
   // out of the default feature set, but the notices cover what the app can
   // download, not what today's cargo flags happen to build.
   "rust-sidecar/src/asr/transcribe_cpp.rs",
+  // Core ML builds of Parakeet for the Neural Engine speech helper.
+  "rust-sidecar/src/asr/neural_engine.rs",
+  "rust-sidecar/src/asr/speech_survey.rs",
   "rust-sidecar/src/download/mod.rs",
 ];
 
@@ -42,7 +47,7 @@ function pinnedRevisionsInSidecar(): Map<string, string[]> {
   const found = new Map<string, string[]>();
   for (const file of SIDECAR_MODEL_SOURCES) {
     for (const line of sidecarSource(file).split("\n")) {
-      if (!/revision|https?:\/\//i.test(line)) continue;
+      if (!/revision|\bREV\b|https?:\/\//i.test(line)) continue;
       for (const revision of line.match(/\b[0-9a-f]{40}\b/g) ?? []) {
         found.set(revision, [...(found.get(revision) ?? []), file]);
       }
@@ -77,6 +82,7 @@ describe("the model-weights manifest behind the notices' MODEL WEIGHTS section",
     for (const entry of MODEL_WEIGHTS) {
       const declaresNone = entry.license.startsWith("not declared");
       expect(Boolean(entry.pendingLicenseReview), entry.name).toBe(declaresNone);
+      if (entry.pendingLicenseReview) expect(entry.disabled, entry.name).toBe(true);
     }
     const rendered = renderModelWeightsSection();
     const pending = MODEL_WEIGHTS.filter((entry) => entry.pendingLicenseReview);
@@ -87,10 +93,15 @@ describe("the model-weights manifest behind the notices' MODEL WEIGHTS section",
     }
   });
 
-  it("pins every artifact to the revision the sidecar actually fetches", () => {
+  it("pins enabled artifacts and keeps disabled revisions as license history", () => {
     const pinned = pinnedRevisionsInSidecar();
     for (const entry of MODEL_WEIGHTS) {
       const revision = entry.revision.split(" ")[0];
+      if (entry.disabled) {
+        expect(entry.note, entry.name).toMatch(/^Disabled:/);
+        expect(pinned.has(revision), `${entry.name} must have no download URL`).toBe(false);
+        continue;
+      }
       if (revision === "main") {
         // The one branch pin. It is allowed only with a note saying how the
         // files are pinned instead, so the notice is not quietly weaker than
@@ -124,34 +135,30 @@ describe("the model-weights manifest behind the notices' MODEL WEIGHTS section",
     ).toEqual([]);
   });
 
-  it("carries the speakrs bundle's ten files and its undeclared license", () => {
-    // The bundle is fetched at runtime by the experimental diarization backend.
-    // No shipped build enables that feature, but the pin is in the sidecar
-    // source, so the notices have to account for it -- and honestly: the mirror
-    // declares no license of its own.
+  it("carries the community-1 bundle's six files, its license and its credits", () => {
     const entry = MODEL_WEIGHTS.find((candidate) =>
-      candidate.pinnedIn.includes("SPEAKRS_BUNDLE"),
+      candidate.pinnedIn.includes("COMMUNITY1_BUNDLE"),
     );
-    expect(entry, "the speakrs bundle needs a manifest entry").toBeDefined();
-    expect(entry!.license).toMatch(/^not declared/);
-    expect(entry!.pendingLicenseReview).toBe(true);
-    // CC-BY-4.0 is upstream's, not the mirror's; the entry must not present it
-    // as the terms these files arrive under.
-    expect(entry!.license).toContain("CC-BY-4.0");
+    expect(entry, "the community-1 bundle needs a manifest entry").toBeDefined();
+    expect(entry!.license).toBe("CC-BY-4.0");
+    expect(entry!.pendingLicenseReview).toBeUndefined();
+    // CC BY 4.0 attribution: creator, the components' authors, and the changes.
+    expect(entry!.note).toContain("by pyannote");
+    expect(entry!.note).toContain("WeSpeaker");
+    expect(entry!.note).toContain("BUT Speech@FIT");
+    expect(entry!.note).toContain("releases/tag/models-2026-10");
 
     const source = sidecarSource("rust-sidecar/src/download/mod.rs");
     const bundle = source.slice(
-      source.indexOf("pub(crate) const SPEAKRS_BUNDLE"),
-      source.indexOf("/// All-or-nothing readiness"),
+      source.indexOf("pub(crate) const COMMUNITY1_BUNDLE"),
+      source.indexOf("/// Every file of the community-1 bundle"),
     );
-    const pinnedFiles = [...bundle.matchAll(/file_name: "([^"]+)"/g)].map(
+    const pinnedFiles = [...bundle.matchAll(/community1_file!\(\s*"([^"]+)"/g)].map(
       (match) => match[1],
     );
-    expect(pinnedFiles).toHaveLength(10);
+    expect(pinnedFiles).toHaveLength(6);
     expect([...entry!.files].sort()).toEqual([...pinnedFiles].sort());
-    for (const file of pinnedFiles) {
-      expect(bundle).toContain(`${entry!.revision}/${file}`);
-    }
+    expect(source).toContain(entry!.revision);
   });
 
   it("names the terms that are not the same as the code's", () => {
@@ -161,6 +168,11 @@ describe("the model-weights manifest behind the notices' MODEL WEIGHTS section",
     expect(rendered).toContain("Attribution is a condition of use");
     // S1-mini's naming clause, in the exact capitalization it requires.
     expect(rendered).toContain('"S1-mini" by "Superwhisper"');
+    expect(rendered).toContain("Orukeet v0.1.0 int8");
+    expect(rendered).toContain("CC-BY-SA-4.0 weights");
+    expect(rendered).toContain("LICENSE-WEIGHTS");
+    expect(rendered).toContain("NOTICE.md");
+    expect(rendered).toContain("required NVIDIA attribution");
     // And every artifact appears by name with its revision.
     for (const entry of MODEL_WEIGHTS) {
       expect(rendered).toContain(entry.name);
@@ -180,5 +192,22 @@ describe("the model-weights manifest behind the notices' MODEL WEIGHTS section",
       `Downloadable model artifacts: ${MODEL_WEIGHTS.length}`,
     );
     expect(notices).toContain(renderModelWeightsSection());
+  });
+});
+
+
+describe("Core ML file pins", () => {
+  it("records exactly the sizes and digests the downloader verifies", () => {
+    const source = sidecarSource("rust-sidecar/src/asr/neural_engine.rs");
+    for (const prefix of ["PARAKEET_V3_COREML", "PARAKEET_V2_COREML", "PARAKEET_CTC_VOCABULARY"]) {
+      const entry = MODEL_WEIGHTS.find((weight) => weight.pinnedIn ===
+        `rust-sidecar/src/asr/neural_engine.rs (${prefix}_*)`);
+      expect(entry).toBeDefined();
+      if (!entry || !("artifacts" in entry)) throw new Error("Missing Core ML file pins");
+      const section = source.split(`const ${prefix}_FILES:`)[1].split("\n];")[0];
+      const pins = [...section.matchAll(/path: "([^"]+)",\s+size: ([\d_]+),\s+sha256: "([a-f0-9]+)"/g)]
+        .map((match) => ({ path: match[1], size: Number(match[2].replaceAll("_", "")), sha256: match[3] }));
+      expect(entry.artifacts).toEqual(pins);
+    }
   });
 });

@@ -99,11 +99,13 @@ Options:
                         decode: feed --wav to the streaming engine in real
                         time, in 100 ms slices, and report how long after each
                         spoken word the first partial containing it arrived.
+                        Uses the pinned Nemotron preview model; --ensure-model
+                        verifies or downloads that model in this process.
                         Needs a build with --features asr-transcribe-cpp.
   --stream-chunk-ms <MS> Streaming chunk size: 320, 560 or 1120 [default: 560]
   --ensure-model        Fetch the selected model first, through the same
                         pinned-SHA-256 download path the app uses (a model
-                        already on disk is verified and receipted, not
+                        already on disk is hashed against its pin, not
                         re-fetched). Off by default: a benchmark should not
                         start a multi-gigabyte download by surprise.
   -h, --help            Print this help without loading a model
@@ -406,7 +408,7 @@ struct BenchmarkReportInput<'a> {
 
 /// Shared `hardware` block for both receipts (`provider_transcription_only`
 /// and `asr_and_local_format_only`) so the two are directly comparable and
-/// the reference-hardware checks in `verify-dictation-latency.mjs` apply
+/// the reference-hardware checks in `verify-dictation-latency.ts` apply
 /// identically.
 fn hardware_context() -> serde_json::Value {
     let logical_cpus = std::thread::available_parallelism()
@@ -642,6 +644,7 @@ async fn run_fixture_benchmark(
         // "format on" does and does not cover.
         let format_off_started = Instant::now();
         let format_off = apply_dictation_pipeline(DictationPipelineInput {
+            spoken_language: None,
             text: text.as_str(),
             dictionary_entries: &[],
             snippets: &[],
@@ -655,11 +658,13 @@ async fn run_fixture_benchmark(
             recent_inserted_text: None,
             command_mode_enabled: false,
             destination_category: DictationAppCategory::Other,
+            structured_layout: false,
         });
         let format_off_ms = format_off_started.elapsed().as_millis() as u64;
 
         let format_on_started = Instant::now();
         let format_on = apply_dictation_pipeline(DictationPipelineInput {
+            spoken_language: None,
             text: text.as_str(),
             dictionary_entries: &[],
             snippets: &[],
@@ -673,6 +678,7 @@ async fn run_fixture_benchmark(
             recent_inserted_text: None,
             command_mode_enabled: false,
             destination_category: DictationAppCategory::Other,
+            structured_layout: false,
         });
         let format_on_ms = format_on_started.elapsed().as_millis() as u64;
 
@@ -944,14 +950,30 @@ fn run_stream_benchmark(args: &BenchmarkArgs) -> i32 {
     };
     let audio_seconds = pcm.len() as f64 / f64::from(STREAMING_SAMPLE_RATE_HZ);
 
+    // Verification must happen in this process: only the app's startup
+    // records verified models in the profile, and this binary skips it.
+    if args.ensure_model {
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let batch_provider = create_benchmark_provider(
+            AsrProviderType::TranscribeCpp,
+            plainsong_lib::asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID,
+        )
+        .expect("known pinned streaming model");
+        if let Err(error) = runtime.block_on(batch_provider.download_models(Box::new(|percent| {
+            eprintln!("  download {percent:.1}%");
+        }))) {
+            eprintln!("Error: live-preview model provisioning failed: {error}");
+            return 1;
+        }
+    }
+
     let provider = TranscribeCppStreamingProvider::with_chunk_ms(args.stream_chunk_ms);
     if !provider.is_streaming_available() {
         eprintln!(
             "Error: the live-preview model is not installed and integrity-verified at {}. \
-             Run `benchmark-latency --provider transcribe_cpp --model {} --ensure-model --runs 1` \
-             first.",
-            provider.model_path().display(),
-            plainsong_lib::asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID
+             Rerun this streaming benchmark with --ensure-model to verify or download it \
+             in the same process.",
+            provider.model_path().display()
         );
         return 1;
     }
@@ -1136,6 +1158,21 @@ fn run_stream_benchmark(_args: &BenchmarkArgs) -> i32 {
     2
 }
 
+fn create_benchmark_provider(
+    provider_type: AsrProviderType,
+    model: &str,
+) -> Result<Box<dyn plainsong_lib::asr::AsrProvider>, String> {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    if provider_type == AsrProviderType::TranscribeCpp {
+        return plainsong_lib::asr::transcribe_cpp::TranscribeCppProvider::for_benchmark(model)
+            .map(|provider| Box::new(provider) as Box<dyn plainsong_lib::asr::AsrProvider>);
+    }
+    Ok(AsrProviderFactory::create_with_model(
+        provider_type,
+        Some(model),
+    ))
+}
+
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse_args(&raw_args) {
@@ -1172,7 +1209,11 @@ fn main() {
 
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async move {
-        let provider = AsrProviderFactory::create_with_model(args.provider_type, Some(&args.model));
+        let provider = create_benchmark_provider(args.provider_type, &args.model)
+            .unwrap_or_else(|error| {
+                eprintln!("Error: {error}");
+                std::process::exit(2);
+            });
 
         if args.ensure_model {
             eprintln!(
@@ -1232,6 +1273,7 @@ fn main() {
             request_speaker_labels: false,
             // The benchmark measures the shipped default, which is auto.
             language: None,
+            acoustic_vocabulary: Vec::new(),
         };
         let warmup_started = Instant::now();
         let warmup_result = provider
@@ -1536,6 +1578,23 @@ mod tests {
         };
         assert!(!parse(&[]));
         assert!(parse(&["--ensure-model"]));
+        assert!(!parse(&["--stream"]));
+        assert!(parse(&["--stream", "--ensure-model"]));
+    }
+
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn benchmark_factory_selects_the_named_model() {
+        let provider = create_benchmark_provider(
+            AsrProviderType::TranscribeCpp,
+            plainsong_lib::asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID,
+        )
+        .expect("known pinned model");
+        assert_eq!(
+            provider.model_info().source_url,
+            "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf"
+        );
+        assert!(create_benchmark_provider(AsrProviderType::TranscribeCpp, "unknown").is_err());
     }
 
     #[cfg(feature = "asr-transcribe-cpp")]

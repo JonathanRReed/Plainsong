@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  DICTATION_PRIMARY_PRESS_ENTER_COMMAND,
   DICTATION_SPOKEN_EDIT_COMMAND_EXAMPLES,
   getDictationSpokenEditCommandExamples,
 } from "@/lib/dictation-voice-edit-actions";
@@ -285,7 +284,7 @@ describe("selected text actions", () => {
     expect(getDictationSpokenEditCommandExamples("plainsong")).toEqual(
       expect.arrayContaining([
         "plainsong new line",
-        `plainsong ${DICTATION_PRIMARY_PRESS_ENTER_COMMAND}`,
+        "plainsong replace selection with approved plan",
       ]),
     );
   });
@@ -312,12 +311,13 @@ describe("selected text actions", () => {
   });
 
   it("formats Quick Fix result toasts from shared copy", () => {
-    expect(formatQuickFixToastMessage({ pasted: true })).toBe(
+    expect(formatQuickFixToastMessage({ pasted: true, confirmed: true })).toBe(
       "Quick Fix applied to selected text.",
     );
     expect(
       formatQuickFixToastMessage({
         pasted: true,
+        confirmed: true,
         targetScope: "focused_field",
       }),
     ).toBe("Quick Fix applied to focused field.");
@@ -328,6 +328,7 @@ describe("selected text actions", () => {
     expect(
       formatQuickFixToastMessage({
         pasted: true,
+        confirmed: true,
         inputText: "teh selected text",
         outputText: "the selected text",
       }),
@@ -354,6 +355,7 @@ describe("selected text actions", () => {
     expect(
       formatQuickFixToastMessage({
         pasted: true,
+        confirmed: true,
         targetScope: "focused_field",
         inputText: "Already clean.",
         outputText: "Already clean.",
@@ -371,6 +373,7 @@ describe("selected text actions", () => {
     expect(
       formatQuickFixToastMessage({
         pasted: true,
+        confirmed: true,
         inputText: "hello world",
         outputText: "hello brave world",
       }),
@@ -387,6 +390,7 @@ describe("selected text actions", () => {
     expect(
       formatQuickFixToastMessage({
         pasted: true,
+        confirmed: true,
         inputText: longInput,
         outputText: longOutput,
       }),
@@ -394,6 +398,7 @@ describe("selected text actions", () => {
     expect(
       formatQuickFixToastMessage({
         pasted: true,
+        confirmed: true,
         inputText: longInput,
         outputText: longInput,
       }),
@@ -404,11 +409,13 @@ describe("selected text actions", () => {
     expect(
       formatSelectedTextActionStatusMessage("rewrite_shorter", {
         pasted: true,
+        confirmed: true,
       }),
     ).toBe("Shortened selected text");
     expect(
       formatSelectedTextActionStatusMessage("rewrite_shorter", {
         pasted: true,
+        confirmed: true,
         targetScope: "focused_field",
       }),
     ).toBe("Shortened focused field");
@@ -437,10 +444,49 @@ describe("selected text actions", () => {
     expect(
       formatSelectedTextActionStatusMessage(QUICK_FIX_ACTION_KEY, {
         pasted: true,
+        confirmed: true,
         inputText: "teh text",
         outputText: "the text",
       }),
     ).toBe("Quick Fix applied to selected text. 1 text edit: teh -> the.");
+  });
+
+  it.each([false, undefined])(
+    "does not claim Quick Fix was applied without confirmation: %s",
+    (confirmed) => {
+      expect(formatQuickFixToastMessage({
+        pasted: true,
+        confirmed,
+        inputText: "teh text",
+        outputText: "the text",
+      })).toBe(
+        "Quick Fix sent to selected text. Check the target to confirm the change.",
+      );
+      expect(formatSelectedTextActionStatusMessage("rewrite_shorter", {
+        pasted: true,
+        confirmed,
+        targetScope: "focused_field",
+      })).toBe(
+        "Shorten result sent to focused field. Check the target to confirm the change.",
+      );
+    },
+  );
+
+  it("offers manual paste recovery only when an unconfirmed result is copied", () => {
+    expect(formatQuickFixToastMessage({
+      pasted: true,
+      confirmed: false,
+      copied: true,
+      targetScope: "focused_field",
+    })).toBe(
+      "Quick Fix sent to focused field. Check the target to confirm the change. Result is on the clipboard; paste it manually if needed.",
+    );
+    expect(formatSelectedTextActionStatusMessage("rewrite_shorter", {
+      pasted: true,
+      copied: true,
+    })).toBe(
+      "Shorten result sent to selected text. Check the target to confirm the change. Result is on the clipboard; paste it manually if needed.",
+    );
   });
 
   it("keeps capture actions backed by full action metadata", () => {

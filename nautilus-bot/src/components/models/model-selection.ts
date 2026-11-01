@@ -15,6 +15,14 @@ export type SpeechLane = "dictation" | "meeting";
 
 type RouteSelectableProvider = AsrProviderInfo | AsrProviderInventory;
 
+const GGUF_PROVIDER = "transcribe_cpp";
+
+/** ONNX Parakeet v3: the same weights as GGUF Parakeet, on the processor. */
+const GGUF_SUBSTITUTE_ROUTE: SpeechRouteTarget = {
+  providerType: "parakeet",
+  modelId: "parakeet-tdt-0.6b-v3",
+};
+
 function sameRoute(left: SpeechRouteTarget, right: SpeechRouteTarget): boolean {
   return (
     left.providerType === right.providerType && left.modelId === right.modelId
@@ -48,6 +56,12 @@ export function readLaneSelection(
  * saying "shared" while the two lanes point at different models would make the
  * meeting lane silently unreachable. Two identical, meeting-capable lanes are
  * shared; anything else is split.
+ *
+ * The shared default never names a transcribe.cpp (GGUF) route, the same shape
+ * `Settings::fresh_install` writes: it is the sidecar's fallback when a lane
+ * cannot run, and the fallback for a missing GGUF model is ONNX Parakeet, the
+ * same weights on the processor. So GGUF lanes are always split, and the
+ * default names ONNX Parakeet while dictation runs on GGUF.
  */
 function withSpeechPair(
   settings: Settings,
@@ -56,17 +70,21 @@ function withSpeechPair(
   meeting: SpeechRouteTarget,
 ): Settings {
   const current = selectionStateFromSettings(providerList, settings.transcription);
+  const dictationIsGguf = dictation.providerType === GGUF_PROVIDER;
   const shared =
+    !dictationIsGguf &&
     sameRoute(dictation, meeting) &&
     isSharedMeetingCompatible(dictation.providerType, dictation.modelId);
+  // The "default" route is what every fallback in asr-route-selection reads
+  // when a lane cannot be honoured, so it mirrors dictation rather than being
+  // left pointing at whatever was selected before -- except that it never
+  // names GGUF (see above).
+  const defaultRoute = dictationIsGguf ? GGUF_SUBSTITUTE_ROUTE : dictation;
 
   const next = mergeSelectionStateUpdate(providerList, current, {
     useSharedAsrSelection: shared,
-    // The "default" route is what every fallback in asr-route-selection reads
-    // when a lane cannot be honoured, so it mirrors dictation rather than
-    // being left pointing at whatever was selected before.
-    defaultProvider: dictation.providerType,
-    defaultModelId: dictation.modelId,
+    defaultProvider: defaultRoute.providerType,
+    defaultModelId: defaultRoute.modelId,
     dictationProvider: dictation.providerType,
     dictationModelId: dictation.modelId,
     meetingProvider: meeting.providerType,

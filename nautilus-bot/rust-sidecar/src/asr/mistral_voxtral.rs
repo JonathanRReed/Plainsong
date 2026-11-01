@@ -406,6 +406,7 @@ impl MistralVoxtralProvider {
         TranscriptionResult {
             text: parsed.text,
             segments: parsed.segments,
+            measured_word_timestamps: false,
             speaker_turns: parsed.speaker_turns,
             language: parsed.language.unwrap_or_else(|| "auto".to_string()),
             confidence: UNSCORED_CLOUD_CONFIDENCE,
@@ -419,6 +420,7 @@ impl MistralVoxtralProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied,
+            vocabulary_candidates: Vec::new(),
         }
     }
 
@@ -428,7 +430,7 @@ impl MistralVoxtralProvider {
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context(
-            "Mistral API key not set. Add it in Settings → API Keys or set MISTRAL_API_KEY.",
+            "Mistral API key not set. Add it in Settings > Search & AI > API keys or set MISTRAL_API_KEY.",
         )?;
         let start = std::time::Instant::now();
         let (form, term_count) = self.build_form(options);
@@ -507,7 +509,7 @@ impl AsrProvider for MistralVoxtralProvider {
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context(
-            "Mistral API key not set. Add it in Settings → API Keys or set MISTRAL_API_KEY.",
+            "Mistral API key not set. Add it in Settings > Search & AI > API keys or set MISTRAL_API_KEY.",
         )?;
         let start = std::time::Instant::now();
         let (form, term_count) = self.build_form(options);

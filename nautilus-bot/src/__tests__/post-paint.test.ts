@@ -28,6 +28,22 @@ describe("scheduleAfterPaint", () => {
     expect(calls).toEqual(["reported"]);
   });
 
+  it.each([0, 1, 2])("cancels work after scheduling stage %s", (stage) => {
+    const frames: FrameRequestCallback[] = [];
+    const tasks: Array<() => void> = [];
+    const calls: string[] = [];
+    const cancel = scheduleAfterPaint(
+      () => calls.push("reported"),
+      (callback) => { frames.push(callback); return frames.length; },
+      (callback) => { tasks.push(callback); return tasks.length; },
+    );
+    for (let frame = 0; frame < stage; frame++) frames.shift()?.(frame);
+    cancel();
+    while (frames.length) frames.shift()?.(3);
+    for (const task of tasks) task();
+    expect(calls).toEqual([]);
+  });
+
   it("binds the browser frame scheduler when using the default", () => {
     const frames: FrameRequestCallback[] = [];
     const fakeWindow = {

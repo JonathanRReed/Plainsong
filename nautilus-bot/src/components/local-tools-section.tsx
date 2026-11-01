@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { SettingsSwitch } from "@/components/ui/settings-control";
+import { SettingsGroup, SettingsRow, SettingsSwitch } from "@/components/ui/settings-control";
 import { useToast } from "@/components/toast";
 import {
   getCliToolStatus,
@@ -15,7 +15,7 @@ interface LocalToolsSectionProps {
 }
 
 /**
- * Settings > General > Command line and MCP access: the one switch behind the
+ * Settings > Advanced > Command line and MCP access: the one switch behind the
  * `plainsong` command, its read-only MCP server, and `plainsong://` links, plus
  * the "Install command-line tool" action.
  *
@@ -106,67 +106,62 @@ export function LocalToolsSection({ enabled, onEnabledChange }: LocalToolsSectio
     !!status && status.binaryPresent && !status.installed && !status.occupied && !installing;
 
   return (
-    <div className="pt-4 border-t space-y-4">
-      <div className="space-y-1">
-        <p className="section-heading">Command line and MCP access</p>
-        <p className="text-sm text-muted-foreground">
-          Apps you run on this Mac, such as a terminal or an AI assistant, can read your
-          meeting notes and transcripts. Nothing leaves the machine unless that app sends it.
-        </p>
-      </div>
-
+    <SettingsGroup
+      title="Command line and MCP access"
+      settingId="local-tools"
+      description="Apps you run on this Mac, such as a terminal or an AI assistant, can read your meeting notes and transcripts. Nothing leaves the machine unless that app sends it."
+    >
       <SettingsSwitch
-        className="py-0"
         label="Allow the plainsong command and MCP server"
-        description="Off by default. Turning it on lets the plainsong command, its read-only MCP server, and plainsong:// links read your meetings and dictations and start a recording; none of them can change or delete anything."
+        description="Off by default. On, the plainsong command, its read-only MCP server and plainsong:// links can read your meetings and dictations and start a recording. None of them can change or delete anything."
         checked={enabled}
         onCheckedChange={onEnabledChange}
       />
 
-      {/* The plainsong:// scheme is registered with macOS, so a link on a web
-          page reaches it exactly like a Raycast script does, and macOS does not
-          say which app opened the URL. The app cannot tell them apart, so it
-          says so instead of implying a check it does not make. */}
-      <p className="text-sm text-muted-foreground">
-        plainsong:// links are registered with macOS, so a web page you open can
-        trigger one just as a script can — Plainsong cannot tell where a link came
-        from. A link never carries text and never starts a meeting recording on its
-        own, and a link that starts dictation shows the dictation window with
-        &ldquo;Recording from a link&rdquo; on it.
+      {/* The plainsong:// scheme is registered with macOS, so a link on a
+          web page reaches it exactly like a Raycast script does, and macOS
+          does not say which app opened the URL. The app cannot tell them
+          apart, so it says so instead of implying a check it does not make. */}
+      <p className="pb-3.5 text-sm leading-5 text-muted-foreground">
+        plainsong:// links work too, and a web page you open can trigger one just
+        as a script can: Plainsong cannot tell where a link came from. A link never
+        carries text or starts a meeting recording, and dictation started by one
+        shows &ldquo;Recording from a link&rdquo;.
       </p>
 
-      <div className="space-y-3">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-1">
-            <p className="text-sm font-medium">Command-line tool</p>
-            <p className="flex items-start gap-2 text-sm text-muted-foreground">
-              <span
-                aria-hidden="true"
-                className={
-                  statusGlyph === "lit"
-                    ? "neume neume-lit mt-1.5 shrink-0"
-                    : statusGlyph === "rust"
-                      ? "neume neume-rust mt-1.5 shrink-0"
-                      : "neume neume-hollow mt-1.5 shrink-0"
-                }
-              />
-              <span data-testid="cli-tool-status">{statusLine}</span>
-            </p>
-          </div>
+      <SettingsRow
+        label="Command-line tool"
+        description={
+          <span className="flex items-start gap-2">
+            <span
+              aria-hidden="true"
+              className={
+                statusGlyph === "lit"
+                  ? "neume neume-lit mt-1.5 shrink-0"
+                  : statusGlyph === "rust"
+                    ? "neume neume-rust mt-1.5 shrink-0"
+                    : "neume neume-hollow mt-1.5 shrink-0"
+              }
+            />
+            <span data-testid="cli-tool-status">{statusLine}</span>
+          </span>
+        }
+        control={
           <Button
-            variant="secondary"
+            variant="outline"
+            size="sm"
             onClick={() => void handleInstall()}
             disabled={!canInstall}
           >
             {installing ? "Installing…" : "Install command-line tool"}
           </Button>
-        </div>
-
-        {lastResult?.status === "unavailable" && (
+        }
+      >
+        {lastResult?.status === "unavailable" ? (
           <p className="text-sm text-rust">{lastResult.reason}</p>
-        )}
+        ) : null}
 
-        {manualCommand && lastResult?.status === "manual" && (
+        {manualCommand && lastResult?.status === "manual" ? (
           <div className="space-y-2">
             <p className="text-sm text-muted-foreground">
               {lastResult.reason} Run this in Terminal to finish the install:
@@ -184,14 +179,19 @@ export function LocalToolsSection({ enabled, onEnabledChange }: LocalToolsSectio
               </Button>
             </div>
           </div>
-        )}
+        ) : null}
+      </SettingsRow>
 
-        <p className="text-sm text-muted-foreground">
-          Assistants that speak MCP connect with the command{" "}
-          <code className="font-mono text-sm">plainsong mcp</code>. Everything it serves is
-          read-only, and transcript text is marked as untrusted content.
-        </p>
-      </div>
-    </div>
+      <SettingsRow
+        label="AI assistants"
+        description={
+          <>
+            Assistants that speak MCP connect with the command{" "}
+            <code className="font-mono text-sm">plainsong mcp</code>. Everything it
+            serves is read-only, and transcript text is marked as untrusted content.
+          </>
+        }
+      />
+    </SettingsGroup>
   );
 }

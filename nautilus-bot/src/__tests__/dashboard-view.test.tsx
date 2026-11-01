@@ -9,6 +9,7 @@ const {
   getRelationshipMemory,
   searchTranscripts,
   requestMainView,
+  requestReadinessDestination,
   requestRecordingWorkspace,
   requestOnboarding,
   getSettings,
@@ -20,6 +21,7 @@ const {
   analyzeRecordings: vi.fn(),
   searchTranscripts: vi.fn(),
   requestMainView: vi.fn(),
+  requestReadinessDestination: vi.fn(),
   requestRecordingWorkspace: vi.fn(),
   requestOnboarding: vi.fn(),
   dashboardState: {
@@ -28,6 +30,10 @@ const {
       meetingReady: true as boolean,
       fullCaptureReady: true as boolean,
       loading: false as boolean,
+      meetingNotesRoute: { state: "ready", reason: null } as {
+        state: string;
+        reason: string | null;
+      },
       productReadiness: {
         evidenceObservedAt: 1,
         dictation: { domain: "dictation", state: "ready", cause: null },
@@ -93,6 +99,7 @@ vi.mock("@/features/readiness/product-readiness-context", () => ({
 
 vi.mock("@/lib/navigation", () => ({
   requestMainView,
+  requestReadinessDestination,
   requestRecordingWorkspace,
 }));
 
@@ -119,6 +126,7 @@ describe("DashboardView memory chat", () => {
       meetingReady: true,
       fullCaptureReady: true,
       loading: false,
+      meetingNotesRoute: { state: "ready", reason: null },
       productReadiness: {
         evidenceObservedAt: 1,
         dictation: { domain: "dictation", state: "ready", cause: null },
@@ -148,6 +156,7 @@ describe("DashboardView memory chat", () => {
     getSettings.mockResolvedValue({
       shortcuts: { toggleDictation: "Alt+Space" },
       transcription: { dictationPushToTalk: true, dictationHandsFreeEnabled: false },
+      privacy: { meetingsAi: { provider: "ollama", modelId: null } },
     });
     getRelationshipMemory.mockResolvedValue({
       people: [
@@ -223,6 +232,7 @@ describe("DashboardView memory chat", () => {
       meetingReady: true,
       fullCaptureReady: false,
       loading: false,
+      meetingNotesRoute: { state: "ready", reason: null },
       productReadiness: {
         evidenceObservedAt: 2,
         dictation: { domain: "dictation", state: "ready", cause: null },
@@ -276,12 +286,99 @@ describe("DashboardView memory chat", () => {
     expect(requestOnboarding).not.toHaveBeenCalled();
   });
 
-  it("sends readiness cards to onboarding when setup is incomplete", async () => {
+  it("shows missing meeting notes without blocking mic-only capture", async () => {
+    dashboardState.setupStatus = {
+      ...dashboardState.setupStatus,
+      meetingNotesRoute: {
+        state: "unconfigured",
+        reason: "qwen3.5:4b is not installed and ready for meeting notes.",
+      },
+      productReadiness: {
+        ...dashboardState.setupStatus.productReadiness,
+        meetingsCapture: {
+          domain: "meetings_capture",
+          state: "ready",
+          cause: null,
+        },
+        fullCapture: {
+          domain: "full_capture",
+          state: "degraded",
+          cause: {
+            id: "system_audio_unavailable",
+            message: "Mic-only meetings are ready.",
+            action: {
+              id: "configure_system_audio",
+              label: "Set up system audio",
+              destination: "transcription",
+            },
+          },
+        },
+      },
+    } as typeof dashboardState.setupStatus;
+
+    render(<DashboardView />);
+
+    expect(
+      await screen.findByRole("alert", { name: "Meeting notes unavailable" }),
+    ).toHaveTextContent("qwen3.5:4b is not installed");
+    const openMeetings = screen.getByRole("button", { name: "Open meetings" });
+    expect(openMeetings).toBeEnabled();
+    fireEvent.click(openMeetings);
+    expect(requestMainView).toHaveBeenCalledWith("recordings");
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Review models" }),
+    );
+    expect(requestReadinessDestination).toHaveBeenCalledWith("models");
+  });
+
+  it("stays quiet when meeting notes are ready or intentionally off", async () => {
+    const { rerender } = render(<DashboardView />);
+    expect(
+      screen.queryByRole("alert", { name: "Meeting notes unavailable" }),
+    ).not.toBeInTheDocument();
+
+    dashboardState.setupStatus = {
+      ...dashboardState.setupStatus,
+      meetingNotesRoute: {
+        state: "opted_out",
+        reason: "Meeting notes are off. Plainsong keeps transcripts only.",
+      },
+    } as typeof dashboardState.setupStatus;
+    rerender(<DashboardView />);
+
+    expect(
+      screen.queryByRole("alert", { name: "Meeting notes unavailable" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open meetings" })).toBeEnabled();
+  });
+
+  it("reports an unknown notes probe as checking", async () => {
+    dashboardState.setupStatus = {
+      ...dashboardState.setupStatus,
+      meetingNotesRoute: {
+        state: "unknown",
+        reason: "Plainsong could not confirm the selected model for meeting notes.",
+      },
+    } as typeof dashboardState.setupStatus;
+
+    render(<DashboardView />);
+
+    expect(
+      await screen.findByRole("status", { name: "Checking meeting notes" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Everything is ready"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("routes blocked lanes directly to their readiness recovery destination", async () => {
     dashboardState.setupStatus = {
       dictationReady: false,
       meetingReady: false,
       fullCaptureReady: false,
       loading: false,
+      meetingNotesRoute: { state: "ready", reason: null },
       productReadiness: {
         evidenceObservedAt: 3,
         dictation: {
@@ -357,11 +454,73 @@ describe("DashboardView memory chat", () => {
     expect(await screen.findByText("Finish setup to unlock the full solo workflow")).toBeInTheDocument();
     expect(screen.getByText("Needs attention")).toBeInTheDocument();
 
+    expect(screen.getByText("Dictation: Choose a dictation model.")).toBeInTheDocument();
+    expect(screen.getByText("Meetings: Choose a meeting model.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dictation: Review models" }));
+    fireEvent.click(screen.getByRole("button", { name: "Meetings: Review models" }));
+
+    expect(requestReadinessDestination).toHaveBeenNthCalledWith(1, "models");
+    expect(requestReadinessDestination).toHaveBeenNthCalledWith(2, "models");
+    expect(requestOnboarding).not.toHaveBeenCalled();
+  });
+
+  it("routes microphone recovery only after the user clicks", () => {
+    dashboardState.setupStatus = {
+      ...dashboardState.setupStatus,
+      productReadiness: {
+        ...dashboardState.setupStatus.productReadiness,
+        meetingsCapture: {
+          domain: "meetings_capture",
+          state: "needs_action",
+          cause: {
+            id: "microphone_device",
+            message: "Select an available microphone.",
+            action: {
+              id: "select_microphone",
+              label: "Select microphone",
+              destination: "transcription",
+            },
+          },
+        },
+      },
+    };
+
+    render(<DashboardView />);
+
+    expect(requestReadinessDestination).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Meetings: Select microphone" }));
+    expect(requestReadinessDestination).toHaveBeenCalledWith("transcription");
+    expect(requestOnboarding).not.toHaveBeenCalled();
+  });
+
+  it("keeps onboarding as a fallback when a blocked lane has no recovery action", async () => {
+    dashboardState.setupStatus = {
+      ...dashboardState.setupStatus,
+      productReadiness: {
+        ...dashboardState.setupStatus.productReadiness,
+        dictation: { domain: "dictation", state: "blocked", cause: null },
+        meetingsCapture: { domain: "meetings_capture", state: "blocked", cause: null },
+      },
+    };
+
+    render(<DashboardView />);
+
     fireEvent.click(screen.getByRole("button", { name: "Set up dictation" }));
     fireEvent.click(screen.getByRole("button", { name: "Set up meetings" }));
-
     expect(requestOnboarding).toHaveBeenNthCalledWith(1, "dictation");
     expect(requestOnboarding).toHaveBeenNthCalledWith(2, "meetings");
+    expect(requestReadinessDestination).not.toHaveBeenCalled();
+  });
+
+  it("waits for readiness before enabling capture or recovery actions", () => {
+    dashboardState.setupStatus = { ...dashboardState.setupStatus, loading: true };
+
+    render(<DashboardView />);
+
+    expect(screen.getByRole("button", { name: "Start dictation" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Open meetings" })).toBeDisabled();
+    expect(requestOnboarding).not.toHaveBeenCalled();
+    expect(requestReadinessDestination).not.toHaveBeenCalled();
   });
 
   it("uses the canonical snapshot when legacy readiness booleans disagree", async () => {
@@ -370,6 +529,7 @@ describe("DashboardView memory chat", () => {
       meetingReady: true,
       fullCaptureReady: true,
       loading: false,
+      meetingNotesRoute: { state: "ready", reason: null },
       productReadiness: {
         evidenceObservedAt: 4,
         dictation: {
@@ -433,9 +593,10 @@ describe("DashboardView memory chat", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Review dictation setup" }),
     );
-    expect(requestMainView).toHaveBeenCalledWith("dictation");
-    fireEvent.click(screen.getByRole("button", { name: "Set up dictation" }));
-    expect(requestOnboarding).toHaveBeenCalledWith("dictation");
+    expect(requestReadinessDestination).toHaveBeenCalledWith("models");
+    fireEvent.click(screen.getByRole("button", { name: "Dictation: Review models" }));
+    expect(requestReadinessDestination).toHaveBeenCalledTimes(2);
+    expect(requestOnboarding).not.toHaveBeenCalled();
   });
 
   it("opens a recent meeting in its own workspace", async () => {
@@ -514,7 +675,9 @@ describe("DashboardView memory chat", () => {
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await screen.findByText("You agreed to hold pricing at the current plan for Q3.");
-    expect(askMemory).toHaveBeenNthCalledWith(1, "What did we decide about pricing?");
+    expect(askMemory).toHaveBeenNthCalledWith(1, "What did we decide about pricing?", {
+      searchQuery: "What did we decide about pricing?",
+    });
 
     fireEvent.change(screen.getByPlaceholderText("Ask about your meetings..."), {
       target: { value: "What was still unresolved?" },
@@ -532,6 +695,9 @@ describe("DashboardView memory chat", () => {
     expect(secondPrompt).toContain("User: What did we decide about pricing?");
     expect(secondPrompt).toContain("Assistant: You agreed to hold pricing at the current plan for Q3.");
     expect(secondPrompt).toContain("New user question: What was still unresolved?");
+    // The thread is context for the answer only: the search looks for the
+    // new question, not every word said so far.
+    expect(askMemory.mock.calls[1][1]).toEqual({ searchQuery: "What was still unresolved?" });
     expect(screen.getByRole("button", { name: "Clear thread" })).toBeInTheDocument();
     expect(screen.getByText("Relationship Memory")).toBeInTheDocument();
     expect(screen.getByText("Jonathan Reed")).toBeInTheDocument();

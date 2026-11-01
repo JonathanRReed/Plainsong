@@ -1,0 +1,1362 @@
+{
+  "schema": "plainsong-notes-variants-gold-v1",
+  "description": "Hand-written meaning annotations for docs/evals/notes-variants-holdout-r6-fixtures.json, written blind to earlier held-out rounds. Terms are lowercase prefixes matched against canonicalized words: number words become digits and ordinal suffixes are dropped. A commitment is mentioned when one verb prefix and one object prefix occur outside a condition span. Condition terms must all occur in the attached condition span. Dates list canonical forms, after any spoken correction; owners, dates and quantities are the final meaning after corrections (for example the school trip needs 4 coaches, not 3, and the X-ray engineer is booked by Ravi for the 19th). key marks a decision or conditional commitment that the prose must state with its condition and date. action marks a commitment that the action list must contain. Statuses list the only status or completion assertions the source makes. labels lists spoken headings or capture labels that name no participant, deliverable or product; a claim may not use a word that occurs only inside one. numbers lists each quantity (not calendar dates) with the prefixes of the words it is stated with in its own clause, and restriction prefixes a restatement must keep. actors maps each person to the verb prefixes the source makes that person the subject of, including speech acts the person actually made. Supplier, product and place names (Halvorsen, Kettering, Brightwell, Kestrel, Hartley, Marlow) are not people and have no actor entry.",
+  "families": {
+    "heldout6-dental-rota": {
+      "fixtures": [
+        "heldout6-dental-rota"
+      ],
+      "commitments": [
+        {
+          "id": "clinic",
+          "owner": null,
+          "verb": [
+            "move"
+          ],
+          "object": [
+            "clinic",
+            "saturday"
+          ],
+          "condition": [
+            "cosima",
+            "find",
+            "second",
+            "hygienist"
+          ],
+          "dates": [
+            "october 9"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "shift",
+          "owner": "Ravi",
+          "verb": [
+            "cover"
+          ],
+          "object": [
+            "shift",
+            "late"
+          ],
+          "condition": [
+            "lab",
+            "deliver",
+            "crown",
+            "early"
+          ],
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "sterilizer",
+          "owner": "Dag",
+          "verb": [
+            "order"
+          ],
+          "object": [
+            "sterilizer"
+          ],
+          "condition": null,
+          "dates": [
+            "28"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "xray",
+          "owner": "Ravi",
+          "verb": [
+            "book"
+          ],
+          "object": [
+            "engineer"
+          ],
+          "condition": null,
+          "dates": [
+            "19"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "lunch",
+          "owner": "Cosima",
+          "verb": [
+            "change"
+          ],
+          "object": [
+            "lunch",
+            "cover"
+          ],
+          "condition": [
+            "wilhelmina",
+            "sign",
+            "rota"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "hours",
+          "owner": null,
+          "verb": [
+            "extend"
+          ],
+          "object": [
+            "hour"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "engineer"
+          ],
+          "status": [
+            "leave"
+          ]
+        },
+        {
+          "subject": [
+            "patient",
+            "reminder",
+            "text"
+          ],
+          "status": [
+            "fix"
+          ]
+        },
+        {
+          "subject": [
+            "hygiene",
+            "audit"
+          ],
+          "status": [
+            "approv"
+          ]
+        }
+      ],
+      "labels": [
+        "Rota",
+        "Supplies"
+      ],
+      "numbers": [
+        {
+          "value": "45",
+          "terms": [
+            "pound",
+            "box",
+            "glove",
+            "halvorsen",
+            "quot",
+            "supplier"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "38",
+          "terms": [
+            "pound",
+            "box",
+            "order",
+            "halvorsen",
+            "quot",
+            "supplier"
+          ],
+          "restriction": [
+            "order",
+            "20"
+          ]
+        },
+        {
+          "value": "20",
+          "terms": [
+            "order",
+            "box",
+            "more",
+            "pound"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Wilhelmina": [
+          "agree",
+          "sign"
+        ],
+        "Ravi": [
+          "cover",
+          "book",
+          "has"
+        ],
+        "Cosima": [
+          "find",
+          "decid",
+          "change"
+        ],
+        "Dag": [
+          "order",
+          "book"
+        ],
+        "Ines": [
+          "told"
+        ]
+      }
+    },
+    "heldout6-podcast-production": {
+      "fixtures": [
+        "heldout6-podcast-production"
+      ],
+      "commitments": [
+        {
+          "id": "publish",
+          "owner": null,
+          "verb": [
+            "publish"
+          ],
+          "object": [
+            "season"
+          ],
+          "condition": [
+            "sponsor",
+            "read",
+            "record"
+          ],
+          "dates": [
+            "november 14"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "email",
+          "owner": "Marisol",
+          "verb": [
+            "email"
+          ],
+          "object": [
+            "guest"
+          ],
+          "condition": null,
+          "dates": [
+            "wednesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "proofread",
+          "owner": "Yevgenia",
+          "verb": [
+            "proofread"
+          ],
+          "object": [
+            "transcript"
+          ],
+          "condition": [
+            "audio",
+            "file",
+            "shared",
+            "folder"
+          ],
+          "dates": [
+            "10"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "trailer",
+          "owner": "Lorcan",
+          "verb": [
+            "send"
+          ],
+          "object": [
+            "trailer"
+          ],
+          "condition": null,
+          "dates": [
+            "19"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "invoice",
+          "owner": "Lorcan",
+          "verb": [
+            "pay"
+          ],
+          "object": [
+            "invoice"
+          ],
+          "condition": [
+            "final",
+            "artwork",
+            "approv"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "episode",
+          "owner": null,
+          "verb": [
+            "add"
+          ],
+          "object": [
+            "episode"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "feed"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "team"
+          ],
+          "status": [
+            "away"
+          ]
+        },
+        {
+          "subject": [
+            "spreadsheet"
+          ],
+          "status": [
+            "done"
+          ]
+        },
+        {
+          "subject": [
+            "sponsor",
+            "read"
+          ],
+          "status": [
+            "record"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "artwork"
+          ],
+          "status": [
+            "approv"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Episodes",
+        "Guests",
+        "Budget",
+        "Hosting"
+      ],
+      "numbers": [
+        {
+          "value": "3",
+          "terms": [
+            "guest",
+            "email",
+            "interview",
+            "slot"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "120",
+          "terms": [
+            "mix",
+            "cost",
+            "pound",
+            "episode"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "90",
+          "terms": [
+            "mix",
+            "pound",
+            "episode",
+            "book"
+          ],
+          "restriction": [
+            "book",
+            "10"
+          ]
+        },
+        {
+          "value": "10",
+          "terms": [
+            "book",
+            "episode",
+            "go"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Lorcan": [
+          "decid",
+          "send",
+          "pay"
+        ],
+        "Marisol": [
+          "email",
+          "said"
+        ],
+        "Thaddeus": [
+          "book",
+          "make"
+        ],
+        "Yevgenia": [
+          "agree",
+          "proofread"
+        ],
+        "Dorrit": [
+          "told"
+        ]
+      }
+    },
+    "heldout6-school-trip": {
+      "fixtures": [
+        "heldout6-school-trip"
+      ],
+      "commitments": [
+        {
+          "id": "trip",
+          "owner": null,
+          "verb": [
+            "take"
+          ],
+          "object": [
+            "group",
+            "geography"
+          ],
+          "condition": [
+            "permission",
+            "slip",
+            "come",
+            "back",
+            "40"
+          ],
+          "dates": [
+            "october 22"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "coaches",
+          "owner": "Anselm",
+          "verb": [
+            "book"
+          ],
+          "object": [
+            "coach"
+          ],
+          "condition": [
+            "headteacher",
+            "sign",
+            "risk",
+            "assessment"
+          ],
+          "dates": [
+            "14"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "chase",
+          "owner": "Osei",
+          "verb": [
+            "chase"
+          ],
+          "object": [
+            "parent",
+            "payment"
+          ],
+          "condition": [
+            "rosalind",
+            "sen",
+            "reminder",
+            "letter"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "collect",
+          "owner": "Rosalind",
+          "verb": [
+            "collect"
+          ],
+          "object": [
+            "slip"
+          ],
+          "condition": null,
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "secondtrip",
+          "owner": null,
+          "verb": [
+            "run"
+          ],
+          "object": [
+            "trip"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "workshop",
+            "room"
+          ],
+          "status": [
+            "book"
+          ]
+        },
+        {
+          "subject": [
+            "risk",
+            "assessment",
+            "draft"
+          ],
+          "status": [
+            "done"
+          ]
+        },
+        {
+          "subject": [
+            "parent",
+            "helper",
+            "list"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "minibus"
+          ],
+          "status": [
+            "repair"
+          ]
+        },
+        {
+          "subject": [
+            "headteacher"
+          ],
+          "status": [
+            "sign"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Trip planning",
+        "Transport",
+        "Costs"
+      ],
+      "numbers": [
+        {
+          "value": "40",
+          "terms": [
+            "permission",
+            "slip",
+            "come",
+            "back"
+          ],
+          "restriction": [
+            "least"
+          ]
+        },
+        {
+          "value": "4",
+          "terms": [
+            "coach",
+            "need",
+            "pupil"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "12",
+          "terms": [
+            "trip",
+            "pound",
+            "pupil"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "8",
+          "terms": [
+            "pound",
+            "pupil",
+            "free",
+            "school",
+            "meal"
+          ],
+          "restriction": [
+            "free",
+            "meal"
+          ]
+        }
+      ],
+      "actors": {
+        "Gwendolyn": [
+          "decid",
+          "agree",
+          "told"
+        ],
+        "Osei": [
+          "need",
+          "chase",
+          "told"
+        ],
+        "Rosalind": [
+          "sen",
+          "collect",
+          "get"
+        ],
+        "Anselm": [
+          "book",
+          "ask"
+        ],
+        "Fitzroy": [
+          "told"
+        ]
+      }
+    },
+    "heldout6-bike-coop": {
+      "fixtures": [
+        "heldout6-bike-coop"
+      ],
+      "commitments": [
+        {
+          "id": "sessions",
+          "owner": null,
+          "verb": [
+            "open"
+          ],
+          "object": [
+            "session",
+            "drop"
+          ],
+          "condition": [
+            "2",
+            "volunteer",
+            "sign"
+          ],
+          "dates": [
+            "november 6"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "tubes",
+          "owner": "Calla",
+          "verb": [
+            "order"
+          ],
+          "object": [
+            "tube"
+          ],
+          "condition": null,
+          "dates": [
+            "tuesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "invoice",
+          "owner": "Calla",
+          "verb": [
+            "pay"
+          ],
+          "object": [
+            "invoice"
+          ],
+          "condition": [
+            "magnus",
+            "check",
+            "stock",
+            "count"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "popup",
+          "owner": "Magnus",
+          "verb": [
+            "run"
+          ],
+          "object": [
+            "pop",
+            "market"
+          ],
+          "condition": null,
+          "dates": [
+            "15"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "bikes",
+          "owner": null,
+          "verb": [
+            "sell"
+          ],
+          "object": [
+            "bike"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "repair",
+            "stand"
+          ],
+          "status": [
+            "arriv"
+          ]
+        },
+        {
+          "subject": [
+            "wall",
+            "rack"
+          ],
+          "status": [
+            "fit"
+          ]
+        },
+        {
+          "subject": [
+            "repair",
+            "grant"
+          ],
+          "status": [
+            "approv"
+          ]
+        }
+      ],
+      "labels": [
+        "Workshop",
+        "Prices",
+        "Stands"
+      ],
+      "numbers": [
+        {
+          "value": "2",
+          "terms": [
+            "volunteer",
+            "sign",
+            "night"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "25",
+          "terms": [
+            "basic",
+            "service",
+            "pound"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "15",
+          "terms": [
+            "basic",
+            "service",
+            "pound",
+            "member"
+          ],
+          "restriction": [
+            "member"
+          ]
+        },
+        {
+          "value": "60",
+          "terms": [
+            "full",
+            "overhaul",
+            "pound"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "40",
+          "terms": [
+            "full",
+            "overhaul",
+            "pound",
+            "member"
+          ],
+          "restriction": [
+            "member"
+          ]
+        }
+      ],
+      "actors": {
+        "Isidore": [
+          "agree",
+          "want"
+        ],
+        "Calla": [
+          "order",
+          "pay"
+        ],
+        "Magnus": [
+          "check",
+          "run"
+        ],
+        "Bettina": [
+          "decid",
+          "told"
+        ],
+        "Tamar": [
+          "told"
+        ]
+      }
+    },
+    "heldout6-translation-agency": {
+      "fixtures": [
+        "heldout6-translation-agency"
+      ],
+      "commitments": [
+        {
+          "id": "deliver",
+          "owner": null,
+          "verb": [
+            "deliver"
+          ],
+          "object": [
+            "manual"
+          ],
+          "condition": [
+            "client",
+            "send",
+            "final",
+            "diagram"
+          ],
+          "dates": [
+            "december 4"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "glossary",
+          "owner": "Ambrose",
+          "verb": [
+            "finish"
+          ],
+          "object": [
+            "glossary"
+          ],
+          "condition": null,
+          "dates": [
+            "wednesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "review",
+          "owner": "Ambrose",
+          "verb": [
+            "start"
+          ],
+          "object": [
+            "review"
+          ],
+          "condition": [
+            "lindiwe",
+            "upload",
+            "style",
+            "guide"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "upload",
+          "owner": "Lindiwe",
+          "verb": [
+            "upload"
+          ],
+          "object": [
+            "guide",
+            "style"
+          ],
+          "condition": null,
+          "dates": [
+            "tuesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "quote",
+          "owner": "Cormac",
+          "verb": [
+            "send"
+          ],
+          "object": [
+            "quote"
+          ],
+          "condition": null,
+          "dates": [
+            "december 2"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "rush",
+          "owner": null,
+          "verb": [
+            "take"
+          ],
+          "object": [
+            "job",
+            "rush"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        },
+        {
+          "id": "contract",
+          "owner": "Cormac",
+          "verb": [
+            "accept"
+          ],
+          "object": [
+            "contract"
+          ],
+          "condition": [
+            "zuzana",
+            "approv",
+            "rate"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "hartley",
+            "translation",
+            "memory"
+          ],
+          "status": [
+            "migrat"
+          ]
+        },
+        {
+          "subject": [
+            "legal",
+            "review"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "invoice"
+          ],
+          "status": [
+            "paid"
+          ]
+        }
+      ],
+      "labels": [
+        "Projects",
+        "Rates",
+        "Quality"
+      ],
+      "numbers": [
+        {
+          "value": "14",
+          "terms": [
+            "cent",
+            "word",
+            "translation"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "11",
+          "terms": [
+            "cent",
+            "word",
+            "repeat",
+            "client"
+          ],
+          "restriction": [
+            "repeat",
+            "client"
+          ]
+        }
+      ],
+      "actors": {
+        "Zuzana": [
+          "decid",
+          "told",
+          "approv"
+        ],
+        "Ambrose": [
+          "finish",
+          "start"
+        ],
+        "Lindiwe": [
+          "upload"
+        ],
+        "Cormac": [
+          "upload",
+          "send",
+          "agree",
+          "accept"
+        ],
+        "Dalia": [
+          "told"
+        ]
+      }
+    },
+    "heldout6-community-radio": {
+      "fixtures": [
+        "heldout6-community-radio"
+      ],
+      "commitments": [
+        {
+          "id": "folk",
+          "owner": null,
+          "verb": [
+            "move"
+          ],
+          "object": [
+            "hour",
+            "folk"
+          ],
+          "condition": [
+            "studio",
+            "free"
+          ],
+          "dates": [
+            "may 5"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "email",
+          "owner": "Jarek",
+          "verb": [
+            "email"
+          ],
+          "object": [
+            "business"
+          ],
+          "condition": [
+            "octavia",
+            "writ"
+          ],
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "record",
+          "owner": "Leona",
+          "verb": [
+            "record"
+          ],
+          "object": [
+            "jingle"
+          ],
+          "condition": [
+            "choir",
+            "12",
+            "singer"
+          ],
+          "dates": [
+            "saturday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "aerial",
+          "owner": "Dhruv",
+          "verb": [
+            "fix"
+          ],
+          "object": [
+            "aerial"
+          ],
+          "condition": [
+            "rain"
+          ],
+          "dates": [
+            "30"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "edit",
+          "owner": "Leona",
+          "verb": [
+            "edit"
+          ],
+          "object": [
+            "jingle"
+          ],
+          "condition": [
+            "dhruv",
+            "sen",
+            "final",
+            "lyric"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "phonein",
+          "owner": null,
+          "verb": [
+            "air"
+          ],
+          "object": [
+            "phone"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "broadcast",
+            "licence",
+            "renewal"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "mixing",
+            "desk"
+          ],
+          "status": [
+            "deliver"
+          ]
+        },
+        {
+          "subject": [
+            "old",
+            "desk"
+          ],
+          "status": [
+            "sold"
+          ]
+        },
+        {
+          "subject": [
+            "grant",
+            "application"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "van"
+          ],
+          "status": [
+            "back"
+          ]
+        },
+        {
+          "subject": [
+            "studio"
+          ],
+          "status": [
+            "free"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Schedule",
+        "Fundraising",
+        "Membership",
+        "Jingle",
+        "Studio"
+      ],
+      "numbers": [
+        {
+          "value": "20",
+          "terms": [
+            "member",
+            "pound",
+            "year"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "12",
+          "terms": [
+            "pound",
+            "student",
+            "pensioner"
+          ],
+          "restriction": [
+            "student",
+            "pensioner"
+          ]
+        },
+        {
+          "value": "640",
+          "terms": [
+            "station",
+            "insurance",
+            "cost",
+            "pound"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "12",
+          "terms": [
+            "choir",
+            "singer"
+          ],
+          "restriction": [
+            "least"
+          ]
+        }
+      ],
+      "actors": {
+        "Octavia": [
+          "agree",
+          "mean",
+          "writ",
+          "told"
+        ],
+        "Jarek": [
+          "email",
+          "told"
+        ],
+        "Dhruv": [
+          "fix",
+          "send"
+        ],
+        "Leona": [
+          "record",
+          "ask",
+          "decid",
+          "edit"
+        ]
+      }
+    }
+  }
+}

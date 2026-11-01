@@ -7,11 +7,11 @@ import {
   downloadHeadersForUrl,
   inspectBundleArchive,
   unsafeArchiveMemberReason,
-} from "../../scripts/provision-asr-assets.mjs";
+} from "../../scripts/provision-asr-assets.ts";
 
 const appRoot = path.resolve(import.meta.dirname, "../..");
 const provisionScript = fs.readFileSync(
-  path.join(appRoot, "scripts/provision-asr-assets.mjs"),
+  path.join(appRoot, "scripts/provision-asr-assets.ts"),
   "utf8",
 );
 
@@ -20,8 +20,12 @@ describe("ASR asset provisioning integrity", () => {
     expect(provisionScript).not.toMatch(/resolve\/(?:main|master)\//);
     expect(provisionScript).toContain("createHash");
     expect(provisionScript).toContain("integrity verification failed");
-    expect(provisionScript).toContain("plainsong-model-integrity-v1");
-    expect(provisionScript).toContain(".plainsong-integrity");
+  });
+
+  it("writes no verification record beside a model", () => {
+    expect(provisionScript).not.toContain("plainsong-model-integrity-v1");
+    expect(provisionScript).not.toMatch(/writeFileSync\([^)]*plainsong-integrity/);
+    expect(provisionScript).toContain("verifyPresentPinnedArtifacts");
   });
 
   it("provisions Moonshine tokenizer data from the model-specific repository", () => {

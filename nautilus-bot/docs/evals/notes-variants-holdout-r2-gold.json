@@ -1,0 +1,878 @@
+{
+  "schema": "plainsong-notes-variants-gold-v1",
+  "description": "Meaning annotations for notes-variants-holdout-r2-fixtures.json, in the format of notes-variants-gold.json, plus three fields per family. labels lists exact spoken heading or recording-label phrases that name the recording or an agenda section, never a person, deliverable or product. numbers lists every quantity and price (not calendar dates): value is the canonical digit string, terms are lowercase prefixes of the noun, subject and modifiers the number is attached to in its own source clause, and restriction lists prefixes that a correct restatement of that number must keep (empty when unrestricted). actors maps each person to the verb prefixes that person may correctly be the grammatical subject of: their own commitments, conditions they are the subject of, actions the source says they did, and speech acts they actually performed. Every term is attested as a prefix of a canonicalized word in its meeting's source text. Dates use canonical forms; a spoken correction leaves only the corrected date.",
+  "families": {
+    "heldout2-quarterly-sync": {
+      "fixtures": [
+        "heldout2-quarterly-sync"
+      ],
+      "labels": [
+        "Quarterly sync"
+      ],
+      "commitments": [
+        {
+          "id": "renew",
+          "owner": null,
+          "verb": [
+            "renew"
+          ],
+          "object": [
+            "licens",
+            "marlowe"
+          ],
+          "condition": [
+            "financ",
+            "sign"
+          ],
+          "dates": [
+            "9"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "update",
+          "owner": "Joren",
+          "verb": [
+            "updat"
+          ],
+          "object": [
+            "seat"
+          ],
+          "condition": null,
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "email",
+          "owner": "Joren",
+          "verb": [
+            "email"
+          ],
+          "object": [
+            "manager",
+            "quillon"
+          ],
+          "condition": null,
+          "dates": [
+            "tuesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "storage",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "storage"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "security",
+            "audit"
+          ],
+          "status": [
+            "done",
+            "complet",
+            "finish"
+          ]
+        }
+      ],
+      "numbers": [
+        {
+          "value": "48",
+          "terms": [
+            "seat",
+            "use"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "40",
+          "terms": [
+            "user",
+            "month",
+            "quillon",
+            "offer",
+            "marlowe"
+          ],
+          "restriction": [
+            "two",
+            "year"
+          ]
+        },
+        {
+          "value": "1200",
+          "terms": [
+            "onboard",
+            "packag",
+            "flat"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Ana": [
+          "agree"
+        ],
+        "Joren": [
+          "updat",
+          "email"
+        ],
+        "Pilar": [
+          "ask"
+        ]
+      }
+    },
+    "heldout2-warehouse-staffing": {
+      "fixtures": [
+        "heldout2-warehouse-staffing"
+      ],
+      "labels": [
+        "Agenda item one, inventory",
+        "Agenda item two, staffing",
+        "Agenda item three, safety"
+      ],
+      "commitments": [
+        {
+          "id": "post",
+          "owner": "Dara",
+          "verb": [
+            "post"
+          ],
+          "object": [
+            "ads",
+            "job"
+          ],
+          "condition": [
+            "bram",
+            "approv"
+          ],
+          "dates": [
+            "thursday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "approve",
+          "owner": "Bram",
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "budget"
+          ],
+          "condition": [
+            "cleo",
+            "send"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "send",
+          "owner": "Cleo",
+          "verb": [
+            "send"
+          ],
+          "object": [
+            "shift",
+            "plan"
+          ],
+          "condition": null,
+          "dates": [
+            "14"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "forklift",
+            "inspection"
+          ],
+          "status": [
+            "done",
+            "complet",
+            "finish"
+          ]
+        }
+      ],
+      "numbers": [
+        {
+          "value": "340",
+          "terms": [
+            "pallet",
+            "north",
+            "bay",
+            "cleo",
+            "count"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "85",
+          "terms": [
+            "return",
+            "dara",
+            "scan"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "6",
+          "terms": [
+            "extra",
+            "picker",
+            "holiday",
+            "peak",
+            "need"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "18500",
+          "terms": [
+            "temp",
+            "budget"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Bram": [
+          "approv"
+        ],
+        "Cleo": [
+          "count",
+          "send"
+        ],
+        "Dara": [
+          "scan",
+          "post",
+          "correct"
+        ]
+      }
+    },
+    "heldout2-cowork-desks": {
+      "fixtures": [
+        "heldout2-cowork-desks"
+      ],
+      "labels": [
+        "Space planning call"
+      ],
+      "commitments": [
+        {
+          "id": "sign",
+          "owner": null,
+          "verb": [
+            "sign"
+          ],
+          "object": [
+            "agreement",
+            "desk"
+          ],
+          "condition": [
+            "price",
+            "chang"
+          ],
+          "dates": [
+            "april 3"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "setup",
+          "owner": "Hiro",
+          "verb": [
+            "set"
+          ],
+          "object": [
+            "odette"
+          ],
+          "condition": null,
+          "dates": [
+            "wednesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "keys",
+          "owner": "Gus",
+          "verb": [
+            "give"
+          ],
+          "object": [
+            "key"
+          ],
+          "condition": [
+            "hiro",
+            "finish"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "parking",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "parking"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "fire",
+            "walkthrough"
+          ],
+          "status": [
+            "done",
+            "complet",
+            "finish"
+          ]
+        }
+      ],
+      "numbers": [
+        {
+          "value": "12",
+          "terms": [
+            "desk",
+            "northgate",
+            "common",
+            "give"
+          ],
+          "restriction": [
+            "except",
+            "friday"
+          ]
+        },
+        {
+          "value": "3",
+          "terms": [
+            "hour",
+            "week",
+            "meeting",
+            "room"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Fenna": [
+          "suggest"
+        ],
+        "Gus": [
+          "agree",
+          "give"
+        ],
+        "Hiro": [
+          "set",
+          "finish"
+        ]
+      }
+    },
+    "heldout2-grant-report": {
+      "fixtures": [
+        "heldout2-grant-report"
+      ],
+      "labels": [
+        "Board prep"
+      ],
+      "commitments": [
+        {
+          "id": "submit",
+          "owner": "Lior",
+          "verb": [
+            "submit"
+          ],
+          "object": [
+            "report"
+          ],
+          "condition": [
+            "maren",
+            "sign"
+          ],
+          "dates": [
+            "thursday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "sign",
+          "owner": "Maren",
+          "verb": [
+            "sign"
+          ],
+          "object": [
+            "budget",
+            "page"
+          ],
+          "condition": [
+            "kenji",
+            "check"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "check",
+          "owner": "Kenji",
+          "verb": [
+            "check"
+          ],
+          "object": [
+            "total"
+          ],
+          "condition": null,
+          "dates": [
+            "monday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "volunteer",
+            "survey"
+          ],
+          "status": [
+            "done",
+            "complet",
+            "finish"
+          ]
+        }
+      ],
+      "numbers": [
+        {
+          "value": "1900",
+          "terms": [
+            "household",
+            "reach",
+            "wren",
+            "project"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "260",
+          "terms": [
+            "hour",
+            "volunteer",
+            "log"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "72000",
+          "terms": [
+            "grant",
+            "budget",
+            "wren",
+            "next",
+            "year"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "2",
+          "terms": [
+            "field",
+            "coordinator",
+            "plan",
+            "cover"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Ivo": [
+          "ask"
+        ],
+        "Kenji": [
+          "check"
+        ],
+        "Lior": [
+          "submit"
+        ],
+        "Maren": [
+          "sign",
+          "correct"
+        ]
+      }
+    },
+    "heldout2-app-launch": {
+      "fixtures": [
+        "heldout2-app-launch"
+      ],
+      "labels": [
+        "Launch review",
+        "Pricing"
+      ],
+      "commitments": [
+        {
+          "id": "release",
+          "owner": null,
+          "verb": [
+            "releas"
+          ],
+          "object": [
+            "tobin"
+          ],
+          "condition": [
+            "payment",
+            "test",
+            "pass"
+          ],
+          "dates": [
+            "22"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "notes",
+          "owner": "Oskar",
+          "verb": [
+            "writ"
+          ],
+          "object": [
+            "note"
+          ],
+          "condition": null,
+          "dates": [
+            "wednesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "page",
+          "owner": "Tali",
+          "verb": [
+            "updat"
+          ],
+          "object": [
+            "page"
+          ],
+          "condition": [
+            "nadia",
+            "approv"
+          ],
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "announce",
+          "owner": "Tali",
+          "verb": [
+            "announc"
+          ],
+          "object": [
+            "price"
+          ],
+          "condition": [
+            "payment",
+            "test",
+            "pass"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "android",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "android"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "accessibility",
+            "review"
+          ],
+          "status": [
+            "done",
+            "complet",
+            "finish"
+          ]
+        }
+      ],
+      "numbers": [
+        {
+          "value": "9",
+          "terms": [
+            "student",
+            "plan",
+            "month"
+          ],
+          "restriction": [
+            "school",
+            "email"
+          ]
+        },
+        {
+          "value": "15",
+          "terms": [
+            "standard",
+            "plan",
+            "month"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Nadia": [
+          "agree",
+          "approv"
+        ],
+        "Oskar": [
+          "writ",
+          "suggest"
+        ],
+        "Tali": [
+          "updat",
+          "announc"
+        ]
+      }
+    },
+    "heldout2-street-festival": {
+      "fixtures": [
+        "heldout2-street-festival"
+      ],
+      "labels": [
+        "Festival committee",
+        "Logistics"
+      ],
+      "commitments": [
+        {
+          "id": "book",
+          "owner": null,
+          "verb": [
+            "book"
+          ],
+          "object": [
+            "crew",
+            "stage"
+          ],
+          "condition": [
+            "council",
+            "grant"
+          ],
+          "dates": [
+            "may 19"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "draft",
+          "owner": "Rhea",
+          "verb": [
+            "draft"
+          ],
+          "object": [
+            "rota"
+          ],
+          "condition": null,
+          "dates": [
+            "saturday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "wristbands",
+          "owner": "Theo",
+          "verb": [
+            "order"
+          ],
+          "object": [
+            "wristband"
+          ],
+          "condition": [
+            "permit",
+            "arriv"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "maps",
+          "owner": "Theo",
+          "verb": [
+            "print"
+          ],
+          "object": [
+            "map"
+          ],
+          "condition": [
+            "rhea",
+            "finish"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "fireworks",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "firework"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "insurance",
+            "renewal"
+          ],
+          "status": [
+            "done",
+            "complet",
+            "finish"
+          ]
+        }
+      ],
+      "numbers": [
+        {
+          "value": "2",
+          "terms": [
+            "stall",
+            "power",
+            "outlet",
+            "each"
+          ],
+          "restriction": [
+            "except",
+            "food",
+            "truck"
+          ]
+        },
+        {
+          "value": "30",
+          "terms": [
+            "picnic",
+            "table",
+            "site"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "18",
+          "terms": [
+            "volunteer",
+            "theo",
+            "sign"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "24",
+          "terms": [
+            "stall",
+            "rhea",
+            "confirm"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Quinn": [
+          "agree"
+        ],
+        "Rhea": [
+          "draft",
+          "confirm",
+          "finish"
+        ],
+        "Sami": [
+          "correct",
+          "ask"
+        ],
+        "Theo": [
+          "sign",
+          "order",
+          "print"
+        ]
+      }
+    }
+  }
+}

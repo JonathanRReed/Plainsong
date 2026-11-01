@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { isRendererCommandAllowed } from "../../electron/ipc-bridge";
 import { getCommandTimeoutMs } from "../../electron/ipc-command-policy";
 import { buildPlaybackResponse, parseRangeHeader } from "../../electron/playback-range";
@@ -10,6 +10,10 @@ import {
   isPlaybackToken,
 } from "../../electron/playback-tokens";
 import { playbackTokenFromUrl, playbackUrl } from "../../electron/renderer-protocol";
+
+vi.mock("electron/main", () => ({
+  ipcMain: { handle: vi.fn() },
+}));
 
 const TOKEN = "0123456789abcdef0123456789abcdef";
 const OTHER = "fedcba9876543210fedcba9876543210";

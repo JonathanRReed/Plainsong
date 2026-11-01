@@ -1,12 +1,35 @@
+import { resolveQaUpdateFeedUrl, restrictQaUpdateSession } from "./qa-update-feed";
+import { editSettings } from "./settings-patch";
+import { copyOverlayText } from "./overlay-clipboard";
+import { parseOverlayNotesFocusRequest, setOverlayNotesFocus } from "./overlay-notes-focus";
+import { calendarConferenceUrl } from "./calendar-conference-url";
+import { prepareMainRendererQuit, trackRendererQuitHealth } from "./renderer-quit-guard";
+import { createMainWindowRequests } from "./main-window-requests";
+import { createMainWindowIdleController, MAIN_WINDOW_IDLE_MS } from "./main-window-idle";
+import { createRendererCloseGuard } from "./renderer-close-guard";
+import { createMeetingQuitDraftCoordinator } from "./meeting-quit-drafts";
+import { createUpdaterQuitHandoff } from "./updater-quit-handoff";
+import { createRendererRecoveryPolicy, sendRendererEvent } from "./renderer-recovery";
+import { bindNotificationActions } from "./notification-actions";
 import {
   ELECTRON_MODULE_ENTRY_AT,
   formatLaunchMilestone,
   parseRendererLaunchMilestone,
   type LaunchMilestoneName,
 } from "./launch-milestones";
+import { ChatGPTAccountStore, createChatGPTStorageCipher } from "./chatgpt-account-store";
+import { createChatGPTPlanSession } from "./chatgpt-plan-session";
+import { createChatGPTPlanController } from "./chatgpt-plan-controller";
+import { startChatGPTPlanRelay } from "./chatgpt-plan-relay";
+
+let chatgptRemoteProcessingEnabled = false;
+let chatgptPlanController: ReturnType<typeof createChatGPTPlanController> | null = null;
+let chatgptPlanRelay: Awaited<ReturnType<typeof startChatGPTPlanRelay>> | null = null;
+
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   globalShortcut,
   ipcMain,
@@ -16,6 +39,8 @@ import {
   protocol,
   screen,
   session,
+  systemPreferences,
+  safeStorage,
   Tray,
   type IpcMainInvokeEvent,
   type IpcMainEvent,
@@ -24,11 +49,13 @@ import { nativeImage, shell } from "electron/common";
 import { execFile, spawn } from "child_process";
 import {
   dictationSoundForTransition,
+  dictationStartSoundDelayMs,
   playDictationSound,
   type DictationSound,
 } from "./dictation-sounds";
-import { createMediaMuteController, runAppleScript } from "./media-mute";
-import { describeTrayStatus } from "./tray-status";
+import { createMediaMuteController } from "./media-mute";
+import { createNativeMediaMuteBackend } from "./media-mute-runtime";
+import { describeTrayStatus, nextTrayRecoveryResults } from "./tray-status";
 import {
   createReadStream,
   appendFileSync,
@@ -51,6 +78,7 @@ import {
   cycleDictationMode,
   dictationBindingAllowsTapToLock,
   dictationBindingConflictSources,
+  dictationBindingSubmitsAfterInsert,
   electronFallbackDictationBindings,
   registrableDictationBindings,
   resolveDictationBindingBehavior,
@@ -66,8 +94,8 @@ import {
   dictationShortcutFailureMessage,
   resolveDictationShortcutBehavior,
   resolveDictationShortcutCapability,
+  resolveDictationShortcutStartOptions,
   shouldHandleDictationShortcutSource,
-  type DictationShortcutStartOptions,
 } from "./dictation-shortcut-controller";
 import { IpcBridge } from "./ipc-bridge";
 import os from "node:os";
@@ -76,16 +104,28 @@ import {
   diagnosticLogBuffer,
 } from "./diagnostic-log-buffer";
 import {
+  createDictationEscapeFallback,
+  dictationSessionCanCancel,
   normalizeNativeShortcutEvent,
   normalizeNativeShortcutHelperShortcut,
   resolveNativeHelperConfigApplication,
-  synthesizeNativeShortcutRelease,
   trackNativeShortcutDownBindings,
   type NativeShortcutController,
   type NativeShortcutRawEvent,
 } from "./native-macos-shortcut";
 import { startNativeMacosShortcutController } from "./native-macos-shortcut-runtime";
 import { createMacosCalendarRuntime, type MacosCalendarRuntime } from "./macos-calendar-runtime";
+import { createCalendarNamesSync, type CalendarNamesSync } from "./macos-calendar-names";
+import { CALENDAR_SNAPSHOT_TTL_MS } from "./macos-calendar";
+import {
+  CONTACT_NAMES_REFRESH_MS,
+  createContactNamesSync,
+  type ContactNamesSync,
+} from "./macos-contact-names";
+import { resolveDictationVadStop } from "./dictation-vad-signal";
+import { createDictationQuitGuard, dictationQuitPromptContent, type DictationQuitPrompt, type DictationQuitChoice } from "./dictation-quit-guard";
+import { createMeetingTranscriptionQuitGuard, meetingTranscriptionQuitPromptContent } from "./meeting-transcription-quit-guard";
+import { describeLoginItem, type LoginItemReading } from "./login-item";
 import {
   convertShortcutToAccelerator,
   findConflictingShortcuts,
@@ -134,6 +174,7 @@ import {
   type NotificationContext,
   type NotificationSettings,
   type PlainsongNotification,
+  type CallCaptureRequest,
 } from "./notification-policy";
 import {
   clampWindowSizeToWorkArea,
@@ -169,10 +210,14 @@ import {
   observeCaptureAdmissionForWindow,
 } from "./capture-admission";
 import { rendererPermissionAllowed } from "./renderer-permission-policy";
+import { checkMicrophonePermission, createMicrophoneAccessRequest, createMicrophonePermissionHandler } from "./microphone-permission";
 import { isAllowedExternalUrl } from "./external-url-policy";
+import { offerMoveToApplications } from "./move-to-applications";
+import { resolveQaUserData } from "./qa-user-data";
 import { trustedSenderFrameUrl } from "./trusted-sender";
 import {
   finalizeMeetingWithinBudget,
+  interruptedMeetingMessage,
   nextActiveMeetingPhase,
   nextActiveMeetingRecordingId,
   resolveMeetingStopId,
@@ -199,6 +244,26 @@ import {
   type CliInstallResult,
   type ExistingLinkPath,
 } from "./cli-install";
+
+const qaUpdateFeedUrl = resolveQaUpdateFeedUrl(
+  process.env.PLAINSONG_QA_UPDATE_FEED_URL,
+  (message) => console.warn(message),
+);
+
+const qaUserData = resolveQaUserData({
+  required: existsSync(path.join(process.resourcesPath, "LOCAL_QA_ONLY")),
+});
+if (qaUserData !== null) {
+  app.setPath("userData", qaUserData);
+  app.setPath("sessionData", qaUserData);
+  if (qaUpdateFeedUrl !== null) {
+    // Keep the staging lookup in the same temporary HOME used by ShipIt.
+    const qaHome = resolveQaUserData({
+      env: { ...process.env, PLAINSONG_QA_ELECTRON_PROFILE: process.env.HOME ?? "" },
+    });
+    if (qaHome !== null) app.setPath("home", qaHome);
+  }
+}
 
 const launchStartedAt = ELECTRON_MODULE_ENTRY_AT;
 const recordedLaunchMilestones = new Set<LaunchMilestoneName>();
@@ -293,6 +358,11 @@ if (isDev) {
 }
 
 let mainWindow: BrowserWindow | null = null;
+const mainWindowRequests = new WeakMap<BrowserWindow, ReturnType<typeof createMainWindowRequests>>();
+const rendererExitChecks = new WeakMap<BrowserWindow, () => boolean>();
+app.on("browser-window-created", (_event, win) => {
+  rendererExitChecks.set(win, trackRendererQuitHealth(win.webContents));
+});
 let ipcBridge: IpcBridge | null = null;
 
 /**
@@ -381,6 +451,8 @@ const IMPORTABLE_AUDIO_EXTENSIONS = ["wav", "mp3", "m4a", "aac", "mp4", "ogg", "
 // Session id from the most recent `dictation-state-changed` event, used to
 // drop stale VAD `silence_stop` signals emitted for an earlier session.
 let dictationSessionId: number | null = null;
+/** A start sound held for a Bluetooth input's profile switch. */
+let pendingStartSound: ReturnType<typeof setTimeout> | null = null;
 // Mirrors the sidecar's active meeting so a sidecar death can be reported
 // against the right recording. Dictation already had this; meetings did not,
 // so a crash mid-meeting left the UI showing "recording" indefinitely.
@@ -399,29 +471,18 @@ let alwaysOnTopEnabled = false;
 let showDictationOverlayEnabled = true;
 let dictationSoundsEnabled = true;
 let muteMediaWhileDictatingEnabled = false;
-// Only macOS has the output mute this drives; elsewhere the query answers
-// "already muted", so the controller never acts.
+// An aside dictates beside a call that is being recorded. Muting the output
+// for it would silence the call the person is in and leave the meeting's
+// system track blank, so the output mute never applies to one.
+let dictationMeetingAside = false;
 const mediaMute = createMediaMuteController({
-  run: process.platform === "darwin" ? runAppleScript : async () => "true",
+  backend: createNativeMediaMuteBackend({
+    platform: process.platform,
+    helperPath: getSidecarPath,
+    markerPath: mediaMuteMarkerPath,
+    log: (message) => console.warn("[media-mute]", message),
+  }),
   log: (message, error) => console.warn(message, error),
-  marker: {
-    // A file, so a launch after a hard kill mid-dictation can unmute the Mac.
-    set: () => {
-      try {
-        writeFileSync(mediaMuteMarkerPath(), "");
-      } catch (error) {
-        console.warn("[media-mute] could not write the mute marker", error);
-      }
-    },
-    clear: () => {
-      try {
-        unlinkSync(mediaMuteMarkerPath());
-      } catch {
-        // Already gone.
-      }
-    },
-    isSet: () => existsSync(mediaMuteMarkerPath()),
-  },
 });
 
 function mediaMuteMarkerPath(): string {
@@ -433,6 +494,9 @@ function mediaMuteMarkerPath(): string {
 let dictationLiveSince: number | null = null;
 let trayMeetingId: string | null = null;
 let trayMeetingStartedAt: number | null = null;
+// Pause bookkeeping for the menu-bar clock, from the sidecar's pause events.
+let trayMeetingPausedSince: number | null = null;
+let trayMeetingClosedPausedMs = 0;
 let trayClockTimer: ReturnType<typeof setInterval> | null = null;
 let showRecordingOverlayEnabled = true;
 // Mirror of `automation.localToolsEnabled`. Gates every `plainsong://` deep
@@ -519,6 +583,7 @@ let updateStatus: UpdateStatusPayload = { status: "unknown" };
 let updateInstallBlockedReason: "unsigned" | undefined;
 
 type AppSettings = {
+  privacy?: { remoteProcessingEnabled?: boolean };
   shortcuts?: {
     toggleDictation?: string;
     openWindow?: string;
@@ -527,12 +592,16 @@ type AppSettings = {
     dictationBindings?: DictationBinding[];
   };
   transcription?: {
+    dictationProfile?: string;
     dictationPushToTalk?: boolean;
     dictationHandsFreeEnabled?: boolean;
     dictationTapToLock?: boolean;
+    dictationDoubleTapToLock?: boolean;
     dictationModePreset?: string;
     dictationSelectedCustomModeId?: string | null;
     dictationCustomModes?: Array<{ id: string; name: string }>;
+    dictationContactNames?: boolean;
+    dictationCalendarNames?: boolean;
   };
   ui?: {
     minimizeToTray?: boolean;
@@ -550,6 +619,9 @@ type AppSettings = {
   };
   automation?: {
     localToolsEnabled?: boolean;
+  };
+  meetings?: {
+    calendarDisconnected?: boolean;
   };
 };
 
@@ -572,13 +644,13 @@ function findWindowByLabel(label: string): BrowserWindow | null {
 function showAndFocusMainWindow(): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createMainWindow();
-    return;
   }
 
   if (mainWindow.isMinimized()) {
     mainWindow.restore();
   }
   mainWindow.show();
+  app.focus({ steal: true });
   mainWindow.focus();
 }
 
@@ -599,21 +671,64 @@ function isDictationLive(): boolean {
 }
 
 function currentTrayStatus() {
+  if (ipcBridge?.getRuntimeStatus().ready !== true) {
+    return {
+      title: "!",
+      tooltip: "Plainsong audio service is unavailable",
+      statusLine: "Audio service unavailable",
+      ticking: false,
+      meetingControl: "busy" as const,
+    };
+  }
   if (activeMeetingRecordingId !== trayMeetingId) {
     trayMeetingId = activeMeetingRecordingId;
     trayMeetingStartedAt = null;
+    trayMeetingPausedSince = null;
+    trayMeetingClosedPausedMs = 0;
   }
   // The clock starts when capture does, not when the meeting began preparing.
   if (activeMeetingRecordingId && activeMeetingPhase === "recording") {
     trayMeetingStartedAt ??= Date.now();
   }
+  const now = Date.now();
   return describeTrayStatus({
     dictationPhase,
     dictationStartedAt: dictationLiveSince,
     meetingPhase: activeMeetingRecordingId ? activeMeetingPhase : null,
     meetingStartedAt: trayMeetingStartedAt,
-    now: Date.now(),
+    meetingPaused: trayMeetingPausedSince !== null,
+    meetingPausedMs:
+      trayMeetingClosedPausedMs + (trayMeetingPausedSince === null ? 0 : now - trayMeetingPausedSince),
+    now,
   });
+}
+
+// Only a packaged app registers itself: a development build would add the
+// bare Electron binary to the reader's Login Items.
+const loginItemSupported = process.platform === "darwin" && app.isPackaged;
+let loginItemReading: LoginItemReading | null = null;
+
+function readLoginItem(): void {
+  if (!loginItemSupported) {
+    return;
+  }
+  try {
+    const settings = app.getLoginItemSettings();
+    loginItemReading = { openAtLogin: settings.openAtLogin, status: settings.status };
+  } catch (error) {
+    console.warn("[tray] could not read the login item", error);
+    loginItemReading = null;
+  }
+}
+
+function setOpenAtLogin(openAtLogin: boolean): void {
+  try {
+    app.setLoginItemSettings({ openAtLogin });
+  } catch (error) {
+    console.error("[tray] could not change the login item", error);
+  }
+  readLoginItem();
+  refreshTray();
 }
 
 function invokeFromTray(command: string, args: Record<string, unknown> = {}): void {
@@ -622,27 +737,46 @@ function invokeFromTray(command: string, args: Record<string, unknown> = {}): vo
   });
 }
 
+/** Menu bar "Type Live Notes": show the meeting overlay and focus its notes box. */
+function focusLiveNotesFromMenu(): void {
+  const overlay = getOrCreateOverlayWindow("recording");
+  if (!overlay.isVisible()) showOverlayWindow(overlay);
+  if (!setOverlayNotesFocus(overlay, true)) return;
+  if (overlay.webContents.isLoadingMainFrame()) {
+    resendOverlayEventWhenReady(overlay, "overlay-focus-live-notes", {});
+  } else {
+    sendRendererEvent(overlay, "sidecar:event:overlay-focus-live-notes", {});
+  }
+}
+
 function buildTrayMenu(): Menu {
   const dictationAccelerator = convertShortcutToAccelerator(
     latestShortcutSettings.shortcuts?.toggleDictation,
   );
   const live = isDictationLive();
+  // Stopping, transcribing or inserting: a start now would be refused, and a
+  // stop has already been asked for.
+  const finishing =
+    dictationPhase === "stopping" ||
+    dictationPhase === "transcribing" ||
+    dictationPhase === "delivering";
   const ready = bootstrapComplete && ipcBridge !== null;
   const status = currentTrayStatus();
+  const loginItem = describeLoginItem(loginItemReading);
 
   const recentItems: Parameters<typeof Menu.buildFromTemplate>[0] =
     recentDictationResults.length === 0
-      ? [{ label: "Nothing dictated yet", enabled: false }]
+      ? [{ label: "None since Plainsong opened", enabled: false }]
       : recentDictationResults.map((result, index) => ({
           label: summarizeTranscriptForMenu(result.text),
           submenu: [
             {
               label: "Paste again",
-              click: () => invokeFromTray("repaste_dictation_result", { index }),
+              click: () => invokeFromTray("repaste_dictation_result", { index, expectedText: result.text }),
             },
             {
               label: "Copy",
-              click: () => invokeFromTray("recopy_dictation_result", { index }),
+              click: () => invokeFromTray("recopy_dictation_result", { index, expectedText: result.text }),
             },
           ],
         }));
@@ -654,10 +788,10 @@ function buildTrayMenu(): Menu {
       // The accelerator is display-only here: the real binding is registered
       // through globalShortcut/the native helper, and letting the menu
       // register it too would double-fire the toggle.
-      label: live ? "Stop Dictation" : "Start Dictation",
+      label: live ? "Stop Dictation" : finishing ? "Finishing Dictation\u2026" : "Start Dictation",
       accelerator: dictationAccelerator ?? undefined,
       registerAccelerator: false,
-      enabled: ready,
+      enabled: ready && !finishing,
       click: () => invokeFromTray(live ? "stop_dictation" : "start_dictation"),
     },
     ...(live
@@ -670,6 +804,17 @@ function buildTrayMenu(): Menu {
                 "force_stop_dictation",
                 typeof dictationSessionId === "number" ? { sessionId: dictationSessionId } : {},
               ),
+          },
+        ]
+      : []),
+    ...(status.meetingControl === "stop"
+      ? [
+          {
+            // The keyboard path to Live notes: focuses only the meeting
+            // overlay's notes box, never during a dictation start.
+            label: "Type Live Notes",
+            enabled: ready,
+            click: () => focusLiveNotesFromMenu(),
           },
         ]
       : []),
@@ -689,11 +834,7 @@ function buildTrayMenu(): Menu {
           // Opens the consent sheet, exactly like the New meeting button.
           label: "Record a Meeting\u2026",
           enabled: bootstrapComplete,
-          click: () => {
-            showAndFocusMainWindow();
-            broadcastRendererEvent("main-view-requested", { view: "recordings" });
-            broadcastRendererEvent("meeting-start-requested", {});
-          },
+          click: () => requestMeetingRecording(),
         },
     { type: "separator" },
     { label: "Recent dictations", enabled: false },
@@ -719,11 +860,20 @@ function buildTrayMenu(): Menu {
         broadcastRendererEvent("main-view-requested", { view: "settings" });
       },
     },
+    ...(loginItemSupported
+      ? [
+          {
+            label: loginItem.label,
+            type: "checkbox" as const,
+            checked: loginItem.checked,
+            click: () => setOpenAtLogin(!loginItem.checked),
+          },
+        ]
+      : []),
     { type: "separator" },
     {
       label: "Quit Plainsong",
       click: () => {
-        isQuitting = true;
         app.quit();
       },
     },
@@ -755,6 +905,10 @@ function currentTrayMenuKey(status: ReturnType<typeof describeTrayStatus>): stri
     status.statusLine,
     status.meetingControl,
     isDictationLive(),
+    dictationPhase === "stopping" ||
+      dictationPhase === "transcribing" ||
+      dictationPhase === "delivering",
+    loginItemReading,
     bootstrapComplete,
     ipcBridge !== null,
     latestShortcutSettings.shortcuts?.toggleDictation ?? null,
@@ -816,6 +970,15 @@ function createTray(): void {
   icon.addRepresentation({ scaleFactor: 2, dataURL: TRAY_ICON_2X });
   icon.setTemplateImage(true);
   tray = new Tray(icon);
+  readLoginItem();
+  if (loginItemSupported) {
+    // The reader can change Login Items in System Settings; read it again
+    // when they come back to Plainsong.
+    app.on("browser-window-focus", () => {
+      readLoginItem();
+      refreshTray();
+    });
+  }
   // A menu (not a popover) on click, per Apple HIG for menu-bar extras.
   refreshTray();
   void refreshDictationPermissionSummary();
@@ -837,10 +1000,9 @@ function resendOverlayEventWhenReady(
   eventName: string,
   payload: unknown,
 ): void {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return;
   const send = () => {
-    if (!window.isDestroyed()) {
-      window.webContents.send(`sidecar:event:${eventName}`, payload);
-    }
+    sendRendererEvent(window, `sidecar:event:${eventName}`, payload);
   };
   window.webContents.once("did-finish-load", () => {
     send();
@@ -850,9 +1012,12 @@ function resendOverlayEventWhenReady(
 
 function broadcastRendererEvent(eventName: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) {
-      win.webContents.send(`sidecar:event:${eventName}`, payload);
+    const requests = mainWindowRequests.get(win);
+    if (requests && (eventName === "main-view-requested" || eventName === "meeting-call-capture-requested")) {
+      requests.request(eventName, payload);
+      continue;
     }
+    sendRendererEvent(win, `sidecar:event:${eventName}`, payload);
   }
 }
 
@@ -1096,7 +1261,10 @@ async function checkForUpdatesInElectron(): Promise<UpdateInfoPayload | null> {
   // The packaged app-update.yml can only name one feed, and it names the beta
   // one. Point the updater at the directory for the channel actually in effect
   // so a stable install never reads a manifest out of the beta bucket.
-  autoUpdater.setFeedURL(updaterFeedOptions(channel));
+  autoUpdater.setFeedURL({
+    ...updaterFeedOptions(channel),
+    ...(qaUpdateFeedUrl === null ? {} : { url: qaUpdateFeedUrl }),
+  });
 
   const result = await autoUpdater.checkForUpdates();
   if (!updaterResultHasAvailableUpdate(result)) {
@@ -1157,6 +1325,15 @@ async function installUpdateInElectron(): Promise<void> {
   await runExplicitUpdaterInstallFlow({
     updater: autoUpdater,
     updateReadyToInstall,
+    prepareToQuit: async () => {
+      if (dictationSessionCanCancel(dictationPhase) || dictationPhase === "delivering") {
+        throw new Error("Finish the active dictation before installing the update.");
+      }
+      if (updaterInstallBlockedByActiveMeeting(activeMeetingRecordingId)) {
+        throw new Error("Finish the active meeting before installing the update.");
+      }
+      return flushRendererDraftsBeforeQuit();
+    },
     setDownloading: () => {
       setUpdateStatus({
         status: "downloading",
@@ -1180,9 +1357,28 @@ async function installUpdateInElectron(): Promise<void> {
           appBundlePath,
           updateInfo.version,
           readyFilePath,
+          qaUpdateFeedUrl === null ? undefined : process.argv.slice(1),
         ),
         { detached: true, stdio: "ignore" },
       );
+      let cancelled = false;
+      const cancel = () => {
+        if (cancelled) return;
+        if (relauncher.exitCode !== null || relauncher.signalCode !== null || !relauncher.pid) {
+          cancelled = true;
+          return;
+        }
+        try {
+          process.kill(-relauncher.pid, "SIGTERM");
+          cancelled = true;
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "ESRCH") {
+            cancelled = true;
+            return;
+          }
+          throw error;
+        }
+      };
       try {
         await new Promise<void>((resolve, reject) => {
           relauncher.once("spawn", resolve);
@@ -1193,6 +1389,14 @@ async function installUpdateInElectron(): Promise<void> {
           readyFilePath,
         });
         relauncher.unref();
+        return cancel;
+      } catch (error) {
+        try {
+          cancel();
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Update relauncher failed and could not be stopped.");
+        }
+        throw error;
       } finally {
         try {
           unlinkSync(readyFilePath);
@@ -1201,15 +1405,16 @@ async function installUpdateInElectron(): Promise<void> {
         }
       }
     },
-    quitApp: () => app.quit(),
-    onFailure: (error) => {
-      // Explicit consent applies only to this attempted install. If download,
-      // staging, or helper handoff fails, an ordinary later quit must not
-      // apply the abandoned update.
-      updateReadyToInstall = false;
+    quitApp: () => updaterQuitHandoff.requestQuit(() => app.quit()),
+    onFailure: (error, state) => {
+      updateReadyToInstall = state.downloaded;
       const message =
         error instanceof Error ? error.message : "Failed to install update";
-      setUpdateStatus({ status: "error", info: updateInfo, error: message });
+      setUpdateStatus({
+        status: "error",
+        info: updateInfo,
+        error: state.staged ? `The update is prepared. ${message} Retry installation when ready.` : message,
+      });
     },
   });
 }
@@ -1345,7 +1550,7 @@ function applyOverlayBounds(
   win.setBounds(bounds);
 }
 
-// Settings > General > Pill position, or the side the user last dropped the
+// Settings > Dictation > Pill position, or the side the user last dropped the
 // pill against. Only the minimal pill docks; the compact and full cards keep
 // the bottom placement whatever this says.
 let dictationPillDock: OverlayDock = "bottom";
@@ -1362,6 +1567,7 @@ let dictationDragSettleTimer: NodeJS.Timeout | null = null;
 // so a display change never picks a side the user did not.
 const overlayUserDragging = new Set<OverlayKind>();
 let overlayDisplayListenersInstalled = false;
+let overlayWarmupTimer: ReturnType<typeof setTimeout> | null = null;
 
 function forgetOverlayDrags(): void {
   overlayUserDragging.clear();
@@ -1481,6 +1687,11 @@ function resizeOverlayKeepingBottomEdge(
  * renderer having to push each field separately.
  */
 function applyUiSettings(settings: AppSettings | null | undefined): void {
+  const allowChatGPT = settings?.privacy?.remoteProcessingEnabled === true;
+  if (allowChatGPT !== chatgptRemoteProcessingEnabled) {
+    chatgptRemoteProcessingEnabled = allowChatGPT;
+    chatgptPlanController?.privacyChanged();
+  }
   const resolved = resolveWindowUiSettings(settings);
   minimizeToTrayEnabled = resolved.minimizeToTray;
   alwaysOnTopEnabled = resolved.alwaysOnTop;
@@ -1491,9 +1702,33 @@ function applyUiSettings(settings: AppSettings | null | undefined): void {
     dictationPillDock = resolved.dictationPillDock;
     replaceDictationOverlayForDock();
   }
-  muteMediaWhileDictatingEnabled = settings?.ui?.muteMediaWhileDictating === true;
+  const nextMuteEnabled = settings?.ui?.muteMediaWhileDictating === true;
+  if (nextMuteEnabled !== muteMediaWhileDictatingEnabled) {
+    muteMediaWhileDictatingEnabled = nextMuteEnabled;
+    void mediaMute.onPhase(
+      dictationPhase,
+      nextMuteEnabled && !dictationMeetingAside && !mediaMuteQuitPending && !isQuitting,
+    );
+  }
   notificationSettings = resolveNotificationSettings(settings);
   localToolsEnabled = settings?.automation?.localToolsEnabled === true;
+  const nextCalendarDisconnected = settings?.meetings?.calendarDisconnected === true;
+  if (nextCalendarDisconnected !== calendarDisconnected) {
+    calendarDisconnected = nextCalendarDisconnected;
+    // Drop the events already held, not just stop fetching new ones.
+    macosCalendarRuntime?.invalidate();
+    syncDictationCalendarNames(true);
+  }
+  const nextCalendarNamesEnabled = settings?.transcription?.dictationCalendarNames === true;
+  if (nextCalendarNamesEnabled !== dictationCalendarNamesEnabled) {
+    dictationCalendarNamesEnabled = nextCalendarNamesEnabled;
+    syncDictationCalendarNames(true);
+  }
+  const nextContactNamesEnabled = settings?.transcription?.dictationContactNames === true;
+  if (nextContactNamesEnabled !== dictationContactNamesEnabled) {
+    dictationContactNamesEnabled = nextContactNamesEnabled;
+    syncDictationContactNames(true);
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setAlwaysOnTop(alwaysOnTopEnabled);
   }
@@ -1512,17 +1747,32 @@ function replaceDictationOverlayForDock(): void {
   resizeOverlayKeepingBottomEdge(overlay, "dictation", { width, height });
 }
 
+let mainSettingsWriteTail: Promise<unknown> = Promise.resolve();
+
+function updateMainSettings(
+  bridge: IpcBridge,
+  mutate: (settings: AppSettings) => void,
+): Promise<void> {
+  const write = mainSettingsWriteTail.catch(() => undefined).then(async () => {
+    const before = (await bridge.invoke("get_settings")) as AppSettings;
+    const patch = editSettings(before, mutate);
+    if (patch.operations.length > 0) {
+      await bridge.invoke("save_settings", { patch: patch.operations, preserveSavedPrompts: true });
+    }
+  });
+  mainSettingsWriteTail = write;
+  return write;
+}
+
 function persistDictationPillDock(dock: OverlayDock): void {
   if (!ipcBridge) {
     return;
   }
   const bridge = ipcBridge;
-  void (async () => {
-    const fresh = (await bridge.invoke("get_settings")) as AppSettings;
-    await bridge.invoke("save_settings", {
-      settings: { ...fresh, ui: { ...fresh.ui, dictationPillDock: dock } },
-    });
-  })().catch((error) => {
+  void updateMainSettings(bridge, (settings) => {
+    settings.ui ??= {};
+    settings.ui.dictationPillDock = dock;
+  }).catch((error) => {
     console.error("[main] Failed to save the dictation pill position:", error);
   });
 }
@@ -1579,15 +1829,25 @@ function mainWindowIsFocused(): boolean {
   return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
 }
 
+function requestMeetingRecording(call?: CallCaptureRequest): void {
+  showAndFocusMainWindow();
+  if (call) {
+    // App parks this request until Recordings mounts, then opens consent.
+    broadcastRendererEvent("meeting-call-capture-requested", call);
+    return;
+  }
+  broadcastRendererEvent("main-view-requested", { view: "recordings" });
+  broadcastRendererEvent("meeting-start-requested", {});
+}
+
 /**
- * Show one notification and route its click.
+ * Show one notification and route its body click or Record action.
  *
  * The first notification an install ever shows is what makes macOS ask the
  * reader whether Plainsong may notify at all; nothing here asks ahead of
  * time. A click brings the main window up and asks the renderer for the view
- * the news is about — the same `main-view-requested` channel the tray uses —
- * or, for a detected call, hands the renderer the prefill for the consent
- * dialog.
+ * the news is about through `main-view-requested`.
+ * The Record action hands the renderer the prefill for the consent dialog.
  */
 function presentNotification(notification: PlainsongNotification): void {
   if (recentNotificationKeys.includes(notification.dedupeKey)) {
@@ -1604,6 +1864,7 @@ function presentNotification(notification: PlainsongNotification): void {
     const note = new Notification({
       title: notification.title,
       body: notification.body,
+      ...(process.platform === "darwin" ? { actions: notification.actions } : {}),
     });
     // Held until the banner is done with. Nothing else in the main process
     // refers to a shown notification, so without this the object — and the
@@ -1613,22 +1874,17 @@ function presentNotification(notification: PlainsongNotification): void {
     const release = () => {
       liveNotifications.delete(note);
     };
-    note.on("click", () => {
-      showAndFocusMainWindow();
-      const focus = notification.focus;
-      if (focus.view === "recordings" && focus.callCapture) {
-        broadcastRendererEvent("meeting-call-capture-requested", focus.callCapture);
-        release();
-        return;
-      }
-      broadcastRendererEvent("main-view-requested", {
-        view: focus.view,
-        recordingId: focus.view === "recordings" ? focus.recordingId : null,
-      });
-      release();
+    bindNotificationActions(note, notification, {
+      openView: (focus) => {
+        showAndFocusMainWindow();
+        broadcastRendererEvent("main-view-requested", {
+          view: focus.view,
+          recordingId: focus.view === "recordings" ? focus.recordingId : null,
+        });
+      },
+      recordMeeting: requestMeetingRecording,
+      release,
     });
-    note.on("close", release);
-    note.on("failed", release);
     note.show();
   } catch (error) {
     console.warn("[main] could not show a notification", error);
@@ -1638,7 +1894,15 @@ function presentNotification(notification: PlainsongNotification): void {
 function showOverlayWindow(win: BrowserWindow): void {
   positionOverlayOnActiveDisplay(win);
   if (process.platform === "darwin") {
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    // To float over full-screen apps Electron flips the whole app to a UI
+    // element and back, which briefly hides Plainsong's windows and hands
+    // focus to the app behind (Finder, after a DMG install). When a Plainsong
+    // window is focused (a dictation started from the app itself) there is no
+    // full-screen app to cover, so skip the flip and keep the focus.
+    win.setVisibleOnAllWorkspaces(true, {
+      visibleOnFullScreen: true,
+      skipTransformProcessType: BrowserWindow.getFocusedWindow() !== null,
+    });
   }
   win.setAlwaysOnTop(true, "screen-saver");
   win.showInactive();
@@ -1704,9 +1968,9 @@ function createOverlayWindow(kind: OverlayKind): BrowserWindow {
   return overlay;
 }
 
-// Both overlays are created (hidden) at bootstrap so the first hotkey press
-// shows an already-mounted React tree instead of waiting on a cold boot behind
-// did-finish-load.
+// The dictation overlay is created (hidden) at bootstrap so the first hotkey
+// press shows an already-mounted React tree instead of waiting on a cold boot
+// behind did-finish-load; the meeting overlay is created here on first use.
 function getOrCreateOverlayWindow(kind: OverlayKind): BrowserWindow {
   const existing = findWindowByLabel(OVERLAY_LABELS[kind]);
   if (existing && !existing.isDestroyed()) {
@@ -1716,6 +1980,11 @@ function getOrCreateOverlayWindow(kind: OverlayKind): BrowserWindow {
 }
 
 function prepareOverlayWindows(): void {
+  if (overlayWarmupTimer) {
+    clearTimeout(overlayWarmupTimer);
+    overlayWarmupTimer = null;
+  }
+  if (isQuitting) return;
   if (!overlayDisplayListenersInstalled) {
     overlayDisplayListenersInstalled = true;
     // macOS moves windows off a display that goes away or changes size. Those
@@ -1724,12 +1993,15 @@ function prepareOverlayWindows(): void {
     screen.on("display-removed", forgetOverlayDrags);
     screen.on("display-metrics-changed", forgetOverlayDrags);
   }
-  for (const kind of ["dictation", "recording"] as OverlayKind[]) {
-    try {
-      getOrCreateOverlayWindow(kind);
-    } catch (error) {
-      console.error(`[main] Failed to pre-create ${kind} overlay window:`, error);
-    }
+  // Only the dictation pill is pre-created: it must appear the instant the
+  // hotkey is pressed. The meeting chip is created when a meeting first shows
+  // it (getOrCreateOverlayWindow), behind the "Preparing meeting audio" phase,
+  // so an app that is never used for a meeting does not keep a third renderer
+  // resident (about 25 MB in the packaged footprint gate).
+  try {
+    getOrCreateOverlayWindow("dictation");
+  } catch (error) {
+    console.error("[main] Failed to pre-create dictation overlay window:", error);
   }
 }
 
@@ -1778,6 +2050,13 @@ async function handleLocalCommand(
   args: unknown
 ): Promise<{ handled: boolean; result?: unknown }> {
   const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  if (command === "get_dictation_overlay_state" && ipcBridge) {
+    const snapshot = await ipcBridge.invoke(command, args);
+    if (snapshot && typeof snapshot === "object") {
+      return { handled: true, result: { ...snapshot, ...dictationShortcutSignalRuntime.getActivationState() } };
+    }
+    return { handled: true, result: snapshot };
+  }
 
   /**
    * Gate every native modal this handler can open.
@@ -1816,21 +2095,59 @@ async function handleLocalCommand(
   };
 
   switch (command) {
+    case "get_sidecar_runtime_status": {
+      return { handled: true, result: ipcBridge?.getRuntimeStatus() ?? { ready: false } };
+    }
+    case "retry_sidecar_with_credential_access": {
+      requireMainWindowGesture("Unlocking secure storage");
+      if (!ipcBridge) throw new Error("The local engine is not ready to retry.");
+      ipcBridge.retryWithCredentialAccess();
+      return { handled: true, result: { accepted: true } };
+    }
+    case "chatgpt_get_status": {
+      if (!senderWindow || senderWindow !== mainWindow) throw new Error("ChatGPT account controls require the main Plainsong window.");
+      return { handled: true, result: chatgptPlanController?.cachedStatus() ?? { loaded: false, accounts: [], models: [], modelsReady: false } };
+    }
+    case "chatgpt_refresh":
+    case "chatgpt_connect":
+    case "chatgpt_select_account":
+    case "chatgpt_sign_out":
+    case "chatgpt_cancel_connect": {
+      requireMainWindowGesture("Managing your ChatGPT account");
+      if (!chatgptPlanController) throw new Error("ChatGPT account controls are not ready. Try again.");
+      const payload = (args ?? {}) as { clientId?: unknown };
+      if (payload.clientId !== undefined && (typeof payload.clientId !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(payload.clientId))) throw new Error("Choose a valid saved ChatGPT account.");
+      const clientId = payload.clientId as string | undefined;
+      let result;
+      if (command === "chatgpt_refresh") result = await chatgptPlanController.refresh();
+      else if (command === "chatgpt_connect") result = await chatgptPlanController.connect(clientId);
+      else if (command === "chatgpt_sign_out") result = await chatgptPlanController.signOut(clientId);
+      else if (command === "chatgpt_cancel_connect") result = chatgptPlanController.cancelConnect();
+      else { if (!clientId) throw new Error("Choose a saved ChatGPT account."); result = await chatgptPlanController.select(clientId); }
+      return { handled: true, result };
+    }
+    case "transform_selected_text":
     case "capture_selected_text_for_playback": {
       if (!senderWindow || senderWindow !== mainWindow || !senderWindow.isFocused()) {
         throw new Error(
-          "Selected text playback requires the focused main Plainsong window",
+          "Selected text actions require the focused main Plainsong window",
         );
       }
       if (!ipcBridge) {
-        throw new Error("Selected text playback service is not ready");
+        throw new Error("Selected text service is not ready");
+      }
+      const commandKey = args && typeof args === "object" && "commandKey" in args
+        ? args.commandKey : undefined;
+      if (command === "transform_selected_text" && typeof commandKey !== "string") {
+        throw new Error("Choose a selected-text action");
       }
       const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
       const grant = captureAdmission.consume(senderWindow.id, route);
       await ipcBridge.invoke("register_capture_admission", { nonce: grant.nonce });
       return {
         handled: true,
-        result: await ipcBridge.invokeSidecar("capture_selected_text_for_playback", {
+        result: await ipcBridge.invokeSidecar(command, {
+          ...(command === "transform_selected_text" ? { commandKey } : {}),
           admissionNonce: grant.nonce,
         }),
       };
@@ -1876,6 +2193,25 @@ async function handleLocalCommand(
       const payload = (args ?? {}) as { ignore?: unknown };
       senderWindow.setIgnoreMouseEvents(payload.ignore !== false, { forward: true });
       return { handled: true, result: null };
+    }
+    case "__overlay_notes_focus__": {
+      // Only the meeting overlay has a Live notes box to type into.
+      const recordingOverlay = findWindowByLabel(OVERLAY_LABELS.recording);
+      if (!senderWindow || senderWindow !== recordingOverlay) {
+        return { handled: true, result: false };
+      }
+      return {
+        handled: true,
+        result: setOverlayNotesFocus(senderWindow, parseOverlayNotesFocusRequest(args)),
+      };
+    }
+    case "__overlay_copy_text__": {
+      const authorizedOverlay = senderWindow !== null && (
+        senderWindow === findWindowByLabel(OVERLAY_LABELS.dictation) ||
+        senderWindow === findWindowByLabel(OVERLAY_LABELS.recording)
+      );
+      const result = await copyOverlayText(args, authorizedOverlay, (text) => clipboard.writeText(text));
+      return { handled: true, result };
     }
     case "__overlay_placement__": {
       const kind = getOverlayKind(senderWindow);
@@ -1985,6 +2321,7 @@ async function handleLocalCommand(
       // safe for the Meetings view to call on mount, which is what lets the
       // "Connect your calendar" card know it has something to offer.
       const payload = (args ?? {}) as { forceRefresh?: unknown };
+      if (dictationCalendarNamesEnabled) syncDictationCalendarNames(false);
       return {
         handled: true,
         result: await getMacosCalendarRuntime().readSnapshot({
@@ -1999,10 +2336,23 @@ async function handleLocalCommand(
       // convenience; asking for it unprompted at launch is exactly the
       // behaviour this feature was scoped to avoid.
       requireMainWindowGesture("Connecting your calendar");
-      return {
-        handled: true,
-        result: await getMacosCalendarRuntime().requestAccess(),
-      };
+      // A spelling opt-in may reconnect a previously disconnected calendar.
+      // Consume the gesture first; the renderer saves its choice after the answer.
+      const reconnect = args !== null && typeof args === "object" &&
+        "reconnect" in args && args.reconnect === true;
+      const runtime = reconnect && calendarDisconnected
+        ? createMacosCalendarRuntime({ platform: process.platform, helperPath: getNativeCalendarHelperPath() })
+        : getMacosCalendarRuntime();
+      return { handled: true, result: await runtime.requestAccess() };
+    }
+    case "get_contacts_access_status":
+      // Reads the stored Contacts answer only; it cannot prompt.
+      return { handled: true, result: await getContactNamesSync().status() };
+    case "request_contacts_access": {
+      // The one path that can raise the macOS Contacts prompt, gated like the
+      // calendar request: the main window and a real click, never at launch.
+      requireMainWindowGesture("Using names from Contacts");
+      return { handled: true, result: await getContactNamesSync().requestAccess() };
     }
     case "open_calendar_privacy_settings": {
       // Deliberately not routed through the sidecar's open_permission_settings:
@@ -2035,10 +2385,16 @@ async function handleLocalCommand(
       return { handled: true, result: installCliTool() };
     }
     case "select_export_location": {
-      const parent = requireMainWindowGesture("Choosing an export folder");
+      // Settings > Meetings asks for a notes folder through the same picker;
+      // the sidecar keeps that approval apart from the export default.
+      const forNotes =
+        typeof args === "object" && args !== null && "forNotes" in args && args.forNotes === true;
+      const parent = requireMainWindowGesture(
+        forNotes ? "Choosing a notes folder" : "Choosing an export folder",
+      );
       const selectedPath = await chooseDirectory(
         parent,
-        "Choose a dedicated export folder",
+        forNotes ? "Choose a folder for meeting notes" : "Choose a dedicated export folder",
       );
       if (!selectedPath) {
         return { handled: true, result: null };
@@ -2050,6 +2406,7 @@ async function handleLocalCommand(
         handled: true,
         result: await ipcBridge.invokeSidecar("approve_export_location_privileged", {
           path: selectedPath,
+          forNotes,
         }),
       };
     }
@@ -2205,12 +2562,20 @@ async function handleLocalCommand(
         ),
       };
     }
+    case "begin_calendar_meeting_capture":
     case "begin_meeting_capture": {
       if (!senderWindow || senderWindow !== mainWindow) {
         throw new Error("Meeting capture can only start from the main Plainsong window");
       }
       if (!ipcBridge) {
         throw new Error("Meeting capture service is not ready");
+      }
+      const calendarPayload = (args ?? {}) as { conferenceUrl?: unknown };
+      const joinUrl = command === "begin_calendar_meeting_capture"
+        ? calendarConferenceUrl(calendarPayload.conferenceUrl)
+        : null;
+      if (command === "begin_calendar_meeting_capture" && !joinUrl) {
+        throw new Error("The calendar meeting link is invalid");
       }
       const route = event.senderFrame?.url ?? senderWindow.webContents.getURL();
       const grant = captureAdmission.consume(senderWindow.id, route);
@@ -2233,10 +2598,29 @@ async function handleLocalCommand(
       if (typeof result?.recordingId !== "string" || !result.recordingId) {
         throw new Error("Meeting capture did not return a recording ID");
       }
-      activeMeetingRecordingId = result.recordingId;
-      // Its lifecycle events normally arrive first; if not, it is starting.
+      if (activeMeetingRecordingId !== result.recordingId) {
+        // Its lifecycle events normally arrive first and already made it the
+        // active meeting; if not, it is starting, whatever the meeting before
+        // it (perhaps still transcribing) was doing.
+        activeMeetingRecordingId = result.recordingId;
+        activeMeetingPhase = "preparing";
+      }
       activeMeetingPhase ??= "preparing";
       refreshTray();
+      if (joinUrl) {
+        let joinOpened = false;
+        try {
+          if (activeMeetingRecordingId === result.recordingId && !senderWindow.isDestroyed()) {
+            await shell.openExternal(joinUrl);
+          } else {
+            throw new Error("Calendar capture is no longer active");
+          }
+          joinOpened = true;
+        } catch {
+          // Capture is already running. A browser failure must not undo it.
+        }
+        return { handled: true, result: { recordingId: result.recordingId, joinOpened } };
+      }
       return { handled: true, result: result.recordingId };
     }
     case "end_meeting_capture": {
@@ -2380,12 +2764,36 @@ const dictationShortcutSignalRuntime = createDictationShortcutSignalRuntime({
     return ipcBridge.invoke(command, args);
   },
   log: qaLog,
+  onLockChanged: (shortcutLocked) => {
+    if (dictationSessionId !== null && dictationSessionCanCancel(dictationPhase)) {
+      broadcastRendererEvent("dictation-state-changed", {
+        phase: dictationPhase, sessionId: dictationSessionId, shortcutLocked,
+        shortcutBindingId: dictationShortcutSignalRuntime.getActivationState().shortcutBindingId,
+      });
+    }
+  },
 });
+
+const dictationEscapeFallback = createDictationEscapeFallback({
+  register: (accelerator, callback) => globalShortcut.register(accelerator, callback),
+  unregister: (accelerator) => globalShortcut.unregister(accelerator),
+  cancel: (sessionId) => ipcBridge
+    ? ipcBridge.invoke("force_stop_dictation", { sessionId })
+    : Promise.reject(new Error("IPC bridge is not ready")),
+  onError: (error) => surfaceDictationShortcutFailure("dictation cancel", error),
+});
+
+function syncDictationCancelShortcut(): void {
+  const active = dictationSessionCanCancel(dictationPhase) && dictationSessionId !== null;
+  nativeShortcutController?.setSessionActive(active);
+  dictationEscapeFallback.sync(active ? dictationSessionId : null, nativeShortcutAvailable);
+}
 
 async function handleDictationShortcutSignal(
   settings: AppSettings,
   signal: DictationShortcutSignal,
   binding?: DictationBinding,
+  timing?: Pick<NativeShortcutRawEvent, "pressEpochMs" | "occurrenceEpochMs" | "modifierArmDelayMs">,
 ): Promise<void> {
   if (!ipcBridge) {
     return;
@@ -2411,14 +2819,19 @@ async function handleDictationShortcutSignal(
           settings.transcription?.dictationCustomModes ?? [],
         )
       : null;
-  const startOptions: DictationShortcutStartOptions | undefined = modeOverride
-    ? { modeOverride: { preset: modeOverride.preset, customModeId: modeOverride.customModeId } }
-    : undefined;
+  const startOptions = resolveDictationShortcutStartOptions(
+    settings.transcription?.dictationProfile,
+    modeOverride,
+    dictationBindingSubmitsAfterInsert(binding),
+  );
   await dictationShortcutSignalRuntime.handleSignal({
     behavior,
     capability,
     signal,
     startOptions,
+    bindingId: binding?.id,
+    ...timing,
+    holdDoubleTapLocks: settings.transcription?.dictationDoubleTapToLock === true,
     holdTapLocks:
       settings.transcription?.dictationTapToLock !== false &&
       dictationBindingAllowsTapToLock(binding),
@@ -2443,18 +2856,11 @@ async function handleCycleDictationModeBinding(settings: AppSettings): Promise<v
     },
     transcription.dictationCustomModes ?? [],
   );
-  const fresh = (await ipcBridge.invoke("get_settings")) as AppSettings & {
-    transcription?: Record<string, unknown>;
-  };
-  const updated = {
-    ...fresh,
-    transcription: {
-      ...(fresh.transcription ?? {}),
-      dictationModePreset: next.modePreset,
-      dictationSelectedCustomModeId: next.selectedCustomModeId,
-    },
-  };
-  await ipcBridge.invoke("save_settings", { settings: updated });
+  await updateMainSettings(ipcBridge, (draft) => {
+    draft.transcription ??= {};
+    draft.transcription.dictationModePreset = next.modePreset;
+    draft.transcription.dictationSelectedCustomModeId = next.selectedCustomModeId;
+  });
   qaLog("dictation mode cycled", next);
   // A dictation overlay that had to be created for this notice has not
   // loaded its renderer yet, so a broadcast in the same tick lands before
@@ -2481,12 +2887,13 @@ async function handleDictationBindingTransition(
   settings: AppSettings,
   binding: DictationBinding,
   event: "down" | "up",
+  timing?: Pick<NativeShortcutRawEvent, "pressEpochMs" | "occurrenceEpochMs" | "modifierArmDelayMs">,
 ): Promise<void> {
   const route = routeDictationBindingEvent({ binding, event });
   qaLog("dictation binding routed", { bindingId: binding.id, event, route });
   switch (route.kind) {
     case "dictation":
-      await handleDictationShortcutSignal(settings, route.signal, binding);
+      await handleDictationShortcutSignal(settings, route.signal, binding, timing);
       return;
     case "cycleMode":
       await handleCycleDictationModeBinding(settings);
@@ -2509,21 +2916,48 @@ async function handleDictationBindingTransition(
  * mute is scheduled, so it is heard; the done and error sounds wait until the
  * mute is undone, for the same reason.
  */
-function applyDictationPhase(nextPhase: string, sound: DictationSound | null = null): void {
+function applyDictationPhase(
+  nextPhase: string,
+  sound: DictationSound | null = null,
+  startSoundDelayMs = 0,
+): void {
   if (nextPhase === "primed" || nextPhase === "recording") {
     dictationLiveSince ??= Date.now();
   } else {
     dictationLiveSince = null;
   }
-  if (sound === "start") {
+  if (nextPhase !== "recording" && pendingStartSound) {
+    clearTimeout(pendingStartSound);
+    pendingStartSound = null;
+  }
+  const muteEnabled = () =>
+    muteMediaWhileDictatingEnabled && !dictationMeetingAside
+      && activeMeetingPhase !== "recording" && activeMeetingPhase !== "stopping"
+      && !mediaMuteQuitPending && !isQuitting;
+  if (sound === "start" && startSoundDelayMs > 0) {
+    // A Bluetooth headset swallows sound while it switches to its
+    // microphone profile. Hold the tick until it can be heard, and hold the
+    // output mute with it so the mute does not silence it either.
+    if (pendingStartSound) clearTimeout(pendingStartSound);
+    pendingStartSound = setTimeout(() => {
+      pendingStartSound = null;
+      if (dictationPhase !== "recording") return;
+      playDictationSound("start");
+      void mediaMute.onPhase("recording", muteEnabled());
+    }, startSoundDelayMs);
+  } else if (sound === "start") {
     playDictationSound(sound);
   }
-  const restored = mediaMute.onPhase(nextPhase, muteMediaWhileDictatingEnabled);
+  const restored = pendingStartSound && nextPhase === "recording"
+    ? Promise.resolve()
+    : mediaMute.onPhase(nextPhase, muteEnabled());
   if (sound && sound !== "start") {
     void restored.then(() => playDictationSound(sound));
   }
   dictationPhase = nextPhase;
+  syncDictationCancelShortcut();
   refreshTray();
+  dictationQuitGuard.onPhase(nextPhase);
 }
 
 function scheduleDictationErrorReset(): void {
@@ -2560,8 +2994,9 @@ function surfaceDictationShortcutFailure(source: string, error: unknown): void {
 }
 
 /**
- * Handle a `dictation-vad-signal` event from the sidecar. Two distinct signals share
- * this event name (see rust-sidecar/src/audio.rs):
+ * Handle a `dictation-vad-signal` event from the sidecar. Three distinct signals share
+ * this event name (see rust-sidecar/src/audio.rs). `max_duration_stop` takes the
+ * same stop path as `silence_stop`; see electron/dictation-vad-signal.ts.
  *
  * - `silence_stop`: sustained silence was detected after speech during the active
  *   dictation session (the in-session `StreamingVadGate`/
@@ -2586,34 +3021,23 @@ async function handleDictationVadSignal(payload: unknown): Promise<void> {
       ? (payload as { signal?: unknown }).signal
       : undefined;
 
-  if (signal === "silence_stop") {
-    // Only stop if a session is actually in a stoppable phase; avoids racing a
-    // signal from a session that already finished stopping through another path.
-    if (dictationPhase !== "recording") {
-      return;
-    }
-    // Scope the auto-stop to the session that emitted it: a delayed signal
-    // from an already-stopped session must not stop a newer session that
-    // started in the meantime. The sidecar re-checks the sessionId too.
-    const payloadSessionId =
-      payload && typeof payload === "object" && "sessionId" in payload
-        ? (payload as { sessionId?: unknown }).sessionId
-        : undefined;
-    if (
-      typeof payloadSessionId === "number" &&
-      dictationSessionId !== null &&
-      payloadSessionId !== dictationSessionId
-    ) {
-      qaLog("dictation vad auto-stop dropped (stale session)", {
-        payloadSessionId,
-        activeSessionId: dictationSessionId,
-      });
-      return;
-    }
+  const vadStop = resolveDictationVadStop(payload, {
+    phase: dictationPhase,
+    sessionId: dictationSessionId,
+  });
+  if (vadStop) {
     qaLog("dictation vad auto-stop", { phase: dictationPhase, signal });
     await ipcBridge.invoke("stop_dictation", {
-      stopReason: "auto_stop_silence",
-      ...(typeof payloadSessionId === "number" ? { sessionId: payloadSessionId } : {}),
+      stopReason: vadStop.stopReason,
+      ...(vadStop.sessionId !== null ? { sessionId: vadStop.sessionId } : {}),
+    });
+    return;
+  }
+  if (signal === "silence_stop" || signal === "max_duration_stop") {
+    qaLog("dictation vad auto-stop dropped (not recording or stale session)", {
+      phase: dictationPhase,
+      signal,
+      activeSessionId: dictationSessionId,
     });
     return;
   }
@@ -2672,8 +3096,12 @@ async function handleNativeDictationShortcutEvent(
   }
 
   const { signal, bindingId } = normalizeNativeShortcutEvent(rawEvent);
-  if (signal === "cancelled") {
-    await handleDictationShortcutSignal(settings, "cancelled");
+  if (signal === "cancelled" && bindingId === "escape") {
+    await handleDictationShortcutSignal(settings, "cancelled", undefined, rawEvent);
+    return;
+  }
+  if (rawEvent.event === "cancel") {
+    await dictationShortcutSignalRuntime.cancelOwned(bindingId, rawEvent.occurrenceEpochMs);
     return;
   }
   const binding = resolveDictationBindings(settings.shortcuts).find(
@@ -2685,7 +3113,7 @@ async function handleNativeDictationShortcutEvent(
     qaLog("dictation native event for unknown binding", { bindingId });
     return;
   }
-  await handleDictationBindingTransition(settings, binding, rawEvent.event);
+  await handleDictationBindingTransition(settings, binding, rawEvent.event, rawEvent);
 }
 
 // Keeps the flag and the renderers in sync: Settings copy (e.g. the
@@ -2696,6 +3124,7 @@ function setNativeShortcutAvailable(next: boolean): void {
     return;
   }
   nativeShortcutAvailable = next;
+  syncDictationCancelShortcut();
   broadcastRendererEvent("dictation-shortcut-capability-changed", {
     nativeShortcutAvailable: next,
   });
@@ -2708,27 +3137,12 @@ function disposeNativeShortcutController(): void {
   setNativeShortcutAvailable(false);
 }
 
-/**
- * Deliver the `up` a helper that is about to die will never send. Runs
- * before the dispose, while `nativeShortcutAvailable` is still true, so the
- * synthetic release takes the same path a real one would and the session
- * stops instead of running to the watchdog.
- */
-function releaseHeldNativeShortcutBindings(reason: string): void {
-  if (nativeShortcutDownBindings.size === 0) {
-    return;
-  }
-  const releases = synthesizeNativeShortcutRelease(nativeShortcutDownBindings);
+function cancelNativeShortcutOwner(reason: string): void {
   nativeShortcutDownBindings = new Set<string>();
-  for (const release of releases) {
-    console.warn("[shortcuts] synthesizing release for a held binding", {
-      reason,
-      bindingId: release.bindingId,
-    });
-    void handleNativeDictationShortcutEvent(latestShortcutSettings, release).catch((error) => {
-      surfaceDictationShortcutFailure("native dictation shortcut", error);
-    });
-  }
+  qaLog("dictation native shortcut ownership cancelled", { reason });
+  void dictationShortcutSignalRuntime.cancelOwned().catch((error) => {
+    surfaceDictationShortcutFailure("native dictation shortcut", error);
+  });
 }
 
 /**
@@ -2758,7 +3172,13 @@ function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
     bindings,
     normalizeNativeShortcutHelperShortcut,
   );
-  const desiredConfig = JSON.stringify(helperTable);
+  const desiredConfig = JSON.stringify({
+    helperTable,
+    actions: bindings.map((binding) => binding.action),
+    behavior: resolveDictationShortcutBehavior(settings.transcription ?? {}),
+    customModes: settings.transcription?.dictationCustomModes ?? [],
+    profile: settings.transcription?.dictationProfile,
+  });
   // The helper takes its table on argv, so applying a new one means killing
   // it. Only respawn when the table actually changed (or it died), and never
   // in the middle of a session or a held key: every binding edit in Settings
@@ -2785,10 +3205,7 @@ function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
   }
   pendingNativeShortcutSettings = null;
 
-  // Belt and braces for a restart that happens anyway (a helper crash, or a
-  // table change while a stale `down` is still tracked): hand the handler the
-  // `up` the dying helper will never send.
-  releaseHeldNativeShortcutBindings("helper restart");
+  cancelNativeShortcutOwner("helper restart");
   disposeNativeShortcutController();
 
   const controller = startNativeMacosShortcutController({
@@ -2796,7 +3213,7 @@ function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
     helperPath: getNativeShortcutHelperPath(),
     helperBindings: helperTable,
     onEvent: (event) => {
-      void handleNativeDictationShortcutEvent(latestShortcutSettings, event).catch((error) => {
+      void handleNativeDictationShortcutEvent(settings, event).catch((error) => {
         surfaceDictationShortcutFailure("native dictation shortcut", error);
       });
     },
@@ -2807,23 +3224,25 @@ function startNativeShortcutControllerIfNeeded(settings: AppSettings): void {
         return;
       }
       console.warn("[shortcuts] native shortcut helper became unavailable", status);
+      cancelNativeShortcutOwner("helper unavailable");
       setNativeShortcutAvailable(false);
     },
   });
 
   nativeShortcutController = controller;
+  controller.setSessionActive(dictationSessionCanCancel(dictationPhase) && dictationSessionId !== null);
   appliedNativeShortcutConfig = desiredConfig;
   setNativeShortcutAvailable(controller.status.available);
 }
 
-async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
+async function applyElectronGlobalShortcuts(reason: string, startupSettings?: AppSettings): Promise<void> {
   if (!ipcBridge) {
     return;
   }
 
   let settings: AppSettings;
   try {
-    settings = (await ipcBridge.invoke("get_settings")) as AppSettings;
+    settings = startupSettings ?? (await ipcBridge.invoke("get_settings")) as AppSettings;
   } catch (error) {
     console.error("[shortcuts] failed to load settings", { reason, error });
     return;
@@ -2901,7 +3320,9 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
   const behavior = resolveDictationShortcutBehavior(settings.transcription ?? {});
   const usesPressOnlyElectronFallback = behavior === "hold_to_talk";
 
+  dictationEscapeFallback.sync(null, false);
   globalShortcut.unregisterAll();
+  syncDictationCancelShortcut();
 
   for (const { binding, accelerator } of fallbackBindings) {
     const registered = globalShortcut.register(accelerator, () => {
@@ -2947,7 +3368,7 @@ async function applyElectronGlobalShortcuts(reason: string): Promise<void> {
       continue;
     }
     const registered = globalShortcut.register(accelerator, () => {
-      void ipcBridge?.invoke(command, { index: 0 }).catch((error) => {
+      void ipcBridge?.invoke(command, { completedOnly: true }).catch((error) => {
         // A missing result (nothing dictated yet) is the common case here and
         // is reported by the sidecar as an error; it is not worth a dialog.
         console.warn("[shortcuts] dictation recovery shortcut failed", {
@@ -3003,15 +3424,93 @@ function getNativeCalendarHelperPath(): string {
  * Meetings view is on screen.
  */
 let macosCalendarRuntime: MacosCalendarRuntime | null = null;
+/**
+ * `meetings.calendarDisconnected`, adopted by `applyUiSettings`. Starts true
+ * so nothing reads the calendar before the saved settings have been read.
+ */
+let calendarDisconnected = true;
 
 function getMacosCalendarRuntime(): MacosCalendarRuntime {
   if (!macosCalendarRuntime) {
     macosCalendarRuntime = createMacosCalendarRuntime({
+      isDisconnected: () => calendarDisconnected,
       platform: process.platform,
       helperPath: getNativeCalendarHelperPath(),
     });
   }
   return macosCalendarRuntime;
+}
+
+/**
+ * Optional name sources start off until `applyUiSettings` adopts saved choices.
+ */
+let dictationCalendarNamesEnabled = false;
+let calendarNamesSync: CalendarNamesSync | null = null;
+let calendarNamesRefreshTimer: NodeJS.Timeout | null = null;
+function syncDictationCalendarNames(force: boolean): void {
+  if (!calendarNamesSync) {
+    calendarNamesSync = createCalendarNamesSync({
+      platform: process.platform, helperPath: getNativeCalendarHelperPath(),
+      isEnabled: () => dictationCalendarNamesEnabled && !calendarDisconnected,
+      sendNames: async ({ names, meetingNames }) => {
+        if (ipcBridge) await ipcBridge.invokeSidecar("set_dictation_calendar_names", { names, meetingNames });
+      },
+    });
+  }
+  void calendarNamesSync.sync(force).catch(() => {
+    console.warn("[calendar] could not update spelling hints");
+  });
+  if (dictationCalendarNamesEnabled && !calendarDisconnected && !calendarNamesRefreshTimer) {
+    calendarNamesRefreshTimer = setInterval(() => syncDictationCalendarNames(false), CALENDAR_SNAPSHOT_TTL_MS);
+    calendarNamesRefreshTimer.unref();
+  } else if ((!dictationCalendarNamesEnabled || calendarDisconnected) && calendarNamesRefreshTimer) {
+    clearInterval(calendarNamesRefreshTimer);
+    calendarNamesRefreshTimer = null;
+  }
+}
+
+let dictationContactNamesEnabled = false;
+let contactNamesSync: ContactNamesSync | null = null;
+let contactNamesRefreshTimer: NodeJS.Timeout | null = null;
+
+function getContactNamesSync(): ContactNamesSync {
+  if (!contactNamesSync) {
+    contactNamesSync = createContactNamesSync({
+      platform: process.platform,
+      helperPath: getNativeCalendarHelperPath(),
+      isEnabled: () => dictationContactNamesEnabled,
+      sendNames: async (names) => {
+        await ipcBridge?.invokeSidecar("set_dictation_contact_names", { names });
+      },
+    });
+  }
+  return contactNamesSync;
+}
+
+/**
+ * Hand the sidecar the current names (or none). Errors are logged without the
+ * names: a failed read leaves dictation spelling as it was.
+ */
+function syncDictationContactNames(force: boolean): void {
+  if (!force && !dictationContactNamesEnabled && !contactNamesSync) return;
+  void getContactNamesSync()
+    .sync({ force })
+    .catch((error) => {
+      console.warn(
+        "[contacts] could not update dictation names:",
+        error instanceof Error ? error.message : String(error),
+      );
+    });
+  if (dictationContactNamesEnabled && !contactNamesRefreshTimer) {
+    contactNamesRefreshTimer = setInterval(
+      () => syncDictationContactNames(false),
+      CONTACT_NAMES_REFRESH_MS,
+    );
+    contactNamesRefreshTimer.unref();
+  } else if (!dictationContactNamesEnabled && contactNamesRefreshTimer) {
+    clearInterval(contactNamesRefreshTimer);
+    contactNamesRefreshTimer = null;
+  }
 }
 
 function getCliBinaryName(): string {
@@ -3174,8 +3673,43 @@ function isTrustedRendererOrigin(rawUrl: string | undefined | null): boolean {
 
 function installRendererPermissionHandlers(): void {
   const defaultSession = session.defaultSession;
+  const microphonePermissionDependencies = {
+    platform: process.platform,
+    getStatus: () => systemPreferences.getMediaAccessStatus("microphone"),
+    ask: () => systemPreferences.askForMediaAccess("microphone"),
+    log: process.env.PLAINSONG_QA_MODE === "1"
+      ? (event: string, fields: Readonly<Record<string, unknown>>) => console.info("[qa:microphone-permission]", { event, ...fields })
+      : undefined,
+  };
+  const handleMicrophonePermission = createMicrophonePermissionHandler(microphonePermissionDependencies);
+  const requestMicrophoneAccess = createMicrophoneAccessRequest(handleMicrophonePermission);
+  ipcMain.handle("microphone:request-access", async (event) => {
+    const documentUrl = trustedSenderFrameUrl(event);
+    const owner = mainWindow;
+    if (!owner || owner.isDestroyed() || event.sender !== owner.webContents ||
+        !isTrustedRendererOrigin(documentUrl)) return false;
+    let navigated = false;
+    const onNavigation = (
+      _event: Electron.Event, _url: string, _isInPlace: boolean, isMainFrame: boolean,
+    ): void => {
+      if (isMainFrame) navigated = true;
+    };
+    event.sender.on("did-start-navigation", onNavigation);
+    try {
+      return await requestMicrophoneAccess({
+        allowed: true,
+        isCurrent: () => mainWindow === owner && !owner.isDestroyed() &&
+          !event.sender.isDestroyed() && !navigated &&
+          trustedSenderFrameUrl(event) === documentUrl &&
+          event.sender.getURL() === documentUrl && isTrustedRendererOrigin(documentUrl),
+      });
+    } finally {
+      event.sender.removeListener("did-start-navigation", onNavigation);
+    }
+  });
 
-  defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+
+  defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const requestUrl =
       "securityOrigin" in details && typeof details.securityOrigin === "string"
         ? details.securityOrigin
@@ -3193,20 +3727,52 @@ function installRendererPermissionHandlers(): void {
       });
     }
 
-    callback(allowed);
+    const mediaTypes = "mediaTypes" in details ? details.mediaTypes : undefined;
+    if (!allowed || process.platform !== "darwin" || permission !== "media" ||
+        mediaTypes?.length !== 1 || mediaTypes[0] !== "audio") {
+      handleMicrophonePermission({ allowed, permission, mediaTypes, isCurrent: () => false, callback });
+      return;
+    }
+    if (webContents.isDestroyed()) {
+      callback(false);
+      return;
+    }
+    const documentUrl = webContents.getURL();
+    let navigated = false;
+    const onNavigation = (
+      _event: Electron.Event, _url: string, _isInPlace: boolean, isMainFrame: boolean,
+    ): void => {
+      if (isMainFrame) navigated = true;
+    };
+    webContents.on("did-start-navigation", onNavigation);
+    handleMicrophonePermission({
+      allowed,
+      permission,
+      mediaTypes,
+      isCurrent: () => !webContents.isDestroyed() && !navigated &&
+        webContents.getURL() === documentUrl && isTrustedRendererOrigin(webContents.getURL()),
+      callback: (granted) => {
+        webContents.removeListener("did-start-navigation", onNavigation);
+        callback(granted);
+      },
+    });
   });
 
   defaultSession.setPermissionCheckHandler(
     (_webContents, permission, requestingOrigin, details) =>
-      rendererPermissionAllowed(
+      checkMicrophonePermission(microphonePermissionDependencies, {
+        allowed: rendererPermissionAllowed(
+          permission,
+          {
+            requestingOrigin: details.securityOrigin ?? requestingOrigin,
+            isMainFrame: details.isMainFrame,
+          },
+          isTrustedRendererOrigin,
+        ),
         permission,
-        {
-          requestingOrigin: details.securityOrigin ?? requestingOrigin,
-          isMainFrame: details.isMainFrame,
-        },
-        isTrustedRendererOrigin,
-      ),
-    );
+        mediaType: details.mediaType,
+      }),
+  );
 }
 
 function configureWindowSecurity(win: BrowserWindow): void {
@@ -3243,10 +3809,14 @@ function configureWindowSecurity(win: BrowserWindow): void {
   });
 }
 
+let suspendedMainBounds: Electron.Rectangle | undefined;
+
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: process.platform === "darwin" ? 1000 : 1200,
+    height: process.platform === "darwin" ? 700 : 800,
+    ...suspendedMainBounds,
+    backgroundColor: "#171715",
     minWidth: 900,
     minHeight: 600,
     titleBarStyle: "hiddenInset",
@@ -3255,13 +3825,34 @@ function createMainWindow(): BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: true,
       additionalArguments: [...rendererAdditionalArguments()],
     },
   });
   recordLaunchMilestone("window-created");
   configureWindowSecurity(win);
 
+  const requests = createMainWindowRequests((eventName, payload) => {
+    sendRendererEvent(win, `sidecar:event:${eventName}`, payload);
+  });
+  mainWindowRequests.set(win, requests);
+  const idle = createMainWindowIdleController({
+    timeoutMs: MAIN_WINDOW_IDLE_MS,
+    eligible: () => process.platform === "darwin" && !isQuitting && mainWindow === win &&
+      !win.isDestroyed() && !win.isVisible() && !win.isMinimized() &&
+      !activeMeetingRecordingId && dictationPhase === "idle" &&
+      BrowserWindow.getAllWindows().every((other) => other === win || other.getParentWindow() !== win),
+    execute: (script) => win.webContents.executeJavaScript(script),
+    flushRendererDrafts: () => prepareMainRendererQuit((script) => win.webContents.executeJavaScript(script)),
+    destroy: () => {
+      suspendedMainBounds = win.getNormalBounds();
+      win.destroy();
+    },
+  });
+  win.on("hide", idle.hidden);
+  win.on("show", idle.cancel);
   win.on("closed", () => {
+    idle.cancel();
     mainWindow = null;
     releaseAllPlayback("main window closed", true);
     // The overlay windows are created hidden at bootstrap and outlive the main
@@ -3272,12 +3863,17 @@ function createMainWindow(): BrowserWindow {
     }
   });
 
-  // Keep Plainsong alive in the menu-bar tray when the user opts in.
+  // Keep Plainsong alive in the menu-bar tray when the user opts in. A
+  // destructive close first lets the mounted editor flush its drafts.
+  const guardRendererClose = createRendererCloseGuard(
+    win,
+    (script) => win.webContents.executeJavaScript(script),
+  );
   win.on("close", (event) => {
-    if (minimizeToTrayEnabled && !isQuitting) {
-      event.preventDefault();
-      win.hide();
-    }
+    guardRendererClose(event, {
+      minimizeToTray: process.platform === "darwin" || minimizeToTrayEnabled,
+      isQuitting,
+    });
   });
 
   // A reload or an in-app navigation replaces the renderer that holds the
@@ -3289,10 +3885,50 @@ function createMainWindow(): BrowserWindow {
     if (!details.isMainFrame || details.isSameDocument) {
       return;
     }
+    requests.reset();
     releaseAllPlayback("renderer navigated", true);
   });
-  win.webContents.on("render-process-gone", () => {
+  const allowAutomaticRendererRecovery = createRendererRecoveryPolicy();
+  const trustedMainRendererUrl = devServerUrlIsUsable ? devServerUrl : rendererUrl();
+  let rendererFailureNoticeOpen = false;
+  const showRendererFailure = async () => {
+    if (isQuitting || win.isDestroyed() || rendererFailureNoticeOpen) return;
+    rendererFailureNoticeOpen = true;
+    try {
+      const { response } = await dialog.showMessageBox(win, {
+        type: "error",
+        title: "Plainsong window stopped responding",
+        message: "The Plainsong window could not recover.",
+        detail: "Reload the window to reconnect to the recorder. Unsaved edits in the window may have been lost.",
+        buttons: ["Reload window", "Dismiss"],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (response === 0 && !isQuitting && !win.isDestroyed()) {
+        await win.loadURL(trustedMainRendererUrl);
+      }
+    } catch (error) {
+      console.error("[renderer] manual recovery failed", error);
+      if (!isQuitting && !win.isDestroyed()) {
+        dialog.showErrorBox("Plainsong window could not reload", "Try reopening the window to reconnect to the recorder.");
+      }
+    } finally {
+      rendererFailureNoticeOpen = false;
+    }
+  };
+  win.webContents.on("render-process-gone", (_event, details) => {
+    requests.reset();
     releaseAllPlayback("renderer process gone", true);
+    console.error("[renderer] render-process-gone", details);
+    if (isQuitting || win.isDestroyed() || details.reason === "clean-exit") return;
+    if (!allowAutomaticRendererRecovery(details.reason)) {
+      void showRendererFailure();
+      return;
+    }
+    void win.loadURL(trustedMainRendererUrl).catch((error) => {
+      console.error("[renderer] automatic recovery failed", error);
+      void showRendererFailure();
+    });
   });
 
   win.webContents.on(
@@ -3353,9 +3989,6 @@ function createMainWindow(): BrowserWindow {
         validatedUrl,
       });
     });
-    win.webContents.on("render-process-gone", (_event, details) => {
-      console.error("[renderer] render-process-gone", details);
-    });
     if (devServerUrlIsUsable) {
       void win.loadURL(devServerUrl);
     } else {
@@ -3412,37 +4045,163 @@ async function finalizeActiveMeetingBeforeQuit(): Promise<MeetingFinalizationOut
   return result;
 }
 
+async function flushRendererDraftsBeforeQuit(): Promise<boolean> {
+  const draftWindows = [mainWindow, findWindowByLabel(OVERLAY_LABELS.recording)]
+    .filter((win): win is BrowserWindow => !!win && !win.isDestroyed());
+  for (const win of draftWindows) {
+    const allowed = await prepareMainRendererQuit(
+      (script) => win.webContents.executeJavaScript(script),
+      undefined,
+      rendererExitChecks.get(win),
+    );
+    if (!allowed || win.isDestroyed()) {
+      if (!win.isDestroyed()) { win.show(); win.focus(); }
+      return false;
+    }
+  }
+  return true;
+}
+
+const updaterQuitHandoff = createUpdaterQuitHandoff();
+const meetingQuitDraftCoordinator = createMeetingQuitDraftCoordinator({
+  flushRendererDrafts: flushRendererDraftsBeforeQuit,
+  onQuitCancelled: (error) => updaterQuitHandoff.cancelled(error),
+  finalizeMeeting: finalizeActiveMeetingBeforeQuit,
+  reissueQuit: () => app.quit(),
+  setQuitPending: (pending) => ipcBridge?.setQuitPending(pending),
+  onFinalizationFailure: (result) => {
+    isQuitting = false;
+    const reason =
+      result.error instanceof Error
+        ? result.error.message
+        : "The meeting could not be finalized safely.";
+    dialog.showErrorBox(
+      "Finish the meeting before quitting",
+      `${reason}\n\nPlainsong stayed open so you can retry without losing the meeting.`,
+    );
+    showAndFocusMainWindow();
+  },
+});
+
+async function askDictationQuitChoice(prompt: DictationQuitPrompt): Promise<DictationQuitChoice> {
+  const content = dictationQuitPromptContent(prompt);
+  // The person just asked Plainsong to quit, so bringing it forward to ask is
+  // expected. A delivery that follows a Wait brings the dictation target back
+  // on its own (`restore_target_after_self_focus`).
+  app.focus({ steal: true });
+  const options = {
+    type: "warning" as const,
+    message: content.message,
+    detail: content.detail,
+    buttons: content.buttons,
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
+  const { response } = parent
+    ? await dialog.showMessageBox(parent, options)
+    : await dialog.showMessageBox(options);
+  return content.choices[response] ?? "wait";
+}
+
+const dictationQuitGuard = createDictationQuitGuard({
+  stop: () => ipcBridge
+    ? ipcBridge.invoke("stop_dictation", { stopReason: "app_quit" })
+    : Promise.reject(new Error("IPC bridge is not ready")),
+  discard: () => ipcBridge
+    ? ipcBridge.invoke("force_stop_dictation", dictationSessionId === null ? {} : { sessionId: dictationSessionId })
+    : Promise.reject(new Error("IPC bridge is not ready")),
+  readText: async () => {
+    if (!ipcBridge || dictationSessionId === null) return null;
+    const result = await ipcBridge.invoke("get_dictation_session_text", { sessionId: dictationSessionId });
+    const text = (result as { text?: unknown } | null)?.text;
+    return typeof text === "string" ? text : null;
+  },
+  copyText: (text) => clipboard.writeText(text),
+  ask: askDictationQuitChoice,
+  quit: () => app.quit(),
+  log: qaLog,
+});
+
+const meetingTranscriptionQuitGuard = createMeetingTranscriptionQuitGuard({
+  ask: async () => {
+    const content = meetingTranscriptionQuitPromptContent();
+    app.focus({ steal: true });
+    const options = {
+      type: "warning" as const,
+      message: content.message,
+      detail: content.detail,
+      buttons: content.buttons,
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+    const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
+    const { response } = parent
+      ? await dialog.showMessageBox(parent, options)
+      : await dialog.showMessageBox(options);
+    return content.choices[response] ?? "wait";
+  },
+  quit: () => app.quit(),
+  log: qaLog,
+});
+
+/** The active meeting's phase for the quit guard, `null` with no meeting. */
+function activeMeetingPhaseForQuit(): string | null {
+  return activeMeetingRecordingId ? activeMeetingPhase : null;
+}
+
+let mediaMuteQuitPending = false;
 app.on("before-quit", (event) => {
-  // Never leave the Mac muted because Plainsong quit mid-dictation.
-  void mediaMute.restore();
-  // Take one pass to finalize the meeting, then re-issue the quit. The guard is
-  // `isQuitting`, which is already set below, so the second pass falls straight
-  // through instead of looping.
-  if (!isQuitting && activeMeetingRecordingId && ipcBridge) {
+  // A dictation still recording or transcribing would vanish with the
+  // sidecar. The quit stays cancelled until it is resolved or the person
+  // chooses Copy or Discard; the guard re-issues the quit. Checked before the
+  // meeting coordinator, which marks final shutdown as started once it lets a
+  // quit through.
+  if (ipcBridge && !dictationQuitGuard.beforeQuit(dictationPhase)) {
     event.preventDefault();
-    isQuitting = true;
-    ipcBridge.setQuitPending(true);
-    void finalizeActiveMeetingBeforeQuit().then((result) => {
-      if (result.status === "failed") {
-        isQuitting = false;
-        ipcBridge?.setQuitPending(false);
-        const reason =
-          result.error instanceof Error
-            ? result.error.message
-            : "The meeting could not be finalized safely.";
-        dialog.showErrorBox(
-          "Finish the meeting before quitting",
-          `${reason}\n\nPlainsong stayed open so you can retry without losing the meeting.`,
-        );
-        showAndFocusMainWindow();
-        return;
-      }
-      app.quit();
-    });
+    return;
+  }
+  // A stopped meeting still being transcribed would lose its transcript the
+  // same way. A meeting still recording is stopped by the coordinator below,
+  // whose re-issued quit then lands here while it transcribes.
+  if (ipcBridge && !meetingTranscriptionQuitGuard.beforeQuit(activeMeetingPhaseForQuit())) {
+    event.preventDefault();
     return;
   }
 
+  const hasDraftWindows = [mainWindow, findWindowByLabel(OVERLAY_LABELS.recording)]
+    .some((win) => !!win && !win.isDestroyed());
+  const mayShutDown = meetingQuitDraftCoordinator.beforeQuit({
+    activeMeetingId: ipcBridge ? activeMeetingRecordingId : null,
+    needsRendererFlush: hasDraftWindows,
+  });
+  if (!mayShutDown) {
+    event.preventDefault();
+    return;
+  }
+
+  if (mediaMute.hasPendingWork) {
+    event.preventDefault();
+    if (!mediaMuteQuitPending) {
+      mediaMuteQuitPending = true;
+      void mediaMute.restore().finally(() => {
+        mediaMuteQuitPending = false;
+        app.quit();
+      });
+    }
+    return;
+  }
+
+  updaterQuitHandoff.complete();
   isQuitting = true;
+  if (overlayWarmupTimer) {
+    clearTimeout(overlayWarmupTimer);
+    overlayWarmupTimer = null;
+  }
+  chatgptPlanController?.privacyChanged();
+  void chatgptPlanRelay?.close();
   // Electron's graceful quit can remain stuck after every window disappears.
   // Keep the normal lifecycle first so renderers and the sidecar can clean up,
   // then force only this process to exit if macOS never completes the quit.
@@ -3524,6 +4283,12 @@ ipcMain.on("launch:renderer-milestone", (event: IpcMainEvent, value: unknown) =>
     return;
   }
   recordLaunchMilestone(milestone.name, "renderer", milestone.rendererElapsedMs);
+  if (milestone.name === "workspace-or-wizard-interactive") {
+    mainWindowRequests.get(win)?.ready();
+  }
+  if (milestone.name === "workspace-or-wizard-interactive" && overlayWarmupTimer) {
+    setImmediate(prepareOverlayWindows);
+  }
   if (
     milestone.name === "workspace-or-wizard-interactive" &&
     process.argv.includes("--plainsong-quit-after-launch-metrics")
@@ -3614,20 +4379,17 @@ async function performDeepLink(command: DeepLinkCommand): Promise<string> {
       if (!resolved.changed) {
         return "performed";
       }
-      await ipcBridge.invoke("save_settings", {
-        settings: {
-          ...settings,
-          transcription: { ...settings.transcription, ...resolved.selection },
-        },
+      await updateMainSettings(ipcBridge, (draft) => {
+        draft.transcription ??= {};
+        draft.transcription.dictationModePreset = resolved.selection.dictationModePreset;
+        draft.transcription.dictationSelectedCustomModeId = resolved.selection.dictationSelectedCustomModeId;
       });
       return "performed";
     }
     case "meeting_start":
       // Opens the consent sheet and nothing more; recording starts only when
       // the person clicks Start there, exactly as with the New meeting button.
-      showAndFocusMainWindow();
-      broadcastRendererEvent("main-view-requested", { view: "recordings" });
-      broadcastRendererEvent("meeting-start-requested", {});
+      requestMeetingRecording();
       return "performed";
     case "meeting_stop": {
       if (!ipcBridge) {
@@ -3660,7 +4422,7 @@ async function handleDeepLink(rawUrl: string): Promise<void> {
   }
   const action = deepLinkActionName(parsed.command);
   if (!localToolsEnabled) {
-    console.warn("[deep-link] refused: Local tools is off in Settings > General", { action });
+    console.warn("[deep-link] refused: command line and MCP access is off in Settings > Advanced", { action });
     recordAutomationAudit(action, "refused_local_tools_off");
     return;
   }
@@ -3684,6 +4446,12 @@ function flushPendingDeepLinks(): void {
   for (const url of pendingDeepLinks.splice(0)) {
     void handleDeepLink(url);
   }
+}
+
+/** The running .app bundle (…/Plainsong.app), from the main executable. */
+function runningAppBundlePath(): string | null {
+  const match = /^(.*?\.app)\/Contents\/MacOS\//.exec(process.execPath);
+  return match ? match[1] : null;
 }
 
 async function bootstrap() {
@@ -3716,10 +4484,26 @@ async function bootstrap() {
 
   await app.whenReady();
   recordLaunchMilestone("app-ready");
+  // Opened straight from the DMG: offer the move before anything else
+  // starts, since the move relaunches from /Applications.
+  if (
+    await offerMoveToApplications({
+      isPackaged: app.isPackaged && process.env.PLAINSONG_QA_MODE !== "1",
+      platform: process.platform,
+      bundlePath: runningAppBundlePath(),
+      isInApplicationsFolder: () => app.isInApplicationsFolder(),
+      ask: async (options) =>
+        (await dialog.showMessageBox({ type: "question", ...options })).response,
+      move: () => app.moveToApplicationsFolder(),
+      log: (message, error) => console.warn(message, error),
+    })
+  ) {
+    return;
+  }
   // A run killed mid-dictation (force quit, crash) could not restore audio.
   void mediaMute.recoverStaleMute();
 
-  if (app.isPackaged) {
+  if (app.isPackaged && process.env.PLAINSONG_QA_MODE !== "1") {
     // Pairs with `protocols:` in electron-builder.yml (CFBundleURLTypes).
     // Packaged-only: in development this would register the bare Electron
     // binary as the handler for every `plainsong://` link on the machine.
@@ -3787,11 +4571,41 @@ async function bootstrap() {
     broadcastRendererEvent("sidecar-error", { reason: "missing-binary", path: sidecarPath, message });
   }
 
-  ipcBridge = new IpcBridge(sidecarPath);
-  ipcBridge.onSpawned(() => recordLaunchMilestone("sidecar-spawned"));
+  const chatgptSession = createChatGPTPlanSession({
+    store: new ChatGPTAccountStore(path.join(app.getPath("userData"), "chatgpt-accounts"), createChatGPTStorageCipher(safeStorage)),
+    remoteProcessingEnabled: () => chatgptRemoteProcessingEnabled,
+    onAccountsChanged: accounts => chatgptPlanController?.accountsChanged(accounts),
+    openAuthorizationURL: async url => {
+      const authorization = new URL(url);
+      if (authorization.origin !== "https://auth.openai.com" || authorization.pathname !== "/api/accounts/authorize") throw new Error("The ChatGPT sign-in address could not be verified.");
+      await shell.openExternal(url);
+    },
+  });
+  chatgptPlanController = createChatGPTPlanController(chatgptSession, () => chatgptRemoteProcessingEnabled,
+    status => broadcastRendererEvent("chatgpt-account-changed", status));
+  chatgptPlanRelay = await startChatGPTPlanRelay({ session: chatgptSession,
+    status: () => chatgptPlanController!.relayStatus(), models: () => chatgptPlanController!.relayModels() });
+  ipcBridge = new IpcBridge(sidecarPath, spawn, chatgptPlanRelay.sidecarEnvironment);
+  ipcBridge.onSpawned(() => {
+    recordLaunchMilestone("sidecar-spawned");
+    // A restarted sidecar starts with no names; the first spawn sends none
+    // because the saved settings have not been read yet.
+    if (dictationContactNamesEnabled) syncDictationContactNames(true);
+    if (dictationCalendarNamesEnabled) syncDictationCalendarNames(true);
+  });
   ipcBridge.onFirstResponse(() => recordLaunchMilestone("sidecar-first-response"));
   ipcBridge.onValidateSender(isTrustedRendererOrigin);
   ipcBridge.onLocalCommand(handleLocalCommand);
+  if (qaUpdateFeedUrl !== null) {
+    await restrictQaUpdateSession(autoUpdater.netSession);
+    console.info("[updater] using launch-only loopback QA feed");
+    for (const event of ["checking-for-update", "update-available", "download-progress", "update-downloaded", "error"] as const) {
+      autoUpdater.on(event, () => console.info(`[qa:updater] ${event}`));
+    }
+    app.on("before-quit", () => {
+      if (updateStatus.status === "installing") console.info("[qa:updater] app-before-quit");
+    });
+  }
   configureAutoUpdater(autoUpdater);
 
   // A sidecar crash mid-recording would otherwise leave the cached phase at
@@ -3827,8 +4641,7 @@ async function bootstrap() {
       broadcastRendererEvent("meeting-recording-state-changed", {
         phase: "recoverable",
         recordingId: interruptedRecordingId,
-        message:
-          "Recording stopped unexpectedly because the audio engine restarted. Audio captured before the interruption was saved.",
+        message: interruptedMeetingMessage(activeMeetingPhase),
       });
       activeMeetingRecordingId = nextActiveMeetingRecordingId(
         activeMeetingRecordingId,
@@ -3838,6 +4651,7 @@ async function bootstrap() {
         phase: "recoverable",
         recordingId: interruptedRecordingId,
       });
+      meetingTranscriptionQuitGuard.onMeetingPhase(activeMeetingPhaseForQuit());
       refreshTray();
     }
   });
@@ -3870,6 +4684,8 @@ async function bootstrap() {
       const lifecycle = payload as {
         phase?: unknown;
         recordingId?: unknown;
+        paused?: unknown;
+        closedPausedMs?: unknown;
       };
       if (typeof lifecycle.phase === "string") {
         const lifecycleEvent: MeetingLifecycleEvent = {
@@ -3880,12 +4696,36 @@ async function bootstrap() {
         activeMeetingRecordingId = nextActiveMeetingRecordingId(
           activeMeetingRecordingId,
           lifecycleEvent,
+          activeMeetingPhase,
         );
         activeMeetingPhase = nextActiveMeetingPhase(
           activeMeetingPhase,
           activeMeetingRecordingId,
           lifecycleEvent,
         );
+        if (
+          typeof lifecycle.paused === "boolean" &&
+          lifecycleEvent.recordingId === activeMeetingRecordingId &&
+          activeMeetingPhase === "recording"
+        ) {
+          const now = Date.now();
+          const reportedClosed =
+            typeof lifecycle.closedPausedMs === "number" && Number.isFinite(lifecycle.closedPausedMs)
+              ? Math.max(0, lifecycle.closedPausedMs)
+              : null;
+          if (lifecycle.paused) {
+            trayMeetingPausedSince ??= now;
+            trayMeetingClosedPausedMs = reportedClosed ?? trayMeetingClosedPausedMs;
+          } else {
+            trayMeetingClosedPausedMs =
+              reportedClosed ??
+              trayMeetingClosedPausedMs + (trayMeetingPausedSince === null ? 0 : now - trayMeetingPausedSince);
+            trayMeetingPausedSince = null;
+          }
+        } else if (activeMeetingPhase !== "recording") {
+          trayMeetingPausedSince = null;
+        }
+        meetingTranscriptionQuitGuard.onMeetingPhase(activeMeetingPhaseForQuit());
         refreshTray();
       }
     }
@@ -3903,13 +4743,24 @@ async function bootstrap() {
             dictationPhase,
             nextPhase,
             (payload as { outcome?: unknown }).outcome,
+            (payload as { captureReady?: unknown }).captureReady,
           )
         : null;
       if (dictationShortcutFailureResetTimer) {
         clearTimeout(dictationShortcutFailureResetTimer);
         dictationShortcutFailureResetTimer = null;
       }
-      applyDictationPhase(nextPhase, sound);
+      const meetingAside = (payload as { meetingAside?: unknown }).meetingAside;
+      if (typeof meetingAside === "boolean") {
+        dictationMeetingAside = meetingAside;
+      } else if (nextPhase === "idle") {
+        dictationMeetingAside = false;
+      }
+      applyDictationPhase(
+        nextPhase,
+        sound,
+        dictationStartSoundDelayMs((payload as { startSoundDelayMs?: unknown }).startSoundDelayMs),
+      );
       // A helper table held back while this session was live can go in now.
       applyDeferredNativeShortcutConfig(`phase ${nextPhase}`);
       const sessionId = (payload as { sessionId?: unknown }).sessionId;
@@ -3920,25 +4771,19 @@ async function bootstrap() {
       // it is cleared as soon as the guarded session leaves "primed"/
       // "recording" through any path (VAD auto-stop, overlay stop, Escape).
       dictationShortcutSignalRuntime.onPhase(dictationPhase);
+      syncDictationCancelShortcut();
       if (dictationPhase === "error") {
         scheduleDictationErrorReset();
       }
     }
 
-    if (eventName === "app-state-reset") {
-      // Reset all data cleared the sidecar's list this mirrors.
-      recentDictationResults = [];
-      refreshTray();
+    if (eventName === "dictation-recovery-results-changed") {
+      dictationQuitGuard.onWordsChanged();
     }
-
-    if (eventName === "dictation-text-ready") {
-      const text = (payload as { text?: unknown } | null)?.text;
-      if (typeof text === "string" && text.trim().length > 0) {
-        // Mirrors the sidecar's own capped list (it stays the source of truth
-        // for the re-paste itself; this copy only labels the menu items).
-        recentDictationResults = [{ text }, ...recentDictationResults].slice(0, 3);
-        refreshTray();
-      }
+    const nextRecoveryResults = nextTrayRecoveryResults(recentDictationResults, eventName, payload);
+    if (nextRecoveryResults !== recentDictationResults) {
+      recentDictationResults = nextRecoveryResults;
+      refreshTray();
     }
 
     if (eventName === "dictation-vad-signal") {
@@ -3973,7 +4818,10 @@ async function bootstrap() {
       }
     }
 
-    broadcastRendererEvent(eventName, payload);
+    broadcastRendererEvent(eventName,
+      eventName === "dictation-state-changed" && payload && typeof payload === "object"
+        ? { ...payload, ...dictationShortcutSignalRuntime.getActivationState() }
+        : payload);
   });
 
   ipcBridge.onWindowCommand((command: string, payload: unknown) => {
@@ -4001,18 +4849,27 @@ async function bootstrap() {
     }
   });
 
-  ipcBridge.onCommandResolved((command) => {
+  ipcBridge.onCommandResolved((command, args) => {
     if (command === "apply_global_shortcuts_now") {
       void applyElectronGlobalShortcuts(command);
+    } else if (
+      command === "update_recording_notes"
+      && typeof args === "object"
+      && args !== null
+      && "recordingId" in args
+      && typeof args.recordingId === "string"
+      && args.recordingId.trim().length > 0
+    ) {
+      broadcastRendererEvent("recording-notes-updated", { recordingId: args.recordingId });
     }
   });
 
   ipcBridge.start();
-  await applyElectronGlobalShortcuts("startup");
 
+  let startupSettings: AppSettings | undefined;
   try {
-    const settings = (await ipcBridge.invoke("get_settings")) as AppSettings;
-    applyUiSettings(settings);
+    startupSettings = (await ipcBridge.invoke("get_settings")) as AppSettings;
+    applyUiSettings(startupSettings);
   } catch (error) {
     console.error("[main] Failed to read window ui settings:", error);
   }
@@ -4021,7 +4878,11 @@ async function bootstrap() {
   // window-level settings itself, so every creation path gets them.
   mainWindow = createMainWindow();
   loadOverlayPlacements();
-  prepareOverlayWindows();
+  // A hotkey can still create the pill on demand. Warming its hidden renderer
+  // waits for the main view, with a fallback if that view fails to load.
+  overlayWarmupTimer = setTimeout(prepareOverlayWindows, 3000);
+  overlayWarmupTimer.unref();
+  await applyElectronGlobalShortcuts("startup", startupSettings);
   createTray();
   bootstrapComplete = true;
   refreshTray();

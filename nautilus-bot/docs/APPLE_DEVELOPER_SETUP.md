@@ -150,11 +150,30 @@ source=Notarized Developer ID
 Signing success alone is not enough. A release is blocked until notarization,
 stapling, and Gatekeeper acceptance all pass.
 
+### Rust dependency audit
+
+The local release gate audits Rust dependencies before builds. CI installs
+the `cargo-audit` version pinned in the workflow, clones the official RustSec database into its job
+workspace and runs the same audit gate before packaging.
+
+For a local release check, prepare an owned database explicitly:
+
+```bash
+PLAINSONG_AUDIT_DB_DIR="$(mktemp -d)"
+git clone --depth 1 https://github.com/RustSec/advisory-db.git "$PLAINSONG_AUDIT_DB_DIR"
+PLAINSONG_RUSTSEC_DB="$PLAINSONG_AUDIT_DB_DIR" bun run gate:release:local
+```
+
+The audit rejects an unofficial, dirty or older-than-seven-days database and
+fails on vulnerabilities or malformed tool output. It never refreshes a database
+itself. `--db PATH` takes precedence over `PLAINSONG_RUSTSEC_DB`; without either,
+it uses `~/.cargo/advisory-db`. Keep audit receipts with the candidate evidence.
+
 ## 6. Run the artifact-staging release workflow
 
 After the release changes are merged and the intended beta tag exists, trigger
-`.github/workflows/release.yml` with that tag. For this candidate, the tag is
-`v0.9.0-beta.2`.
+`.github/workflows/release.yml` with that tag. Use `v` followed by the exact
+version in `nautilus-bot/package.json`.
 
 The workflow:
 
@@ -166,7 +185,9 @@ The workflow:
 5. creates or refreshes an artifact-only draft GitHub release after every
    automated artifact check passes
 
-The workflow refuses to overwrite a published release. Its draft does not
+The workflow sets draft prerelease status from the validated tag, including
+when refreshing an existing draft. It refuses to overwrite a published release.
+Its draft does not
 prove the real-hardware Dictation, Meetings, clean-install, updater-journey, or
 three-hour soak gates. The aggregate release audit remains authoritative for
 beta readiness.
@@ -184,7 +205,7 @@ Before publishing the draft:
 6. make the repository public before announcing public download links
 7. publish the reviewed draft only when the website and release notes are ready
 
-No public release or website deployment has happened yet.
+This candidate remains unpublished. Earlier releases do not qualify it.
 
 ## Troubleshooting
 

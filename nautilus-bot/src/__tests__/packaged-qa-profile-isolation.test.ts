@@ -2,26 +2,62 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
 const unsafePackagedLaunchers = [
-  "capture-packaged-macos-app-matrix-insertion.mjs",
-  "capture-packaged-macos-backup-restore.mjs",
-  "capture-packaged-macos-dictation-hotkey.mjs",
-  "capture-packaged-macos-exports.mjs",
-  "capture-packaged-macos-idle-cpu.mjs",
-  "capture-packaged-macos-meeting-mic.mjs",
-  "capture-packaged-macos-meeting-soak.mjs",
-  "capture-packaged-macos-ollama-analysis.mjs",
-  "capture-packaged-macos-recovery-shortcuts.mjs",
-  "capture-packaged-macos-retention.mjs",
-  "capture-packaged-macos-system-audio-test.mjs",
-  "capture-packaged-macos-whisper-transcription.mjs",
+  "capture-packaged-macos-app-matrix-insertion.ts",
+  "capture-packaged-macos-backup-restore.ts",
+  "capture-packaged-macos-dictation-hotkey.ts",
+  "capture-packaged-macos-exports.ts",
+  "capture-packaged-macos-idle-cpu.ts",
+  "capture-packaged-macos-meeting-mic.ts",
+  "capture-packaged-macos-meeting-soak.ts",
+  "capture-packaged-macos-ollama-analysis.ts",
+  "capture-packaged-macos-recovery-shortcuts.ts",
+  "capture-packaged-macos-retention.ts",
+  "capture-packaged-macos-system-audio-test.ts",
+  "capture-packaged-macos-whisper-transcription.ts",
 ] as const;
 
 describe("packaged QA profile isolation", () => {
+  beforeEach(() => {
+    vi.stubEnv("PLAINSONG_CONFIG_DIR", undefined);
+    vi.stubEnv("PLAINSONG_DATA_DIR", undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("preserves caller-owned roots when isolation overrides are explicit", async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "plainsong-qa-profile-env-"));
+    const configRoot = path.join(fixtureRoot, "config");
+    const dataRoot = path.join(fixtureRoot, "data");
+    vi.stubEnv("PLAINSONG_CONFIG_DIR", configRoot);
+    vi.stubEnv("PLAINSONG_DATA_DIR", dataRoot);
+    const { createPackagedQaProfile } = await import(
+      "../../scripts/lib/packaged-qa-profile.ts"
+    );
+
+    try {
+      const qaProfile = createPackagedQaProfile({
+        args: [],
+        sourceProfileDir: path.join(fixtureRoot, "missing-source"),
+        registerCleanup: false,
+      });
+      expect(qaProfile.ownsProfileRoot).toBe(false);
+      expect(qaProfile.configRoot).toBe(configRoot);
+      expect(qaProfile.dataRoot).toBe(dataRoot);
+      qaProfile.cleanup();
+      expect(fs.existsSync(configRoot)).toBe(true);
+      expect(fs.existsSync(dataRoot)).toBe(true);
+    } finally {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
   it("routes every packaged app or sidecar launcher through the isolated profile helper", () => {
     for (const filename of unsafePackagedLaunchers) {
       const source = fs.readFileSync(path.join(repoRoot, "scripts", filename), "utf8");
@@ -47,7 +83,7 @@ describe("packaged QA profile isolation", () => {
     ]);
 
     const { createPackagedQaProfile } = await import(
-      "../../scripts/lib/packaged-qa-profile.mjs"
+      "../../scripts/lib/packaged-qa-profile.ts"
     );
     const qaProfile = createPackagedQaProfile({
       args: [],
@@ -106,9 +142,9 @@ describe("packaged QA profile isolation", () => {
 
   it("passes the disposable Electron user-data directory to every packaged app launcher", () => {
     for (const filename of [
-      "capture-packaged-macos-dictation-hotkey.mjs",
-      "capture-packaged-macos-idle-cpu.mjs",
-      "capture-packaged-macos-recovery-shortcuts.mjs",
+      "capture-packaged-macos-dictation-hotkey.ts",
+      "capture-packaged-macos-idle-cpu.ts",
+      "capture-packaged-macos-recovery-shortcuts.ts",
     ]) {
       const source = fs.readFileSync(path.join(repoRoot, "scripts", filename), "utf8");
       expect(source, filename).toContain("spawn(appExecutablePath, qaProfile.appArgs");
@@ -125,7 +161,7 @@ describe("packaged QA profile isolation", () => {
     const prefix = "plainsong-qa-profile-cleanup-unit-";
     const before = new Set(fs.readdirSync(os.tmpdir()).filter((name) => name.startsWith(prefix)));
     const { createPackagedQaProfile } = await import(
-      "../../scripts/lib/packaged-qa-profile.mjs"
+      "../../scripts/lib/packaged-qa-profile.ts"
     );
 
     expect(() =>
@@ -149,7 +185,7 @@ describe("packaged QA profile isolation", () => {
     fs.mkdirSync(outsideRoot);
     fs.symlinkSync(outsideRoot, linkedProfileRoot);
     const { createPackagedQaProfile } = await import(
-      "../../scripts/lib/packaged-qa-profile.mjs"
+      "../../scripts/lib/packaged-qa-profile.ts"
     );
 
     try {
@@ -169,7 +205,7 @@ describe("packaged QA profile isolation", () => {
 
   it("rejects the live Application Support directory as an explicit profile root", async () => {
     const { createPackagedQaProfile } = await import(
-      "../../scripts/lib/packaged-qa-profile.mjs"
+      "../../scripts/lib/packaged-qa-profile.ts"
     );
 
     expect(() =>
@@ -190,7 +226,7 @@ describe("packaged QA profile isolation", () => {
       const fixtureRoot = fs.mkdtempSync("/tmp/plainsong-qa-profile-alias-");
       const profileRoot = path.join(fixtureRoot, "profile");
       const { createPackagedQaProfile } = await import(
-        "../../scripts/lib/packaged-qa-profile.mjs"
+        "../../scripts/lib/packaged-qa-profile.ts"
       );
 
       try {
@@ -215,7 +251,7 @@ describe("packaged QA profile isolation", () => {
 
   it("falls back to a regular fixture copy when filesystem cloning is unsupported", async () => {
     const { copyPackagedQaFixtureFile } = await import(
-      "../../scripts/lib/packaged-qa-profile.mjs"
+      "../../scripts/lib/packaged-qa-profile.ts"
     );
     const calls: Array<number | undefined> = [];
     const copyFileSync = (_source: string, _destination: string, mode?: number) => {

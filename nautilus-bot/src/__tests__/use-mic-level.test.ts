@@ -1,3 +1,4 @@
+vi.unmock("@/lib/electron");
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -132,6 +133,7 @@ describe("useMicLevel", () => {
   };
 
   beforeEach(() => {
+    Object.defineProperty(window, "electronAPI", { configurable: true, value: undefined });
     tracks = [];
     getUserMedia.mockReset();
     getUserMedia.mockImplementation(async () => fakeStream());
@@ -161,7 +163,85 @@ describe("useMicLevel", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("refuses a retained start callback after disposal", async () => {
+    const { result, unmount } = renderHook(() => useMicLevel());
+    const start = result.current.start;
+    unmount();
+    await act(() => start());
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(enumerateDevices).not.toHaveBeenCalled();
+  });
+
+  it("waits for native permission before device enumeration or capture", async () => {
+    const permission = deferred<boolean>();
+    const requestMicrophoneAccess = vi.fn(() => permission.promise);
+    Object.defineProperty(window, "electronAPI", { configurable: true, value: { requestMicrophoneAccess } });
+    const { result } = renderHook(() => useMicLevel());
+    await act(async () => { void result.current.start(podcastMic); });
+    expect(requestMicrophoneAccess).toHaveBeenCalledOnce();
+    expect(enumerateDevices).not.toHaveBeenCalled();
+    expect(getUserMedia).not.toHaveBeenCalled();
+    await act(async () => { permission.resolve(true); });
+    expect(result.current.state).toBe("live");
+    expect(getUserMedia).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, "rejected"])("reports native permission %s without opening capture", async (permission) => {
+    const requestMicrophoneAccess = vi.fn(() => permission === false ? Promise.resolve(false) : Promise.reject(Error("native")));
+    Object.defineProperty(window, "electronAPI", { configurable: true, value: { requestMicrophoneAccess } });
+    const { result } = renderHook(() => useMicLevel());
+    await act(() => result.current.start(podcastMic));
+    expect(result.current.error).toBe(permission === false ? "denied" : "unavailable");
+    expect(enumerateDevices).not.toHaveBeenCalled();
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it.each(["stop", "unmount", "timeout"])("does not open capture after late native permission following %s", async (action) => {
+    vi.useFakeTimers();
+    const permission = deferred<boolean>();
+    Object.defineProperty(window, "electronAPI", { configurable: true, value: { requestMicrophoneAccess: () => permission.promise } });
+    const { result, unmount } = renderHook(() => useMicLevel());
+    await act(async () => { void result.current.start(podcastMic); });
+    if (action === "stop") act(() => result.current.stop());
+    if (action === "unmount") unmount();
+    if (action === "timeout") await act(() => vi.advanceTimersByTimeAsync(30_000));
+    await act(async () => { permission.resolve(true); });
+    expect(enumerateDevices).not.toHaveBeenCalled();
+    expect(getUserMedia).not.toHaveBeenCalled();
+    if (action === "timeout") expect(result.current.error).toBe("timeout");
+  });
+
+  it("keeps one deadline across native permission and capture", async () => {
+    vi.useFakeTimers();
+    const permission = deferred<boolean>();
+    Object.defineProperty(window, "electronAPI", { configurable: true, value: { requestMicrophoneAccess: () => permission.promise } });
+    getUserMedia.mockReturnValueOnce(new Promise(() => {}));
+    const { result } = renderHook(() => useMicLevel());
+    await act(async () => { void result.current.start(); });
+    await act(() => vi.advanceTimersByTimeAsync(20_000));
+    await act(async () => { permission.resolve(true); });
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(result.current.error).toBe("timeout");
+  });
+
+  it("ignores an older native grant after restart", async () => {
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const requestMicrophoneAccess = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    Object.defineProperty(window, "electronAPI", { configurable: true, value: { requestMicrophoneAccess } });
+    const { result } = renderHook(() => useMicLevel());
+    await act(async () => { void result.current.start(); });
+    await act(async () => { void result.current.start(); });
+    await act(async () => { first.resolve(true); });
+    expect(getUserMedia).not.toHaveBeenCalled();
+    await act(async () => { second.resolve(true); });
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(result.current.state).toBe("live");
   });
 
   it("opens the chosen microphone exactly once the browser can name it", async () => {
@@ -228,4 +308,105 @@ describe("useMicLevel", () => {
     expect(cancelFrame).toHaveBeenCalled();
     expect(result.current.getStream()).toBeNull();
   });
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  it("uses one 30-second deadline across device lookup and capture, then allows retry", async () => {
+    vi.useFakeTimers();
+    const devices = deferred<MediaDeviceInfo[]>();
+    const capture = deferred<ReturnType<typeof fakeStream>>();
+    enumerateDevices.mockReturnValueOnce(devices.promise);
+    getUserMedia.mockReturnValueOnce(capture.promise);
+    const { result } = renderHook(() => useMicLevel());
+    act(() => { void result.current.start(podcastMic); });
+    await act(() => vi.advanceTimersByTimeAsync(20_000));
+    await act(async () => { devices.resolve([]); });
+    await act(() => vi.advanceTimersByTimeAsync(9_999));
+    expect(result.current.state).toBe("starting");
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(result.current.state).toBe("error");
+    expect(result.current.error).toBe("timeout");
+    const late = fakeStream();
+    await act(async () => { capture.resolve(late); });
+    expect(tracks[0].stop).toHaveBeenCalledOnce();
+    expect(result.current.getStream()).toBeNull();
+    await act(() => result.current.start());
+    expect(result.current.state).toBe("live");
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+    expect(result.current.state).toBe("live");
+  });
+
+  it.each(["stop", "unmount", "timeout", "restart"] as const)(
+    "does not open capture after a late device lookup following %s",
+    async (action) => {
+      vi.useFakeTimers();
+      const devices = deferred<MediaDeviceInfo[]>();
+      enumerateDevices.mockReturnValueOnce(devices.promise);
+      const { result, unmount } = renderHook(() => useMicLevel());
+      act(() => { void result.current.start(podcastMic); });
+      if (action === "stop") act(() => result.current.stop());
+      if (action === "unmount") unmount();
+      if (action === "timeout") await act(() => vi.advanceTimersByTimeAsync(30_000));
+      if (action === "restart") await act(() => result.current.start());
+      const calls = getUserMedia.mock.calls.length;
+      await act(async () => { devices.resolve([]); });
+      expect(getUserMedia).toHaveBeenCalledTimes(calls);
+      await act(() => vi.advanceTimersByTimeAsync(30_000));
+      if (action === "restart") expect(result.current.state).toBe("live");
+      if (action === "stop") expect(result.current.state).toBe("idle");
+    },
+  );
+
+  it("releases the first stream if the second device lookup times out", async () => {
+    vi.useFakeTimers();
+    const devices = deferred<MediaDeviceInfo[]>();
+    enumerateDevices.mockResolvedValueOnce([]).mockReturnValueOnce(devices.promise);
+    const { result } = renderHook(() => useMicLevel());
+    await act(async () => { void result.current.start(podcastMic); });
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+    expect(result.current.error).toBe("timeout");
+    expect(tracks[0].stop).toHaveBeenCalled();
+    await act(async () => { devices.resolve([]); });
+    expect(result.current.state).toBe("error");
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["stop", "unmount", "restart"] as const)(
+    "stops a late capture after %s without changing the current generation",
+    async (action) => {
+      vi.useFakeTimers();
+      const capture = deferred<ReturnType<typeof fakeStream>>();
+      getUserMedia.mockReturnValueOnce(capture.promise);
+      const { result, unmount } = renderHook(() => useMicLevel());
+      await act(async () => { void result.current.start(); });
+      if (action === "stop") act(() => result.current.stop());
+      if (action === "unmount") unmount();
+      if (action === "restart") {
+        getUserMedia.mockReturnValueOnce(new Promise(() => {}));
+        await act(async () => { void result.current.start(); });
+      }
+      const late = fakeStream();
+      await act(async () => { capture.resolve(late); });
+      expect(tracks[0].stop).toHaveBeenCalledOnce();
+      expect(result.current.getStream()).toBeNull();
+      await act(() => vi.advanceTimersByTimeAsync(30_000));
+      if (action === "restart") expect(result.current.error).toBe("timeout");
+      if (action === "stop") expect(result.current.state).toBe("idle");
+    },
+  );
+
+  it("releases capture when AudioContext construction throws", async () => {
+    vi.stubGlobal("AudioContext", class {
+      constructor() { throw new Error("Audio unavailable"); }
+    });
+    const { result } = renderHook(() => useMicLevel());
+    await act(() => result.current.start());
+    expect(result.current.error).toBe("unavailable");
+    expect(tracks[0].stop).toHaveBeenCalledOnce();
+    expect(result.current.getStream()).toBeNull();
+  });
+
 });

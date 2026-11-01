@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MODEL_PRESETS,
   presetDiskLabel,
+  presetForThisMac,
   resolveActivePresetId,
   type ModelPreset,
 } from "@/components/models/model-presets";
@@ -20,12 +21,13 @@ import { buildAsrRouteCatalog } from "@/lib/asr-route-catalog";
 import type { AsrProviderInventory } from "@/types";
 import type { Settings } from "@/types/settings";
 
+/** A preset as a Mac without the GGUF build runs it (Intel, in these fixtures). */
 function preset(id: ModelPreset["id"]): ModelPreset {
   const found = MODEL_PRESETS.find((entry) => entry.id === id);
   if (!found) {
     throw new Error(`No preset ${id}`);
   }
-  return found;
+  return presetForThisMac(found, false);
 }
 
 const providers = [
@@ -100,11 +102,20 @@ function settingsFixture(): Settings {
 
 describe("model presets", () => {
   it("costs a disk figure that only ever comes from the model catalogue", () => {
-    // base.en (142 MiB) + Parakeet v3 (639 MiB), summed from asr-capabilities.
-    expect(presetDiskLabel(preset("light"))).toBe("781 MiB");
+    // base.en (142 MiB) + Parakeet v3 (639 MiB), summed from asr-capabilities
+    // and shown in the decimal MB Finder uses.
+    expect(presetDiskLabel(preset("light"))).toBe("819 MB");
     // One model serving both lanes is counted once.
-    expect(presetDiskLabel(preset("balanced"))).toBe("639 MiB");
-    expect(presetDiskLabel(preset("largest_models"))).toBe("4.4 GiB");
+    expect(presetDiskLabel(preset("recommended"))).toBe("670 MB");
+    expect(presetDiskLabel(preset("largest_models"))).toBe("4.7 GB");
+    // Where the GGUF build runs, Parakeet v3 is that build (705 MiB).
+    const recommendedHere = presetForThisMac(MODEL_PRESETS[0], true);
+    expect(presetDiskLabel(recommendedHere)).toBe("739 MB");
+    // Where the sidecar reports the download fetching something else (the
+    // Neural Engine build and vocabulary model), the preset says so.
+    const sized = (target: { modelId: string }) =>
+      target.modelId === "parakeet-tdt-0.6b-v3-q8_0" ? 734_972_305 / (1024 * 1024) : undefined;
+    expect(presetDiskLabel(recommendedHere, sized)).toBe("735 MB");
   });
 
   it("states a downside for every preset", () => {
@@ -116,17 +127,47 @@ describe("model presets", () => {
   });
 
   it("does not present upstream language counts as Plainsong-qualified coverage", () => {
-    const balanced = preset("balanced");
+    const recommended = preset("recommended");
     const widest = preset("widest_languages");
 
-    expect(balanced.costs).toContain(
-      "vendor lists 25 European languages",
-    );
-    expect(balanced.costs).toContain(
-      "Plainsong has only qualified English",
-    );
-    expect(widest.buys).toContain("upstream documentation lists roughly 100");
-    expect(widest.costs).toContain("Plainsong has only qualified English");
+    expect(recommended.costs).toContain("Tested in English only so far");
+    expect(widest.buys).toContain("built for about 100 languages");
+    expect(widest.costs).toContain("Other languages aren't tested in Plainsong yet");
+    for (const entry of MODEL_PRESETS) {
+      expect(`${entry.buys} ${entry.costs}`).not.toMatch(
+        /upstream|vendor|qualified|transducer|decodes|GGUF|ONNX|GPU|CPU|Apple Silicon/i,
+      );
+    }
+  });
+
+  it("offers one Parakeet v3 on every Mac, and never two presets for it", () => {
+    for (const efficient of [true, false]) {
+      const presets = MODEL_PRESETS.map((entry) => presetForThisMac(entry, efficient));
+      expect(presets.map((entry) => entry.id)).toEqual([
+        "recommended",
+        "light",
+        "widest_languages",
+        "largest_models",
+      ]);
+      for (const entry of presets) {
+        expect(`${entry.buys} ${entry.costs}`).not.toMatch(/Compatible|any Mac|Where Recommended/);
+        expect(entry.costs.length).toBeGreaterThan(0);
+        // Parakeet v3 is the GGUF build where it runs, the ONNX build elsewhere.
+        for (const lane of [entry.dictationSpeech, entry.meetingSpeech]) {
+          expect(lane.providerType).not.toBe(efficient ? "parakeet" : "transcribe_cpp");
+        }
+      }
+      // No two presets set the same pair of lanes.
+      const pairs = presets.map(
+        (entry) =>
+          `${entry.dictationSpeech.providerType}:${entry.dictationSpeech.modelId}|${entry.meetingSpeech.providerType}:${entry.meetingSpeech.modelId}`,
+      );
+      expect(new Set(pairs).size).toBe(pairs.length);
+    }
+    expect(preset("recommended").buys).toMatch(/^Parakeet v3 for dictation and meetings/);
+    // The stray-words cost was measured on the GGUF build.
+    expect(preset("recommended").costs).not.toMatch(/stray words/);
+    expect(presetForThisMac(MODEL_PRESETS[0], true).costs).toMatch(/stray words/);
   });
 
   it("applies both speech lanes in one write", () => {
@@ -144,7 +185,7 @@ describe("model presets", () => {
     // shared route here would leave the meeting lane pointing at nothing.
     expect(next.transcription.useSharedAsrSelection).toBe(false);
 
-    expect(resolveActivePresetId(readLaneSelection(providers, next))).toBe(
+    expect(resolveActivePresetId(readLaneSelection(providers, next), false)).toBe(
       "light",
     );
   });
@@ -163,7 +204,7 @@ describe("model presets", () => {
       },
     };
 
-    const next = withModelPreset(cloudAi, providers, preset("balanced"));
+    const next = withModelPreset(cloudAi, providers, preset("recommended"));
 
     expect(next.privacy.dictationAi).toEqual({
       provider: "anthropic",
@@ -181,32 +222,32 @@ describe("model presets", () => {
     const next = withModelPreset(
       settingsFixture(),
       providers,
-      preset("balanced"),
+      preset("recommended"),
     );
 
     expect(next.transcription.useSharedAsrSelection).toBe(true);
     expect(next.transcription.defaultProvider).toBe("parakeet");
-    expect(resolveActivePresetId(readLaneSelection(providers, next))).toBe(
-      "balanced",
+    expect(resolveActivePresetId(readLaneSelection(providers, next), false)).toBe(
+      "recommended",
     );
   });
 
   it("reads as Custom once a single lane is changed underneath it", () => {
-    const balanced = withModelPreset(
+    const recommended = withModelPreset(
       settingsFixture(),
       providers,
-      preset("balanced"),
+      preset("recommended"),
     );
-    expect(resolveActivePresetId(readLaneSelection(providers, balanced))).toBe(
-      "balanced",
+    expect(resolveActivePresetId(readLaneSelection(providers, recommended), false)).toBe(
+      "recommended",
     );
 
-    const changed = withSpeechLaneRoute(balanced, providers, "meeting", {
+    const changed = withSpeechLaneRoute(recommended, providers, "meeting", {
       providerType: "distil_whisper",
       modelId: "distil-large-v3.5",
     });
 
-    expect(resolveActivePresetId(readLaneSelection(providers, changed))).toBeNull();
+    expect(resolveActivePresetId(readLaneSelection(providers, changed), false)).toBeNull();
   });
 
   it("names the preset a change lands on rather than insisting on Custom", () => {
@@ -223,7 +264,7 @@ describe("model presets", () => {
       modelId: "large-v3-turbo",
     });
 
-    expect(resolveActivePresetId(readLaneSelection(providers, changed))).toBe(
+    expect(resolveActivePresetId(readLaneSelection(providers, changed), false)).toBe(
       "widest_languages",
     );
   });
@@ -245,7 +286,7 @@ describe("model presets", () => {
       },
     };
 
-    expect(resolveActivePresetId(readLaneSelection(providers, cloudAi))).toBe(
+    expect(resolveActivePresetId(readLaneSelection(providers, cloudAi), false)).toBe(
       "light",
     );
   });
@@ -449,5 +490,99 @@ describe("buildDownloadedModelIndex partial downloads", () => {
 
     expect(isModelOnDisk(index, "whisper", "base.en")).toBe(true);
     expect(index.fileCount).toBe(1);
+  });
+});
+
+describe("the Recommended preset", () => {
+  const gguf = { providerType: "transcribe_cpp", modelId: "parakeet-tdt-0.6b-v3-q8_0" } as const;
+  const onnx = { providerType: "parakeet", modelId: "parakeet-tdt-0.6b-v3" } as const;
+  const recommendedHere = presetForThisMac(MODEL_PRESETS[0], true);
+
+  it("matches the lanes a new Apple Silicon install starts with: GGUF Parakeet for both", () => {
+    expect(
+      resolveActivePresetId({ dictationSpeech: gguf, meetingSpeech: gguf }, true),
+    ).toBe("recommended");
+    expect(recommendedHere.dictationSpeech).toEqual(gguf);
+    expect(recommendedHere.meetingSpeech).toEqual(gguf);
+    // One model serving both lanes is one download, counted once.
+    expect(presetDiskLabel(recommendedHere)).toBe("739 MB");
+  });
+
+  it("reads a lane still on the ONNX build as the same Parakeet v3", () => {
+    // A beta.6 install dictates on GGUF and records meetings on ONNX: on a
+    // Mac that runs the GGUF build both are Parakeet v3, and Settings offers
+    // the GGUF download beside the preset.
+    expect(
+      resolveActivePresetId({ dictationSpeech: gguf, meetingSpeech: onnx }, true),
+    ).toBe("recommended");
+    expect(
+      resolveActivePresetId({ dictationSpeech: onnx, meetingSpeech: onnx }, true),
+    ).toBe("recommended");
+    // Where the GGUF build can't run, a GGUF lane is no preset at all.
+    expect(
+      resolveActivePresetId({ dictationSpeech: gguf, meetingSpeech: onnx }, false),
+    ).toBeNull();
+    expect(
+      resolveActivePresetId({ dictationSpeech: onnx, meetingSpeech: onnx }, false),
+    ).toBe("recommended");
+  });
+
+  it("claims only what was measured, and names its costs", () => {
+    expect(recommendedHere.buys).toMatch(/for dictation and meetings, in one download/i);
+    expect(recommendedHere.buys).not.toMatch(/faster|quicker|Compatible/i);
+    expect(recommendedHere.costs).toMatch(/stray words/i);
+    expect(recommendedHere.costs).toMatch(/English only so far/);
+    // Internal scheduling is not a chooser's cost.
+    expect(recommendedHere.costs).not.toMatch(/one recording at a time|Apple Silicon/i);
+    expect(recommendedHere.costs).not.toMatch(/two downloads/i);
+  });
+
+  it("reads back as Recommended once applied on a build that lists GGUF Parakeet", () => {
+    const withGguf = [
+      ...providers,
+      {
+        providerType: "transcribe_cpp",
+        name: "transcribe.cpp",
+        description: "GGUF Parakeet",
+        isAvailable: true,
+        inferenceEnabled: true,
+        selectedModelId: gguf.modelId,
+        modelOptions: [{ id: gguf.modelId, label: "Parakeet TDT 0.6B v3 GGUF Q8_0" }],
+        downloadStatus: "NotDownloaded",
+      },
+    ] as unknown as AsrProviderInventory[];
+    const next = withModelPreset(settingsFixture(), withGguf, recommendedHere);
+    // The same shape `Settings::fresh_install` writes: split lanes on GGUF,
+    // and a shared default that never names GGUF but its ONNX substitute.
+    expect(next.transcription).toMatchObject({
+      useSharedAsrSelection: false,
+      defaultProvider: "parakeet",
+      selectedModelId: "parakeet-tdt-0.6b-v3",
+      dictationProvider: "transcribe_cpp",
+      dictationModelId: gguf.modelId,
+      meetingProvider: "transcribe_cpp",
+      meetingModelId: gguf.modelId,
+    });
+    expect(resolveActivePresetId(readLaneSelection(withGguf, next), true)).toBe("recommended");
+  });
+
+  it("never writes a GGUF route into the shared default when one lane moves to it", () => {
+    const withGguf = [
+      ...providers,
+      {
+        providerType: "transcribe_cpp",
+        name: "transcribe.cpp",
+        description: "GGUF Parakeet",
+        isAvailable: true,
+        inferenceEnabled: true,
+        selectedModelId: gguf.modelId,
+        modelOptions: [{ id: gguf.modelId, label: "Parakeet TDT 0.6B v3 GGUF Q8_0" }],
+        downloadStatus: "NotDownloaded",
+      },
+    ] as unknown as AsrProviderInventory[];
+    const next = withSpeechLaneRoute(settingsFixture(), withGguf, "dictation", gguf);
+    expect(next.transcription.useSharedAsrSelection).toBe(false);
+    expect(next.transcription.dictationProvider).toBe("transcribe_cpp");
+    expect(next.transcription.defaultProvider).not.toBe("transcribe_cpp");
   });
 });

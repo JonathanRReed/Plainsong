@@ -1,4 +1,8 @@
 export {
+  getNativeTextModelStatus,
+  downloadNativeTextModel,
+  cancelNativeTextModelDownload,
+  deleteNativeTextModel,
   analyzeRecording,
   analyzeRecordings,
   askMemory,
@@ -13,6 +17,7 @@ export {
   getBundledCleanupModelStatus,
   getLivePreviewEngineStatus,
   getOllamaStatus,
+  getLocalTextRuntimeHealth,
   getRelationshipMemory,
   listAnthropicModels,
   listDeepSeekModels,
@@ -28,6 +33,8 @@ export {
   summarizeRecordingGrounded,
 } from "../backend";
 export type {
+  NativeTextModelStatus,
+  LocalTextRuntimeStatus,
   AppleLanguageModelAvailability,
   BundledCleanupModelStatus,
   LivePreviewEngineStatus,

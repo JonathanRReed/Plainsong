@@ -17,7 +17,7 @@ describe("support bundle IPC contract", () => {
   const bridge = read("electron/ipc-bridge.ts");
   const main = read("electron/main.ts");
   const sidecar = dispatcher();
-  const gate = read("scripts/verify-ipc-contract.mjs");
+  const gate = read("scripts/verify-ipc-contract.ts");
 
   it("admits only the two renderer-facing commands", () => {
     expect(bridge).toContain('"preview_support_bundle"');

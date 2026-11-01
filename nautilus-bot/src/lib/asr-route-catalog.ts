@@ -1,8 +1,10 @@
 import { normalizeDownloadStatus } from "@/lib/download-status";
 import {
+  FLUID_SPEECH_MINI_MODEL_ID,
+  UNDERDOG_BARK_PRO_MODEL_ID,
   appleSpeechServesMeetings,
   describeAsrModel,
-  getAsrModelCapability,
+  getAsrModelCapabilityFor,
   isDownloadableProvider,
   isMeetingEligibleModel,
   isSharedMeetingCompatible,
@@ -57,7 +59,7 @@ export interface AsrRouteCatalogEntry {
   selectable: boolean;
   downloadable: boolean;
   experimental: boolean;
-  capabilityBadge: "Best for dictation" | "Best for meetings" | "Shared";
+  capabilityBadge: "Dictation only" | "Meetings" | "Dictation and meetings";
   readinessLabel: string;
   action: AsrRouteAction;
   actionLabel: string | null;
@@ -66,6 +68,12 @@ export interface AsrRouteCatalogEntry {
   capability: AsrModelCapability | null;
   /** One honest sentence including the downside. Null when no metadata exists. */
   capabilitySummary: string | null;
+  /**
+   * ONNX Parakeet v3 where the GGUF build of the same model can run. Kept in
+   * the catalog so a slot that still names it can be read and labelled, but
+   * never offered in a picker: there it is an internal fallback.
+   */
+  superseded: boolean;
   recommendedRank: Record<AsrRouteLane, number | null>;
 }
 
@@ -78,16 +86,21 @@ export interface AsrRouteCatalogEntry {
 // Qwen3-ASR sits with the other experimental local route: it is offered (it
 // is the only local route to Chinese, Japanese and Korean) but never
 // recommended, and `isExperimentalRoute` sorts it into the last bucket.
+//
+// transcribe.cpp sits directly ahead of Parakeet: its one non-experimental
+// route, GGUF Parakeet, is the recommended local speech engine on Apple
+// Silicon (see `isRecommendedSpeechRoute`), and its experimental routes still
+// sort into the last bucket whatever their provider rank.
 const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "moonshine",
   "macos_apple_speech",
   "windows_sdk_dictation",
+  "transcribe_cpp",
   "parakeet",
   "whisper",
   "distil_whisper",
   "whisper_candle",
   "qwen3_asr",
-  "transcribe_cpp",
   "openai_cloud",
   "elevenlabs_scribe",
   "groq",
@@ -95,19 +108,24 @@ const DICTATION_PROVIDER_ORDER: AsrProviderType[] = [
   "gemini_transcribe",
   "mistral_voxtral",
   "xai_stt",
-  "plainsong_plus",
   "cohere_transcribe",
 ];
 
-// Parakeet stays first in every policy. whisper.cpp (only its multilingual
-// small+ models reach this lane -- see `isWhisperMeetingModel`) sits after it
-// and before Distil: it is the local route for the ~100 languages Parakeet v3
-// lacks, at the cost of being slower than Parakeet on long audio.
+// Parakeet leads the local routes in every policy: GGUF Parakeet through
+// transcribe.cpp first where this build lists it (Apple Silicon -- see
+// `isRecommendedSpeechRoute`), then the ONNX build of the same weights. Only
+// that one transcribe.cpp route is non-experimental; the others (Unified EN)
+// still sort into the last bucket whatever their provider rank. whisper.cpp
+// (only its multilingual small+ models reach this lane -- see
+// `isWhisperMeetingModel`) sits after Parakeet and before Distil: it is the
+// local route for the ~100 languages Parakeet v3 lacks, at the cost of being
+// slower than Parakeet on long audio.
 const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
   MeetingRoutePolicy,
   AsrProviderType[]
 > = {
   prefer_local: [
+    "transcribe_cpp",
     "parakeet",
     "whisper",
     "distil_whisper",
@@ -140,6 +158,7 @@ const MEETING_PROVIDER_ORDER_BY_POLICY: Record<
     "elevenlabs_scribe",
     "groq",
     "cohere_transcribe",
+    "transcribe_cpp",
     "parakeet",
     "whisper",
     "distil_whisper",
@@ -172,6 +191,19 @@ function routeHosting(providerType: AsrProviderType): AsrRouteHosting {
   return providerHostingPreference(providerType) === "cloud" ? "cloud" : "local";
 }
 
+/** "en_US" as a reader says it ("American English"), or the code when unknown. */
+function localeDisplayName(locale: string): string {
+  try {
+    return (
+      new Intl.DisplayNames(["en"], { type: "language" }).of(
+        locale.replace(/_/g, "-"),
+      ) ?? locale
+    );
+  } catch {
+    return locale;
+  }
+}
+
 /**
  * Which engine the Apple Speech route runs, and why, in one sentence.
  *
@@ -185,18 +217,18 @@ export function describeAppleSpeechEngine(
   const version = readiness.operatingSystemVersion
     ? ` (macOS ${readiness.operatingSystemVersion})`
     : "";
-  const locale = readiness.locale ?? "this language";
+  const locale = readiness.locale ? localeDisplayName(readiness.locale) : "this language";
 
   if (!readiness.speechAnalyzerAvailable) {
-    return `Runs SFSpeechRecognizer${version}. SpeechAnalyzer needs macOS 26 or later.`;
+    return `Uses Apple's older speech recognizer${version}, so it works for dictation only. Meetings need macOS 26 or later.`;
   }
   if (readiness.engine === "speech_analyzer") {
-    return `Runs SpeechAnalyzer${version} with the ${locale} language installed. Nothing to download.`;
+    return `Uses Apple's current speech recognizer${version} with ${locale} installed. Nothing to download.`;
   }
   if (!readiness.speechAnalyzerLocaleSupported) {
-    return `Runs SFSpeechRecognizer${version}. SpeechAnalyzer is available but does not cover ${locale}.`;
+    return `Uses Apple's older speech recognizer${version}. The current one doesn't cover ${locale} yet.`;
   }
-  return `Runs SFSpeechRecognizer${version}. Install the ${locale} language to switch to SpeechAnalyzer.`;
+  return `Uses Apple's older speech recognizer${version}. Install ${locale} to switch to the current one, which also works for meetings.`;
 }
 
 /// Builds the human-readable readiness detail string for a route.
@@ -206,13 +238,18 @@ export function describeAppleSpeechEngine(
 /// runs decides whether the route has timestamps and whether meetings can use
 /// it at all.
 function buildReadinessDetail(provider: RouteSelectableProvider): string | null {
-  const base = provider.platformReadiness?.message ?? null;
+  const detail = provider.platformReadiness?.message ?? ("runtimeMessage" in provider ? provider.runtimeMessage ?? null : null);
+  const base = detail && /\bGGUF\b|transcribe\.cpp|\bONNX\b|\bMetal\b|\bCoreML\b/i.test(detail)
+    ? ("runtimeStatus" in provider && provider.runtimeStatus === "missing_model")
+      ? "The speech model is missing or couldn't be verified. Download it again in Settings > Models."
+      : "The speech model isn't ready. Check it in Settings > Models."
+    : detail;
   if (
     provider.providerType === "macos_apple_speech" &&
     provider.platformReadiness
   ) {
     const engineNote = describeAppleSpeechEngine(provider.platformReadiness);
-    return base ? `${base}. ${engineNote}` : engineNote;
+    return base ? `${base.replace(/\.\s*$/, "")}. ${engineNote}` : engineNote;
   }
   return base;
 }
@@ -262,7 +299,7 @@ function routeReadinessLabel(
   if (provider.providerType === "macos_apple_speech") {
     switch (provider.platformReadiness?.status) {
       case "ready":
-        return "Ready on-device";
+        return "Ready on this Mac";
       case "authorization_not_determined":
         return "Permission required";
       case "authorization_denied":
@@ -270,15 +307,15 @@ function routeReadinessLabel(
       case "authorization_restricted":
         return "Permission restricted";
       case "unsupported_locale":
-        return "Locale unsupported";
+        return "Language not supported";
       case "on_device_unavailable":
-        return "On-device unavailable";
+        return "Not available offline";
       case "helper_missing":
-        return "Helper missing";
+        return "Needs repair";
       case "recognizer_unavailable":
         return "Temporarily unavailable";
       case "unsupported_platform":
-        return "Unsupported platform";
+        return "Not available on this Mac";
       default:
         break;
     }
@@ -290,7 +327,7 @@ function routeReadinessLabel(
     case "needs_download":
       return "Needs download";
     case "requires_key":
-      return "BYOK required";
+      return "Needs an API key";
     case "missing_runtime":
       return "Fix setup";
     default:
@@ -359,46 +396,204 @@ function routeAction(
 function routeCapabilityBadge(
   provider: RouteSelectableProvider,
   modelId: string,
-): "Best for dictation" | "Best for meetings" | "Shared" {
+): "Dictation only" | "Meetings" | "Dictation and meetings" {
   const lanes = routeLaneCompatibility(provider, modelId);
   if (lanes.shared) {
-    return "Shared";
+    return "Dictation and meetings";
   }
   if (lanes.meeting) {
-    return "Best for meetings";
+    return "Meetings";
   }
-  return "Best for dictation";
+  return "Dictation only";
+}
+
+/**
+ * The local speech route a new Apple Silicon install dictates and records
+ * meetings on: Parakeet TDT 0.6B v3 in GGUF through transcribe.cpp, one
+ * download for both lanes (the Neural Engine build and vocabulary model in
+ * place of the 739 MB GGUF on Macs that run them; the sidecar reports the
+ * size, `parakeet_download_bytes`). Mirrors `fresh_install_dictation_route` in
+ * rust-sidecar/src/settings.rs, which points the dictation and meeting slots
+ * at it and leaves the shared default on ONNX Parakeet. The sidecar lists the
+ * transcribe.cpp provider only in builds that compile it, so a catalog entry
+ * for this route is itself the "this Mac can run it" signal; everywhere else
+ * ONNX Parakeet stays the recommendation.
+ */
+export const RECOMMENDED_SPEECH_ROUTE = {
+  providerType: "transcribe_cpp",
+  modelId: "parakeet-tdt-0.6b-v3-q8_0",
+} as const satisfies { providerType: AsrProviderType; modelId: string };
+
+/** Whether this is GGUF Parakeet, the one non-experimental transcribe.cpp route. */
+export function isRecommendedSpeechRoute(
+  providerType: AsrProviderType,
+  modelId: string,
+): boolean {
+  return (
+    providerType === RECOMMENDED_SPEECH_ROUTE.providerType &&
+    modelId.trim() === RECOMMENDED_SPEECH_ROUTE.modelId
+  );
+}
+
+/**
+ * Whether Settings marks this route Recommended in a lane: GGUF Parakeet in
+ * the dictation and meeting lanes, the two slots a new Apple Silicon install
+ * starts on. Never in the shared lane (see `isExperimentalInLane`).
+ */
+export function isRecommendedLaneRoute(
+  lane: AsrRouteLane,
+  providerType: AsrProviderType,
+  modelId: string,
+): boolean {
+  return lane !== "shared" && isRecommendedSpeechRoute(providerType, modelId);
 }
 
 function isExperimentalRoute(providerType: AsrProviderType, modelId: string) {
   const normalized = modelId.trim().toLowerCase();
+  if (isRecommendedSpeechRoute(providerType, modelId)) {
+    return false;
+  }
   return (
     providerType === "whisper_candle" ||
     providerType === "qwen3_asr" ||
-    // The transcribe.cpp spike: a second inference runtime behind an off-by-
-    // default Cargo feature. Offered when a build has it, never recommended.
+    // Named "(experimental)" in every picker (`LOCAL_ROUTE_DISPLAY_LABELS`).
+    providerType === "whistle" ||
+    providerType === "cohere_local" ||
+    // transcribe.cpp's other routes (Qwen3-ASR, Orukeet, Unified EN,
+    // Nemotron, Moonshine Streaming, and the optional English Fluid Speech
+    // Mini and Underdog Bark 3.0 Pro): offered, never recommended.
     providerType === "transcribe_cpp" ||
     normalized.includes("experimental") ||
     normalized === "parakeet-tdt-0.6b-v2" ||
+    normalized === "orukeet-v0.1.0-int8" ||
     normalized === "parakeet-tdt-ctc-110m"
   );
 }
 
-function routeDisplayLabel(
+/**
+ * Whether this Mac can run GGUF Parakeet, the efficient build of Parakeet v3
+ * (Apple Silicon builds that compile transcribe.cpp). Where it can, it is the
+ * only Parakeet v3 any picker offers, and ONNX Parakeet is kept as an
+ * internal fallback (`AsrRouteCatalogEntry.superseded`). Everywhere else ONNX
+ * Parakeet is simply Parakeet v3.
+ */
+export function efficientParakeetOffered(
+  providers:
+    | readonly Pick<AsrProviderInfo, "providerType" | "modelOptions" | "inferenceEnabled">[]
+    | null
+    | undefined,
+): boolean {
+  return (
+    providers?.some(
+      (provider) =>
+        provider.providerType === RECOMMENDED_SPEECH_ROUTE.providerType &&
+        provider.inferenceEnabled !== false &&
+        provider.modelOptions.some((option) =>
+          isRecommendedSpeechRoute(provider.providerType, option.id),
+        ),
+    ) ?? false
+  );
+}
+
+/** ONNX Parakeet v3, the build of Parakeet v3 that runs on every Mac. */
+export const ONNX_PARAKEET_ROUTE = {
+  providerType: "parakeet",
+  modelId: "parakeet-tdt-0.6b-v3",
+} as const satisfies { providerType: AsrProviderType; modelId: string };
+
+export function isOnnxParakeetRoute(
+  providerType: AsrProviderType | string | null | undefined,
+  modelId: string | null | undefined,
+): boolean {
+  return (
+    providerType === ONNX_PARAKEET_ROUTE.providerType &&
+    (modelId ?? "").trim() === ONNX_PARAKEET_ROUTE.modelId
+  );
+}
+
+/**
+ * The plain name a picker shows for each local speech model, so every surface
+ * calls a model the same thing. The sidecar's own labels carry build details
+ * ("GGUF Q8_0 via transcribe.cpp", "int4") that mean nothing to a reader;
+ * those stay in the model id. Both builds of Parakeet v3 are "Parakeet v3":
+ * a picker never offers both (`superseded`), so there is nothing to tell
+ * apart.
+ */
+const LOCAL_ROUTE_DISPLAY_LABELS: Readonly<Record<string, string>> = {
+  "transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0": "Parakeet v3",
+  "transcribe_cpp:parakeet-unified-en-0.6b-q8_0": "Parakeet Unified English (experimental)",
+  "transcribe_cpp:orukeet-r3-q8_0": "Orukeet r3 (experimental)",
+  "transcribe_cpp:qwen3-asr-1.7b-q8_0": "Qwen3-ASR 1.7B (experimental)",
+  "transcribe_cpp:qwen3-asr-0.6b-q6_k": "Qwen3-ASR 0.6B Lite (experimental)",
+  "transcribe_cpp:nemotron-3.5-asr-streaming-0.6b-q8_0": "Nemotron 3.5 Streaming (experimental)",
+  "transcribe_cpp:moonshine-streaming-medium-q8_0": "Moonshine Streaming Medium (experimental)",
+  [`transcribe_cpp:${FLUID_SPEECH_MINI_MODEL_ID}`]: "Fluid Speech Mini by FluidVoice",
+  [`transcribe_cpp:${UNDERDOG_BARK_PRO_MODEL_ID}`]: "Underdog Bark 3.0 Pro by Conway Research",
+  "parakeet:parakeet-tdt-0.6b-v3": "Parakeet v3",
+  "parakeet:parakeet-tdt-0.6b-v2": "Parakeet v2 (English)",
+  "parakeet:orukeet-v0.1.0-int8": "Orukeet v0.1 (experimental)",
+  "parakeet:parakeet-tdt-ctc-110m": "Parakeet 110M (older, English)",
+  "whisper:tiny": "Whisper Tiny",
+  "whisper:tiny.en": "Whisper Tiny (English)",
+  "whisper:base": "Whisper Base",
+  "whisper:base.en": "Whisper Base (English)",
+  "whisper:small": "Whisper Small",
+  "whisper:small.en": "Whisper Small (English)",
+  "whisper:medium": "Whisper Medium",
+  "whisper:medium.en": "Whisper Medium (English)",
+  "whisper:large-v3-turbo": "Whisper Large Turbo",
+  "whisper:large-v3": "Whisper Large",
+  "whisper_candle:whisper-large-v3-turbo": "Whisper Large Turbo, alternate (experimental)",
+  "distil_whisper:distil-large-v3.5": "Distil-Whisper Large (English)",
+  "moonshine:moonshine-tiny": "Moonshine Tiny (English)",
+  "moonshine:moonshine-base": "Moonshine Base (English)",
+  "whistle:whistle-2.0.0": "Cactus Whistle 2.0 (experimental)",
+  "qwen3_asr:qwen3-asr-0.6b": "Qwen3-ASR 0.6B (experimental)",
+  "cohere_local:cohere-transcribe-03-2026-q4": "Cohere Transcribe, offline (experimental)",
+  "macos_apple_speech:macos_apple_speech": "Apple Speech",
+};
+
+/** Build details a sidecar label may carry that a reader never needs. */
+const BUILD_DETAIL_PATTERN =
+  /\s*via transcribe\.cpp|\bGGUF\b|\bONNX\b|\bQ\d(?:_[A-Z0-9]+)*\b|\bint[48]\b/gi;
+
+export function routeDisplayLabel(
   providerType: AsrProviderType,
   modelId: string,
   upstreamLabel: string,
 ) {
-  if (
-    providerType === "parakeet" &&
-    (modelId === "parakeet-tdt-0.6b-v3" || modelId === "parakeet-tdt-0.6b-v2")
-  ) {
-    return modelId === "parakeet-tdt-0.6b-v3"
-      ? "Parakeet TDT 0.6B v3"
-      : "Parakeet TDT 0.6B v2";
+  const key = `${providerType}:${modelId.trim()}`;
+  const known = LOCAL_ROUTE_DISPLAY_LABELS[key];
+  if (known) {
+    return known;
   }
+  if (routeHosting(providerType) === "cloud") {
+    return upstreamLabel;
+  }
+  return upstreamLabel
+    .replace(BUILD_DETAIL_PATTERN, "")
+    .replace(/\(\s*,\s*/g, "(")
+    .replace(/,\s*\)/g, ")")
+    .replace(/\(\s*\)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
 
-  return upstreamLabel;
+/**
+ * A speech model the way a status line names it: "Parakeet v3" for a model on
+ * this Mac, "Deepgram · Nova-3" for a cloud service. Which program runs a
+ * local model is not the reader's concern; where cloud audio goes is.
+ */
+export function speechRouteName(
+  provider: Pick<AsrProviderInfo, "providerType" | "name" | "modelOptions">,
+  modelId: string,
+) {
+  const label = routeDisplayLabel(
+    provider.providerType,
+    modelId,
+    provider.modelOptions.find((option) => option.id === modelId)?.label ?? modelId,
+  );
+  return routeHosting(provider.providerType) === "cloud" ? `${provider.name} · ${label}` : label;
 }
 
 function routeSummary(
@@ -407,19 +602,22 @@ function routeSummary(
   capabilityBadge: AsrRouteCatalogEntry["capabilityBadge"],
 ) {
   if (providerType === "moonshine") {
-    return "Lowest-friction local dictation route for fast everyday writing.";
+    return "Quick to set up, for fast everyday dictation on this Mac.";
   }
   if (providerType === "distil_whisper") {
-    return "English-only accuracy alternative that is slower on long local meetings.";
+    return "English only. An accuracy alternative that is slower on long meetings.";
   }
   if (providerType === "parakeet") {
+    if (modelId === "orukeet-v0.1.0-int8") {
+      return "Experimental, for English dictation. A separate download, not yet tested for meetings.";
+    }
     if (modelId === "parakeet-tdt-0.6b-v3") {
-      return "Fast local long-form meeting route with the current recommended multilingual Parakeet release.";
+      return "For dictation and long meetings: one download covers both.";
     }
     if (modelId === "parakeet-tdt-0.6b-v2") {
-      return "Experimental English-only local dictation route; real-audio qualification is pending.";
+      return "Experimental, English only. Not yet tested on real recordings.";
     }
-    return "Legacy English-only Parakeet export, kept as a short-form dictation fallback.";
+    return "An older English-only Parakeet, kept as a fallback for short dictation.";
   }
   if (providerType === "openai_cloud") {
     // Only whisper-1 requests OpenAI's verbose_json response format
@@ -428,66 +626,81 @@ function routeSummary(
     // transcribe models return a single un-timed block, so they never
     // appear as meeting routes (see isMeetingEligibleModel).
     return modelId === "whisper-1"
-      ? "Cloud transcription route with segment timestamps, tuned for meeting and dictation output."
-      : "Cloud transcription route for dictation; no segment timestamps, so it is not offered for meetings.";
+      ? "Cloud transcription with timestamps, for meetings and dictation."
+      : "Cloud transcription for dictation. It returns no timestamps, so it isn't offered for meetings.";
   }
   if (providerType === "elevenlabs_scribe") {
-    return "Cloud route aimed at premium meeting and transcription quality.";
+    return "Cloud service aimed at high-quality meeting transcription.";
   }
   if (providerType === "groq") {
-    return "Cloud route optimized for low-latency Whisper-style transcription.";
+    return "Cloud service for fast Whisper transcription.";
   }
   if (providerType === "cohere_transcribe") {
-    return "Cloud route for meeting-grade transcription with a simple BYOK setup.";
+    return "Cloud service for meeting transcription. Bring your own API key.";
   }
   if (providerType === "deepgram") {
     // The per-minute rate belongs in the picker, not only in the model label
     // the sidecar sends: this is the line a user reads while choosing.
     return modelId === "nova-3-medical"
       ? "Deepgram's clinical-vocabulary build, English only, with the same speaker labels and word timestamps as Nova-3. Billed to your Deepgram key at $0.0043/min."
-      : "Fastest cloud route here, and the cheapest with speaker labels: meetings keep Deepgram's own speakers instead of running a second pass on this Mac. Billed to your Deepgram key at $0.0043/min in English, $0.0052/min on any other language setting including auto.";
+      : "Cloud transcription with speaker labels and word timestamps. Meetings keep Deepgram's speaker labels. Billed to your Deepgram key at $0.0043/min in English, $0.0052/min on any other language setting including auto.";
   }
   if (providerType === "gemini_transcribe") {
-    return "Lowest published word error rate of the cloud routes, with speaker labels and word timestamps. Its API refuses your dictionary on the same request, so meetings get speakers and dictation gets the dictionary. Billed to your Google key at $0.005/min.";
+    return "Cloud transcription with speaker labels and word timestamps. Its API refuses your dictionary on the same request, so meetings get speakers and dictation gets the dictionary. Billed to your Google key at $0.005/min.";
   }
   if (providerType === "mistral_voxtral") {
-    return "Cheapest cloud route here with speaker labels, at $0.003/min, in 13 languages. Mistral's API refuses a language and timestamps on the same request, so meetings detect the language and dictation sends the one you chose. Billed to your Mistral key.";
-  }
-  if (providerType === "plainsong_plus") {
-    return "Included with Plainsong Plus: the most accurate hosted model we route to, with your dictionary sent as key terms. Dictation only for now.";
+    return "Cloud transcription with speaker labels, at $0.003/min, in 13 languages. Mistral's API refuses a language and timestamps on the same request, so meetings detect the language and dictation sends the one you chose. Billed to your Mistral key.";
   }
   if (providerType === "xai_stt") {
-    return "xAI's Grok speech-to-text, near the top of the Artificial Analysis accuracy board, with your dictionary sent as key terms. Dictation only for now. Billed to your xAI key.";
+    return "xAI's Grok speech-to-text, with your dictionary sent as key terms. Dictation only for now. Billed to your xAI key.";
   }
   if (providerType === "macos_apple_speech") {
-    return capabilityBadge === "Best for dictation"
-      ? "On-device Apple Speech for direct dictation only; server fallback is disabled and meetings use a separate provider."
-      : "On-device Apple Speech through SpeechAnalyzer: nothing to download, per-segment timestamps for meetings, and server fallback disabled.";
+    return capabilityBadge === "Dictation only"
+      ? "Apple's speech recognition on this Mac, for dictation only. It never falls back to Apple's servers; meetings use another model."
+      : "Apple's speech recognition on this Mac: nothing to download, works for meetings, and never falls back to Apple's servers.";
   }
   if (providerType === "windows_sdk_dictation") {
-    return "Built into Windows and convenient for direct dictation, but not a meeting route.";
+    return "Built into Windows and handy for dictation, but not for meetings.";
   }
   if (providerType === "whisper_candle") {
-    return "Whisper Large v3 Turbo run via Candle instead of whisper.cpp — a fallback engine, not a different model from the whisper.cpp large-v3-turbo route.";
+    return "The same model as Whisper Large Turbo, run a different way. A fallback, not a different model.";
   }
   if (providerType === "whisper") {
     // The meeting-grade ggml models carry the same tradeoff sentence in every
     // picker: what they add over Parakeet, where they run, and what it costs.
     return isWhisperMeetingModel(modelId)
-      ? "100 languages, runs on the GPU, slower than Parakeet. Local route for meetings in languages Parakeet v3 and Distil-Whisper cannot hear."
-      : "Flexible Whisper family for local power users who want finer model control.";
+      ? "About 100 languages, slower than Parakeet. For meetings in languages Parakeet v3 and Distil-Whisper can't handle."
+      : "Whisper in more sizes, for people who want to choose their own trade-off.";
   }
   if (providerType === "transcribe_cpp") {
-    return "Experimental second engine for the Parakeet weights, run on Metal through transcribe.cpp instead of the CPU ONNX runtime; a separate download from the Parakeet route.";
+    if (modelId === "qwen3-asr-0.6b-q6_k") {
+      return "Experimental English dictation. Not for meetings, and long recordings aren't tested yet.";
+    }
+    if (modelId === "qwen3-asr-1.7b-q8_0") {
+      return "Experimental English dictation with a larger download. Not for meetings.";
+    }
+    if (modelId === "orukeet-r3-q8_0") {
+      return "Experimental English dictation. A separate download from the other Orukeet.";
+    }
+    if (modelId === FLUID_SPEECH_MINI_MODEL_ID) {
+      return "English only. Fewer stray words when someone else talks nearby in our synthetic audio tests; can miss very short replies.";
+    }
+    if (modelId === UNDERDOG_BARK_PRO_MODEL_ID) {
+      return "English only. Did better on short distant-microphone meeting clips in our tests; dictation may lose capitals and punctuation.";
+    }
+    if (isRecommendedSpeechRoute(providerType, modelId)) {
+      return "Recommended for dictation and meetings on this Mac: one download covers both.";
+    }
+    return "Experimental speech model.";
   }
   if (providerType === "qwen3_asr") {
-    return "Experimental local route with the widest language list here, including Chinese, Japanese and Korean; slower than real time on the CPU.";
+    return "Experimental. Built for 30 languages and 22 Chinese dialects. Tested in English in Plainsong.";
   }
-  return capabilityBadge === "Shared"
-    ? "One route that stays viable for both dictation and meetings."
-    : capabilityBadge === "Best for meetings"
-      ? "Meeting-focused route for longer recordings and summaries."
-      : "Dictation-focused route for fast everyday text entry.";
+  return capabilityBadge === "Dictation and meetings"
+    ? "Works for both dictation and meetings."
+    : capabilityBadge === "Meetings"
+      ? "Made for longer recordings like meetings."
+      : "Made for fast everyday dictation.";
 }
 
 function routeLaneCompatibility(
@@ -508,11 +721,34 @@ function routeLaneCompatibility(
   };
 }
 
+/**
+ * Whether a route counts as experimental in one lane.
+ *
+ * GGUF Parakeet is recommended for dictation and meetings: it made fewer word
+ * errors than the ONNX int8 route on dictation clips and on recorded meetings
+ * through the chunked meeting path, at about half the memory. So in those two
+ * lanes it ranks ahead of ONNX Parakeet, and a GGUF model already on disk for
+ * dictation outranks an ONNX one that still needs downloading -- one download
+ * covers both.
+ *
+ * The shared lane still sorts every transcribe.cpp route last and never
+ * recommends one, mirroring settings.rs: a new install keeps the shared
+ * default on ONNX Parakeet (`apply_fresh_install_route`) as the sidecar's
+ * nearest substitute when the GGUF model is missing, and gives the two lanes
+ * their own GGUF selections instead of one shared GGUF route.
+ */
+function isExperimentalInLane(route: AsrRouteCatalogEntry, lane: AsrRouteLane) {
+  return (
+    route.experimental ||
+    (lane === "shared" && route.providerType === "transcribe_cpp")
+  );
+}
+
 function routeSortBucket(
   route: AsrRouteCatalogEntry,
   lane: AsrRouteLane,
 ): number {
-  if (route.experimental) {
+  if (isExperimentalInLane(route, lane)) {
     return 5;
   }
 
@@ -570,13 +806,21 @@ function sortRoutesForLane(
   });
 }
 
+/**
+ * The routes a lane can use, best first. The dictation and meeting lanes are
+ * what pickers offer, so a superseded route (ONNX Parakeet where GGUF
+ * Parakeet can run) is never among them; the shared lane is the sidecar's
+ * fallback and keeps it.
+ */
 export function getLaneRoutes(
   routes: AsrRouteCatalogEntry[],
   lane: AsrRouteLane,
   meetingRoutePolicy: MeetingRoutePolicy,
 ) {
   return sortRoutesForLane(
-    routes.filter((route) => route.laneCompatibility[lane]),
+    routes.filter(
+      (route) => route.laneCompatibility[lane] && !(route.superseded && lane !== "shared"),
+    ),
     lane,
     meetingRoutePolicy,
   );
@@ -596,7 +840,7 @@ export function getRecommendedLaneRoute(
 ) {
   return (
     getLaneRoutes(routes, lane, meetingRoutePolicy).find(
-      (route) => !route.experimental,
+      (route) => !isExperimentalInLane(route, lane),
     ) ?? null
   );
 }
@@ -605,22 +849,20 @@ export function buildAsrRouteCatalog(
   providers: RouteSelectableProvider[],
   meetingRoutePolicy: MeetingRoutePolicy,
 ): AsrRouteCatalogEntry[] {
+  const efficientParakeet = efficientParakeetOffered(providers);
   const baseRoutes = providers.flatMap((provider) =>
     provider.modelOptions.map((option) => {
       const hosting = routeHosting(provider.providerType);
       const readiness = routeReadiness(provider, hosting);
       const capabilityBadge = routeCapabilityBadge(provider, option.id);
       const actionState = routeAction(provider, readiness, hosting);
+      const capability = getAsrModelCapabilityFor(provider, option.id);
 
       return {
         routeId: routeIdFor(provider.providerType, option.id),
         providerType: provider.providerType,
         modelId: option.id,
-        label: routeDisplayLabel(
-          provider.providerType,
-          option.id,
-          option.label,
-        ),
+        label: routeDisplayLabel(provider.providerType, option.id, option.label),
         providerLabel: provider.name,
         providerDescription: provider.description,
         laneCompatibility: routeLaneCompatibility(provider, option.id),
@@ -636,8 +878,10 @@ export function buildAsrRouteCatalog(
         action: actionState.action,
         actionLabel: actionState.actionLabel,
         summary: routeSummary(provider.providerType, option.id, capabilityBadge),
-        capability: getAsrModelCapability(provider.providerType, option.id),
-        capabilitySummary: describeAsrModel(provider.providerType, option.id),
+        capability,
+        capabilitySummary: describeAsrModel(provider.providerType, option.id, capability),
+        superseded:
+          efficientParakeet && isOnnxParakeetRoute(provider.providerType, option.id),
         recommendedRank: {
           dictation: null,
           meeting: null,

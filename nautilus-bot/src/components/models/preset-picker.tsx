@@ -2,6 +2,8 @@ import { cn } from "@/lib/utils";
 import {
   MODEL_PRESETS,
   presetDiskLabel,
+  presetForThisMac,
+  type DownloadSizeMibFor,
   type ModelPreset,
   type ModelPresetId,
 } from "@/components/models/model-presets";
@@ -10,12 +12,21 @@ interface PresetPickerProps {
   activePresetId: ModelPresetId | null;
   /** Presets whose models this build cannot offer, with the reason. */
   unavailableReasonFor: (preset: ModelPreset) => string | null;
+  /**
+   * Whether this Mac runs the GGUF build of Parakeet v3, which presets then
+   * name in place of the ONNX build (`presetForThisMac`).
+   */
+  efficientParakeet: boolean;
+  /** What a Download fetches for a model on this Mac, where that is known. */
+  downloadSizeMibFor?: DownloadSizeMibFor;
   onApply: (preset: ModelPreset) => void;
 }
 
 export function PresetPicker({
   activePresetId,
   unavailableReasonFor,
+  efficientParakeet,
+  downloadSizeMibFor,
   onApply,
 }: PresetPickerProps) {
   const activePreset = MODEL_PRESETS.find(
@@ -26,11 +37,11 @@ export function PresetPicker({
     <div>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="section-heading">Start from a preset</p>
-          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-            Each one sets both speech choices at once and leaves your two AI
-            choices alone. Change either speech choice afterwards and this
-            reads Custom instead.
+          {/* The heading is the disclosure that holds this picker. */}
+          <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
+            Each preset picks the speech models for dictation and meetings
+            together. Your AI choices stay as they are. Change either speech
+            model afterwards and this shows Custom.
           </p>
         </div>
         <p className="text-sm text-muted-foreground">
@@ -46,10 +57,11 @@ export function PresetPicker({
         aria-label="Model preset"
         className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4"
       >
-        {MODEL_PRESETS.map((preset) => {
+        {MODEL_PRESETS.map((definition) => {
+          const preset = presetForThisMac(definition, efficientParakeet);
           const selected = preset.id === activePresetId;
           const unavailable = unavailableReasonFor(preset);
-          const diskLabel = presetDiskLabel(preset);
+          const diskLabel = presetDiskLabel(preset, downloadSizeMibFor);
 
           return (
             <button
@@ -76,7 +88,7 @@ export function PresetPicker({
               </span>
               {diskLabel ? (
                 <span className="font-mono text-sm text-muted-foreground">
-                  {diskLabel} of models
+                  {diskLabel}
                 </span>
               ) : null}
               <span className="text-sm leading-6 text-muted-foreground">

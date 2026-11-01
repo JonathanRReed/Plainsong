@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -7,6 +7,58 @@ import {
 } from "../../electron/external-url-policy";
 
 describe("external URL policy", () => {
+  it("refuses attacker content and redirects on otherwise approved hosts", () => {
+    for (const url of [
+      "https://huggingface.co/spaces/attacker/collector?text=private",
+      "https://huggingface.co/spaces/attacker/collector/private-transcript",
+      "https://huggingface.co/attacker/model/resolve/main/redirect.html",
+      "https://github.com/attacker/collector/releases/download/v1/private-transcript",
+      "https://github.com/attacker/collector",
+      "https://github.com/login?return_to=https://attacker.example",
+      "https://docs.x.ai/?text=private",
+      "https://huggingface.co/openai/whisper-large-v3#private",
+    ]) {
+      expect(isAllowedExternalUrl(url), url).toBe(false);
+    }
+  });
+  it("keeps the static provider model cards, files and license links reachable", () => {
+    const directory = path.resolve(process.cwd(), "rust-sidecar/src/asr");
+    for (const file of readdirSync(directory).filter((name) => name.endsWith(".rs"))) {
+      const source = readFileSync(path.join(directory, file), "utf8");
+      const urls = [...source.matchAll(/(?:source_url|upstream_url|url):\s*"(https:\/\/[^"{}]+)"/g)]
+        .map((match) => match[1]);
+      const repositories = [...source.matchAll(/const \w*(?:HF_REPO|V[23]_REPO|LEGACY_REPO|ORUKEET_REPO)\w*: &str = "([^"/]+\/[^"/]+)"/g)]
+        .map((match) => `https://huggingface.co/${match[1]}`);
+      for (const url of [...urls, ...repositories]) {
+        const parsed = new URL(url);
+        if (!["github.com", "huggingface.co", "docs.cohere.com", "console.groq.com",
+          "developers.openai.com", "elevenlabs.io", "developers.deepgram.com",
+          "docs.mistral.ai", "docs.x.ai", "ai.google.dev", "developer.apple.com",
+          "learn.microsoft.com"].includes(parsed.hostname)) continue;
+        // Download endpoints are not renderer links. Whisper exposes its model file.
+        if (parsed.pathname.includes("/resolve/") && file !== "whisper.rs" &&
+          !/(?:LICENSE-WEIGHTS|NOTICE.md|README.md)$/.test(parsed.pathname)) continue;
+        expect(isAllowedExternalUrl(url), `${file}: ${url}`).toBe(true);
+      }
+    }
+  });
+
+  it("allows only the fixed ChatGPT usage page", () => {
+    expect(isAllowedExternalUrl("https://chatgpt.com/settings/usage")).toBe(true);
+    for (const url of [
+      "https://chatgpt.com/",
+      "https://chatgpt.com/settings/usage?data=private",
+      "https://chatgpt.com/settings/usage#private",
+      "https://chatgpt.com/settings/usage/",
+      "https://chatgpt.com:444/settings/usage",
+      "https://user@chatgpt.com/settings/usage",
+      "https://chatgpt.com.evil.example/settings/usage",
+      "http://chatgpt.com/settings/usage",
+    ]) {
+      expect(isAllowedExternalUrl(url)).toBe(false);
+    }
+  });
+
   it("refuses to open an arbitrary https host", () => {
     // The whole point of the allowlist. `connect-src 'self'` stops the renderer
     // talking to the network directly, so openExternal was the one channel a

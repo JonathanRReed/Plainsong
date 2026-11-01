@@ -174,6 +174,41 @@ struct BackupManifest {
     recording_path_format: Option<RecordingPathFormat>,
 }
 
+#[derive(Debug)]
+pub(crate) struct RestoreRecoveryRequired(String);
+
+impl std::fmt::Display for RestoreRecoveryRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RestoreRecoveryRequired {}
+
+#[derive(Debug)]
+struct RestoreRolledBack {
+    message: String,
+    database: bool,
+}
+
+impl std::fmt::Display for RestoreRolledBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}; live data rolled back", self.message)
+    }
+}
+
+impl std::error::Error for RestoreRolledBack {}
+
+pub(crate) fn restore_error_rolled_back(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RestoreRolledBack>()
+        .is_some_and(|error| error.database)
+}
+
+pub(crate) fn restore_error_requires_recovery(error: &anyhow::Error) -> bool {
+    error.is::<RestoreRecoveryRequired>()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BackupRestoreOutcome {
     pub restored_database: bool,
@@ -209,6 +244,8 @@ pub struct CloudSetupReport {
 /// Backup manager
 pub struct BackupManager {
     config: BackupConfig,
+    #[cfg(test)]
+    test_config_directory: TestBackupConfigDirectory,
 }
 
 impl BackupManager {
@@ -238,7 +275,11 @@ impl BackupManager {
         }
         config.enabled = false;
         config.max_backups = config.max_backups.max(1);
-        Self { config }
+        Self {
+            config,
+            #[cfg(test)]
+            test_config_directory: TestBackupConfigDirectory::new(),
+        }
     }
 
     #[cfg(test)]
@@ -252,8 +293,8 @@ impl BackupManager {
         }
         config.enabled = false;
         config.max_backups = config.max_backups.max(1);
+        self.persist_config(&config)?;
         self.config = config;
-        self.persist_config()?;
         Ok(())
     }
 
@@ -279,11 +320,12 @@ impl BackupManager {
         summary: &crate::approved_locations::ApprovedLocationSummary,
         canonical_path: PathBuf,
     ) -> Result<()> {
-        self.config.backup_dir = Some(canonical_path);
-        self.config.backup_location_id = Some(summary.id.clone());
-        self.config.backup_location_label = Some(summary.label.clone());
-        self.config.backup_location_approved = summary.approved;
-        self.persist_config()
+        let mut config = self.config.clone();
+        config.backup_dir = Some(canonical_path);
+        config.backup_location_id = Some(summary.id.clone());
+        config.backup_location_label = Some(summary.label.clone());
+        config.backup_location_approved = summary.approved;
+        self.set_config(config)
     }
 
     pub fn set_cloud_location_privileged(
@@ -294,14 +336,15 @@ impl BackupManager {
         cloud_folder: String,
         icloud_path: Option<PathBuf>,
     ) -> Result<()> {
-        self.config.cloud_provider = Some(provider);
-        self.config.cloud_remote_name = remote_name;
-        self.config.cloud_folder = cloud_folder;
-        self.config.icloud_path = icloud_path;
-        self.config.cloud_location_id = Some(summary.id.clone());
-        self.config.cloud_location_label = Some(summary.label.clone());
-        self.config.cloud_location_approved = summary.approved;
-        self.persist_config()
+        let mut config = self.config.clone();
+        config.cloud_provider = Some(provider);
+        config.cloud_remote_name = remote_name;
+        config.cloud_folder = cloud_folder;
+        config.icloud_path = icloud_path;
+        config.cloud_location_id = Some(summary.id.clone());
+        config.cloud_location_label = Some(summary.label.clone());
+        config.cloud_location_approved = summary.approved;
+        self.set_config(config)
     }
 
     pub fn config_for_renderer(&self) -> BackupConfig {
@@ -567,22 +610,40 @@ impl BackupManager {
     }
 
     /// Restore a complete, validated backup generation.
-    pub async fn restore_backup(
+    pub(crate) async fn restore_backup(
         &self,
         backup_id: &str,
         data_dir: &Path,
-    ) -> Result<BackupRestoreOutcome> {
+        database: &mut crate::db::Database,
+    ) -> Result<PendingBackupRestore> {
         let settings_path = crate::settings::settings_file_path()?;
-        self.restore_backup_to_targets(backup_id, data_dir, &settings_path)
-            .await
+        self.restore_backup_to_targets_with_database(
+            backup_id,
+            data_dir,
+            &settings_path,
+            Some(database),
+        )
+        .await
     }
 
+    #[cfg(test)]
     async fn restore_backup_to_targets(
         &self,
         backup_id: &str,
         data_dir: &Path,
         settings_path: &Path,
-    ) -> Result<BackupRestoreOutcome> {
+    ) -> Result<PendingBackupRestore> {
+        self.restore_backup_to_targets_with_database(backup_id, data_dir, settings_path, None)
+            .await
+    }
+
+    async fn restore_backup_to_targets_with_database(
+        &self,
+        backup_id: &str,
+        data_dir: &Path,
+        settings_path: &Path,
+        database: Option<&mut crate::db::Database>,
+    ) -> Result<PendingBackupRestore> {
         let backup_dir = self.resolved_backup_dir()?;
         let backup_path = resolve_existing_backup_path(&backup_dir, backup_id)?;
         let manifest = validate_complete_backup(&backup_path, Some(backup_id)).await?;
@@ -602,13 +663,14 @@ impl BackupManager {
             ));
         }
 
-        restore_backup_into_targets(
+        let (units, transaction) = restore_backup_into_targets(
             &backup_path,
             data_dir,
             settings_path,
             &manifest.components,
             &manifest.files,
             manifest.recording_path_format,
+            database,
         )
         .await?;
 
@@ -617,8 +679,13 @@ impl BackupManager {
             restored_recordings: manifest.components.contains(&BackupComponent::Recordings),
             restored_settings: manifest.components.contains(&BackupComponent::Settings),
         };
-        tracing::info!("Backup restored: {}", backup_id);
-        Ok(outcome)
+        tracing::info!("Backup committed pending runtime acceptance: {}", backup_id);
+        Ok(PendingBackupRestore {
+            units,
+            transaction,
+            outcome,
+            resolved: false,
+        })
     }
 
     /// List only complete, validated, visible backup generations.
@@ -975,12 +1042,15 @@ impl BackupManager {
         }
     }
 
-    fn persist_config(&self) -> Result<()> {
+    fn persist_config(&self, config: &BackupConfig) -> Result<()> {
+        #[cfg(test)]
+        let config_path = self.test_config_directory.0.join("backup-config.json");
+        #[cfg(not(test))]
         let config_path = backup_config_path()?;
         if let Some(parent) = config_path.parent() {
             crate::safe_fs::ensure_directory_without_links(parent)?;
         }
-        let mut json = serde_json::to_vec_pretty(&self.config)?;
+        let mut json = serde_json::to_vec_pretty(config)?;
         json.push(b'\n');
         crate::safe_fs::atomic_write(&config_path, &json)
             .context("Failed to persist backup configuration atomically")
@@ -1194,6 +1264,53 @@ struct RestoreUnit {
     staged_path: PathBuf,
     rollback_path: PathBuf,
     path_kind: RestorePathKind,
+}
+
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct PendingBackupRestore {
+    units: Vec<RestoreUnit>,
+    transaction: crate::restore_journal::RestoreTransaction,
+    outcome: BackupRestoreOutcome,
+    resolved: bool,
+}
+
+impl PendingBackupRestore {
+    pub(crate) fn outcome(&self) -> BackupRestoreOutcome {
+        self.outcome
+    }
+
+    pub(crate) async fn accept(mut self) -> Result<BackupRestoreOutcome> {
+        self.transaction.mark_accepted().map_err(|error| {
+            anyhow::Error::new(RestoreRecoveryRequired(format!(
+                "Restore acceptance could not be confirmed durably: {error}"
+            )))
+        })?;
+        self.resolved = true;
+        if let Err(error) = self.transaction.cleanup() {
+            tracing::warn!("Accepted restore cleanup deferred to startup: {error}");
+        }
+        Ok(self.outcome)
+    }
+
+    pub(crate) async fn rollback(mut self) -> Result<()> {
+        let result = self.transaction.rollback();
+        self.resolved = true;
+        result
+    }
+}
+
+impl Drop for PendingBackupRestore {
+    fn drop(&mut self) {
+        if !self.resolved {
+            for unit in &self.units {
+                tracing::warn!(
+                    "Restore not accepted or rolled back; recovery copy preserved at {}",
+                    unit.rollback_path.display()
+                );
+            }
+        }
+    }
 }
 
 fn backup_manifest_path(backup_path: &Path) -> PathBuf {
@@ -1517,6 +1634,10 @@ async fn prepare_staged_database_for_restore(
                 rebased_managed_path(raw, &managed_recordings_root)
             })?;
         }
+        drop(
+            crate::db::Database::open_at_path(&database_path, None)
+                .context("Staged database schema initialization failed")?,
+        );
         crate::db::validate_plaintext_database_file(&database_path)
     })
     .await
@@ -1919,68 +2040,76 @@ async fn validate_staged_restore_inventory(
     Ok(())
 }
 
-async fn rollback_restore_units(units: &[RestoreUnit]) {
-    for unit in units.iter().rev() {
-        let _ = remove_path_if_exists(&unit.live_path).await;
-        if unit.rollback_path.exists() {
-            let _ = tokio::fs::rename(&unit.rollback_path, &unit.live_path).await;
-        }
-        let _ = remove_path_if_exists(&unit.staged_path).await;
+async fn failed_restore_with_rollback(
+    error: anyhow::Error,
+    transaction: &mut crate::restore_journal::RestoreTransaction,
+    restored_database: bool,
+) -> anyhow::Error {
+    match transaction.rollback() {
+        Ok(()) => anyhow::Error::new(RestoreRolledBack {
+            message: format!("{error:#}"),
+            database: restored_database,
+        }),
+        Err(rollback_error) => anyhow::Error::new(RestoreRecoveryRequired(format!(
+            "{:#}; Restore rollback incomplete: {:#}",
+            error, rollback_error,
+        ))),
     }
 }
 
+#[cfg(test)]
 async fn cleanup_restore_artifacts(units: &[RestoreUnit]) {
     for unit in units {
-        let _ = remove_path_if_exists(&unit.rollback_path).await;
-        let _ = remove_path_if_exists(&unit.staged_path).await;
+        for path in [&unit.rollback_path, &unit.staged_path] {
+            if let Err(error) = remove_path_if_exists(path).await {
+                tracing::warn!(
+                    "Failed to clean restore artifact {}: {}",
+                    path.display(),
+                    error
+                );
+            }
+        }
     }
 }
 
-async fn commit_restore_units(units: &[RestoreUnit]) -> Result<()> {
-    let mut committed_units: Vec<RestoreUnit> = Vec::new();
-
-    for unit in units {
-        if let Some(parent) = unit.live_path.parent() {
-            if let Err(error) = tokio::fs::create_dir_all(parent).await {
-                rollback_restore_units(&committed_units).await;
-                cleanup_restore_artifacts(units).await;
-                return Err(error).with_context(|| {
+async fn commit_restore_units(
+    units: &[RestoreUnit],
+    transaction: &mut crate::restore_journal::RestoreTransaction,
+) -> Result<()> {
+    let commit = (|| {
+        for unit in units {
+            if let Some(parent) = unit.live_path.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
                     format!("Failed to create live parent for {:?}", unit.component)
-                });
+                })?;
             }
-        }
-
-        let had_live_target = unit.live_path.exists();
-        if had_live_target {
-            if let Err(error) = tokio::fs::rename(&unit.live_path, &unit.rollback_path).await {
-                rollback_restore_units(&committed_units).await;
-                cleanup_restore_artifacts(units).await;
-                return Err(error).with_context(|| {
+            if unit.live_path.exists() {
+                crate::restore_journal::sync_path(&unit.live_path)?;
+                std::fs::rename(&unit.live_path, &unit.rollback_path).with_context(|| {
                     format!(
                         "Failed to move live {:?} into rollback location",
                         unit.component
                     )
-                });
+                })?;
+                crate::restore_journal::sync_parent(&unit.live_path)?;
             }
+            std::fs::rename(&unit.staged_path, &unit.live_path)
+                .with_context(|| format!("Failed to commit restored {:?}", unit.component))?;
+            crate::restore_journal::sync_parent(&unit.live_path)?;
         }
-
-        if let Err(err) = tokio::fs::rename(&unit.staged_path, &unit.live_path).await {
-            if had_live_target && unit.rollback_path.exists() {
-                let _ = tokio::fs::rename(&unit.rollback_path, &unit.live_path).await;
-            }
-            rollback_restore_units(&committed_units).await;
-            cleanup_restore_artifacts(units).await;
-            return Err(anyhow::anyhow!(
-                "Failed to commit restored {:?}: {}",
-                unit.component,
-                err
-            ));
-        }
-
-        committed_units.push(unit.clone());
+        Ok::<(), anyhow::Error>(())
+    })();
+    match commit {
+        Ok(()) => Ok(()),
+        Err(error) => Err(failed_restore_with_rollback(
+            error,
+            transaction,
+            units
+                .iter()
+                .any(|unit| unit.component == BackupComponent::Database),
+        )
+        .await),
     }
-
-    Ok(())
 }
 
 async fn restore_backup_into_targets(
@@ -1990,8 +2119,9 @@ async fn restore_backup_into_targets(
     components: &[BackupComponent],
     expected_files: &[BackupFileInventory],
     recording_path_format: Option<RecordingPathFormat>,
-) -> Result<()> {
-    let transaction_id = format!("{}-{}", Utc::now().timestamp_millis(), std::process::id());
+    database: Option<&mut crate::db::Database>,
+) -> Result<(Vec<RestoreUnit>, crate::restore_journal::RestoreTransaction)> {
+    let transaction_id = uuid::Uuid::new_v4().to_string();
     let units = build_restore_units(
         backup_path,
         data_dir,
@@ -1999,14 +2129,36 @@ async fn restore_backup_into_targets(
         components,
         &transaction_id,
     );
+    let journal_components: Vec<_> = components
+        .iter()
+        .map(|component| match component {
+            BackupComponent::Database => crate::restore_journal::Component::Database,
+            BackupComponent::Recordings => crate::restore_journal::Component::Recordings,
+            BackupComponent::Settings => crate::restore_journal::Component::Settings,
+        })
+        .collect();
+    let mut transaction = crate::restore_journal::RestoreTransaction::begin(
+        data_dir,
+        settings_path,
+        &transaction_id,
+        &journal_components,
+    )
+    .map_err(|error| {
+        anyhow::Error::new(RestoreRecoveryRequired(format!(
+            "Restore journal creation could not be confirmed durably: {error}"
+        )))
+    })?;
     if let Err(error) = stage_restore_units(&units).await {
-        cleanup_restore_artifacts(&units).await;
-        return Err(error);
+        return Err(failed_restore_with_rollback(error, &mut transaction, false).await);
     }
 
     if let Err(error) = validate_staged_restore_inventory(&units, expected_files).await {
-        cleanup_restore_artifacts(&units).await;
-        return Err(error.context("Staged backup bytes failed manifest validation"));
+        return Err(failed_restore_with_rollback(
+            error.context("Staged backup bytes failed manifest validation"),
+            &mut transaction,
+            false,
+        )
+        .await);
     }
 
     if let Some(database_unit) = units
@@ -2020,15 +2172,31 @@ async fn restore_backup_into_targets(
         )
         .await
         {
-            cleanup_restore_artifacts(&units).await;
-            return Err(error.context("Staged database failed validation before restore"));
+            return Err(failed_restore_with_rollback(
+                error.context("Staged database failed validation before restore"),
+                &mut transaction,
+                false,
+            )
+            .await);
         }
     }
 
-    if let Err(err) = commit_restore_units(&units).await {
-        cleanup_restore_artifacts(&units).await;
-        return Err(err);
+    if let Err(error) = transaction.prepare() {
+        return Err(failed_restore_with_rollback(
+            error.context("Staged restore could not become durable"),
+            &mut transaction,
+            false,
+        )
+        .await);
     }
+    if components.contains(&BackupComponent::Database) {
+        if let Some(database) = database {
+            if let Err(error) = database.close_for_restore() {
+                return Err(failed_restore_with_rollback(error, &mut transaction, false).await);
+            }
+        }
+    }
+    commit_restore_units(&units, &mut transaction).await?;
 
     if let Some(database_unit) = units
         .iter()
@@ -2044,14 +2212,16 @@ async fn restore_backup_into_targets(
         if let Err(error) = reopen_result {
             // Do not discard the rollback copy until the database that was
             // actually published has reopened and passed quick_check.
-            rollback_restore_units(&units).await;
-            cleanup_restore_artifacts(&units).await;
-            return Err(error.context("Restored database failed to reopen; live data rolled back"));
+            return Err(failed_restore_with_rollback(
+                error.context("Restored database failed to reopen"),
+                &mut transaction,
+                true,
+            )
+            .await);
         }
     }
 
-    cleanup_restore_artifacts(&units).await;
-    Ok(())
+    Ok((units, transaction))
 }
 
 async fn validate_directory_tree_without_symlinks(path: &Path) -> Result<()> {
@@ -2305,7 +2475,7 @@ async fn sync_to_rclone(
     let destination = format!("{remote}:{folder}/{backup_id}");
 
     let rclone = rclone_executable().map_err(anyhow::Error::msg)?;
-    let output = Command::new(rclone)
+    let output = tokio::process::Command::from(crate::qos::background_command(rclone))
         .arg("copy")
         .arg(source)
         .arg(&destination)
@@ -2553,6 +2723,37 @@ fn validate_rclone_executable(path: &Path) -> std::result::Result<PathBuf, Strin
         }
     }
     Ok(canonical)
+}
+
+#[cfg(test)]
+struct TestBackupConfigDirectory(PathBuf);
+
+#[cfg(test)]
+impl TestBackupConfigDirectory {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-backup-config-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .expect("create owned backup test config directory");
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir(&path).expect("create owned backup test config directory");
+        Self(path)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestBackupConfigDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 #[cfg(test)]
@@ -2897,6 +3098,94 @@ mod tests {
             Some("Beta backups")
         );
         assert!(manager.config().backup_location_approved);
+    }
+
+    #[test]
+    fn failed_config_writes_keep_running_preferences_and_destinations() {
+        let root = unique_test_dir("failed-config-write");
+        fs::create_dir_all(&root).unwrap();
+        let mut mutated = Vec::new();
+        for change in ["preferences", "backup-location", "cloud-location"] {
+            let mut manager = manager_for(root.join(change), 7);
+            manager.set_config(manager.config().clone()).unwrap();
+            let before = serde_json::to_value(manager.config()).unwrap();
+            let config_directory = manager.test_config_directory.0.clone();
+            let original = fs::read(config_directory.join("backup-config.json")).unwrap();
+            let preserved = config_directory.with_extension("preserved");
+            fs::rename(&config_directory, &preserved).unwrap();
+            fs::write(&config_directory, "obstruction").unwrap();
+            let summary = crate::approved_locations::ApprovedLocationSummary {
+                id: "new-location".into(),
+                label: "New destination".into(),
+                approved: true,
+            };
+            let result = match change {
+                "preferences" => {
+                    let mut preferences = manager.config().clone();
+                    preferences.max_backups = 1;
+                    manager.set_config_from_renderer(preferences)
+                }
+                "backup-location" => {
+                    manager.set_backup_location_privileged(&summary, root.join("new-backups"))
+                }
+                _ => manager.set_cloud_location_privileged(
+                    CloudProvider::ICloud,
+                    &summary,
+                    None,
+                    "NewBackups".into(),
+                    Some(root.join("new-cloud")),
+                ),
+            };
+            let after = serde_json::to_value(manager.config()).unwrap();
+            let retained = fs::read(preserved.join("backup-config.json")).unwrap();
+            fs::remove_file(&config_directory).unwrap();
+            fs::rename(&preserved, &config_directory).unwrap();
+            assert!(result.is_err(), "{change} write unexpectedly succeeded");
+            assert_eq!(retained, original);
+            if after != before {
+                mutated.push(change);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            mutated.is_empty(),
+            "Failed saves changed running state: {mutated:?}"
+        );
+    }
+
+    #[test]
+    fn backup_managers_keep_persisted_preferences_independent() {
+        let root = unique_test_dir("manager-config-isolation");
+        fs::create_dir_all(&root).unwrap();
+        let mut left = manager_for(root.join("left-backups"), 7);
+        let mut right = manager_for(root.join("right-backups"), 7);
+        let left_path = left.test_config_directory.0.join("backup-config.json");
+        let right_path = right.test_config_directory.0.join("backup-config.json");
+        let mut preferences = left.config().clone();
+        preferences.max_backups = 3;
+        left.set_config_from_renderer(preferences).unwrap();
+        let mut preferences = right.config().clone();
+        preferences.max_backups = 9;
+        right.set_config_from_renderer(preferences).unwrap();
+        assert_ne!(left_path, right_path);
+        let left_saved = load_backup_config_from_path(&left_path).unwrap().unwrap();
+        let right_saved = load_backup_config_from_path(&right_path).unwrap().unwrap();
+        assert_eq!(left_saved.max_backups, 3);
+        assert_eq!(left_saved.backup_dir, Some(root.join("left-backups")));
+        assert_eq!(right_saved.max_backups, 9);
+        assert_eq!(right_saved.backup_dir, Some(root.join("right-backups")));
+        drop(left);
+        assert!(!left_path.parent().unwrap().exists());
+        assert_eq!(
+            load_backup_config_from_path(&right_path)
+                .unwrap()
+                .unwrap()
+                .max_backups,
+            9
+        );
+        drop(right);
+        assert!(!right_path.parent().unwrap().exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3292,6 +3581,146 @@ mod tests {
         });
     }
 
+    async fn pending_settings_restore_fixture(root: &Path) -> PendingBackupRestore {
+        fs::create_dir_all(root).unwrap();
+        let transaction_id = uuid::Uuid::new_v4().to_string();
+        let unit = build_restore_units(
+            root,
+            root,
+            &root.join("live"),
+            &[BackupComponent::Settings],
+            &transaction_id,
+        )
+        .remove(0);
+        fs::write(&unit.live_path, "original settings").unwrap();
+        fs::write(&unit.staged_path, "restored settings").unwrap();
+        let mut transaction = crate::restore_journal::RestoreTransaction::begin(
+            root,
+            &unit.live_path,
+            &transaction_id,
+            &[crate::restore_journal::Component::Settings],
+        )
+        .unwrap();
+        transaction.prepare().unwrap();
+        commit_restore_units(std::slice::from_ref(&unit), &mut transaction)
+            .await
+            .unwrap();
+        PendingBackupRestore {
+            units: vec![unit],
+            transaction,
+            outcome: BackupRestoreOutcome {
+                restored_database: false,
+                restored_recordings: false,
+                restored_settings: true,
+            },
+            resolved: false,
+        }
+    }
+
+    #[test]
+    fn pending_restore_accept_cleans_recovery_copies() {
+        Runtime::new().unwrap().block_on(async {
+            let root = unique_test_dir("pending-accept");
+            let pending = pending_settings_restore_fixture(&root).await;
+            assert!(pending.outcome().restored_settings);
+            let rollback = pending.units[0].rollback_path.clone();
+            assert!(rollback.exists());
+            pending.accept().await.unwrap();
+            assert!(!rollback.exists());
+            assert_eq!(
+                fs::read_to_string(root.join("live")).unwrap(),
+                "restored settings"
+            );
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+
+    #[test]
+    fn pending_restore_drop_preserves_recovery_copies() {
+        Runtime::new().unwrap().block_on(async {
+            let root = unique_test_dir("pending-drop");
+            let pending = pending_settings_restore_fixture(&root).await;
+            let rollback = pending.units[0].rollback_path.clone();
+            drop(pending);
+            assert_eq!(fs::read_to_string(rollback).unwrap(), "original settings");
+            assert_eq!(
+                fs::read_to_string(root.join("live")).unwrap(),
+                "restored settings"
+            );
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+
+    #[test]
+    fn pending_restore_rolls_back_after_runtime_rejection() {
+        Runtime::new().unwrap().block_on(async {
+            let root = unique_test_dir("pending-runtime-rejection");
+            let pending = pending_settings_restore_fixture(&root).await;
+            let rollback = pending.units[0].rollback_path.clone();
+            pending.rollback().await.unwrap();
+            assert_eq!(
+                fs::read_to_string(root.join("live")).unwrap(),
+                "original settings"
+            );
+            assert!(!rollback.exists());
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+
+    #[test]
+    fn restore_rejects_quick_check_valid_database_with_invalid_schema() {
+        Runtime::new().unwrap().block_on(async {
+            let root = unique_test_dir("invalid-restore-schema");
+            let backup_root = root.join("backups");
+            let backup_id = "backup_20260802_120000_deadbeef";
+            let generation = backup_root.join(backup_id);
+            let data = root.join("data");
+            fs::create_dir_all(&generation).unwrap();
+            fs::create_dir_all(&data).unwrap();
+            let staged = generation.join("plainsong.db");
+            let conn = Connection::open(&staged).unwrap();
+            conn.execute_batch("CREATE TABLE recordings (broken TEXT); PRAGMA user_version = 1;")
+                .unwrap();
+            drop(conn);
+            crate::db::validate_plaintext_database_file(&staged).unwrap();
+            write_backup_manifest(
+                &generation,
+                backup_id,
+                Utc::now(),
+                BackupType::Full,
+                &[BackupComponent::Database],
+            )
+            .await
+            .unwrap();
+            let mut manifest = read_backup_manifest(&generation).await.unwrap();
+            manifest.recording_path_format = None;
+            fs::write(
+                backup_manifest_path(&generation),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let live = data.join("plainsong.db");
+            let conn = Connection::open(&live).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE sentinel (value TEXT); INSERT INTO sentinel VALUES ('original');",
+            )
+            .unwrap();
+            drop(conn);
+            let original = fs::read(&live).unwrap();
+            let manager = manager_for(backup_root, 7);
+            let error = manager
+                .restore_backup_to_targets(backup_id, &data, &root.join("settings.json"))
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{:#}", error).contains("schema initialization failed"),
+                "{error:#}"
+            );
+            assert_eq!(fs::read(&live).unwrap(), original);
+            fs::remove_dir_all(root).unwrap();
+        });
+    }
+
     #[test]
     fn restore_rejects_database_that_fails_quick_check() {
         let runtime = Runtime::new().expect("create tokio runtime");
@@ -3371,34 +3800,25 @@ mod tests {
             fs::write(&source_recording, "audio").expect("write source recording");
             write_settings(&source_settings, "dark");
 
-            let conn = Connection::open(&snapshot).expect("create database snapshot");
-            conn.execute_batch(
-                "CREATE TABLE recordings (id TEXT PRIMARY KEY, audio_path TEXT);
-                 CREATE TABLE recording_audio_assets (
-                    recording_id TEXT, role TEXT, path TEXT
-                 );
-                 CREATE TABLE recording_audio_operation_items (
-                    operation_id TEXT, recording_id TEXT, role TEXT,
-                    source_path TEXT, staged_path TEXT, target_path TEXT
-                 );
-                 PRAGMA user_version = 1;",
-            )
-            .expect("create recording path tables");
+            drop(crate::db::Database::open_at_path(&snapshot, None).expect("initialize database snapshot"));
+            let conn = Connection::open(&snapshot).expect("open database snapshot");
             conn.execute(
-                "INSERT INTO recordings (id, audio_path) VALUES ('r1', ?1)",
+                "INSERT INTO recordings (id, audio_path, title, project_id, created_at, updated_at, source_type)
+                 VALUES ('r1', ?1, 'Fixture meeting', 'inbox', '2026-08-02T12:00:00Z', '2026-08-02T12:00:00Z', 'meeting')",
                 [source_recording.to_string_lossy().as_ref()],
             )
             .expect("seed source recording path");
             conn.execute(
-                "INSERT INTO recording_audio_assets (recording_id, role, path)
-                 VALUES ('r1', 'primary', ?1)",
+                "INSERT INTO recording_audio_assets (recording_id, role, path, created_at, updated_at)
+                 VALUES ('r1', 'primary', ?1, '2026-08-02T12:00:00Z', '2026-08-02T12:00:00Z')",
                 [source_recording.to_string_lossy().as_ref()],
             )
             .expect("seed source asset path");
             conn.execute(
                 "INSERT INTO recording_audio_operation_items (
-                    operation_id, recording_id, role, source_path, staged_path, target_path
-                 ) VALUES ('op1', 'r1', 'primary', ?1, ?2, ?3)",
+                    operation_id, recording_id, role, source_path, staged_path, target_path,
+                    plaintext_bytes, plaintext_sha256, state, created_at, updated_at
+                 ) VALUES ('op1', 'r1', 'primary', ?1, ?2, ?3, 0, 'fixture', 'prepared', '2026-08-02T12:00:00Z', '2026-08-02T12:00:00Z')",
                 params![
                     source_recording.to_string_lossy().as_ref(),
                     source_data
@@ -3477,7 +3897,8 @@ mod tests {
             manager
                 .restore_backup_to_targets(&info.id, &target_data, &target_settings)
                 .await
-                .expect("restore portable full backup");
+                .expect("restore portable full backup")
+                .accept().await.unwrap();
 
             let restored =
                 Connection::open(target_data.join("plainsong.db")).expect("open restored database");
@@ -3597,7 +4018,10 @@ mod tests {
             let outcome = manager
                 .restore_backup_to_targets(&info.id, &data_dir, &settings_path)
                 .await
-                .expect("restore settings snapshot");
+                .expect("restore settings snapshot")
+                .accept()
+                .await
+                .expect("accept restored backup");
             assert_eq!(
                 outcome,
                 BackupRestoreOutcome {
@@ -3617,6 +4041,60 @@ mod tests {
             assert_eq!(restored.theme, "dark");
 
             let _ = fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn failed_restore_preserves_recovery_bytes_when_rollback_rename_fails() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("rollback-rename-failure");
+            let pending = pending_settings_restore_fixture(&root).await;
+            let rollback = pending.units[0].rollback_path.clone();
+            // Obstruct the live path's parent without deleting its recovery bytes.
+            let preserved = root.with_extension("preserved");
+            fs::rename(&root, &preserved).unwrap();
+            fs::write(&root, "obstruction").unwrap();
+            let preserved_rollback = preserved.join(rollback.file_name().unwrap());
+            let mut transaction = pending.transaction.clone();
+            let error = failed_restore_with_rollback(
+                anyhow::anyhow!("Commit failed"),
+                &mut transaction,
+                false,
+            )
+            .await;
+            assert!(restore_error_requires_recovery(&error));
+            assert!(error.to_string().contains("Restore rollback incomplete"));
+            assert!(!error.to_string().contains("live data rolled back"));
+            assert_eq!(
+                fs::read_to_string(preserved_rollback).unwrap(),
+                "original settings"
+            );
+            fs::remove_file(&root).unwrap();
+            fs::rename(&preserved, &root).unwrap();
+            fs::remove_dir_all(&root).unwrap();
+        });
+    }
+
+    #[test]
+    fn rollback_preserves_recovery_bytes_when_live_parent_is_obstructed() {
+        let runtime = Runtime::new().expect("create tokio runtime");
+        runtime.block_on(async {
+            let root = unique_test_dir("rollback-remove-failure");
+            let pending = pending_settings_restore_fixture(&root).await;
+            let rollback = pending.units[0].rollback_path.clone();
+            let preserved = root.with_extension("preserved");
+            fs::rename(&root, &preserved).unwrap();
+            fs::write(&root, "obstruction").unwrap();
+            let error = pending.rollback().await.unwrap_err();
+            assert!(!error.to_string().is_empty());
+            assert_eq!(
+                fs::read_to_string(preserved.join(rollback.file_name().unwrap())).unwrap(),
+                "original settings"
+            );
+            fs::remove_file(&root).unwrap();
+            fs::rename(&preserved, &root).unwrap();
+            fs::remove_dir_all(&root).unwrap();
         });
     }
 
@@ -3642,22 +4120,35 @@ mod tests {
             fs::write(live_data_dir.join("plainsong.db"), "old-db").expect("write live db");
             fs::write(&settings_path, "{\"theme\":\"old\"}").expect("write live settings");
 
+            let transaction_id = uuid::Uuid::new_v4().to_string();
             let units = build_restore_units(
                 &backup_dir,
                 &live_data_dir,
                 &settings_path,
                 &[BackupComponent::Database, BackupComponent::Settings],
-                "tx-rollback",
+                &transaction_id,
             );
 
             stage_restore_units(&units)
                 .await
                 .expect("stage restore units");
+
+            let mut transaction = crate::restore_journal::RestoreTransaction::begin(
+                &live_data_dir,
+                &settings_path,
+                &transaction_id,
+                &[
+                    crate::restore_journal::Component::Database,
+                    crate::restore_journal::Component::Settings,
+                ],
+            )
+            .unwrap();
+            transaction.prepare().unwrap();
             remove_path_if_exists(&units[1].staged_path)
                 .await
                 .expect("remove staged settings to force failure");
 
-            let err = commit_restore_units(&units)
+            let err = commit_restore_units(&units, &mut transaction)
                 .await
                 .expect_err("commit should fail");
             assert!(err.to_string().contains("Failed to commit restored"));
@@ -3813,6 +4304,112 @@ mod tests {
             assert_eq!(temp_entries, 0);
 
             let _ = fs::remove_dir_all(&root);
+        });
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn full_backup_restores_flac_audio_and_resumable_compression_cleanup() {
+        let runtime = Runtime::new().unwrap();
+        runtime.block_on(async {
+            struct Scratch(PathBuf);
+            impl Drop for Scratch {
+                fn drop(&mut self) { fs::remove_dir_all(&self.0).unwrap(); }
+            }
+            let root = Scratch(unique_test_dir("flac-backup"));
+            let source_data = root.0.join("source");
+            let target_data = root.0.join("restored");
+            fs::create_dir_all(source_data.join("recordings")).unwrap();
+            let wav = source_data.join("recordings/source.wav");
+            let flac = source_data.join("recordings/compact.flac");
+            let mut writer = hound::WavWriter::create(&wav,hound::WavSpec {
+                channels:1,sample_rate:48_000,bits_per_sample:16,sample_format:hound::SampleFormat::Int
+            }).unwrap();
+            for n in 0..96_000 { writer.write_sample(((n as f32*0.08).sin()*4000.0) as i16).unwrap(); }
+            writer.finalize().unwrap();
+            crate::audio_import_runtime::run_audio_conversion(vec![wav.as_os_str().to_owned(),flac.as_os_str().to_owned(),"-f".into(),"flac".into(),"-d".into(),"flac".into()],std::time::Duration::from_secs(60)).unwrap();
+            let crate::recording_audio::RecordingAudioValidation::Ready(metadata) = crate::recording_audio::validate_plaintext_wav(&flac) else { panic!("FLAC fixture"); };
+            let snapshot = root.0.join("snapshot.db");
+            let mut db = crate::db::Database::open_at_path(&snapshot,None).unwrap();
+            let now = chrono::Utc::now();
+            let recording: crate::models::Recording = serde_json::from_value(serde_json::json!({
+                "id":"flac","title":"Compressed fixture","projectId":"inbox","duration":2,
+                "createdAt":now,"updatedAt":now,"sourceType":"meeting","audioPath":flac,"status":"completed"
+            })).unwrap();
+            db.create_recording(&recording).unwrap(); drop(db);
+            let conn = Connection::open(&snapshot).unwrap();
+            conn.execute("INSERT INTO recording_audio_assets(recording_id,role,path,lifecycle,protection,plaintext_bytes,plaintext_sha256,created_at,updated_at) VALUES('flac','primary',?1,'ready','plaintext',?2,?3,?4,?4)",params![flac.to_string_lossy(),metadata.plaintext_bytes,metadata.plaintext_sha256,now.to_rfc3339()]).unwrap();
+            conn.execute("INSERT INTO audio_compression_jobs(recording_id,role,source_name,target_name,source_hash,committed) VALUES('flac','primary','source.wav','compact.flac',?1,1)",[crate::recording_audio::compute_file_sha256(&wav).unwrap()]).unwrap();
+            drop(conn);
+            let source_settings = root.0.join("config/settings.json");
+            write_settings(&source_settings,"dark");
+            let manager = manager_for(root.0.join("backups"),7);
+            let info = manager.create_backup_with_sources(&source_data,&source_settings,BackupType::Full,Some(&snapshot)).await.unwrap();
+            manager.restore_backup_to_targets(&info.id,&target_data,&root.0.join("restored-config/settings.json")).await.unwrap().accept().await.unwrap();
+            let restored = crate::db::Database::open_at_path(&target_data.join("plainsong.db"),None).unwrap();
+            let bundle = restored.load_recording_audio_bundle("flac").unwrap();
+            let asset = bundle.primary.as_ref().unwrap();
+            assert_eq!(asset.path,target_data.join("recordings/compact.flac"));
+            assert_eq!(fs::read(&asset.path).unwrap(),fs::read(&flac).unwrap());
+            let job = restored.compression_job(asset).unwrap();
+            assert!(job.committed); assert_eq!(job.source,target_data.join("recordings/source.wav"));
+            fs::create_dir(root.0.join("runtime")).unwrap();
+            let resolved = crate::resolve_recording_audio_bundle_in_directory(&bundle,None,&root.0.join("runtime"),&[target_data],crate::RuntimeAudioResolveMode::Full, &[]).unwrap();
+            let reader = hound::WavReader::open(&resolved.primary).unwrap();
+            assert_eq!(reader.spec().sample_rate,48_000); assert_eq!(reader.duration(),96_000);
+            assert_eq!(crate::audio::utils::load_audio_file(&resolved.primary).unwrap(),crate::audio::utils::load_audio_file(&wav).unwrap());
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn full_backup_restores_16k_sources_without_recreating_a_stored_mix() {
+        Runtime::new().unwrap().block_on(async {
+            let root = crate::test_fs::TempDir::new("sources-backup");
+            let source = root.path().join("source");
+            let recordings = source.join("recordings");
+            let target = root.path().join("restored");
+            fs::create_dir_all(&recordings).unwrap();
+            let wav = recordings.join("old-mix.wav");
+            let mut writer = hound::WavWriter::create(&wav,hound::WavSpec {channels:1,sample_rate:16_000,bits_per_sample:16,sample_format:hound::SampleFormat::Int}).unwrap();
+            for n in 0..32_000 { writer.write_sample(((n as f64*0.08).sin()*4000.0) as i16).unwrap(); }
+            writer.finalize().unwrap();
+            let snapshot = root.path().join("snapshot.db");
+            let now = chrono::Utc::now();
+            let mut db = crate::db::Database::open_at_path(&snapshot,None).unwrap();
+            let recording = serde_json::from_value(serde_json::json!({"id":"sources","title":"Source fixture","projectId":"inbox","duration":2,"createdAt":now,"updatedAt":now,"sourceType":"meeting","audioPath":recordings.join("system.flac"),"status":"completed"})).unwrap();
+            db.create_recording(&recording).unwrap();
+            db.set_meeting_audio_finalized("sources",true).unwrap();
+            let transcript = serde_json::from_value(serde_json::json!({"id":"t","recordingId":"sources","fullText":"Both voices.","segments":[],"language":"en","confidence":1.0,"model":"fixture","createdAt":now})).unwrap();
+            db.save_transcript(&transcript).unwrap();
+            db.complete_recording_with_transcript_state("sources","completed",true,None).unwrap();
+            drop(db);
+            let conn = Connection::open(&snapshot).unwrap();
+            for role in ["mic","system"] {
+                let flac = recordings.join(format!("{role}.flac"));
+                crate::audio_import_runtime::run_audio_conversion(vec![wav.as_os_str().to_owned(),flac.as_os_str().to_owned(),"-f".into(),"flac".into(),"-d".into(),"flac".into()],std::time::Duration::from_secs(60)).unwrap();
+                let crate::recording_audio::RecordingAudioValidation::Ready(metadata) = crate::recording_audio::validate_plaintext_wav(&flac) else { panic!("FLAC fixture"); };
+                conn.execute("INSERT INTO recording_audio_assets(recording_id,role,path,lifecycle,protection,plaintext_bytes,plaintext_sha256,created_at,updated_at) VALUES('sources',?1,?2,'ready','plaintext',?3,?4,?5,?5)",params![role,flac.to_string_lossy(),metadata.plaintext_bytes,metadata.plaintext_sha256,now.to_rfc3339()]).unwrap();
+            }
+            conn.execute("INSERT INTO audio_compression_jobs(recording_id,role,source_name,target_name,source_hash,committed) VALUES('sources','primary','old-mix.wav','system.flac',?1,1)",[crate::recording_audio::compute_file_sha256(&wav).unwrap()]).unwrap();
+            drop(conn);
+            let settings = root.path().join("config/settings.json"); write_settings(&settings,"dark");
+            let manager = manager_for(root.path().join("backups"),7);
+            let info = manager.create_backup_with_sources(&source,&settings,BackupType::Full,Some(&snapshot)).await.unwrap();
+            manager.restore_backup_to_targets(&info.id,&target,&root.path().join("restored-config/settings.json")).await.unwrap().accept().await.unwrap();
+            let mut db = crate::db::Database::open_at_path(&target.join("plainsong.db"),None).unwrap();
+            let bundle = db.load_recording_audio_bundle("sources").unwrap();
+            assert!(bundle.primary.is_none()); assert_eq!(bundle.assets().count(),2);
+            assert!(db.meeting_audio_finalized("sources").unwrap());
+            assert_eq!(db.backfill_legacy_recording_audio(std::slice::from_ref(&target)).unwrap(),0);
+            let jobs = db.compression_jobs_for_bundle(&bundle).unwrap();
+            assert_eq!(jobs.len(),1); assert_eq!(jobs[0].source,target.join("recordings/old-mix.wav"));
+            assert!(db.compression_source_unchanged(&jobs[0]).unwrap());
+            let runtime = root.path().join("runtime"); fs::create_dir(&runtime).unwrap();
+            for mode in [crate::RuntimeAudioResolveMode::Full,crate::RuntimeAudioResolveMode::PlaybackPrimary] {
+                let resolved = crate::resolve_recording_audio_bundle_in_directory(&bundle,None,&runtime,std::slice::from_ref(&target),mode, &[]).unwrap();
+                let reader = hound::WavReader::open(&resolved.primary).unwrap();
+                assert_eq!(reader.spec().sample_rate,16_000); assert_eq!(reader.duration(),32_000);
+            }
         });
     }
 }

@@ -1,14 +1,135 @@
 # Plainsong limited beta launch checklist
 
-Release target: `0.9.0-beta.5`
+Source target: `0.9.0-beta.7`
 
-Last reconciled: September 4, 2026
+Last reconciled: October 30, 2026
 
-This checklist is the release boundary for the private integration candidate.
-Dictation and Meetings are both supported product pillars. Source readiness,
-packaged candidate readiness, and distribution are separate states.
+## Beta.7 evidence boundary
 
-## Beta 4 current boundary
+Electron is the chosen shell. Dictation and meetings are the product's two
+pillars. Source checks, recorded-audio evaluations, packaged interaction and
+public distribution need separate evidence. The
+[beta.7 evidence index](nautilus-bot/docs/evals/beta7-evidence.md) records the
+measurements used in the release notes and their limits.
+
+The `models-2026-10` assets are published as a prerelease, per the maintainer's
+October 22 verification. This does not establish publication or qualification
+of the beta.7 app. No fresh model-release check was made in this reconciliation.
+
+Use either the local candidate path or the
+[release workflow](.github/workflows/release.yml). The
+[signing guide](nautilus-bot/docs/CODE_SIGNING.md#official-publication-paths)
+describes both official paths. Signing, notarization, clean installation, capture,
+insertion and updater receipts must cover the delivered bytes. Publication
+and replacing an installed app require the task's authorization.
+
+## Publication and rollout gates
+
+Jonathan approved the local release path on October 30, 2026. Build, notarize
+and verify with `bun run release:mac`, which runs
+`nautilus-bot/scripts/release-mac.mjs`. Keep those exact bytes for upload and
+finish qualification before requesting publication approval. Actions is an
+alternative that builds its own candidate, which needs its own qualification.
+
+From `nautilus-bot/`, run:
+
+```bash
+bun run qa:packaged:macos:release-audit:pre -- \
+  --candidate /absolute/path/to/candidate --qa-dir /absolute/path/to/qa
+```
+
+Pre checks candidate identity and bytes, Developer ID trust, notarization,
+update metadata, packaged licenses, the 450 MiB size limit and required
+qualification receipts. It does not require the candidate to be published.
+`release-pre-audit.json` must report `PASS` and `publicationReady: true`.
+Missing, stale or failed qualification evidence blocks publication.
+
+The [candidate receipt checklist](nautilus-bot/scripts/qa/README.md) maps all 24
+requirements to producers and lists b27 qualification commands. Beta.7 has five
+recorded decisions by Jonathan in
+[release-scope-exceptions.json](nautilus-bot/release-scope-exceptions.json).
+The October 30 decisions exclude the beta.5 updater journey and the audible
+benchmark. The updater reports `excluded by decision`; the benchmark appears
+outside the 24 audit rows in the decision list.
+
+The October 31 decisions exclude only these parts:
+
+- `memory-footprint`, 8 GB tier, `idle-after-dictation`: "Accept 8 GB window-open idle after dictation for beta.7; fix in beta.8". Reason: "Average is at the 300 MiB limit with the speech model kept warm and the main window open; brief graphics peaks to 534 MiB; window closed is about 200 MiB."
+- `host-matrix`, Google Docs in Chrome: "Skip Google Docs typing for beta.7". Reason: "Chrome has no QA connection on this Mac; Notes, Slack and Messages pass."
+- `clean-install`, clean-account permission and first dictation/insertion journey: "Skip fresh-account install journey for beta.7". Reason: "Needs a new macOS user account; quarantined DMG install, signatures and Gatekeeper pass."
+
+Partial exclusions report `proved with scoped exclusion`, counted separately
+from clean proofs, only if the remaining checks pass. Other memory states and
+effective-memory verdicts, receipt validity, candidate binding, required hosts,
+quarantined install, bundle match, signatures and Gatekeeper still apply.
+The 16 GB footprint gate has no exclusion. These decisions do not qualify
+physical 8 GB hardware or packaged encrypted migration. Other missing or
+failed gates still block.
+
+After Jonathan authorizes publication, upload those unchanged assets to the
+GitHub release. The update Worker serves that release through the feed.
+Capture the feed receipt and update the site's metadata from those assets:
+
+```bash
+bun run qa:packaged:macos:public-update-feed -- \
+  --candidate /absolute/path/to/candidate \
+  --feed-url https://updates.plainsong.jonathanrreed.com/beta/ \
+  --out /absolute/path/to/qa/public-update-feed.json \
+  --markdown /absolute/path/to/qa/public-update-feed.md
+bun run qa:packaged:macos:release-audit:post -- \
+  --candidate /absolute/path/to/candidate --qa-dir /absolute/path/to/qa
+```
+
+Post requires the exact-candidate pre PASS, the public feed serving that
+candidate, public DMG and ZIP downloads matching hashes and sizes, and the
+public download page and `llms.txt` matching the release. Public requests are
+unauthenticated GETs. `release-post-audit.json` must report `PASS` and
+`launchDone: true` before rollout is complete. A pre PASS does not close rollout.
+The unsuffixed `qa:packaged:macos:release-audit` defaults to pre. Explicit
+`--phase pre|post` selects a phase; each writes separate default receipts.
+
+The feed gate uses `nautilus-bot/release-channel-policy.json`. With
+`stableReleaseExists: false`, the exact stable manifest URL must return 404,
+recorded as `expected-absent-before-first-stable-release`. Beta must remain
+valid and match the candidate. A stable 200, beta build in stable, redirect,
+or unexpected error blocks the gate. Change the value to `true` in reviewed
+source when the first stable release is published. Stable must then return a
+valid stable manifest. Never create a fake stable manifest to pass a beta gate.
+
+Everything below is a historical candidate record. Its package names, test
+counts, repository visibility and hosting status do not describe beta.7.
+The phase rules above replace the historical aggregate-audit ordering.
+
+## Two-submission macOS release flow
+
+`bun run release:mac` compiles and signs the app, submits its ZIP, then staples
+and verifies the app. It builds and signs the DMG from that stapled app,
+submits and staples the DMG, and verifies its mounted payload read-only under
+the system temporary directory. It builds the updater ZIP, blockmap and
+`beta-mac.yml` from the stapled app and verifies the extracted copy. The full
+trust policy must pass before `SHA256SUMS` and the completion receipt are
+written. Attach `SHA256SUMS` to the release and include download checksums in
+release notes.
+
+Set `PLAINSONG_BUILD_SLOT` to the shared host's existing guard. The runner holds
+the slot only for compilation, with nice 10 and four Cargo jobs. Apple uploads
+and waits hold no build slot. Do not wrap the whole release command in the
+guard.
+
+Use a fresh `PLAINSONG_RELEASE_DIR` outside iCloud. App and DMG uploads have
+separate retry journals. Resume with
+`bun scripts/release-mac.mjs --resume <candidate-directory>`. It reuses selected
+submissions, recovers IDs and never waits on cut-off uploads still In Progress.
+Old single-submission candidates require a fresh candidate directory. Preserve
+b22's evidence rather than rebuilding its submitted bytes.
+
+The encrypted-snapshot integration test runs real sidecar startup across
+isolated child processes with a test key. It checks encryption, ordering,
+two-copy retention and migration-failure preservation. No production key
+mechanism is added. This does not qualify a packaged encrypted updater journey.
+See [CODE_SIGNING.md](nautilus-bot/docs/CODE_SIGNING.md) for commands and limits.
+
+## Historical beta 4 boundary
 
 - Source, release, binaries, and update feed went public on September 5, 2026
   at the maintainer's direction (repository public, release `v0.9.0-beta.4`
@@ -30,8 +151,8 @@ packaged candidate readiness, and distribution are separate states.
   maintainer accepted fast, usable launch as the objective on September 4.
   The notarized beta 4 sample presented at 3,015 ms and was interactive at
   4,065 ms on a heavily loaded Mac. This is not a quiet-machine benchmark.
-- The private `v0.9.0-beta.4` release points to `5c0ca098`. Source gates,
-  signing, notarization, stapling, Gatekeeper, DMG copy and first-run setup,
+- Release `v0.9.0-beta.4` points to `5c0ca098`. Source gates, signing,
+  notarization, stapling, Gatekeeper, DMG copy and first-run setup,
   hold and toggle dictation, Apple Notes insertion, meeting capture,
   local analysis, backup, retention, and exports have evidence. Update
   metadata passes; an installed-version updater journey is still unqualified.
@@ -42,51 +163,9 @@ packaged candidate readiness, and distribution are separate states.
 
 ## Historical beta 2 evidence, not valid for beta 4
 
-The sections below preserve the beta 2 record so its measurements remain
-auditable. They must not be read as evidence for beta 4.
-
-Everything under "Historical beta 2 verdict" and "Exact packaged candidate gate" below
-describes the source and package as they stood on **August 23, 2026**. Two
-further audited fix waves have merged into `main` since then — Electron
-security hardening, meeting data-integrity fixes, model currency, sidecar
-robustness, and a renderer UX pass on Dictation and Meetings recovery. See
-`nautilus-bot/CHANGELOG.md`'s `[Unreleased] - 0.9.0-beta.3` section for the
-full, evidence-checked list. `package.json` has not been bumped and no
-`0.9.0-beta.3` package has been built, so this document still tracks
-`0.9.0-beta.2` — but its qualification claims are **stale, not current**:
-
-- **Stale: the "868 Vitest tests ... pass" claim and every other source-ready
-  line below.** They describe the `0.9.0-beta.2` revision's source tree, not
-  current `HEAD`. The two merged waves added new source files, new tests, and
-  changed entitlements, packaging config, and default models. The
-  source-ready gate must be rerun top to bottom on current `HEAD` before any
-  of those lines can be asserted again.
-- **Stale: every number in "Exact packaged candidate gate" and the size/
-  cold-start figures in "Historical beta 2 verdict."** The size gate (374 MB), the
-  cold-start gate (2428 ms), and the native-helper, signature, and
-  entitlement checks were all measured against a binary that no longer
-  matches current source — the entitlements files changed shape (see
-  `nautilus-bot/docs/CODE_SIGNING.md`'s "Per-binary entitlements" section),
-  `CFBundleVersion` changed from a string to a numeric build version, and the
-  DMG layout changed. None of these numbers can be assumed to still hold;
-  they must be re-measured against a freshly built package.
-- **Never true, still not true: the product acceptance gate.** Real-hardware
-  Dictation matrix, Meeting lifecycle soak, and updater-journey evidence were
-  required and absent for `0.9.0-beta.2` before this reconciliation, and
-  remain required and absent now. Nothing in this reconciliation changes that.
-- **What must be recaptured before a beta.3 candidate decision:** rebuild the
-  packaged candidate (`bun run release:mac`) against current `HEAD`; rerun
-  every command under "Exact packaged candidate gate"; capture a fresh
-  aggregate release audit (`bun run qa:packaged:macos:release-audit`) — the
-  existing receipts predate this revision, and
-  `scripts/lib/release-receipt-freshness.mjs` is designed to reject a receipt
-  older than the candidate it's supposed to describe; and take fresh invite-
-  kit screenshots, since the Dictation and Settings UI changed visibly (a new
-  clipboard-copy toggle, a searchable language picker, meeting recovery
-  actions, and a new onboarding step asking how meeting notes get written).
-  This recapture work is scheduled for a later wave. This reconciliation's
-  job was to say plainly what is stale, not to produce new green checkmarks
-  for claims nobody has re-run.
+The remaining sections preserve the August 23, 2026 beta.2 checklist and
+receipts. They do not prove beta.4, beta.7 or any later candidate. Re-run the
+source and exact-package gates for the candidate being delivered.
 
 ## Historical beta 2 verdict
 
@@ -163,7 +242,7 @@ The following evidence must refer to the same app digest and package version:
 - `Plainsong-0.9.0-beta.2-arm64-mac.zip`
 - matching ZIP blockmap
 - `beta-mac.yml`
-- `SHA256SUMS.txt`, covering the DMG, ZIP, blockmap, and beta manifest
+- `SHA256SUMS`, covering the DMG, ZIP, blockmap, and beta manifest
 - Developer ID signature and timestamp for the app and every native helper
 - hardened runtime, least-privilege entitlements, and Electron fuse checks
 - Apple notarization acceptance and stapled tickets for the app and DMG
@@ -181,9 +260,22 @@ bun run gate:packaged:macos:native
 bun run qa:packaged:macos:update-metadata
 bun run gate:size
 bun run gate:cold-start
+bun run qa:packaged:macos:footprint -- --simulate-gb 8
+bun run qa:packaged:macos:footprint -- --simulate-gb 16
 bun run gate:release:licenses
 bun run gate:release:macos:trust
 ```
+
+The footprint gate launches the candidate in a throwaway QA profile, tells it
+to plan for an 8 GB or 16 GB Mac, and sums the `phys_footprint` of every app
+process (main, renderers, GPU and utility helpers, the sidecar and native
+helpers) once a second through idle (window open and closed to the menu bar),
+dictation, a two-minute Me + Them meeting and the work after the call. A state
+over the `rust-sidecar/src/hardware_tier.rs` budget for that Mac fails. It
+needs a virtual input such as BlackHole for its spoken fixtures; nothing is
+played aloud and the QA profile keeps all processing on the Mac. The release
+audit requires `artifacts/qa/macos/footprint-8gb.json` and
+`artifacts/qa/macos/footprint-16gb.json` for the exact candidate.
 
 ## Product acceptance gate
 
@@ -211,13 +303,15 @@ bun run benchmark:latency -- --provider whisper --model base.en --runs 5
 bun run gate:dictation-latency
 ```
 
-The aggregate release audit is:
+The historical aggregate command now defaults to the pre-publication phase:
 
 ```bash
 bun run qa:packaged:macos:release-audit
 ```
 
-It must report `PASS`. Missing evidence is a blocker, not an implicit pass.
+Pre must report `PASS` before publication. Post must report `PASS` after
+publication. See the current phase commands above. Missing evidence blocks
+the selected phase.
 
 ## Beta update gate
 
@@ -238,7 +332,7 @@ bun run qa:packaged:macos:public-update-feed -- \
   --feed-url https://updates.plainsong.jonathanrreed.com/beta/
 ```
 
-The GitHub repository is currently private. A private GitHub release API is
+At the beta.2 snapshot, the repository was private. A private GitHub release API is
 not a client-reachable feed. Before inviting testers, either the release feed
 must be public or the verified beta assets must be placed on another public,
 credential-free update host. The integrated candidate is configured for the
@@ -247,7 +341,7 @@ verification. This is an external distribution gate, not something source
 tests can waive.
 
 The existing Cloudflare Pages site cannot host the candidate update ZIP because
-the ZIP exceeds Pages' per-file limit. The current recommended path is a public
+the ZIP exceeds Pages' per-file limit. The recommendation at that snapshot was a public
 R2 Standard bucket on a dedicated custom domain such as
 `updates.plainsong.jonathanrreed.com`. Creating the bucket, enabling public
 access, connecting DNS, and uploading the release are production changes and
@@ -301,3 +395,15 @@ Do not claim Whisperflow or Raycast speed parity without a controlled,
 same-hardware comparison. Do not claim Granola feature parity. Do not call the
 beta launched until invited testers can install the tested artifact and receive
 the tested update feed.
+
+## October 30 release decisions
+
+- Keep the two existing speech fixtures and internal documentation public as
+  they are. This records Jonathan's disposition, not new provenance evidence.
+- Defer `main` branch protection until after launch. It is not a publication
+  gate. Still review the PR and pass its source CI before merging.
+- Publish the integration tree through one squash commit on `main`. Create a
+  release branch from fresh `origin/main`, squash the reviewed integration tree
+  onto it locally, then push that branch and open the PR. Do not push the local
+  integration branch's ancestor QA history. Squash-merge the PR and build from
+  the resulting main SHA. Review the PR's final tree before the first push.

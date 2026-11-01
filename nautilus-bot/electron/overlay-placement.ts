@@ -61,7 +61,7 @@ export const OVERLAY_BASE_SIZE: Record<OverlayKind, OverlaySize> = {
  *   432x420, the full-mode done card. The pill size presets scale only the
  *   minimal pill, whose largest window (xlarge, docked upright) is 125x255,
  *   so they need no extra headroom.
- * - recording: 470x228, the expanded chip in recording-popup.tsx.
+ * - recording: 470x650, the full notes editor in recording-popup.tsx.
  *
  * Clamping BELOW those would clip the card rather than contain an attack, and
  * the layout module is explicit that a short estimate cuts off the live-text
@@ -71,7 +71,7 @@ export const OVERLAY_BASE_SIZE: Record<OverlayKind, OverlaySize> = {
  */
 export const OVERLAY_MAX_SIZE: Record<OverlayKind, OverlaySize> = {
   dictation: { width: 720, height: 480 },
-  recording: { width: 560, height: 320 },
+  recording: { width: 560, height: 720 },
 };
 
 /** Below this an overlay is invisible but still hit-testable. */

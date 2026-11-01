@@ -105,8 +105,9 @@ impl XaiSttProvider {
         audio_data: &[u8],
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
-        let api_key = Self::api_key()
-            .context("No xAI API key: add one in Settings, API Keys, or set XAI_API_KEY")?;
+        let api_key = Self::api_key().context(
+            "No xAI API key: add one in Settings > Search & AI > API keys, or set XAI_API_KEY",
+        )?;
         let start = std::time::Instant::now();
 
         let part = reqwest::multipart::Part::bytes(audio_data.to_vec())
@@ -178,7 +179,9 @@ impl XaiSttProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 }

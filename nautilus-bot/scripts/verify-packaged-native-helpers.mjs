@@ -3,15 +3,16 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifySidecarBuildReceipt } from "./lib/sidecar-build-receipt.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const scriptPath = fileURLToPath(import.meta.url);
 const SPEECH_HELPER_NAME =
   "nautilus-macos-speech-helper-aarch64-apple-darwin";
 const SYSTEM_AUDIO_USAGE_DESCRIPTION =
-  "Plainsong captures audio playing on your Mac to record and transcribe meetings. Depending on your transcription settings, meeting audio may be processed on this Mac or sent to the cloud provider you choose.";
+  "In Me + Them meetings, Plainsong records your microphone and all audio playing on this Mac, including other apps and notification sounds. This works with headphones on macOS 14.7 or later. It never records your screen. Depending on your transcription settings, meeting audio is processed on this Mac or sent to the cloud provider you choose.";
 const CALENDAR_USAGE_DESCRIPTION =
-  "Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac.";
+  "Plainsong reads your calendar to help you prepare for and capture meetings, and, if enabled, spell names locally. It does not change your calendar. If you choose cloud AI, selected meeting details may be sent to that provider.";
 // macOS 13 reads the first key, macOS 14+ reads the second. The app supports
 // both, so a packaged bundle carrying only one of them shows half its supported
 // range an empty permission prompt — which is not a thing to discover after
@@ -22,6 +23,13 @@ const CALENDAR_USAGE_DESCRIPTION_KEYS = [
 ];
 const CALENDAR_HELPER_REQUIRED_ENTITLEMENT =
   "com.apple.security.personal-information.calendars";
+// The calendar helper also reads contact names, only after the user turns on
+// Contacts names for dictation.
+const CONTACTS_USAGE_DESCRIPTION_KEY = "NSContactsUsageDescription";
+const CONTACTS_USAGE_DESCRIPTION =
+  "Plainsong uses names from Contacts to spell people's names in dictation. It reads only names, never changes Contacts, and they stay on this Mac.";
+const CONTACTS_REQUIRED_ENTITLEMENT =
+  "com.apple.security.personal-information.addressbook";
 const CALENDAR_HELPER_FORBIDDEN_ENTITLEMENTS = [
   "com.apple.security.device.audio-input",
   "com.apple.security.device.microphone",
@@ -91,6 +99,20 @@ function appBundlePaths(appPath) {
       "Resources",
       "language-model-helper",
       "plainsong-native-language-model-helper",
+    ),
+    asrHelper: path.join(
+      appPath,
+      "Contents",
+      "Resources",
+      "asr-helper",
+      "plainsong-native-asr-helper",
+    ),
+    textHelper: path.join(
+      appPath,
+      "Contents",
+      "Resources",
+      "text-helper",
+      "plainsong-text-helper",
     ),
     speechHelper: path.join(
       appPath,
@@ -256,33 +278,23 @@ function readEntitlements(filePath, label) {
  * machine — an entitlement that leaked into its signature would be handing out
  * the app's own privileges. It reads with SQLite's read-only flag and needs
  * nothing beyond that.
+ *
+ * The Apple Foundation Models helper and the Neural Engine speech helper are
+ * held to the same rule. FoundationModels is not TCC-guarded, and the speech
+ * helper is fed 16 kHz audio by the sidecar on stdin rather than capturing it;
+ * neither needs a network client, Apple Events or a JIT. If either comes back
+ * non-empty it inherited the app's broad child-process set, which would hand a
+ * process that sees dictation text or audio far more reach than it needs.
+ *
+ * The llama.cpp text helper reads a model file descriptor and JSON on stdin and
+ * runs on Metal or the CPU, linking only system libraries, so it needs no
+ * library-validation exception either.
  */
 function requireEmptyEntitlements(filePath, label) {
   const entitlements = readEntitlements(filePath, label);
   const keys = Object.keys(entitlements);
   if (keys.length > 0) {
     fail(`${label} must have an empty entitlement set, found: ${keys.join(", ")}`);
-  }
-}
-
-/**
- * The Apple Foundation Models helper carries no entitlement at all.
- *
- * FoundationModels is not TCC-guarded and the helper needs no network client,
- * no Apple Events and no JIT. If this ever comes back non-empty it means the
- * helper inherited the app's broad child-process set, which would hand a
- * process that reads dictation text a great deal more reach than it needs.
- */
-function requireEmptyLanguageModelHelperEntitlements(filePath) {
-  const entitlements = readEntitlements(
-    filePath,
-    "Apple Foundation Models helper",
-  );
-  const keys = Object.keys(entitlements);
-  if (keys.length > 0) {
-    fail(
-      `Apple Foundation Models helper must have an empty entitlement set, found: ${keys.join(", ")}`,
-    );
   }
 }
 
@@ -327,6 +339,34 @@ function requirePackagedCalendarUsageDescriptions(appPath) {
       fail(`packaged ${key} is missing or stale`);
     }
   }
+  if (
+    readPackagedInfoString(appPath, CONTACTS_USAGE_DESCRIPTION_KEY) !==
+    CONTACTS_USAGE_DESCRIPTION
+  ) {
+    fail(`packaged ${CONTACTS_USAGE_DESCRIPTION_KEY} is missing or stale`);
+  }
+}
+
+/**
+ * The app itself must carry the calendar entitlement.
+ *
+ * TCC attributes the helper's calendar request to the responsible process —
+ * the app — and the hardened runtime refuses to prompt for a responsible
+ * process whose signature lacks the entitlement. 0.9.0-beta.6 shipped with it
+ * on the helper only, and Connect calendar answered "no" without a prompt.
+ */
+function requireAppCalendarEntitlement(filePath) {
+  const entitlements = readEntitlements(filePath, "app executable");
+  if (entitlements[CALENDAR_HELPER_REQUIRED_ENTITLEMENT] !== true) {
+    fail(
+      `app must carry ${CALENDAR_HELPER_REQUIRED_ENTITLEMENT} or macOS will not show the calendar prompt the helper asks for`,
+    );
+  }
+  if (entitlements[CONTACTS_REQUIRED_ENTITLEMENT] !== true) {
+    fail(
+      `app must carry ${CONTACTS_REQUIRED_ENTITLEMENT} or macOS will not show the Contacts prompt the helper asks for`,
+    );
+  }
 }
 
 /**
@@ -345,6 +385,9 @@ function requireCalendarHelperEntitlements(filePath) {
         Object.keys(entitlements).join(", ") || "none"
       }`,
     );
+  }
+  if (entitlements[CONTACTS_REQUIRED_ENTITLEMENT] !== true) {
+    fail(`calendar helper must carry ${CONTACTS_REQUIRED_ENTITLEMENT}`);
   }
   for (const forbidden of CALENDAR_HELPER_FORBIDDEN_ENTITLEMENTS) {
     if (forbidden in entitlements) {
@@ -379,6 +422,9 @@ function requireCalendarHelperEmbeddedUsageDescriptions(filePath) {
       fail(`calendar helper must embed ${key}`);
     }
   }
+  if (!result.stdout.includes(CONTACTS_USAGE_DESCRIPTION_KEY)) {
+    fail(`calendar helper must embed ${CONTACTS_USAGE_DESCRIPTION_KEY}`);
+  }
   for (const forbidden of [
     "NSMicrophoneUsageDescription",
     "NSAppleEventsUsageDescription",
@@ -389,7 +435,7 @@ function requireCalendarHelperEmbeddedUsageDescriptions(filePath) {
   }
 }
 
-function verifySpeechHelperContract(appPath) {
+export function verifySpeechHelperContract(appPath) {
   const verifier = path.resolve(
     import.meta.dirname,
     "verify-macos-speech-helper.mjs",
@@ -404,6 +450,15 @@ function verifySpeechHelperContract(appPath) {
   if (result.status !== 0) {
     fail(`Apple Speech helper verification exited ${result.status}`);
   }
+}
+
+export function checkSpeechHelperContract(
+  appPath,
+  { staticOnly = false, verifier = verifySpeechHelperContract } = {},
+) {
+  if (staticOnly) return false;
+  verifier(appPath);
+  return true;
 }
 
 /**
@@ -431,7 +486,11 @@ function entitlementChecksApply(filePath, label, allowUnsigned, skipped) {
   return false;
 }
 
-function verifyAppBundle(appPath, expectedArchitecture, { allowUnsigned = false } = {}) {
+export function verifyAppBundle(
+  appPath,
+  expectedArchitecture,
+  { allowUnsigned = false, staticOnly = false, speechContractVerifier } = {},
+) {
   if (process.platform !== "darwin") {
     fail("Mach-O package verification requires macOS");
   }
@@ -446,6 +505,8 @@ function verifyAppBundle(appPath, expectedArchitecture, { allowUnsigned = false 
     ["shortcut helper", paths.shortcutHelper],
     ["calendar helper", paths.calendarHelper],
     ["Apple Foundation Models helper", paths.languageModelHelper],
+    ["Neural Engine speech helper", paths.asrHelper],
+    ["text helper", paths.textHelper],
     ["Apple Speech helper", paths.speechHelper],
   ];
   const architectures = {};
@@ -484,7 +545,30 @@ function verifyAppBundle(appPath, expectedArchitecture, { allowUnsigned = false 
       unsignedSkips,
     )
   ) {
-    requireEmptyLanguageModelHelperEntitlements(paths.languageModelHelper);
+    requireEmptyEntitlements(
+      paths.languageModelHelper,
+      "Apple Foundation Models helper",
+    );
+  }
+  if (
+    entitlementChecksApply(
+      paths.asrHelper,
+      "Neural Engine speech helper",
+      allowUnsigned,
+      unsignedSkips,
+    )
+  ) {
+    requireEmptyEntitlements(paths.asrHelper, "Neural Engine speech helper");
+  }
+  if (
+    entitlementChecksApply(
+      paths.textHelper,
+      "text helper",
+      allowUnsigned,
+      unsignedSkips,
+    )
+  ) {
+    requireEmptyEntitlements(paths.textHelper, "text helper");
   }
   if (
     entitlementChecksApply(
@@ -496,17 +580,32 @@ function verifyAppBundle(appPath, expectedArchitecture, { allowUnsigned = false 
   ) {
     requireCalendarHelperEntitlements(paths.calendarHelper);
   }
+  if (
+    entitlementChecksApply(
+      paths.mainExecutable,
+      "app executable",
+      allowUnsigned,
+      unsignedSkips,
+    )
+  ) {
+    requireAppCalendarEntitlement(paths.mainExecutable);
+  }
   // The helper's embedded `__TEXT,__info_plist` is compiled into the binary,
   // not attached by codesign, so it is readable before signing too.
   requireCalendarHelperEmbeddedUsageDescriptions(paths.calendarHelper);
   requirePackagedSystemAudioUsageDescription(appPath);
   requirePackagedCalendarUsageDescriptions(appPath);
-  verifySpeechHelperContract(appPath);
+  const speechContractChecked = checkSpeechHelperContract(appPath, {
+    staticOnly,
+    verifier: speechContractVerifier ?? verifySpeechHelperContract,
+  });
   return {
     pass: true,
     appPath,
     expectedArchitecture,
     allowUnsigned,
+    staticOnly,
+    speechContractChecked,
     unsignedSkips,
     paths,
     architectures,
@@ -525,19 +624,29 @@ function verifyAppBundle(appPath, expectedArchitecture, { allowUnsigned = false 
  * is checked strictly afterwards by `bun run gate:packaged:macos:native`.
  *
  * The helpers a build script signs itself (Speech, calendar, shortcut, Apple
- * Foundation Models) are still fully asserted here, because those signatures
- * do exist by now. What is skipped is the Rust binaries, which cargo leaves
- * linker-signed until electron-builder gets to them.
+ * Foundation Models, Neural Engine speech, text) are still fully asserted
+ * here, because those signatures do exist by now. What is skipped is the
+ * Rust binaries, which cargo leaves linker-signed until electron-builder
+ * gets to them.
  */
-export default function verifyPackagedNativeHelpers(context) {
+export default function verifyPackagedNativeHelpers(
+  context,
+  { staticOnly = false } = {},
+) {
   if (context.electronPlatformName !== "darwin") return;
 
   const appPath = path.join(
     context.appOutDir,
     `${context.packager.appInfo.productFilename}.app`,
   );
+  const paths = appBundlePaths(appPath);
+  verifySidecarBuildReceipt(context.packager.projectDir ?? repoRoot, new Map([
+    ["plainsong-sidecar", paths.sidecar],
+    ["plainsong-cli", paths.cli],
+  ]));
   verifyAppBundle(appPath, normalizeArchitecture(process.arch), {
     allowUnsigned: true,
+    staticOnly,
   });
 }
 
@@ -556,12 +665,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
   // release defect and not something to shrug at. Pass the flag to verify the
   // unsigned bundle `bun run electron:pack` leaves in the same place.
   const allowUnsigned = args.includes("--allow-unsigned");
+  const staticOnly = args.includes("--static-only");
 
   try {
     const result = verifyAppBundle(
       path.resolve(repoRoot, appValue),
       expectedArchitecture,
-      { allowUnsigned },
+      { allowUnsigned, staticOnly },
     );
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {

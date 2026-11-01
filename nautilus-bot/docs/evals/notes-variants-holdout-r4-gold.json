@@ -1,0 +1,123 @@
+{
+  "schema": "plainsong-notes-variants-gold-v1",
+  "description": "Hand-written meaning annotations for docs/evals/notes-variants-holdout-r4-fixtures.json, using the term rules of notes-variants-gold.json. Terms are lowercase prefixes matched against canonicalized words: number words become digits and ordinal suffixes are dropped. A commitment is mentioned when one verb prefix and one object prefix occur outside a condition span. Condition terms must all occur in the attached condition span. Dates list canonical forms after any spoken correction. key marks a decision or conditional commitment that the prose must state with its condition and date. action marks a commitment that the action list must contain. Statuses list the only status or completion assertions the source makes. labels lists spoken headings that name no participant, deliverable or product; a claim may not use a word that occurs only inside one. numbers lists each quantity (not calendar dates) with the prefixes of the words it is stated with in its own clause, and restriction prefixes a restatement must keep. actors maps each person to the verb prefixes the source makes that person the subject of, including speech acts the person actually made.",
+  "families": {
+    "hackathon": {
+      "fixtures": ["heldout4-hackathon"],
+      "commitments": [
+        {"id": "reserve", "owner": null, "verb": ["reserv"], "object": ["atrium"], "condition": ["fire", "marshal", "sign"], "dates": ["22"], "negated": false, "key": true, "action": true},
+        {"id": "badges", "owner": "Dario", "verb": ["order"], "object": ["badge"], "condition": null, "dates": ["monday"], "negated": false, "key": false, "action": true},
+        {"id": "rubric", "owner": "Mei", "verb": ["draft"], "object": ["rubric"], "condition": null, "dates": ["wednesday"], "negated": false, "key": false, "action": true},
+        {"id": "building", "owner": null, "verb": ["rent"], "object": ["building"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["badge", "proof"], "status": ["email", "done"]},
+        {"subject": ["sponsor"], "status": ["renew"]}
+      ],
+      "labels": ["Logistics", "Sponsor round-up"],
+      "numbers": [
+        {"value": "60", "terms": ["hacker", "regist"], "restriction": []},
+        {"value": "14", "terms": ["mentor", "sign"], "restriction": []},
+        {"value": "1800", "terms": ["food", "budget", "dollar"], "restriction": []},
+        {"value": "30", "terms": ["plan", "rent", "extra", "monitor", "separat"], "restriction": []}
+      ],
+      "actors": {"Wren": ["said"], "Dario": ["order", "ask"], "Mei": ["draft"], "Tobias": ["told", "call"]}
+    },
+    "newsletter": {
+      "fixtures": ["heldout4-newsletter"],
+      "commitments": [
+        {"id": "print", "owner": null, "verb": ["send"], "object": ["issue", "autumn"], "condition": ["council", "notice", "arriv", "late"], "dates": ["11"], "negated": false, "key": true, "action": true},
+        {"id": "survey", "owner": "Linus", "verb": ["publish"], "object": ["survey", "result"], "condition": ["fen", "check", "number", "resident", "group"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "payments", "owner": "Fen", "verb": ["collect"], "object": ["payment"], "condition": ["odette", "send", "invoice", "list"], "dates": ["friday"], "negated": false, "key": true, "action": true},
+        {"id": "puzzle", "owner": null, "verb": ["add"], "object": ["puzzle"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["garage"], "status": ["paid"]}
+      ],
+      "labels": ["Editor's desk", "Ads"],
+      "numbers": [
+        {"value": "40", "terms": ["quarter", "page", "ad", "cost", "pound"], "restriction": []},
+        {"value": "25", "terms": ["quarter", "page", "ad", "pound", "member", "trader", "association"], "restriction": ["member"]},
+        {"value": "90", "terms": ["full", "page", "stay", "pound"], "restriction": []}
+      ],
+      "actors": {"Odette": ["send"], "Linus": ["correct", "publish"], "Fen": ["collect", "check"]}
+    },
+    "moving-crew": {
+      "fixtures": ["heldout4-moving-crew"],
+      "commitments": [
+        {"id": "move", "owner": "Calla", "verb": ["move"], "object": ["hartley", "job"], "condition": null, "dates": ["friday"], "negated": false, "key": false, "action": true},
+        {"id": "piano", "owner": null, "verb": ["take"], "object": ["piano"], "condition": ["joss", "find", "train", "lifter"], "dates": ["june 9"], "negated": false, "key": true, "action": true},
+        {"id": "dispatch", "owner": "Calla", "verb": ["switch"], "object": ["dispatch"], "condition": ["cancel", "dexter"], "dates": [], "negated": false, "key": true, "action": true}
+      ],
+      "statuses": [
+        {"subject": ["dolli"], "status": ["return"]},
+        {"subject": ["supplier", "invoice"], "status": ["settl"]}
+      ],
+      "labels": ["Dispatch review", "Boxes"],
+      "numbers": [
+        {"value": "2", "terms": ["dexter", "double", "book", "crew", "hartley"], "restriction": []},
+        {"value": "4", "terms": ["large", "box", "pound", "each"], "restriction": []},
+        {"value": "3", "terms": ["box", "pound", "each", "order"], "restriction": ["50"]},
+        {"value": "50", "terms": ["order", "more", "box"], "restriction": []}
+      ],
+      "actors": {"Bram": ["notic"], "Calla": ["move", "switch"], "Joss": ["find"], "Nils": ["told", "return"]}
+    },
+    "vet-rota": {
+      "fixtures": ["heldout4-vet-rota"],
+      "commitments": [
+        {"id": "cover", "owner": "Rafe", "verb": ["cover"], "object": ["emergency", "line"], "condition": ["tullia", "return", "leave"], "dates": ["saturday"], "negated": false, "key": true, "action": true},
+        {"id": "drugs", "owner": "Rafe", "verb": ["sign"], "object": ["drug", "order"], "condition": ["stock", "count", "finish"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "count", "owner": "Kofi", "verb": ["run"], "object": ["stock", "count"], "condition": ["vaccin", "deliver", "arriv"], "dates": ["17"], "negated": false, "key": true, "action": true},
+        {"id": "holidays", "owner": null, "verb": ["clos"], "object": ["clinic"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [],
+      "labels": ["Rota check"],
+      "numbers": [],
+      "actors": {"Imogen": ["confirm"], "Rafe": ["cover", "sign"], "Tullia": ["suggest", "return"], "Kofi": ["run"]}
+    },
+    "garden-board": {
+      "fixtures": ["heldout4-garden-board"],
+      "commitments": [
+        {"id": "bins", "owner": null, "verb": ["buy"], "object": ["compost", "bin"], "condition": ["council", "grant", "come"], "dates": [], "negated": false, "key": true, "action": true},
+        {"id": "measure", "owner": "Yusra", "verb": ["measur"], "object": ["shed", "wall"], "condition": null, "dates": ["saturday"], "negated": false, "key": false, "action": true},
+        {"id": "notice", "owner": "Amos", "verb": ["post"], "object": ["notice"], "condition": ["hester", "confirm", "date", "allotment", "office"], "dates": ["march 3"], "negated": false, "key": true, "action": true},
+        {"id": "woodchip", "owner": "Yusra", "verb": ["order"], "object": ["woodchip"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["water", "butt"], "status": ["repair"]},
+        {"subject": ["insurance"], "status": ["complet"]}
+      ],
+      "labels": ["Treasurer's report"],
+      "numbers": [
+        {"value": "12", "terms": ["rais", "bed"], "restriction": []},
+        {"value": "31", "terms": ["member"], "restriction": []},
+        {"value": "650", "terms": ["tool", "budget", "spring", "pound"], "restriction": []},
+        {"value": "20", "terms": ["plot", "fee", "stay", "pound", "year"], "restriction": []},
+        {"value": "10", "terms": ["plot", "fee", "drop", "pound"], "restriction": ["70"]},
+        {"value": "70", "terms": ["anyone", "over"], "restriction": []}
+      ],
+      "actors": {"Hester": ["confirm"], "Amos": ["post"], "Yusra": ["measur", "order"], "Marguerite": ["told", "repair"]}
+    },
+    "swim-gala": {
+      "fixtures": ["heldout4-swim-gala"],
+      "commitments": [
+        {"id": "heats", "owner": "Benedikt", "verb": ["print"], "object": ["heat", "sheet"], "condition": ["morris", "export", "entr", "list", "clean"], "dates": ["thursday"], "negated": false, "key": true, "action": true},
+        {"id": "timekeepers", "owner": "Kemal", "verb": ["recruit"], "object": ["timekeeper"], "condition": null, "dates": ["21"], "negated": false, "key": false, "action": true},
+        {"id": "programmes", "owner": null, "verb": ["sell"], "object": ["programme"], "condition": null, "dates": [], "negated": true, "key": false, "action": false},
+        {"id": "medals", "owner": "Benedikt", "verb": ["order"], "object": ["medal"], "condition": ["entr", "count", "final"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "results", "owner": "Lowri", "verb": ["send"], "object": ["result"], "condition": ["benedikt", "check"], "dates": ["27"], "negated": false, "key": true, "action": true}
+      ],
+      "statuses": [
+        {"subject": ["pool"], "status": ["book"]},
+        {"subject": ["morris", "timing"], "status": ["back", "came"]}
+      ],
+      "labels": ["Gala planning"],
+      "numbers": [
+        {"value": "6", "terms": ["recruit", "timekeeper"], "restriction": []},
+        {"value": "8", "terms": ["entr", "pound", "swimmer"], "restriction": []},
+        {"value": "5", "terms": ["entr", "pound", "swimmer", "club", "member"], "restriction": ["member"]}
+      ],
+      "actors": {"Saoirse": ["confirm"], "Benedikt": ["print", "order", "check"], "Lowri": ["ask", "rais", "send"], "Kemal": ["recruit"]}
+    }
+  }
+}

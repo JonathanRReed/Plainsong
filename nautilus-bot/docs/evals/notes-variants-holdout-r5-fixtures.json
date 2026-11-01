@@ -1,0 +1,758 @@
+{
+  "schema": "plainsong-notes-fidelity-v1",
+  "description": "Round-five held-out synthetic meetings for the variant robustness eval, written blind to earlier rounds and to the Rust implementation. Settings are a soil research lab, a wedding venue, a rowing club committee, a choir, an orchard co-op and a museum loan. They cover conditional and negated commitments, negated decisions, spoken headings, vendor and product names that look like people, restricted prices, adjacent counts, budgets, suggestions that are not tasks, date corrections in several phrasings, completed statuses and reported speech.",
+  "meetings": [
+    {
+      "id": "heldout5-soil-lab",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Saskia",
+          "text": "We agreed to send the soil samples to Ferris, the sequencing vendor, on the 14th if the extraction yields pass QC, and Tobin will label the sample tubes."
+        },
+        {
+          "start": 11.0,
+          "end": 17.0,
+          "speaker": "Tobin",
+          "text": "I'll label the tubes by Wednesday. Actually, make that Thursday, I'm out in the field on Wednesday."
+        },
+        {
+          "start": 18.0,
+          "end": 27.0,
+          "speaker": "Mireille",
+          "text": "Ferris quoted 96 samples per plate, at 40 euros a sample, or 32 euros a sample for academic accounts."
+        },
+        {
+          "start": 28.0,
+          "end": 35.0,
+          "speaker": "Saskia",
+          "text": "Let me just ask, could someone look into a second freezer? That's a question for later, not a task for today."
+        },
+        {
+          "start": 36.0,
+          "end": 44.0,
+          "speaker": "Mireille",
+          "text": "I'll book the confocal microscope for November 3rd as long as my safety induction is signed off."
+        },
+        {
+          "start": 45.0,
+          "end": 53.0,
+          "speaker": "Tobin",
+          "text": "The ethics amendment is already approved. Petra from facilities told me the backup freezer was repaired yesterday."
+        },
+        {
+          "start": 54.0,
+          "end": 63.0,
+          "speaker": "Saskia",
+          "text": "We decided not to renew the Ferris contract next year. And I won't order more extraction kits until the QC results are back."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "send",
+            "soil",
+            "samples",
+            "if",
+            "extraction",
+            "yields",
+            "pass"
+          ],
+          "owner": null,
+          "due": [
+            "the 14th",
+            "the fourteenth"
+          ]
+        },
+        {
+          "task": [
+            "label",
+            "tubes"
+          ],
+          "owner": "Tobin",
+          "due": [
+            "Thursday"
+          ]
+        },
+        {
+          "task": [
+            "book",
+            "confocal",
+            "microscope",
+            "as long as",
+            "safety",
+            "induction"
+          ],
+          "owner": "Mireille",
+          "due": [
+            "November 3rd",
+            "November 3"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "order",
+            "extraction",
+            "kits",
+            "until",
+            "qc",
+            "results"
+          ],
+          "owner": "Saskia",
+          "due": []
+        }
+      ],
+      "names": [
+        "Saskia",
+        "Tobin",
+        "Mireille",
+        "Petra"
+      ],
+      "numbers": [
+        [
+          "14th",
+          "fourteenth"
+        ],
+        [
+          "96"
+        ],
+        [
+          "40"
+        ],
+        [
+          "32"
+        ],
+        [
+          "November 3rd",
+          "November 3"
+        ]
+      ]
+    },
+    {
+      "id": "heldout5-wedding-venue",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Odile",
+          "text": "Room layout. We agreed to set up 14 round tables and 112 chairs in the orangery on June 19, provided that the guest list stays under 120."
+        },
+        {
+          "start": 12.0,
+          "end": 21.0,
+          "speaker": "Bram",
+          "text": "Catering: Bellamy, our caterer, quoted 58 pounds a head for the dinner, or 34 pounds a head for children under twelve."
+        },
+        {
+          "start": 22.0,
+          "end": 31.0,
+          "speaker": "Celeste",
+          "text": "I'll send Bellamy the final menu by the 5th of June, sorry, I mean the 6th of June, unless Bram changes the dessert again."
+        },
+        {
+          "start": 32.0,
+          "end": 37.0,
+          "speaker": "Odile",
+          "text": "Catering: the tasting session is already finished, so that's done."
+        },
+        {
+          "start": 38.0,
+          "end": 48.0,
+          "speaker": "Bram",
+          "text": "Room layout again. I won't confirm the band until Odile checks the noise limit, and we decided not to use the garden for the ceremony."
+        },
+        {
+          "start": 49.0,
+          "end": 56.0,
+          "speaker": "Celeste",
+          "text": "I should mention, Odile told me the council refused the fireworks permit."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "set",
+            "up",
+            "tables",
+            "chairs",
+            "provided",
+            "guest",
+            "list"
+          ],
+          "owner": null,
+          "due": [
+            "June 19",
+            "June 19th"
+          ]
+        },
+        {
+          "task": [
+            "send",
+            "final",
+            "menu",
+            "unless",
+            "changes",
+            "dessert"
+          ],
+          "owner": "Celeste",
+          "due": [
+            "the 6th of June",
+            "June 6"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "confirm",
+            "band",
+            "until",
+            "checks",
+            "noise"
+          ],
+          "owner": "Bram",
+          "due": []
+        }
+      ],
+      "names": [
+        "Odile",
+        "Bram",
+        "Celeste"
+      ],
+      "numbers": [
+        [
+          "14",
+          "fourteen"
+        ],
+        [
+          "112"
+        ],
+        [
+          "June 19"
+        ],
+        [
+          "120"
+        ],
+        [
+          "58"
+        ],
+        [
+          "34"
+        ],
+        [
+          "twelve",
+          "12"
+        ],
+        [
+          "6th of June",
+          "June 6"
+        ]
+      ]
+    },
+    {
+      "id": "heldout5-rowing-committee",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Philippa",
+          "text": "Treasurer's report. We have 6 boats insured and 38 rowers registered this season. The regatta budget is 2,400 pounds, and we're planning 3 away fixtures."
+        },
+        {
+          "start": 12.0,
+          "end": 20.0,
+          "speaker": "Garrick",
+          "text": "Equipment: I'll repair the double scull by the 21st as long as the boatyard sends the parts."
+        },
+        {
+          "start": 21.0,
+          "end": 26.0,
+          "speaker": "Anouk",
+          "text": "Not the 21st, the 28th. The boatyard is shut that week."
+        },
+        {
+          "start": 27.0,
+          "end": 31.0,
+          "speaker": "Garrick",
+          "text": "Fair enough, the 28th then."
+        },
+        {
+          "start": 32.0,
+          "end": 41.0,
+          "speaker": "Desmond",
+          "text": "I'd suggest we look at a new trailer, but that's only a suggestion, nobody needs to take it on yet."
+        },
+        {
+          "start": 42.0,
+          "end": 48.0,
+          "speaker": "Anouk",
+          "text": "I'll renew the club's water safety certificate by Friday."
+        },
+        {
+          "start": 49.0,
+          "end": 56.0,
+          "speaker": "Philippa",
+          "text": "Equipment: the new oars have already been delivered and paid for."
+        },
+        {
+          "start": 57.0,
+          "end": 68.0,
+          "speaker": "Garrick",
+          "text": "Any other business. We decided not to raise the membership fees this year, and I'm not going to book the coach for the regatta until Philippa signs off the budget."
+        },
+        {
+          "start": 69.0,
+          "end": 76.0,
+          "speaker": "Desmond",
+          "text": "Fenella at the sponsor said the sponsorship money has been paid in full."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "repair",
+            "double",
+            "scull",
+            "as long as",
+            "boatyard",
+            "sends"
+          ],
+          "owner": "Garrick",
+          "due": [
+            "the 28th",
+            "the twenty-eighth"
+          ]
+        },
+        {
+          "task": [
+            "renew",
+            "water",
+            "safety",
+            "certificate"
+          ],
+          "owner": "Anouk",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "book",
+            "coach",
+            "until",
+            "philippa",
+            "signs"
+          ],
+          "owner": "Garrick",
+          "due": []
+        }
+      ],
+      "names": [
+        "Philippa",
+        "Garrick",
+        "Anouk",
+        "Desmond",
+        "Fenella"
+      ],
+      "numbers": [
+        [
+          "6",
+          "six"
+        ],
+        [
+          "38"
+        ],
+        [
+          "2,400",
+          "2400"
+        ],
+        [
+          "3",
+          "three"
+        ],
+        [
+          "28th",
+          "twenty-eighth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout5-choir-concert",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Margit",
+          "text": "Concert planning. We have 18 sopranos and 11 tenors confirmed for the spring concert on April 25th."
+        },
+        {
+          "start": 11.0,
+          "end": 18.0,
+          "speaker": "Leopold",
+          "text": "Tickets are 15 pounds, or 10 pounds for students with a valid card."
+        },
+        {
+          "start": 19.0,
+          "end": 26.0,
+          "speaker": "Ysolde",
+          "text": "Our ticketing system, Tilly, shows 140 seats sold so far."
+        },
+        {
+          "start": 27.0,
+          "end": 38.0,
+          "speaker": "Margit",
+          "text": "We agreed to hire the harpist only if the church lets us rehearse in the nave, and Leopold will print the programmes by April 18."
+        },
+        {
+          "start": 39.0,
+          "end": 45.0,
+          "speaker": "Ysolde",
+          "text": "Sorry to correct you, but it has to be April 16 instead, the printer closes for Easter."
+        },
+        {
+          "start": 46.0,
+          "end": 55.0,
+          "speaker": "Leopold",
+          "text": "Fine, April 16. I won't order the extra music stands unless the arts council approves our grant."
+        },
+        {
+          "start": 56.0,
+          "end": 67.0,
+          "speaker": "Margit",
+          "text": "Concert planning, last item. The venue deposit is paid, and Reverend Oyelaran said we can use the vestry for warm-ups. We decided not to record the concert this year."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "hire",
+            "harpist",
+            "only if",
+            "church",
+            "lets"
+          ],
+          "owner": null,
+          "due": []
+        },
+        {
+          "task": [
+            "print",
+            "programmes"
+          ],
+          "owner": "Leopold",
+          "due": [
+            "April 16",
+            "April 16th"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "order",
+            "music",
+            "stands",
+            "unless",
+            "arts",
+            "council"
+          ],
+          "owner": "Leopold",
+          "due": []
+        }
+      ],
+      "names": [
+        "Margit",
+        "Leopold",
+        "Ysolde",
+        "Oyelaran"
+      ],
+      "numbers": [
+        [
+          "18",
+          "eighteen"
+        ],
+        [
+          "11",
+          "eleven"
+        ],
+        [
+          "April 25th",
+          "April 25"
+        ],
+        [
+          "15",
+          "fifteen"
+        ],
+        [
+          "10",
+          "ten"
+        ],
+        [
+          "140"
+        ],
+        [
+          "April 16"
+        ]
+      ]
+    },
+    {
+      "id": "heldout5-orchard-coop",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Brigid",
+          "text": "Harvest: we've picked 340 crates of apples and 85 sacks of potatoes so far."
+        },
+        {
+          "start": 10.0,
+          "end": 20.0,
+          "speaker": "Hollis",
+          "text": "Market stall. The co-op budget for the autumn market is 1,500 pounds, and we plan to run the stall on 6 Saturdays."
+        },
+        {
+          "start": 21.0,
+          "end": 30.0,
+          "speaker": "Eamon",
+          "text": "I'll deliver the cider apples to Wexcombe Press on the 2nd of October, provided that the lorry passes its MOT."
+        },
+        {
+          "start": 31.0,
+          "end": 37.0,
+          "speaker": "Tamsin",
+          "text": "Eamon, sorry, it should be the 9th of October, not the 2nd. The press is closed that week."
+        },
+        {
+          "start": 38.0,
+          "end": 42.0,
+          "speaker": "Eamon",
+          "text": "Right, the 9th of October it is."
+        },
+        {
+          "start": 43.0,
+          "end": 53.0,
+          "speaker": "Hollis",
+          "text": "Harvest: the Bertram grain dryer was installed last week. Brigid will train the volunteers on it once the insurer signs off."
+        },
+        {
+          "start": 54.0,
+          "end": 63.0,
+          "speaker": "Tamsin",
+          "text": "Just a thought, not an action: maybe we could sell jam at the stall. Separately, I'll set up the card reader by Friday."
+        },
+        {
+          "start": 64.0,
+          "end": 74.0,
+          "speaker": "Brigid",
+          "text": "Market stall: we decided not to take a second pitch, and I won't sign the pitch agreement until Hollis has read it."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "deliver",
+            "cider",
+            "apples",
+            "provided",
+            "lorry",
+            "passes"
+          ],
+          "owner": "Eamon",
+          "due": [
+            "the 9th of October",
+            "October 9"
+          ]
+        },
+        {
+          "task": [
+            "train",
+            "volunteers",
+            "once",
+            "insurer",
+            "signs"
+          ],
+          "owner": "Brigid",
+          "due": []
+        },
+        {
+          "task": [
+            "set",
+            "up",
+            "card",
+            "reader"
+          ],
+          "owner": "Tamsin",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "sign",
+            "pitch",
+            "agreement",
+            "until",
+            "read"
+          ],
+          "owner": "Brigid",
+          "due": []
+        }
+      ],
+      "names": [
+        "Brigid",
+        "Hollis",
+        "Eamon",
+        "Tamsin"
+      ],
+      "numbers": [
+        [
+          "340"
+        ],
+        [
+          "85"
+        ],
+        [
+          "1,500",
+          "1500"
+        ],
+        [
+          "6",
+          "six"
+        ],
+        [
+          "9th of October",
+          "October 9"
+        ]
+      ]
+    },
+    {
+      "id": "heldout5-museum-loan",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Aurelie",
+          "text": "We agreed to ship the Vasquez tapestry to the Corran Gallery on March 3rd once the condition report is signed, and Konstantin will arrange the insurance."
+        },
+        {
+          "start": 12.0,
+          "end": 21.0,
+          "speaker": "Konstantin",
+          "text": "I'll arrange the insurance by February 20th, or rather February 24th, the broker is away that week."
+        },
+        {
+          "start": 22.0,
+          "end": 31.0,
+          "speaker": "Nkem",
+          "text": "Transport: we need 2 crates and 3 art handlers for the move, and the transport budget is 6,800 euros."
+        },
+        {
+          "start": 32.0,
+          "end": 39.0,
+          "speaker": "Konstantin",
+          "text": "Ottilie Brandt, the gallery director, told me their climate survey is complete."
+        },
+        {
+          "start": 40.0,
+          "end": 50.0,
+          "speaker": "Nkem",
+          "text": "I won't release the courier booking until the insurance certificate arrives. And we decided not to lend the matching cushion covers."
+        },
+        {
+          "start": 51.0,
+          "end": 60.0,
+          "speaker": "Aurelie",
+          "text": "Can I ask, should we film the unpacking? That's not a task, just a question. Meanwhile, I'll email the loan agreement to Ottilie on Monday."
+        },
+        {
+          "start": 61.0,
+          "end": 66.0,
+          "speaker": "Nkem",
+          "text": "Transport: the courier has already confirmed the route."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "ship",
+            "tapestry",
+            "once",
+            "condition",
+            "report",
+            "signed"
+          ],
+          "owner": null,
+          "due": [
+            "March 3rd",
+            "March 3"
+          ]
+        },
+        {
+          "task": [
+            "arrange",
+            "insurance"
+          ],
+          "owner": "Konstantin",
+          "due": [
+            "February 24th",
+            "February 24"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "release",
+            "courier",
+            "booking",
+            "until",
+            "insurance",
+            "certificate"
+          ],
+          "owner": "Nkem",
+          "due": []
+        },
+        {
+          "task": [
+            "email",
+            "loan",
+            "agreement"
+          ],
+          "owner": "Aurelie",
+          "due": [
+            "Monday"
+          ]
+        }
+      ],
+      "names": [
+        "Aurelie",
+        "Konstantin",
+        "Nkem",
+        "Ottilie"
+      ],
+      "numbers": [
+        [
+          "March 3rd",
+          "March 3"
+        ],
+        [
+          "February 24th",
+          "February 24"
+        ],
+        [
+          "2",
+          "two"
+        ],
+        [
+          "3",
+          "three"
+        ],
+        [
+          "6,800",
+          "6800"
+        ]
+      ]
+    }
+  ]
+}

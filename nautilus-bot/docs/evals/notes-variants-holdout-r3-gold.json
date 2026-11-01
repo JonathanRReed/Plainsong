@@ -1,0 +1,876 @@
+{
+  "schema": "plainsong-notes-variants-gold-v1",
+  "description": "Hand-written meaning annotations for docs/evals/notes-variants-holdout-r3-fixtures.json, using the conventions of notes-variants-gold.json. Terms are lowercase prefixes matched against canonicalized words: number words become digits and ordinal suffixes are dropped. A commitment is mentioned when one verb prefix and one object prefix occur outside a condition span. Condition terms must all occur in the attached condition span. Dates list canonical forms and use the corrected date when the meeting corrects one; conditionDates are dates allowed only because the condition itself names them. key marks a decision or conditional commitment that the prose must state with its condition and date. action marks a commitment that the action list must contain. Statuses list the only status or completion assertions the source makes. labels lists spoken headings or capture labels that name no participant, deliverable or product; a claim may not use a word that occurs only inside one. numbers lists each quantity (not calendar dates) with the prefixes of the words it is stated with in its own clause, and restriction prefixes a restatement must keep. actors maps each person to the verb prefixes the source makes that person the subject of, including speech acts the person actually made. Every term occurs in its meeting's source text.",
+  "families": {
+    "nonprofit-pricing": {
+      "fixtures": [
+        "heldout3-nonprofit-pricing"
+      ],
+      "commitments": [
+        {
+          "id": "memo",
+          "owner": "Talia",
+          "verb": [
+            "draft"
+          ],
+          "object": [
+            "memo"
+          ],
+          "condition": null,
+          "dates": [
+            "tuesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "sign",
+          "owner": null,
+          "verb": [
+            "sign"
+          ],
+          "object": [
+            "fenwick",
+            "order"
+          ],
+          "condition": [
+            "board",
+            "approv",
+            "nonprofit",
+            "tier"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "seats",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "admin",
+            "seat"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "security",
+            "questionnaire"
+          ],
+          "status": [
+            "done"
+          ]
+        },
+        {
+          "subject": [
+            "admin",
+            "seat"
+          ],
+          "status": [
+            "approv"
+          ]
+        }
+      ],
+      "labels": [
+        "Pricing review",
+        "Status"
+      ],
+      "numbers": [
+        {
+          "value": "12",
+          "terms": [
+            "fenwick",
+            "quote",
+            "dollar",
+            "seat"
+          ],
+          "restriction": [
+            "nonprofit"
+          ]
+        },
+        {
+          "value": "19",
+          "terms": [
+            "standard",
+            "rate",
+            "dollar",
+            "seat"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "5",
+          "terms": [
+            "extra",
+            "admin",
+            "seat",
+            "approv"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Odile": [
+          "correct"
+        ],
+        "Bram": [
+          "ask"
+        ],
+        "Talia": [
+          "draft"
+        ]
+      }
+    },
+    "library-rooms": {
+      "fixtures": [
+        "heldout3-library-rooms"
+      ],
+      "commitments": [
+        {
+          "id": "book",
+          "owner": "Dario",
+          "verb": [
+            "book"
+          ],
+          "object": [
+            "east",
+            "wing",
+            "room"
+          ],
+          "condition": [
+            "facilit",
+            "unlock",
+            "booking",
+            "portal"
+          ],
+          "dates": [
+            "tuesday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "publish",
+          "owner": "Sunniva",
+          "verb": [
+            "publish"
+          ],
+          "object": [
+            "timetable"
+          ],
+          "condition": [
+            "dario",
+            "book",
+            "room"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "order",
+          "owner": "Kofi",
+          "verb": [
+            "order"
+          ],
+          "object": [
+            "chair"
+          ],
+          "condition": null,
+          "dates": [
+            "16"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "fire",
+            "inspection"
+          ],
+          "status": [
+            "confirm"
+          ]
+        }
+      ],
+      "labels": [
+        "Library planning",
+        "Furniture"
+      ],
+      "numbers": [
+        {
+          "value": "8",
+          "terms": [
+            "ash",
+            "hall",
+            "lend",
+            "room"
+          ],
+          "restriction": [
+            "exam"
+          ]
+        },
+        {
+          "value": "3",
+          "terms": [
+            "east",
+            "wing",
+            "room",
+            "term",
+            "book"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "40",
+          "terms": [
+            "north",
+            "floor",
+            "study",
+            "carrel"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "12",
+          "terms": [
+            "annex",
+            "group",
+            "table"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "2400",
+          "terms": [
+            "chair",
+            "budget"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Wren": [
+          "correct"
+        ],
+        "Dario": [
+          "book"
+        ],
+        "Sunniva": [
+          "publish"
+        ],
+        "Kofi": [
+          "order"
+        ],
+        "Ingrid": [
+          "confirm"
+        ]
+      }
+    },
+    "bakery-supplier": {
+      "fixtures": [
+        "heldout3-bakery-supplier"
+      ],
+      "commitments": [
+        {
+          "id": "export",
+          "owner": "Tobias",
+          "verb": [
+            "export"
+          ],
+          "object": [
+            "order",
+            "history"
+          ],
+          "condition": null,
+          "dates": [
+            "monday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "template",
+          "owner": "Anouk",
+          "verb": [
+            "move"
+          ],
+          "object": [
+            "template"
+          ],
+          "condition": [
+            "export",
+            "look",
+            "clean"
+          ],
+          "dates": [
+            "june 11"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "march",
+            "invoice"
+          ],
+          "status": [
+            "paid"
+          ]
+        },
+        {
+          "subject": [
+            "oven",
+            "repair"
+          ],
+          "status": [
+            "finish"
+          ]
+        }
+      ],
+      "labels": [
+        "Supplier check-in"
+      ],
+      "numbers": [
+        {
+          "value": "27",
+          "terms": [
+            "harlan",
+            "mill",
+            "charg",
+            "sack",
+            "flour"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "4",
+          "terms": [
+            "delivery",
+            "fee"
+          ],
+          "restriction": [
+            "10"
+          ]
+        },
+        {
+          "value": "10",
+          "terms": [
+            "order",
+            "under",
+            "sack"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Mireille": [
+          "note"
+        ],
+        "Tobias": [
+          "export",
+          "suggest"
+        ],
+        "Anouk": [
+          "move"
+        ],
+        "Bettina": [
+          "paid"
+        ]
+      }
+    },
+    "theatre-rehearsal": {
+      "fixtures": [
+        "heldout3-theatre-rehearsal"
+      ],
+      "commitments": [
+        {
+          "id": "matinee",
+          "owner": null,
+          "verb": [
+            "add"
+          ],
+          "object": [
+            "matinee"
+          ],
+          "condition": [
+            "presales",
+            "pass",
+            "200",
+            "ticket"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "print",
+          "owner": "Ronan",
+          "verb": [
+            "print"
+          ],
+          "object": [
+            "program"
+          ],
+          "condition": null,
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "lock",
+          "owner": "Imke",
+          "verb": [
+            "lock"
+          ],
+          "object": [
+            "lighting",
+            "cue"
+          ],
+          "condition": [
+            "yusuf",
+            "finish",
+            "set",
+            "change"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "finish",
+          "owner": "Yusuf",
+          "verb": [
+            "finish"
+          ],
+          "object": [
+            "set",
+            "change"
+          ],
+          "condition": null,
+          "dates": [
+            "thursday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "fog",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "fog",
+            "machine"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "fog",
+            "machine"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "piano",
+            "tuner"
+          ],
+          "status": [
+            "book"
+          ]
+        }
+      ],
+      "labels": [
+        "Rehearsal schedule"
+      ],
+      "numbers": [
+        {
+          "value": "14",
+          "terms": [
+            "cast",
+            "actor"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "6",
+          "terms": [
+            "crew",
+            "stagehand"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "850",
+          "terms": [
+            "props",
+            "budget"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "200",
+          "terms": [
+            "presales",
+            "pass",
+            "ticket"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Celeste": [
+          "ask"
+        ],
+        "Ronan": [
+          "print"
+        ],
+        "Imke": [
+          "lock",
+          "book"
+        ],
+        "Yusuf": [
+          "finish"
+        ]
+      }
+    },
+    "food-drive": {
+      "fixtures": [
+        "heldout3-food-drive"
+      ],
+      "commitments": [
+        {
+          "id": "drive",
+          "owner": "Aksel",
+          "verb": [
+            "drive"
+          ],
+          "object": [
+            "jasper",
+            "north",
+            "pantr"
+          ],
+          "condition": [
+            "inspection",
+            "slip"
+          ],
+          "dates": [
+            "thursday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "send",
+          "owner": "Aksel",
+          "verb": [
+            "send"
+          ],
+          "object": [
+            "route",
+            "sheet"
+          ],
+          "condition": null,
+          "dates": [
+            "8"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "van",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "backup",
+            "van"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "jasper",
+            "van"
+          ],
+          "status": [
+            "repair"
+          ]
+        },
+        {
+          "subject": [
+            "backup",
+            "van"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "donated",
+            "pallet"
+          ],
+          "status": [
+            "collect"
+          ]
+        }
+      ],
+      "labels": [
+        "Food drive sync",
+        "Deliveries",
+        "Box pricing"
+      ],
+      "numbers": [
+        {
+          "value": "5",
+          "terms": [
+            "standard",
+            "price",
+            "dollar",
+            "box"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "3",
+          "terms": [
+            "school",
+            "pantr",
+            "pay",
+            "dollar",
+            "box"
+          ],
+          "restriction": [
+            "school"
+          ]
+        }
+      ],
+      "actors": {
+        "Marisol": [
+          "propos"
+        ],
+        "Aksel": [
+          "drive",
+          "send"
+        ],
+        "Fenna": [
+          "need"
+        ],
+        "Oskar": [
+          "collect"
+        ]
+      }
+    },
+    "app-release": {
+      "fixtures": [
+        "heldout3-app-release"
+      ],
+      "commitments": [
+        {
+          "id": "freeze",
+          "owner": "Emeka",
+          "verb": [
+            "freez"
+          ],
+          "object": [
+            "code"
+          ],
+          "condition": [
+            "translation",
+            "pass",
+            "land"
+          ],
+          "dates": [
+            "thursday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "notes",
+          "owner": "Lise",
+          "verb": [
+            "write"
+          ],
+          "object": [
+            "release",
+            "note"
+          ],
+          "condition": null,
+          "dates": [
+            "21"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "announce",
+          "owner": "Zofia",
+          "verb": [
+            "announc"
+          ],
+          "object": [
+            "launch"
+          ],
+          "condition": [
+            "tablet",
+            "build",
+            "approv"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "tablet",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "tablet",
+            "build"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "privacy",
+            "review"
+          ],
+          "status": [
+            "sign"
+          ]
+        },
+        {
+          "subject": [
+            "tablet",
+            "build"
+          ],
+          "status": [
+            "approv"
+          ]
+        }
+      ],
+      "labels": [
+        "Release planning",
+        "Pricing"
+      ],
+      "numbers": [
+        {
+          "value": "640",
+          "terms": [
+            "rowan",
+            "beta",
+            "tester"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "95",
+          "terms": [
+            "support",
+            "team",
+            "closed",
+            "bug",
+            "report"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "6",
+          "terms": [
+            "pro",
+            "tier",
+            "cost",
+            "month"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "4",
+          "terms": [
+            "month",
+            "verifi",
+            "student"
+          ],
+          "restriction": [
+            "student"
+          ]
+        }
+      ],
+      "actors": {
+        "Zofia": [
+          "announc"
+        ],
+        "Emeka": [
+          "freez"
+        ],
+        "Lise": [
+          "write",
+          "suggest",
+          "correct"
+        ],
+        "Kenji": [
+          "sign"
+        ]
+      }
+    }
+  }
+}

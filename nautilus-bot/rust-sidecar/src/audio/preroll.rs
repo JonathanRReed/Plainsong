@@ -2,12 +2,12 @@
 //! dictation session can start with the words the user already said.
 //!
 //! The hands-free idle monitor (`AudioCapture::start_hands_free_monitor`)
-//! downmixes every frame it receives purely to decide whether speech started,
-//! and then throws the samples away. By the time it has the
-//! `DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS` of sustained speech it needs, has
-//! round-tripped a `hands_free_start` signal through Electron, and a fresh
-//! capture stream has opened, roughly a second of the user's opening words has
-//! already been spoken into a buffer nobody kept. This ring keeps them.
+//! downmixes every frame it receives purely to decide whether speech started.
+//! By the time it has the `DICTATION_AUTO_STOP_MIN_SPEECH_SECONDS` of sustained
+//! speech it needs and has round-tripped a `hands_free_start` signal through
+//! Electron, roughly a second of the user's opening words has already been
+//! spoken. This ring keeps them until the session takes the stream over (or,
+//! on another device, opens its own).
 //!
 //! It is deliberately small, fixed-size, and only ever written while the
 //! monitor the user opted into is actually running — it is not a background

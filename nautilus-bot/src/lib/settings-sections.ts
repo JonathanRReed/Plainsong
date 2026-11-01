@@ -15,9 +15,11 @@ const DEFAULT_MEETINGS_SETTINGS: MeetingsSettings = {
   callDetectionEnabled: true,
   autoStopWhenCallAppQuits: true,
   autoStopAfterSilenceMinutes: 15,
+  maxRecordingMinutes: 0,
   rememberVoices: false,
   autoApplyConfidentVoices: false,
   preferProviderDiarization: true,
+  calendarDisconnected: false,
 };
 
 const DEFAULT_NOTIFICATIONS_SETTINGS: NotificationsSettings = {
@@ -27,12 +29,14 @@ const DEFAULT_NOTIFICATIONS_SETTINGS: NotificationsSettings = {
 
 /** Longest silence auto-stop the UI offers, in minutes; mirrors the Rust cap. */
 export const MEETING_AUTO_STOP_SILENCE_MINUTES_MAX = 240;
+export const MEETING_MAX_RECORDING_MINUTES = 240;
 
 export function resolveMeetingsSettings(
   settings: Pick<Settings, "meetings"> | null | undefined,
 ): MeetingsSettings {
   const meetings = settings?.meetings;
   const minutes = meetings?.autoStopAfterSilenceMinutes;
+  const maxRecordingMinutes = meetings?.maxRecordingMinutes;
   const rememberVoices =
     meetings?.rememberVoices ?? DEFAULT_MEETINGS_SETTINGS.rememberVoices;
   return {
@@ -44,6 +48,10 @@ export function resolveMeetingsSettings(
       typeof minutes === "number" && Number.isFinite(minutes)
         ? Math.min(Math.max(0, Math.round(minutes)), MEETING_AUTO_STOP_SILENCE_MINUTES_MAX)
         : DEFAULT_MEETINGS_SETTINGS.autoStopAfterSilenceMinutes,
+    maxRecordingMinutes:
+      typeof maxRecordingMinutes === "number" && Number.isFinite(maxRecordingMinutes)
+        ? Math.min(Math.max(0, Math.round(maxRecordingMinutes)), MEETING_MAX_RECORDING_MINUTES)
+        : DEFAULT_MEETINGS_SETTINGS.maxRecordingMinutes,
     rememberVoices: rememberVoices,
     // Mirrors `normalize_loaded_meetings_settings` in settings.rs: auto-apply
     // refines remembering, so it cannot be on while remembering is off.
@@ -52,6 +60,8 @@ export function resolveMeetingsSettings(
     preferProviderDiarization:
       meetings?.preferProviderDiarization ??
       DEFAULT_MEETINGS_SETTINGS.preferProviderDiarization,
+    calendarDisconnected:
+      meetings?.calendarDisconnected ?? DEFAULT_MEETINGS_SETTINGS.calendarDisconnected,
   };
 }
 

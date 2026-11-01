@@ -22,6 +22,22 @@
 
   If a packaged smoke test ever fails to launch because of this, the fix is to
   find the unsigned library and sign it, not to restore the entitlement.
+
+  `com.apple.security.personal-information.calendars` is here because TCC
+  attributes the calendar helper's request to the RESPONSIBLE process, which is
+  this app, and under the hardened runtime it refuses to prompt for a process
+  whose signature lacks the matching entitlement. 0.9.0-beta.6 shipped with the
+  entitlement on the helper only: EventKit answered "no" about ten
+  milliseconds after Connect, macOS stored no decision and showed no prompt,
+  and the button appeared to do nothing. The grant itself has always been keyed
+  to this app's identity (it is what System Settings lists), so carrying the
+  entitlement here does not widen what any grant covers; it only lets macOS
+  ask. Calendar READING still happens only in the helper, which keeps its own
+  copy of the entitlement as the accessing process.
+
+  `com.apple.security.personal-information.addressbook` is here for the same
+  reason: the same helper reads contact names when the user turns on Contacts
+  names for dictation, and macOS asks on this app's behalf.
 -->
 <plist version="1.0">
   <dict>
@@ -32,6 +48,10 @@
     <key>com.apple.security.device.audio-input</key>
     <true/>
     <key>com.apple.security.device.microphone</key>
+    <true/>
+    <key>com.apple.security.personal-information.addressbook</key>
+    <true/>
+    <key>com.apple.security.personal-information.calendars</key>
     <true/>
     <key>com.apple.security.automation.apple-events</key>
     <true/>

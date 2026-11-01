@@ -34,12 +34,12 @@ const ASR_PROVIDER_TYPE_FLAGS = {
   cohere_transcribe: true,
   cohere_local: true,
   qwen3_asr: true,
+  whistle: true,
   deepgram: true,
   gemini_transcribe: true,
   mistral_voxtral: true,
   xai_stt: true,
   transcribe_cpp: true,
-  plainsong_plus: true,
 } satisfies Record<AsrProviderType, true>;
 
 export const ASR_PROVIDER_TYPES = Object.keys(
@@ -65,6 +65,7 @@ const DOWNLOADABLE_PROVIDER_SET = new Set<AsrProviderType>([
   "qwen3_asr",
   "cohere_local",
   "transcribe_cpp",
+  "whistle",
 ]);
 
 const MEETING_GRADE_PROVIDER_SET = new Set<AsrProviderType>([
@@ -115,10 +116,9 @@ const DICTATION_ONLY_PROVIDER_SET = new Set<AsrProviderType>([
   "windows_sdk_dictation",
   "moonshine",
   "whisper_candle",
+  "whistle",
   // Until xAI's per-request size and duration limits are confirmed.
   "xai_stt",
-  // The relay's meeting purpose exists; the app does not send meetings yet.
-  "plainsong_plus",
 ]);
 
 /**
@@ -162,7 +162,6 @@ const CLOUD_PROVIDER_SET = new Set<AsrProviderType>([
   "gemini_transcribe",
   "mistral_voxtral",
   "xai_stt",
-  "plainsong_plus",
 ]);
 
 export function isDownloadableProvider(providerType: AsrProviderType) {
@@ -240,10 +239,18 @@ export function isMeetingEligibleModel(providerType: AsrProviderType, modelId: s
       // always resolves openai_cloud to whisper-1.
       return normalizedModelId === "whisper-1";
     case "transcribe_cpp":
-      // Same Parakeet TDT 0.6B v3 weights as the shipped meeting route, so
-      // the long-form property is the same one; only the runtime differs.
-      // Experimental, so the catalog sorts it last and never recommends it.
-      return normalizedModelId.startsWith("parakeet-tdt-0.6b-v3");
+      // Pinned batch routes tested on English conversation audio. GGUF
+      // Parakeet is the recommended meeting route on Apple Silicon (see
+      // `isExperimentalInLane` in asr-route-catalog.ts); Unified EN stays
+      // experimental. Eligible, never inherited: the sidecar uses either for
+      // meetings only when the meeting slot names it, so an older install
+      // that dictates on GGUF keeps recording meetings on ONNX Parakeet.
+      // Fluid Speech Mini and Underdog Bark 3.0 Pro are optional English
+      // models for both lanes, never inherited or recommended.
+      return normalizedModelId === "parakeet-tdt-0.6b-v3-q8_0" ||
+        normalizedModelId === "parakeet-unified-en-0.6b-q8_0" ||
+        normalizedModelId === FLUID_SPEECH_MINI_MODEL_ID ||
+        normalizedModelId === UNDERDOG_BARK_PRO_MODEL_ID;
     case "qwen3_asr":
       // Qwen3-ASR is an encoder-decoder model that transcribes a whole
       // recording in one pass (the meeting lane chunks it). Experimental:
@@ -294,21 +301,21 @@ export function providerRecommendation(provider: AsrProviderInfo) {
     if (provider.runtimeStatus === "ready" && provider.inferenceEnabled) {
       return "Ready for meeting-grade transcription.";
     }
-    return "Best used for meetings once the runtime is ready.";
+    return "Supports meetings once it is set up.";
   }
 
   if (
     provider.providerType === "macos_apple_speech" &&
     appleSpeechServesMeetings(provider.platformReadiness)
   ) {
-    return "Ready for dictation and meetings through Apple's SpeechAnalyzer, with nothing to download.";
+    return "Ready for dictation and meetings with Apple's built-in speech recognition, with nothing to download.";
   }
 
   if (isDictationOnlyProvider(provider.providerType)) {
-    return "Best used for fast dictation, not meeting transcription.";
+    return "Supports dictation only.";
   }
 
-  return "Available for general transcription once the runtime is ready.";
+  return "Available for transcription once it is set up.";
 }
 
 export function providerActionLabel(provider: AsrProviderInfo) {
@@ -360,6 +367,10 @@ export interface AsrModelLanguageSupport {
   count: number;
   /** Short renderable label, e.g. "English only", "~100 languages". */
   label: string;
+  /** The label in a sentence, when the short form reads badly there ("about 100 languages"). */
+  prose?: string;
+  /** The languages besides English, for "Tested in English. Also built for …". */
+  besidesEnglish?: string;
 }
 
 export type AsrLanguageEvidenceBasis =
@@ -393,7 +404,7 @@ export interface AsrModelCapability {
    * rust-sidecar/src/download/mod.rs, which multiplies by 1024*1024. The
    * sources are that file's table for whisper.cpp and each provider's own
    * `model_info` for the rest. `formatModelSize` is the only renderer and it
-   * divides by 1024, so the displayed unit matches the stored one.
+   * converts to the decimal MB/GB Finder shows.
    */
   sizeMib: number;
   tier: AsrModelTier;
@@ -412,13 +423,31 @@ const WHISPER_MULTILINGUAL: AsrModelLanguageSupport = {
   englishOnly: false,
   count: 99,
   label: "~100 languages",
+  prose: "about 100 languages",
+  besidesEnglish: "about 100 other languages",
 };
 
 const PARAKEET_V3_LANGUAGES: AsrModelLanguageSupport = {
   englishOnly: false,
   count: 25,
   label: "25 European languages",
+  besidesEnglish: "24 other European languages",
 };
+
+/**
+ * Optional English models on the transcribe.cpp route: Parakeet TDT 0.6B v3
+ * derivatives that Plainsong converts and serves from its own GitHub release.
+ * Neither is a default or recommended anywhere. Each id mirrors the pin in
+ * rust-sidecar/src/asr/transcribe_cpp.rs.
+ */
+export const FLUID_SPEECH_MINI_MODEL_ID = "fluid-speech-mini-q8_0";
+export const UNDERDOG_BARK_PRO_MODEL_ID = "underdog-bark-3.0-pro-q8_0";
+
+/** The credits each model's licence asks for, shown wherever the model is described. */
+const FLUID_SPEECH_MINI_ATTRIBUTION =
+  "Fluid Speech Mini by FluidVoice. Built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra.";
+const UNDERDOG_BARK_PRO_ATTRIBUTION =
+  "Underdog Bark 3.0 Pro by Conway Research. Built on NVIDIA Parakeet TDT 0.6B v3 and Moondream Parakeet Ultra; post-trained and compressed by Conway Research.";
 
 const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
   AsrModelCapability,
@@ -432,7 +461,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "it garbles proper nouns and accented speech often enough that you will retype sentences.",
+      "Garbles names and accented speech often enough that you'll retype sentences.",
   },
   {
     providerType: "whisper",
@@ -442,7 +471,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "it has the same accuracy problems as tiny, without the option of another language.",
+      "Has the same accuracy problems as Whisper Tiny, without the option of another language.",
   },
   {
     providerType: "whisper",
@@ -452,7 +481,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "the multilingual weights cost accuracy on English against base.en at effectively the same size.",
+      "Less accurate in English than Whisper Base (English), at the same size.",
   },
   {
     providerType: "whisper",
@@ -464,7 +493,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "promoted",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "speak Spanish or German into it and it returns English-sounding nonsense rather than admitting it cannot.",
+      "Speak Spanish or German into it and it returns English-sounding nonsense rather than admitting it can't.",
   },
   {
     providerType: "whisper",
@@ -474,7 +503,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "about three times the download of base.en for a gain you may not notice on short dictation.",
+      "About three times the download of Whisper Base, for a gain you may not notice on short dictation.",
   },
   {
     providerType: "whisper",
@@ -484,7 +513,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "about three times the download of base.en for a gain you may not notice on short dictation.",
+      "About three times the download of Whisper Base, for a gain you may not notice on short dictation.",
   },
   {
     providerType: "whisper",
@@ -494,7 +523,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "roughly ten times the size of base.en, and proportionally slower on every utterance.",
+      "About ten times the size of Whisper Base, and slower on every dictation to match.",
   },
   {
     providerType: "whisper",
@@ -504,7 +533,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "roughly ten times the size of base.en, and proportionally slower on every utterance.",
+      "About ten times the size of Whisper Base, and slower on every dictation to match.",
   },
   {
     providerType: "whisper",
@@ -514,7 +543,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "roughly twenty times the size of base.en and slower again than large-v3-turbo, for a narrow accuracy difference.",
+      "About twenty times the size of Whisper Base and slower again than Whisper Large Turbo, for a small accuracy difference.",
   },
   {
     providerType: "whisper",
@@ -524,7 +553,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "promoted",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "about eleven times the size of base.en and slower per utterance; take it for the language coverage, not the speed.",
+      "About eleven times the size of Whisper Base, and slower. Choose it for the languages, not the speed.",
   },
   {
     providerType: "parakeet",
@@ -533,8 +562,11 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     sizeMib: 639,
     tier: "promoted",
     pauseBehavior: "transducer",
-    tradeoff:
-      "Mandarin, Hindi and Arabic are not covered at all, and the download is four separate ONNX files rather than one.",
+    // Offered only where the GGUF build can't run, so there is nothing to
+    // compare it with in a picker. Where both can run, the GGUF build made
+    // fewer word errors (6.3% against 7.6% pooled on real speech) at about
+    // half the memory, and this one is an internal fallback.
+    tradeoff: "One download covers dictation and meetings.",
   },
   {
     providerType: "parakeet",
@@ -545,7 +577,18 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "transducer",
     tradeoff:
-      "English only; choose v3 for multilingual work. Plainsong has not yet published a same-hardware accuracy and latency comparison for this export.",
+      "Choose Parakeet v3 for other languages. Plainsong hasn't compared its accuracy and speed with Parakeet v3 yet.",
+  },
+  {
+    providerType: "parakeet",
+    modelId: "orukeet-v0.1.0-int8",
+    languages: ENGLISH_ONLY,
+    // Six pinned files total 671,502,392 bytes, including the retained terms.
+    sizeMib: 640,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff:
+      "Experimental, offered for English dictation. It was tuned against one public English test set, and Plainsong hasn't shown it does better than the recommended model.",
   },
   {
     providerType: "parakeet",
@@ -557,7 +600,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "transducer",
     tradeoff:
-      "an older English-only export kept as a fallback; less accurate than the v3 model and short-form only.",
+      "An older version kept as a fallback. Less accurate than Parakeet v3, and for short dictation only.",
   },
   {
     providerType: "whisper_candle",
@@ -567,7 +610,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "the same weights as the whisper.cpp large-v3-turbo route, run through Candle -- a fallback engine, not extra accuracy.",
+      "The same model as Whisper Large Turbo, run a different way. A fallback, not extra accuracy.",
   },
   {
     providerType: "distil_whisper",
@@ -577,7 +620,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     sizeMib: 2888,
     tier: "more",
     pauseBehavior: "encoder_decoder",
-    tradeoff: "that is a lot of disk for a model that cannot switch out of English.",
+    tradeoff: "A lot of disk for a model that can't switch out of English.",
   },
   {
     providerType: "moonshine",
@@ -586,7 +629,7 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     sizeMib: 120,
     tier: "more",
     pauseBehavior: "encoder_decoder",
-    tradeoff: "tuned for very short utterances; accuracy drops on anything longer.",
+    tradeoff: "Tuned for very short phrases. Accuracy drops on anything longer.",
   },
   {
     providerType: "moonshine",
@@ -595,7 +638,17 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
     sizeMib: 246,
     tier: "more",
     pauseBehavior: "encoder_decoder",
-    tradeoff: "tuned for short utterances; longer recordings drift.",
+    tradeoff: "Tuned for short phrases. Longer recordings drift.",
+  },
+  {
+    providerType: "whistle",
+    modelId: "whistle-2.0.0",
+    languages: { englishOnly: false, count: 7, label: "7 languages", besidesEnglish: "6 other languages" },
+    sizeMib: 17,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff:
+      "Experimental, for dictations up to 30 seconds. It takes vocabulary hints, but names can still be misheard. Not for meetings or live preview.",
   },
   {
     providerType: "qwen3_asr",
@@ -605,13 +658,15 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
       englishOnly: false,
       count: 52,
       label: "30 languages + 22 Chinese dialects",
+      prose: "30 languages and 22 Chinese dialects",
+      besidesEnglish: "29 other languages and 22 Chinese dialects",
     },
     // Total across all 7 files: ~2,020,098,572 bytes ≈ 1927 MiB.
     sizeMib: 1927,
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "experimental — English is the only language verified in Plainsong, and the int4 decoders run on the CPU at anywhere from a quarter of real time to slower than real time depending on load (11-59 s to transcribe 44 s of speech on an M4 Pro across quiet and shared-CPU runs), so a meeting can take longer to transcribe than it took to hold.",
+      "Experimental. It can be slower than real time: 11 to 59 seconds to transcribe 44 seconds of speech on an M4 Pro, depending on what else was running. A meeting can take longer to transcribe than it took to hold.",
   },
   {
     providerType: "cohere_local",
@@ -620,25 +675,104 @@ const ASR_MODEL_CAPABILITIES_WITHOUT_LANGUAGE_EVIDENCE: readonly Omit<
       englishOnly: false,
       count: 14,
       label: "14 languages, and you have to pick one",
+      prose: "14 languages",
+      besidesEnglish: "13 other languages",
     },
     // 2,127,674,554 bytes across the eight pinned files.
     sizeMib: 2029,
     tier: "more",
     pauseBehavior: "encoder_decoder",
     tradeoff:
-      "experimental \u2014 the same weights the Cohere cloud route uses, run offline on the CPU. Measured on a quiet M4 Pro against the shipped Parakeet default: 0.67 s against 0.13 s for a 5.3 s utterance, and 7.5 s against 1.0 s for 44 s of speech. It also cannot detect a language, so it transcribes as English until you choose one, and its segment times are estimated from sentence lengths rather than measured, which is why it is not offered for meetings.",
+      "Experimental. The same model the Cohere cloud service uses, run offline on this Mac. Slower than Parakeet on a quiet M4 Pro: 0.67 s against 0.13 s for a 5-second phrase, and 7.5 s against 1.0 s for 44 s of speech. It can't detect a language, so it transcribes as English until you choose one, and its timings are estimated rather than measured, which is why it isn't offered for meetings.",
   },
   {
     providerType: "transcribe_cpp",
     modelId: "parakeet-tdt-0.6b-v3-q8_0",
     languages: PARAKEET_V3_LANGUAGES,
     // 739,508,576 bytes for the single GGUF = 705.3 MiB. Mirrors
-    // `size_bytes` in rust-sidecar/src/asr/transcribe_cpp.rs.
+    // `size_bytes` in rust-sidecar/src/asr/transcribe_cpp.rs. Where a
+    // Download fetches more (the Neural Engine build on Apple Silicon), the
+    // sidecar reports the total and `withDownloadSize` shows it instead.
     sizeMib: 705,
     tier: "more",
     pauseBehavior: "transducer",
     tradeoff:
-      "experimental — the same Parakeet weights the recommended route already runs, re-quantized to GGUF and run through a second inference runtime, so it is a second copy of a model you may already have downloaded.",
+      "One download covers dictation and meetings. It can write stray words when only background chatter is audible.",
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: "orukeet-r3-q8_0",
+    languages: ENGLISH_ONLY,
+    sizeMib: 705,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff:
+      "Experimental, for English dictation. A separate download from the other Orukeet. Check spoken amounts: one came out differently between test runs. Other languages and meetings aren't tested yet.",
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: "qwen3-asr-1.7b-q8_0",
+    languages: ENGLISH_ONLY,
+    sizeMib: 2084,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff: "Experimental, for English dictation. A larger download and more memory than Parakeet. Not for meetings or live preview; other languages aren't tested yet.",
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: "qwen3-asr-0.6b-q6_k",
+    languages: ENGLISH_ONLY,
+    sizeMib: 658,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff: "Experimental, for short English dictation. Longer recordings can repeat text and drop speech; use Parakeet for those. Not for meetings or live preview; other languages aren't tested yet.",
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: "parakeet-unified-en-0.6b-q8_0",
+    languages: ENGLISH_ONLY,
+    sizeMib: 698,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff:
+      "Experimental, for English dictation and meetings. Overlapping speech can confuse amounts, so check important numbers. No live preview while you dictate. Licensed by NVIDIA Corporation under the NVIDIA Open Model License.",
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: "nemotron-3.5-asr-streaming-0.6b-q8_0",
+    languages: ENGLISH_ONLY,
+    sizeMib: 717,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff: "Experimental, for English dictation, using the same model as the live preview. Live preview with it, other languages and meetings aren't tested yet. Licensed under OpenMDW-1.1.",
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: FLUID_SPEECH_MINI_MODEL_ID,
+    languages: ENGLISH_ONLY,
+    // 739,508,608 bytes for the single GGUF = 705.3 MiB.
+    sizeMib: 705,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff: `English only. Fewer stray words when someone else talks nearby in our synthetic audio tests; can miss very short replies. Compared with Parakeet v3, it left more real-speech clips empty, did worse in synthetic crowd noise, and made more critical errors in dictation tests. ${FLUID_SPEECH_MINI_ATTRIBUTION} CC BY 4.0.`,
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: UNDERDOG_BARK_PRO_MODEL_ID,
+    languages: ENGLISH_ONLY,
+    sizeMib: 705,
+    tier: "more",
+    pauseBehavior: "transducer",
+    tradeoff: `English only. Did better on short distant-microphone meeting clips in our tests; dictation may lose capitals and punctuation and run numbers into words. Whole-meeting differences were within test variation, and it did worse on synthetic noisy audio. ${UNDERDOG_BARK_PRO_ATTRIBUTION} CC BY 4.0.`,
+  },
+  {
+    providerType: "transcribe_cpp",
+    modelId: "moonshine-streaming-medium-q8_0",
+    languages: ENGLISH_ONLY,
+    sizeMib: 282,
+    tier: "more",
+    pauseBehavior: "encoder_decoder",
+    tradeoff: "Experimental, for short English dictation, with a small download. Check numbers carefully. Longer recordings can drop speech; use Parakeet for those. Not for meetings or live preview.",
   },
 ];
 
@@ -668,6 +802,13 @@ const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
     },
   ],
   [
+    "parakeet:orukeet-v0.1.0-int8",
+    {
+      basis: "plainsong_verified",
+      verifiedLanguages: ["English"],
+    },
+  ],
+  [
     "transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0",
     {
       // English only, on the two repo fixtures, in the spike receipt
@@ -676,6 +817,31 @@ const LANGUAGE_EVIDENCE_BY_ROUTE = new Map<
       basis: "upstream_listed",
       verifiedLanguages: ["English"],
     },
+  ],
+  [
+    "transcribe_cpp:orukeet-r3-q8_0",
+    { basis: "plainsong_verified", verifiedLanguages: ["English"] },
+  ],
+  [
+    "transcribe_cpp:qwen3-asr-1.7b-q8_0",
+    { basis: "plainsong_verified", verifiedLanguages: ["English"] },
+  ],
+  [
+    "transcribe_cpp:parakeet-unified-en-0.6b-q8_0",
+    { basis: "plainsong_verified", verifiedLanguages: ["English"] },
+  ],
+  [
+    "transcribe_cpp:nemotron-3.5-asr-streaming-0.6b-q8_0",
+    { basis: "plainsong_verified", verifiedLanguages: ["English"] },
+  ],
+  ["transcribe_cpp:moonshine-streaming-medium-q8_0", { basis: "plainsong_verified", verifiedLanguages: ["English"] }],
+  [
+    `transcribe_cpp:${FLUID_SPEECH_MINI_MODEL_ID}`,
+    { basis: "plainsong_verified", verifiedLanguages: ["English"] },
+  ],
+  [
+    `transcribe_cpp:${UNDERDOG_BARK_PRO_MODEL_ID}`,
+    { basis: "plainsong_verified", verifiedLanguages: ["English"] },
   ],
   [
     "cohere_local:cohere-transcribe-03-2026-q4",
@@ -731,6 +897,34 @@ export function getAsrModelCapability(
   return CAPABILITY_BY_ROUTE.get(`${providerType}:${(modelId ?? "").trim()}`) ?? null;
 }
 
+/**
+ * `capability` with its size replaced by what a Download fetches on this Mac,
+ * when the sidecar reports that (`modelDownloadBytes`). On Apple Silicon a
+ * Parakeet download fetches its Neural Engine build and, for English, the
+ * vocabulary model besides the one GGUF file the catalog sizes.
+ */
+function withDownloadSize(
+  capability: AsrModelCapability | null,
+  downloadBytes: number | null | undefined,
+): AsrModelCapability | null {
+  if (!capability || typeof downloadBytes !== "number" || !Number.isFinite(downloadBytes) || downloadBytes <= 0) {
+    return capability;
+  }
+  return { ...capability, sizeMib: downloadBytes / (1024 * 1024) };
+}
+
+/** The capability for one of `provider`'s models, sized for this Mac. */
+export function getAsrModelCapabilityFor(
+  provider: { providerType: AsrProviderType; modelDownloadBytes?: Record<string, number> },
+  modelId: string | null | undefined,
+): AsrModelCapability | null {
+  const id = (modelId ?? "").trim();
+  return withDownloadSize(
+    getAsrModelCapability(provider.providerType, id),
+    provider.modelDownloadBytes?.[id],
+  );
+}
+
 export function asrModelTier(
   providerType: AsrProviderType,
   modelId: string | null | undefined
@@ -739,23 +933,25 @@ export function asrModelTier(
 }
 
 /**
- * Renders an `AsrModelCapability.sizeMib` value. The divisor is 1024 and the
- * suffix says MiB/GiB, because the stored numbers are binary units -- dividing
- * by 1000 and printing "MB" understated every size in the picker by ~5%.
+ * Renders an `AsrModelCapability.sizeMib` value the way Finder and the first-run
+ * wizard show a download: decimal MB and GB. The stored numbers are binary
+ * (MiB), so this converts rather than relabels -- 705 MiB is 739 MB. Printing
+ * MiB here while the wizard printed MB showed one file at two sizes.
  */
 export function formatModelSize(sizeMib: number): string {
   if (!Number.isFinite(sizeMib) || sizeMib <= 0) {
     return "size unknown";
   }
-  return sizeMib >= 1024
-    ? `${(sizeMib / 1024).toFixed(1)} GiB`
-    : `${Math.round(sizeMib)} MiB`;
+  const megabytes = (sizeMib * 1024 * 1024) / 1_000_000;
+  return megabytes >= 1000
+    ? `${(megabytes / 1000).toFixed(1)} GB`
+    : `${Math.round(megabytes)} MB`;
 }
 
 export function describePauseBehavior(behavior: AsrPauseBehavior): string {
   return behavior === "transducer"
-    ? "Stays quiet through pauses: silence produces no text."
-    : "Its decoder keeps emitting through long pauses, so silence can become invented words.";
+    ? "Stays quiet through pauses, so silence produces no text."
+    : "Can turn long pauses into invented words.";
 }
 
 // ---------------------------------------------------------------------------
@@ -848,8 +1044,13 @@ const LANGUAGE_CODES_BY_ROUTE = new Map<string, readonly string[]>([
   ["whisper_candle:whisper-large-v3-turbo", WHISPER_LARGE_V3_LANGUAGE_CODES],
   ["parakeet:parakeet-tdt-0.6b-v3", PARAKEET_V3_LANGUAGE_CODES],
   ["parakeet:parakeet-tdt-0.6b-v2", ["en"]],
+  ["parakeet:orukeet-v0.1.0-int8", ["en"]],
   ["transcribe_cpp:parakeet-tdt-0.6b-v3-q8_0", PARAKEET_V3_LANGUAGE_CODES],
+  ["transcribe_cpp:parakeet-unified-en-0.6b-q8_0", ["en"]],
+  [`transcribe_cpp:${FLUID_SPEECH_MINI_MODEL_ID}`, ["en"]],
+  [`transcribe_cpp:${UNDERDOG_BARK_PRO_MODEL_ID}`, ["en"]],
   ["qwen3_asr:qwen3-asr-0.6b", QWEN3_ASR_LANGUAGE_CODES],
+  ["whistle:whistle-2.0.0", ["en", "de", "fr", "es", "it", "nl", "pl"]],
   ["cohere_local:cohere-transcribe-03-2026-q4", COHERE_LOCAL_LANGUAGE_CODES],
 ]);
 
@@ -999,30 +1200,56 @@ export function asrLanguageOptions(
 }
 
 /**
- * One sentence a user can act on: size, language coverage, and the downside.
- * Returns null for routes we have no measured metadata for, so callers render
- * nothing rather than a plausible-sounding guess.
+ * What a model's language coverage means for you, in plain sentences. What
+ * Plainsong has tested stays apart from what the model was built for.
+ */
+function describeLanguages(capability: AsrModelCapability): string {
+  const { languages, languageEvidence } = capability;
+  const verified = languageEvidence.verifiedLanguages;
+  if (languages.englishOnly) {
+    return verified.length > 0 ? "English only." : "English only. Not yet tested in Plainsong.";
+  }
+  const prose = languages.prose ?? languages.label;
+  if (languageEvidence.basis === "plainsong_verified") {
+    return `${prose.charAt(0).toUpperCase()}${prose.slice(1)}, tested in Plainsong.`;
+  }
+  if (verified.length === 0) {
+    return `Built for ${prose}. Not yet tested in Plainsong.`;
+  }
+  const besides =
+    verified.length === 1 && verified[0] === "English" && languages.besidesEnglish
+      ? languages.besidesEnglish
+      : prose;
+  return `Tested in ${verified.join(" and ")}. Also built for ${besides}.`;
+}
+
+/**
+ * What a model is, in a few short sentences a user can act on: size, language
+ * coverage, and the downside. Returns null for routes we have no measured
+ * metadata for, so callers render nothing rather than a plausible-sounding
+ * guess.
  */
 export function describeAsrModel(
   providerType: AsrProviderType,
-  modelId: string | null | undefined
+  modelId: string | null | undefined,
+  capability: AsrModelCapability | null = getAsrModelCapability(providerType, modelId),
 ): string | null {
-  const capability = getAsrModelCapability(providerType, modelId);
   if (!capability) {
     return null;
   }
 
-  const verifiedLanguages = capability.languageEvidence.verifiedLanguages;
-  const languageEvidence =
-    capability.languageEvidence.basis === "plainsong_verified"
-      ? `${capability.languages.label}; ${verifiedLanguages.join(
-          " and ",
-        )} verified in Plainsong`
-      : verifiedLanguages.length > 0
-        ? `${capability.languages.label} listed upstream; ${verifiedLanguages.join(
-            " and ",
-          )} verified in Plainsong`
-        : `${capability.languages.label} listed upstream; not yet qualified across the full set in Plainsong`;
+  return `${formatModelSize(capability.sizeMib)}. ${describeLanguages(capability)} ${capability.tradeoff}`;
+}
 
-  return `${formatModelSize(capability.sizeMib)}, ${languageEvidence}; ${capability.tradeoff}`;
+/**
+ * A model's display name without the file-format details a sidecar adds
+ * ("Nemotron 3.5 ASR Streaming 0.6B (GGUF Q8_0)" -> "Nemotron 3.5 ASR
+ * Streaming 0.6B"). Those details stay in the model id.
+ */
+export function plainModelName(name: string): string {
+  return name
+    .replace(/\s*\((?:GGUF|ONNX)?[\s,]*(?:Q\d(?:_[A-Z0-9]+)*|int[48])?[\s,]*\)/gi, "")
+    .replace(/\s*via transcribe\.cpp/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }

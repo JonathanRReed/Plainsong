@@ -90,7 +90,7 @@ impl DistilWhisperProvider {
 
     fn has_trusted_required_files(&self) -> bool {
         DISTIL_REQUIRED_FILES.iter().all(|(file_name, sha256, _)| {
-            crate::download::is_model_artifact_trusted(
+            crate::download::is_model_artifact_installed(
                 &self.model_dir.join(file_name),
                 Some(sha256),
             )
@@ -174,7 +174,7 @@ impl AsrProvider for DistilWhisperProvider {
         }
         if !self.has_trusted_required_files() {
             anyhow::bail!(
-                "Distil-Whisper model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+                "Distil-Whisper model files failed their integrity check. Download the model again in Settings > Models."
             );
         }
         let model_dir = self.model_dir.clone();
@@ -206,7 +206,7 @@ impl AsrProvider for DistilWhisperProvider {
         }
         if !self.has_trusted_required_files() {
             return Err(anyhow::anyhow!(
-                "Distil-Whisper model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+                "Distil-Whisper model files failed their integrity check. Download the model again in Settings > Models."
             ));
         }
 
@@ -290,7 +290,9 @@ impl AsrProvider for DistilWhisperProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 

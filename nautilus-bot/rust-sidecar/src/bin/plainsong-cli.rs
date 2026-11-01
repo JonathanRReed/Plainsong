@@ -13,14 +13,15 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let command = match cli::parse_args(&args) {
-        Ok(command) => command,
+    let invocation = match cli::parse_invocation(&args) {
+        Ok(invocation) => invocation,
         Err(error) => {
             eprintln!("plainsong: {error}\n\n{}", cli::USAGE);
             return ExitCode::from(2);
         }
     };
 
+    let command = invocation.command;
     match command {
         cli::Command::Help => {
             print!("{}", cli::USAGE);
@@ -41,7 +42,8 @@ fn main() -> ExitCode {
         return ExitCode::from(local_tools::EXIT_LOCAL_TOOLS_DISABLED as u8);
     }
 
-    let store = match ReadOnlyStore::open() {
+    let store = match ReadOnlyStore::open_with_credential_access(invocation.allow_credential_access)
+    {
         Ok(store) => store,
         Err(error) => {
             eprintln!("plainsong: {error:#}");

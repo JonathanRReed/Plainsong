@@ -42,6 +42,7 @@ pub struct AdmissionController {
     analyses: Arc<Semaphore>,
     backups: Arc<Semaphore>,
     capture: Arc<Semaphore>,
+    dictation: Arc<Semaphore>,
     duplicate_keys: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -54,6 +55,7 @@ impl Default for AdmissionController {
             analyses: Arc::new(Semaphore::new(MAX_CONCURRENT_ANALYSES)),
             backups: Arc::new(Semaphore::new(MAX_CONCURRENT_BACKUP_WORK)),
             capture: Arc::new(Semaphore::new(MAX_CONCURRENT_CAPTURE_COMMANDS)),
+            dictation: Arc::new(Semaphore::new(4)),
             duplicate_keys: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -61,8 +63,31 @@ impl Default for AdmissionController {
 
 impl AdmissionController {
     pub fn admit(&self, command: &str, params: &Value) -> Result<AdmissionLease, String> {
+        self.admit_with_pressure(command, params, crate::memory_pressure::events().current())
+    }
+
+    fn admit_with_pressure(
+        &self,
+        command: &str,
+        params: &Value,
+        pressure: crate::memory_pressure::MemoryPressure,
+    ) -> Result<AdmissionLease, String> {
         let class = classify_command(command);
-        let overall = Arc::clone(&self.overall)
+        if matches!(
+            class,
+            CommandClass::Analysis | CommandClass::Benchmark | CommandClass::Download
+        ) && pressure != crate::memory_pressure::MemoryPressure::Normal
+        {
+            return Err("SIDECAR_BUSY: Background work is paused while memory is low. Retry when memory pressure clears.".into());
+        }
+        // Dictation has reserved capacity. Filling the general pool must never
+        // turn a start or stop gesture into a busy error.
+        let pool = if crate::qos::is_interactive_command(command) {
+            &self.dictation
+        } else {
+            &self.overall
+        };
+        let overall = Arc::clone(pool)
             .try_acquire_owned()
             .map_err(|_| busy_error(CommandClass::General))?;
         let class_permit = self
@@ -114,13 +139,19 @@ fn busy_error(class: CommandClass) -> String {
 fn classify_command(command: &str) -> CommandClass {
     match command {
         "download_asr_models"
+        | "download_embedding_model"
+        | "download_live_preview_engine_model"
+        | "download_native_text_model"
+        | "download_bundled_cleanup_model"
+        | "install_ollama_model"
         | "download_diarization_model"
         | "download_platform_assets"
         | "download_silero_vad_model"
         | "download_whisper_model"
         | "install_apple_speech_language" => CommandClass::Download,
         "benchmark_asr_providers" | "benchmark_asr_providers_bytes" => CommandClass::Benchmark,
-        "analyze_recording"
+        "run_diarization"
+        | "analyze_recording"
         | "analyze_recordings"
         | "ask_memory"
         | "extract_action_items"
@@ -293,6 +324,15 @@ impl CaptureAdmissionRegistry {
         self.registrar_active.store(true, Ordering::SeqCst);
     }
 
+    /// Selected-text actions require a privileged registrar even before its
+    /// first registration. They never use meeting capture's compatibility path.
+    pub fn consume_required(&self, nonce: &str) -> Result<(), CaptureAdmissionRejection> {
+        if !self.is_enforcing() {
+            return Err(CaptureAdmissionRejection::Unknown);
+        }
+        self.consume(nonce)
+    }
+
     /// Redeem a nonce. Succeeds at most once per registered nonce.
     pub fn consume(&self, nonce: &str) -> Result<(), CaptureAdmissionRejection> {
         let mut issued = self
@@ -328,6 +368,33 @@ mod capture_admission_tests {
         let registry = CaptureAdmissionRegistry::default();
         assert!(!registry.is_enforcing());
         assert!(registry.consume("any-uuid").is_ok());
+    }
+
+    #[test]
+    fn required_selection_proofs_reject_uninitialized_forged_replayed_and_expired_nonces() {
+        let registry = CaptureAdmissionRegistry::default();
+        assert_eq!(
+            registry.consume_required("renderer-forged"),
+            Err(CaptureAdmissionRejection::Unknown)
+        );
+        registry.register("issued-selection");
+        assert_eq!(
+            registry.consume_required("renderer-forged"),
+            Err(CaptureAdmissionRejection::Unknown)
+        );
+        assert!(registry.consume_required("issued-selection").is_ok());
+        assert_eq!(
+            registry.consume_required("issued-selection"),
+            Err(CaptureAdmissionRejection::Unknown)
+        );
+
+        let expired = CaptureAdmissionRegistry::with_ttl(Duration::ZERO);
+        expired.register("expired-selection");
+        std::thread::sleep(Duration::from_millis(1));
+        assert_eq!(
+            expired.consume_required("expired-selection"),
+            Err(CaptureAdmissionRejection::Expired)
+        );
     }
 
     #[test]
@@ -398,6 +465,19 @@ mod capture_admission_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_speakers_share_analysis_capacity_and_reject_duplicate_work() {
+        let admission = AdmissionController::default();
+        let _first = admission
+            .admit("run_diarization", &serde_json::json!({"recordingId": "r1"}))
+            .unwrap();
+        let error = admission
+            .admit("run_diarization", &serde_json::json!({"recordingId": "r1"}))
+            .err()
+            .unwrap();
+        assert!(error.starts_with("SIDECAR_DUPLICATE:"));
+    }
 
     #[test]
     fn benchmark_capacity_is_bounded_and_recovers_after_drop() {
@@ -541,5 +621,44 @@ mod tests {
             .err()
             .expect("duplicate analysis must be rejected");
         assert!(error.starts_with("SIDECAR_DUPLICATE:"));
+    }
+}
+
+#[cfg(test)]
+mod responsiveness_pressure_tests {
+    use super::*;
+    use crate::memory_pressure::MemoryPressure;
+
+    #[test]
+    fn pressure_defers_background_requests_but_keeps_dictation_available() {
+        let admission = AdmissionController::default();
+        for pressure in [MemoryPressure::Warning, MemoryPressure::Critical] {
+            for command in [
+                "analyze_recording",
+                "benchmark_asr_providers",
+                "download_asr_models",
+                "download_embedding_model",
+                "download_native_text_model",
+                "download_bundled_cleanup_model",
+                "download_live_preview_engine_model",
+                "install_ollama_model",
+            ] {
+                assert!(admission
+                    .admit_with_pressure(command, &serde_json::json!({}), pressure)
+                    .is_err());
+            }
+            for command in ["start_dictation", "stop_dictation", "force_stop_dictation"] {
+                assert!(admission
+                    .admit_with_pressure(command, &serde_json::json!({}), pressure)
+                    .is_ok());
+            }
+        }
+        assert!(admission
+            .admit_with_pressure(
+                "analyze_recording",
+                &serde_json::json!({}),
+                MemoryPressure::Normal
+            )
+            .is_ok());
     }
 }

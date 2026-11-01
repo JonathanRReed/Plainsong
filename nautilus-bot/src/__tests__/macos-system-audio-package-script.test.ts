@@ -8,8 +8,8 @@ const repoRoot = path.resolve(import.meta.dirname, "../..");
 describe("macOS system-audio packaging gates", () => {
   it("keeps macOS 13 launch metadata while requiring dynamic process-tap imports", () => {
     const output = execFileSync(
-      process.execPath,
-      [path.join(repoRoot, "scripts", "verify-macos-system-audio.mjs"), "--source-only"],
+      "bun",
+      [path.join(repoRoot, "scripts", "verify-macos-system-audio.ts"), "--source-only"],
       { cwd: repoRoot, encoding: "utf8" },
     );
     expect(JSON.parse(output)).toMatchObject({
@@ -22,16 +22,16 @@ describe("macOS system-audio packaging gates", () => {
 
   it("builds Darwin sidecars with an explicit macOS 13 deployment target", () => {
     const buildScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "build-rust-sidecar.mjs"),
+      path.join(repoRoot, "scripts", "build-rust-sidecar.ts"),
       "utf8",
     );
     expect(buildScript).toContain('env.MACOSX_DEPLOYMENT_TARGET = "13.0"');
-    expect(buildScript).toContain("verify-macos-system-audio.mjs");
+    expect(buildScript).toContain("verify-macos-system-audio.ts");
   });
 
   it("builds the native shortcut helper for the documented macOS 13 floor", () => {
     const buildScript = fs.readFileSync(
-      path.join(repoRoot, "scripts/build-native-shortcut-helper.mjs"),
+      path.join(repoRoot, "scripts/build-native-shortcut-helper.ts"),
       "utf8",
     );
     expect(buildScript).toContain(
@@ -42,7 +42,7 @@ describe("macOS system-audio packaging gates", () => {
 
   it("requires packaged callbacks, non-silent frames, and the known tone", () => {
     const qaScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-system-audio-test.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-system-audio-test.ts"),
       "utf8",
     );
     expect(qaScript).toContain('method: "test_system_audio_capture"');
@@ -59,8 +59,8 @@ describe("macOS system-audio packaging gates", () => {
 
   it("verifies system audio before combined meeting capture in the same sidecar", () => {
     for (const scriptName of [
-      "capture-packaged-macos-meeting-mic.mjs",
-      "capture-packaged-macos-meeting-soak.mjs",
+      "capture-packaged-macos-meeting-mic.ts",
+      "capture-packaged-macos-meeting-soak.ts",
     ]) {
       const qaScript = fs.readFileSync(
         path.join(repoRoot, "scripts", scriptName),
@@ -80,7 +80,7 @@ describe("macOS system-audio packaging gates", () => {
 
   it("starts external fixture audio before verifying a virtual loopback route", () => {
     const qaScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.ts"),
       "utf8",
     );
     const earlyFixtureIndex = qaScript.indexOf(
@@ -98,7 +98,7 @@ describe("macOS system-audio packaging gates", () => {
 
   it("routes and restores both macOS output classes for the spoken fixture", () => {
     const qaScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.ts"),
       "utf8",
     );
 
@@ -113,11 +113,11 @@ describe("macOS system-audio packaging gates", () => {
 
   it("binds the three-hour soak receipt to the exact release identity", () => {
     const qaScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.ts"),
       "utf8",
     );
     const auditScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.ts"),
       "utf8",
     );
     const meetingSoakStart = auditScript.indexOf('id: "meeting-soak"');
@@ -136,7 +136,7 @@ describe("macOS system-audio packaging gates", () => {
 
   it("releases fixture audio before waiting for long-form transcription", () => {
     const qaScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.ts"),
       "utf8",
     );
     const stopRecordingIndex = qaScript.indexOf(
@@ -156,13 +156,13 @@ describe("macOS system-audio packaging gates", () => {
     expect(transcriptWaitIndex).toBeGreaterThan(releaseFixtureIndex);
   });
 
-  it("proves the observed recording duration instead of only the requested duration", () => {
+  it("records the observed duration and uses the soak audit predicate", () => {
     const qaScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.ts"),
       "utf8",
     );
     const auditScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.ts"),
       "utf8",
     );
     const meetingSoakStart = auditScript.indexOf('id: "meeting-soak"');
@@ -175,13 +175,13 @@ describe("macOS system-audio packaging gates", () => {
     expect(qaScript).toContain("recordingDurationMs");
     expect(qaScript).toContain("minimumDurationObserved");
     expect(meetingSoakRequirement).toContain(
-      "artifact?.recordingDurationMs >= 3 * 60 * 60 * 1000",
+      "meetingSoakReceiptQualifies(artifact",
     );
   });
 
   it("can mute a native spoken fixture and restores the prior output state", () => {
     const qaScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.ts"),
       "utf8",
     );
 
@@ -193,7 +193,7 @@ describe("macOS system-audio packaging gates", () => {
 
   it("proves a virtual microphone timeout is bounded and leaves the sidecar usable", () => {
     const qaScript = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-soak.ts"),
       "utf8",
     );
 

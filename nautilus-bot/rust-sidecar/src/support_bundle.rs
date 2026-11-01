@@ -1,6 +1,6 @@
 //! Privacy-safe support bundle.
 //!
-//! `scripts/capture-support-bundle.mjs` has always been able to write one of
+//! `scripts/capture-support-bundle.ts` has always been able to write one of
 //! these from a source checkout; an installed beta could not, so the only
 //! diagnostics a tester could send were screenshots and prose
 //! (`docs/beta/KNOWN-LIMITATIONS.md`). This module is the in-app version of
@@ -14,18 +14,10 @@
 //!
 //! ## The policy, in one place
 //!
-//! * A string under a key that looks like a credential is dropped outright.
-//! * A string that is not identifier-shaped is dropped, because anything with
-//!   spaces or slashes in it could be a sentence somebody dictated or a path
-//!   with their name in it.
-//! * A list is replaced by its length. Prompts, dictionary entries, snippets,
-//!   and vocabulary hints all live in lists, and all of them are things the
-//!   reader typed.
-//! * Booleans and numbers pass through, because they cannot carry a sentence.
-//!
-//! That ordering matters: the default for an unrecognised string is to drop
-//! it, so a settings field added next month is redacted until somebody
-//! deliberately teaches this module that it is safe.
+//! * Only schema-allowlisted settings fields retain scalar values.
+//! * Prompts, free text, credentials and unknown fields are redacted.
+//! * Lists retain only their length; unknown objects are not traversed.
+//! * Diagnostic strings lose absolute paths, email addresses and tokens.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -36,7 +28,7 @@ use std::sync::LazyLock;
 
 /// Bumped when the file set or the redaction policy changes in a way a reader
 /// of an old bundle would need to know about.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// How many log lines the bundle will carry at most.
 pub const MAX_LOG_LINES: usize = 400;
@@ -56,8 +48,10 @@ pub const REDACTED: &str = "[redacted]";
 /// Substrings that make a settings key a credential key whatever its value
 /// looks like. Compared against the lowercased key.
 const SECRET_KEY_MARKERS: &[&str] = &[
+    "authorization",
     "apikey",
     "api_key",
+    "api-key",
     "secret",
     "token",
     "password",
@@ -68,10 +62,8 @@ const SECRET_KEY_MARKERS: &[&str] = &[
 
 /// Audit-detail fields whose values are app-generated machine identifiers.
 ///
-/// Audit details have a narrower policy than settings: whether a value happens
-/// to look identifier-like says nothing about whether it is reader-authored
-/// content. New audit fields therefore remain redacted until they are reviewed
-/// and explicitly added here.
+/// Shape alone does not distinguish identifiers from reader-authored content.
+/// New audit fields remain redacted until explicitly added here.
 const AUDIT_IDENTIFIER_FIELDS: &[&str] = &[
     "recording_id",
     "session_id",
@@ -162,9 +154,9 @@ pub const INCLUDED_SECTIONS: &[(&str, &str)] = &[
 
 /// The rules, in the reader's words.
 pub const REDACTION_RULES: &[&str] = &[
-    "Anything that is not a yes/no, a number, or a short name is removed.",
+    "Only approved settings fields keep yes/no values, numbers, or short machine names. Prompts and free text are removed.",
     "Email addresses, API keys, and access tokens are removed wherever they appear.",
-    "Paths that contain your account name are removed, not shortened.",
+    "Absolute paths, file URLs, and volume names are removed, not shortened.",
     "Lists you filled in — prompts, dictionary entries, snippets — are reduced to how many entries they hold.",
     "A log line that mentions transcripts, dictation, notes, prompts, or the clipboard keeps its timestamp and loses its message.",
 ];
@@ -186,31 +178,27 @@ static EMAIL_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
         .expect("email pattern is valid")
 });
 
-/// A path under a home directory, including the parts of it that follow a
-/// space.
-///
-/// The obvious pattern -- stop at the first whitespace -- leaves the tail of
-/// `~/Library/Application Support/Plainsong/models/base.bin` in the clear,
-/// which is a file name, and file names are on the never-included list. So
-/// after the first run this keeps consuming space-separated tokens for as long
-/// as they still look like path segments (they contain a `/`). A trailing
-/// prose word with no slash in it ends the match, so "in 42ms" survives and
-/// the path does not.
-static HOME_PATH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"(?i)(?:/Users/|/home/|[A-Za-z]:\\Users\\)[^\s"',;)\]}]*(?: [^\s"',;)\]}]*/[^\s"',;)\]}]*)*"#,
-    )
-    .expect("home path pattern is valid")
+/// An absolute path or file URL at a token boundary. Drop the rest of the
+/// diagnostic value: filenames and volume names can contain spaces, quotes,
+/// punctuation and newlines, so punctuation cannot safely end a path match.
+static ABSOLUTE_PATH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"(?is)(?P<prefix>^|[^0-9A-Za-z_])(?:file://|/|[A-Za-z]:\\|~/).*"#)
+        .expect("absolute path pattern is valid")
 });
 
 static API_KEY_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    // Two shapes: a vendor-prefixed key, and any long opaque run that is not a
-    // word. The second is deliberately blunt — a false positive costs a
-    // diagnostic string, a false negative costs a credential.
+    // Prefer over-redaction to carrying a credential into a support export.
     regex::Regex::new(
-        r"(?:sk|pk|rk|api|key|ghp|gho|xox[abps])[-_][A-Za-z0-9_\-]{16,}|\b[A-Za-z0-9_\-]{40,}\b",
+        r"AIza[A-Za-z0-9_\-]{35}|\b[0-9a-fA-F]{32}\b|(?:sk|pk|rk|api|key|ghp|gho|xox[abps])[-_][A-Za-z0-9_\-]{16,}|\b[A-Za-z0-9_\-]{40,}\b",
     )
     .expect("api key pattern is valid")
+});
+
+static AUTHORIZATION_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?i)\b(?:(?:authorization|(?:[a-z0-9]+[-_])*api[-_ ]?key)["']?\s*[:=]\s*["']?(?:(?:bearer|basic|token)\s+)?|(?:bearer|basic)\s+)[A-Za-z0-9_.~+/=\-]+"#,
+    )
+    .expect("authorization pattern is valid")
 });
 
 /// A quoted run longer than 24 characters is assumed to be captured content.
@@ -241,7 +229,8 @@ pub fn is_identifier_like(value: &str) -> bool {
 /// rest alone. Used on app-authored strings (log lines, diagnostic notes)
 /// where the surrounding text is worth keeping.
 pub fn redact_text(input: &str) -> String {
-    let stage = HOME_PATH_RE.replace_all(input, "[redacted:path]");
+    let stage = AUTHORIZATION_RE.replace_all(input, "[redacted:key]");
+    let stage = ABSOLUTE_PATH_RE.replace_all(&stage, "${prefix}[redacted:path]");
     let stage = EMAIL_RE.replace_all(&stage, "[redacted:email]");
     let stage = API_KEY_RE.replace_all(&stage, "[redacted:key]");
     QUOTED_RUN_RE
@@ -301,42 +290,119 @@ pub fn redact_log_lines(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Redact a settings tree.
-///
-/// Fails closed: an unrecognised string is dropped, and a list becomes its
-/// length. Only booleans, numbers, and identifier-shaped strings survive.
+// Full schema paths prevent a field with a safe name inside an unknown object
+// from inheriting permission to disclose its value.
+const SAFE_SETTINGS_SCALARS: &[&str] = &[
+    "theme",
+    "audio.dictationInputOverrideEnabled",
+    "audio.meetingInputOverrideEnabled",
+    "transcription.defaultProvider",
+    "transcription.selectedModelId",
+    "transcription.dictationProvider",
+    "transcription.dictationModelId",
+    "transcription.meetingProvider",
+    "transcription.meetingModelId",
+    "transcription.useSharedAsrSelection",
+    "transcription.meetingRoutePolicy",
+    "transcription.enableDiarization",
+    "transcription.diarizationModelId",
+    "transcription.language",
+    "transcription.silenceSkipEnabled",
+    "transcription.dictationCopyToClipboard",
+    "transcription.dictationPushToTalk",
+    "transcription.dictationHandsFreeEnabled",
+    "transcription.dictationTapToLock",
+    "transcription.dictationDoubleTapToLock",
+    "transcription.dictationMatchSurroundingText",
+    "transcription.dictationRoutePreference",
+    "transcription.dictationKeepWarm",
+    "transcription.dictationLivePreviewEnabled",
+    "transcription.dictationLivePreviewEngine",
+    "transcription.dictationAiFormatting",
+    "transcription.dictationRemoveDisfluencies",
+    "transcription.dictationTranslateToEnglish",
+    "transcription.dictationModePreset",
+    "transcription.dictationContextSource",
+    "transcription.dictationCommandModeEnabled",
+    "transcription.dictationInsertionMode",
+    "transcription.dictationSnippetsEnabled",
+    "transcription.dictationAutoLearnCorrections",
+    "transcription.dictationLearnFromExternalCorrections",
+    "transcription.dictationSaveToInbox",
+    "transcription.dictationProfile",
+    "transcription.dictationRetentionPreset",
+    "transcription.dictationRetentionCustomHours",
+    "transcription.dictationKeepAudio",
+    "transcription.meetingAudioStorageMode",
+    "transcription.meetingRetentionPreset",
+    "transcription.meetingRetentionConfirmed",
+    "transcription.meetingRetentionCustomMonths",
+    "transcription.meetingRetentionDeleteMode",
+    "transcription.dictationSilenceTimeoutSeconds",
+    "transcription.dictationVadBackend",
+    "transcription.memorySearchMode",
+    "transcription.builtinEmbeddingModel",
+    "transcription.enableAutoAnalysis",
+    "transcription.dictationCategoryFormattingEnabled",
+    "transcription.platformOptimization.mode",
+    "transcription.platformOptimization.fallbackPolicy",
+    "transcription.platformOptimization.macos.appleNativeEnabled",
+    "transcription.platformOptimization.macos.mlxEnabled",
+    "transcription.platformOptimization.windows.foundryEnabled",
+    "transcription.platformOptimization.windows.windowsSdkDictationEnabled",
+    "ui.alwaysOnTop",
+    "ui.minimizeToTray",
+    "ui.showDictationPopup",
+    "ui.showRecordingPopup",
+    "ui.colorScheme",
+    "ui.dictationSounds",
+    "ui.dictationPillSize",
+    "ui.dictationPillDock",
+    "ui.muteMediaWhileDictating",
+    "privacy.remoteProcessingEnabled",
+    "privacy.vaultInitialized",
+    "privacy.exportLocationApproved",
+    "privacy.dictationAi.provider",
+    "privacy.dictationAi.modelId",
+    "privacy.meetingsAi.provider",
+    "privacy.meetingsAi.modelId",
+    "automation.localToolsEnabled",
+];
+
+/// Settings retain values only through the safe schema, never by their shape.
 pub fn redact_settings(value: &Value) -> Value {
-    redact_settings_entry(None, value)
+    redact_settings_entry("", value)
 }
 
-fn redact_settings_entry(key: Option<&str>, value: &Value) -> Value {
+fn redact_settings_entry(path: &str, value: &Value) -> Value {
+    let permitted = SAFE_SETTINGS_SCALARS.contains(&path);
     match value {
         Value::Null => Value::Null,
-        Value::Bool(_) | Value::Number(_) => value.clone(),
-        Value::String(text) => {
-            if key.is_some_and(is_secret_key) {
-                Value::String(REDACTED.to_string())
-            } else if is_identifier_like(text) {
-                Value::String(text.clone())
-            } else {
-                Value::String(REDACTED.to_string())
-            }
+        Value::Bool(_) | Value::Number(_) if permitted => value.clone(),
+        Value::String(text) if permitted && is_identifier_like(text) => value.clone(),
+        Value::Array(items) => serde_json::json!({ "count": items.len() }),
+        Value::Object(fields)
+            if path.is_empty()
+                || SAFE_SETTINGS_SCALARS
+                    .iter()
+                    .any(|safe| safe.starts_with(&format!("{path}.")))
+                || path == "ai" =>
+        {
+            Value::Object(
+                fields
+                    .iter()
+                    .map(|(key, value)| {
+                        let child_path = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{path}.{key}")
+                        };
+                        (key.clone(), redact_settings_entry(&child_path, value))
+                    })
+                    .collect(),
+            )
         }
-        Value::Array(items) => {
-            let mut summary = Map::new();
-            summary.insert("count".to_string(), Value::from(items.len()));
-            Value::Object(summary)
-        }
-        Value::Object(fields) => {
-            let mut out = Map::new();
-            for (field_key, field_value) in fields {
-                out.insert(
-                    field_key.clone(),
-                    redact_settings_entry(Some(field_key.as_str()), field_value),
-                );
-            }
-            Value::Object(out)
-        }
+        _ => Value::String(REDACTED.to_string()),
     }
 }
 
@@ -356,7 +422,11 @@ pub fn redact_diagnostics(value: &Value) -> Value {
             fields
                 .iter()
                 .map(|(key, field)| {
-                    let redacted = if is_secret_key(key) {
+                    let lowered = key.to_ascii_lowercase();
+                    let redacted = if is_secret_key(key)
+                        || lowered.contains("volume")
+                        || lowered.contains("mount")
+                    {
                         Value::String(REDACTED.to_string())
                     } else {
                         redact_diagnostics(field)
@@ -409,7 +479,12 @@ pub fn redact_audit_entries(entries: &[Value]) -> Vec<Value> {
             let mut out = Map::new();
             for field in ["id", "timestamp", "event", "severity"] {
                 if let Some(value) = entry.get(field) {
-                    out.insert(field.to_string(), redact_settings_entry(Some(field), value));
+                    let redacted = match value {
+                        Value::String(text) if is_identifier_like(text) => value.clone(),
+                        Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
+                        _ => Value::String(REDACTED.to_string()),
+                    };
+                    out.insert(field.to_string(), redacted);
                 }
             }
             let details = entry.get("details").unwrap_or(&Value::Null);
@@ -557,18 +632,23 @@ fn pretty(value: &Value) -> String {
 }
 
 /// The last check before anything is written: no assembled file may still
-/// contain a home path or an email address.
+/// contain an absolute path, file URL, credential-like token or email address.
 ///
 /// This is the same idea as the script's `unsafePathPattern` guard, hoisted to
 /// cover every file rather than one JSON blob, and it is a hard failure — a
 /// bundle that trips it is not written at all.
 pub fn find_leak(files: &[BundleFile]) -> Option<String> {
     for file in files {
-        if let Some(found) = HOME_PATH_RE.find(&file.contents) {
+        if ABSOLUTE_PATH_RE.is_match(&file.contents) {
             return Some(format!(
-                "{} still contained a path under a home directory ({}…)",
-                file.name,
-                found.as_str().chars().take(12).collect::<String>()
+                "{} still contained an absolute path or file URL",
+                file.name
+            ));
+        }
+        if API_KEY_RE.is_match(&file.contents) || AUTHORIZATION_RE.is_match(&file.contents) {
+            return Some(format!(
+                "{} still contained a credential-like token",
+                file.name
             ));
         }
         if EMAIL_RE.is_match(&file.contents) {
@@ -580,7 +660,7 @@ pub fn find_leak(files: &[BundleFile]) -> Option<String> {
 
 /// Write the assembled files to `destination` as a zip.
 ///
-/// Refuses to write anything if [`find_leak`] finds a home path or an address
+/// Refuses to write anything if [`find_leak`] finds a path, token or address
 /// in the assembled text, so a redaction bug becomes a visible failure rather
 /// than a file the reader forwards to a stranger.
 pub fn write_bundle(destination: &Path, files: &[BundleFile]) -> Result<()> {
@@ -615,6 +695,55 @@ pub fn write_bundle(destination: &Path, files: &[BundleFile]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn support_bundle_redacts_short_provider_credentials_and_authorization_values() {
+        for secret in [
+            "AIzaxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "0123456789abcdef0123456789abcdef",
+            "Bearer synthetic-short-token",
+            "Basic c3ludGhldGljOnNlY3JldA==",
+        ] {
+            for line in [
+                format!("WARN provider: Authorization: {secret}"),
+                format!("WARN provider: {secret}"),
+            ] {
+                let redacted = redact_log_line(&line);
+                assert!(
+                    !redacted.contains(secret),
+                    "credential survived: {redacted}"
+                );
+                let files = vec![BundleFile {
+                    name: "logs-redacted.txt".into(),
+                    contents: line,
+                }];
+                assert!(
+                    find_leak(&files).is_some(),
+                    "bundle leak check accepted {secret}"
+                );
+            }
+        }
+        assert_eq!(
+            redact_diagnostics(&serde_json::json!({"authorization": "short-value"}))
+                ["authorization"],
+            REDACTED
+        );
+        for label in [
+            "X-Api-Key",
+            "xi-api-key",
+            "x-goog-api-key",
+            "MISTRAL_API_KEY",
+            "api key",
+        ] {
+            let line = format!("WARN provider: {label}=\"synthetic-short-key\"");
+            assert!(!redact_log_line(&line).contains("synthetic-short-key"));
+            assert!(find_leak(&[BundleFile {
+                name: "logs-redacted.txt".into(),
+                contents: line,
+            }])
+            .is_some());
+        }
+    }
 
     fn fixture_settings() -> Value {
         serde_json::json!({
@@ -701,6 +830,64 @@ mod tests {
     }
 
     #[test]
+    fn settings_redaction_rejects_short_prompts_and_unknown_nested_fields() {
+        let redacted = redact_settings(&serde_json::json!({
+            "transcription": {
+                "meetingCustomPrompt": "ACME-MERGER",
+                "dictationCustomPrompt": "HIV",
+                "dictationCommandPrefix": "ACME",
+                "futureFreeText": "PRIVATE",
+                "futureObject": {"theme": "PRIVATE", "enabled": true},
+                "dictationProvider": "whisper",
+            },
+            "futureObject": {"dictationProvider": "PRIVATE", "count": 42},
+        }));
+        let serialized = redacted.to_string();
+        for private in ["ACME-MERGER", "HIV", "ACME", "PRIVATE"] {
+            assert!(!serialized.contains(private), "{serialized}");
+        }
+        assert_eq!(redacted["transcription"]["dictationProvider"], "whisper");
+    }
+
+    #[test]
+    fn all_absolute_paths_and_volume_names_are_redacted() {
+        for input in [
+            "/Volumes/HR/a.txt",
+            "file:///Volumes/HR/a.txt",
+            "file://localhost/Volumes/HR/a.txt",
+            "/tmp/private.txt",
+            "/private/var/folders/private.txt",
+            "/Volumes/HR Team/a.txt",
+            "/Volumes/HR Team",
+            "/Volumes/HR, Team/a.txt",
+            "/Volumes/HR (Team)/a.txt",
+            "/Volumes/HR's Team/a.txt",
+            "/Volumes/HR\nTeam/a.txt",
+            "/Volumes/HR \"Team\"/a.txt",
+            "file:///Volumes/HR%20Team/a.txt",
+            "file://server/Volumes/HR/a.txt",
+        ] {
+            let line = format!("WARN sidecar: failed to open {input}");
+            let redacted = redact_log_line(&line);
+            assert!(redacted.contains("[redacted:path]"), "{redacted}");
+            for private in ["HR", "private.txt", "a.txt", "Team"] {
+                assert!(!redacted.contains(private), "{redacted}");
+            }
+            let files = [BundleFile {
+                name: "logs.txt".into(),
+                contents: line,
+            }];
+            assert!(find_leak(&files).is_some(), "{input}");
+        }
+        let diagnostics = redact_diagnostics(&serde_json::json!({
+            "error": "Failed opening /Volumes/HR/a.txt",
+            "volumeName": "HR",
+            "nested": {"mountPoint": "/Volumes/HR", "volumeLabel": "HR"},
+        }));
+        assert!(!diagnostics.to_string().contains("HR"));
+    }
+
+    #[test]
     fn log_redaction_removes_home_paths_addresses_and_keys() {
         let line = "2026-09-02T19:00:00.000000Z  INFO plainsong_lib::download: fetched \
                     /Users/jonathanreed/Library/Application Support/Plainsong/models/base.bin";
@@ -727,9 +914,9 @@ mod tests {
         assert!(!redacted.contains("base.bin"), "{redacted}");
         assert!(!redacted.contains("jonathanreed"), "{redacted}");
 
-        // A prose word after the path is not swallowed with it.
+        // Unquoted path tails are removed conservatively, including prose.
         let with_tail = redact_log_line("INFO opened /Users/jonathanreed/x.txt in 42ms");
-        assert!(with_tail.contains("in 42ms"), "{with_tail}");
+        assert!(with_tail.contains("[redacted:path]"), "{with_tail}");
         assert!(!with_tail.contains("x.txt"), "{with_tail}");
     }
 
@@ -903,6 +1090,32 @@ mod tests {
                 "INFO mail: invited contact@example.com".to_string(),
             ],
         );
+        assert_eq!(find_leak(&files), None);
+    }
+
+    #[test]
+    fn assembled_bundle_removes_short_prompts_and_external_volume_paths() {
+        let mut settings = fixture_settings();
+        settings["transcription"]["meetingCustomPrompt"] = Value::String("ACME-MERGER".into());
+        let files = build_files(
+            "2026-10-22T00:00:00Z",
+            &serde_json::json!({"platform": "darwin"}),
+            &serde_json::json!({"packaged": true}),
+            &settings,
+            &serde_json::json!({"path": "file:///Volumes/HR/a.txt", "volumeName": "HR"}),
+            &serde_json::json!({"artifacts": []}),
+            &[],
+            &["WARN sidecar: Failed opening /Volumes/HR/a.txt".into()],
+        );
+        for file in &files {
+            for private in ["ACME-MERGER", "/Volumes", "HR", "a.txt"] {
+                assert!(
+                    !file.contents.contains(private),
+                    "{} leaked {private}",
+                    file.name
+                );
+            }
+        }
         assert_eq!(find_leak(&files), None);
     }
 

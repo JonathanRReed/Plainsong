@@ -3,12 +3,12 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const gatePath = path.join(repoRoot, "scripts", "cold-start-gate.mjs");
+const gatePath = path.join(repoRoot, "scripts", "cold-start-gate.ts");
 
-describe("cold-start-gate.mjs", () => {
+describe("cold-start-gate.ts", () => {
   it("waits for a readiness line from a long-running process and then stops it", () => {
     const result = spawnSync(
-      process.execPath,
+      "bun",
       [
         gatePath,
         "--threshold-ms",
@@ -52,7 +52,7 @@ describe("cold-start-gate.mjs", () => {
     ].join(" ");
 
     const result = spawnSync(
-      process.execPath,
+      "bun",
       [
         gatePath,
         "--threshold-ms",
@@ -94,7 +94,7 @@ describe("cold-start-gate.mjs", () => {
     ].join(" ");
 
     const result = spawnSync(
-      process.execPath,
+      "bun",
       [
         gatePath,
         "--threshold-ms",

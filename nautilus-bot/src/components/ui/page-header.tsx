@@ -24,7 +24,9 @@ export function PageHeader({
   children,
 }: PageHeaderProps) {
   return (
-    <div className={cn("border-b border-border/70 bg-background/82 backdrop-blur-xl", className)}>
+    // No backdrop blur: on an always-visible header it keeps a GPU blur pass
+    // resident (see resident-surface-compositing.test.ts).
+    <div className={cn("border-b border-border/70 bg-background/82", className)}>
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-6 py-5 lg:px-8">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="min-w-0 flex-1">

@@ -8,6 +8,8 @@
  */
 import type { DictationProcessingStage } from "@/lib/dictation-progress";
 import { SLOW_STAGE_DETAIL, SLOW_STAGE_LABEL } from "@/lib/dictation-slow-stage";
+import { MEETING_ASIDE_LABEL, MEETING_ASIDE_NOTICE } from "@/lib/meeting-aside";
+import { dictationDeliveryFeedback } from "../../electron/dictation-feedback";
 
 export type HudTone = "live" | "settling" | "success" | "quiet" | "alert";
 
@@ -21,79 +23,92 @@ export interface PillStatus {
   detail: string | null;
 }
 
-const SUCCESS_OUTCOME_LABELS: Record<string, string> = {
-  pasted: "Inserted",
-  paste_dispatched: "Inserted",
-  replaced: "Replaced",
-  copied: "Copied",
-  copied_replacement: "Copied",
-  previewed: "Ready",
-};
+export const PREPARING_MODEL_LABEL = "Preparing model";
+/** Mirrors `SPEECH_MODEL_PREPARING_MESSAGE` in `dictation_session.rs`. */
+const PREPARING_MODEL_DETAIL = "Preparing the speech model for this Mac. This happens once.";
 
 /** A short cause for the error pill, from the sidecar's user-facing message. */
 export function shortErrorLabel(message: string | null | undefined): string {
   const text = (message ?? "").toLowerCase();
+  if (/memory/.test(text)) return "Low memory";
   if (/microphone|mic access|mic permission/.test(text)) return "Mic blocked";
   if (/accessibility/.test(text)) return "Needs access";
   if (/no speech|didn't hear|did not hear|silence/.test(text)) return "No speech";
+  if (/meeting is recording|meeting recording is active|while a meeting records/.test(text)) return "Meeting recording";
+  // `meeting_asides.rs`: the meeting is saving, or changed under the start.
+  if (/meeting is still saving/.test(text)) return "Meeting saving";
+  if (/meeting started or stopped/.test(text)) return "Meeting changed";
   if (/api key|no key|credential/.test(text)) return "Needs API key";
+  // The speech model is fetching a file it needs (`transcribe_cpp.rs`
+  // `NEEDED_DOWNLOAD_*`): not missing, and not something to download by hand.
+  if (/couldn't download|could not download/.test(text)) return "Download failed";
+  if (/is downloading/.test(text)) return "Downloading";
   if (/download|not downloaded|model is missing|missing model/.test(text)) return "Model missing";
-  if (/network|offline|timed out|timeout|connection/.test(text)) return "Offline";
+  if (/network|offline|connection/.test(text)) return "Offline";
+  if (/timed out|timeout|took too long/.test(text)) return "Took too long";
   return "Didn't finish";
 }
 
 export function describePillStatus(input: {
   phase: string;
-  stage: DictationProcessingStage;
+  stage: DictationProcessingStage | "delivering";
   outcome: string | null;
   message: string | null;
   /** The current processing stage has run well past its expected time. */
   slow?: boolean;
+  /** The speech model is being prepared for this Mac before transcribing. */
+  preparingModel?: boolean;
+  /** The dictation takes its audio from a meeting that is recording. */
+  meetingAside?: boolean;
 }): PillStatus {
-  const { phase, stage, outcome, message, slow } = input;
+  const { phase, stage, outcome, message, slow, preparingModel, meetingAside } = input;
   switch (phase) {
     case "preparing":
       return { label: "Starting", tone: "quiet", showBar: false, barComplete: false, detail: null };
     case "primed":
-      return { label: "Speak now", tone: "quiet", showBar: false, barComplete: false, detail: null };
+      return { label: "Starting mic", tone: "quiet", showBar: false, barComplete: false, detail: null };
     case "recording":
-      return { label: "Listening", tone: "live", showBar: false, barComplete: false, detail: null };
+      // The call hears an aside too, so the reminder rides along as the
+      // pill's tooltip and accessible name every time, not only the first.
+      return meetingAside
+        ? { label: MEETING_ASIDE_LABEL, tone: "live", showBar: false, barComplete: false, detail: MEETING_ASIDE_NOTICE }
+        : { label: "Listening", tone: "live", showBar: false, barComplete: false, detail: null };
     case "stopping":
-    case "transcribing":
+    case "transcribing": {
+      // A first-use compile runs long by nature; "Still working" would hide
+      // the reason the user is waiting.
+      const preparing = preparingModel === true && phase === "transcribing" && stage === "transcribing";
       return {
-        label: slow
-          ? SLOW_STAGE_LABEL
-          : stage === "stopping"
-            ? "Finishing"
-            : stage === "polishing"
-              ? "Polishing"
-              : "Transcribing",
+        label: preparing
+          ? PREPARING_MODEL_LABEL
+          : slow
+            ? SLOW_STAGE_LABEL
+            : stage === "stopping"
+              ? "Finishing"
+              : stage === "polishing"
+                ? "Polishing"
+                : "Transcribing",
         tone: "settling",
         showBar: true,
         barComplete: false,
-        detail: slow ? SLOW_STAGE_DETAIL : null,
+        detail: preparing ? PREPARING_MODEL_DETAIL : slow ? SLOW_STAGE_DETAIL : null,
       };
+    }
     case "delivering":
-      return { label: "Inserting", tone: "settling", showBar: true, barComplete: false, detail: null };
+      return { label: slow ? SLOW_STAGE_LABEL : "Inserting", tone: "settling", showBar: true, barComplete: false, detail: slow ? SLOW_STAGE_DETAIL : null };
+    case "idle":
     case "done": {
-      const success = outcome === null ? "Done" : SUCCESS_OUTCOME_LABELS[outcome];
-      if (success) {
-        return { label: success, tone: "success", showBar: true, barComplete: true, detail: message };
+      if (phase === "idle" && outcome !== "aborted") {
+        return { label: "Ready", tone: "quiet", showBar: false, barComplete: false, detail: null };
       }
-      if (outcome === "empty") {
-        return { label: "No speech", tone: "quiet", showBar: false, barComplete: false, detail: message };
-      }
-      if (outcome === "undone") {
-        return { label: "Undone", tone: "quiet", showBar: false, barComplete: false, detail: message };
-      }
-      // secure_field, error, or anything unrecognized: the words were not
-      // delivered. History still has them.
+      const feedback = dictationDeliveryFeedback(outcome);
+      const complete = feedback.tone === "success";
       return {
-        label: "Not inserted",
-        tone: "alert",
-        showBar: false,
-        barComplete: false,
-        detail: message ?? "Not inserted. The words are in your dictation history.",
+        label: feedback.label,
+        tone: feedback.tone,
+        showBar: complete,
+        barComplete: complete,
+        detail: message ?? feedback.detail ?? null,
       };
     }
     case "error":

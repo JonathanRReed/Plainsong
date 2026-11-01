@@ -1,4 +1,4 @@
-//! NVIDIA Parakeet, three pure-ONNX routes and nothing else.
+//! Parakeet-compatible pure-ONNX routes.
 //!
 //! * `parakeet-tdt-0.6b-v2` — the English 0.6B transducer, run as three ONNX
 //!   graphs with the same bounded greedy TDT decoder.
@@ -31,6 +31,7 @@ use ort::session::Session;
 const PARAKEET_V3_MODEL_ID: &str = "parakeet-tdt-0.6b-v3";
 const PARAKEET_V2_MODEL_ID: &str = "parakeet-tdt-0.6b-v2";
 const PARAKEET_LEGACY_MODEL_ID: &str = "parakeet-tdt-ctc-110m";
+const ORUKEET_MODEL_ID: &str = "orukeet-v0.1.0-int8";
 
 /// Shared graph-shape contracts stay in this always-compiled catalog module
 /// so model discovery also builds when the ONNX runtime feature is disabled.
@@ -55,6 +56,11 @@ const PARAKEET_TDT_JOINER_FILE: &str = "joiner.int8.onnx";
 
 const PARAKEET_V2_REPO: &str = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8";
 const PARAKEET_V2_REVISION: &str = "1ab9323565ddb038682214b292f588070a538ce2";
+const ORUKEET_REPO: &str = "oruk/orukeet";
+const ORUKEET_REVISION: &str = "b59c13a733fce5cf193230d0fa317ee7f145a108";
+const ORUKEET_SUBDIR: &str = "onnx/sherpa-v0.1.0-int8";
+const ORUKEET_LICENSE_FILE: &str = "LICENSE-WEIGHTS";
+const ORUKEET_NOTICE_FILE: &str = "NOTICE.md";
 
 /// The v3 encoder declares `audio_signal [batch, 128, frames]`. Handing it a
 /// different width fails to bind rather than degrading quietly, so this is a
@@ -82,6 +88,15 @@ const PARAKEET_V2_ARTIFACTS: [(&str, u64, u64); 4] = [
     (PARAKEET_TDT_DECODER_FILE, 7_257_753, 1024 * 1024),
     (PARAKEET_TDT_JOINER_FILE, 1_739_080, 512 * 1024),
     (PARAKEET_VOCAB_FILE, 9_384, 4096),
+];
+
+const ORUKEET_ARTIFACTS: [(&str, u64, u64); 6] = [
+    (PARAKEET_TDT_ENCODER_FILE, 653_182_378, 64 * 1024 * 1024),
+    (PARAKEET_TDT_DECODER_FILE, 11_845_332, 1024 * 1024),
+    (PARAKEET_TDT_JOINER_FILE, 6_355_335, 512 * 1024),
+    (PARAKEET_VOCAB_FILE, 93_939, 4096),
+    (ORUKEET_LICENSE_FILE, 20_137, 1024),
+    (ORUKEET_NOTICE_FILE, 5_271, 512),
 ];
 
 fn v3_sha256(file_name: &str) -> Option<&'static str> {
@@ -120,13 +135,38 @@ fn v2_sha256(file_name: &str) -> Option<&'static str> {
     }
 }
 
+fn orukeet_sha256(file_name: &str) -> Option<&'static str> {
+    match file_name {
+        PARAKEET_TDT_ENCODER_FILE => {
+            Some("7b55f2a504a20a8e462899f5befd45f4a1784948d76ed0127902d9cf39405487")
+        }
+        PARAKEET_TDT_DECODER_FILE => {
+            Some("c185c2afb4c77c94bb1314807ecb3dc1623057a3dc540b83e10301af9bf4cfca")
+        }
+        PARAKEET_TDT_JOINER_FILE => {
+            Some("1a7e90abf7172d926dd7e2edac2a5d5035c24dfb641a15e131d57b6a5f63cdd3")
+        }
+        PARAKEET_VOCAB_FILE => {
+            Some("d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d")
+        }
+        ORUKEET_LICENSE_FILE => {
+            Some("23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2")
+        }
+        ORUKEET_NOTICE_FILE => {
+            Some("440361d963edd9621e744f251332b47f2c4de2e2594ecfe42b215e3f6223fa44")
+        }
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TdtContract {
     model_id: &'static str,
     display_version: &'static str,
     repo: &'static str,
     revision: &'static str,
-    artifacts: &'static [(&'static str, u64, u64); 4],
+    source_subdir: &'static str,
+    artifacts: &'static [(&'static str, u64, u64)],
     blank_id: usize,
     encoder_dim: usize,
 }
@@ -136,6 +176,7 @@ const PARAKEET_V2: TdtContract = TdtContract {
     display_version: "v2",
     repo: PARAKEET_V2_REPO,
     revision: PARAKEET_V2_REVISION,
+    source_subdir: "",
     artifacts: &PARAKEET_V2_ARTIFACTS,
     blank_id: PARAKEET_V2_BLANK_ID,
     encoder_dim: PARAKEET_V2_ENCODER_DIM,
@@ -146,16 +187,28 @@ const PARAKEET_V3: TdtContract = TdtContract {
     display_version: "v3",
     repo: PARAKEET_V3_REPO,
     revision: PARAKEET_V3_REVISION,
+    source_subdir: "",
     artifacts: &PARAKEET_V3_ARTIFACTS,
     blank_id: PARAKEET_V3_BLANK_ID,
     encoder_dim: PARAKEET_V3_ENCODER_DIM,
 };
 
+const ORUKEET: TdtContract = TdtContract {
+    model_id: ORUKEET_MODEL_ID,
+    display_version: "Orukeet v0.1.0 int8",
+    repo: ORUKEET_REPO,
+    revision: ORUKEET_REVISION,
+    source_subdir: ORUKEET_SUBDIR,
+    artifacts: &ORUKEET_ARTIFACTS,
+    blank_id: PARAKEET_V3_BLANK_ID,
+    encoder_dim: PARAKEET_V3_ENCODER_DIM,
+};
+
 fn tdt_sha256(contract: TdtContract, file_name: &str) -> Option<&'static str> {
-    if contract.model_id == PARAKEET_V2_MODEL_ID {
-        v2_sha256(file_name)
-    } else {
-        v3_sha256(file_name)
+    match contract.model_id {
+        PARAKEET_V2_MODEL_ID => v2_sha256(file_name),
+        ORUKEET_MODEL_ID => orukeet_sha256(file_name),
+        _ => v3_sha256(file_name),
     }
 }
 
@@ -166,6 +219,18 @@ fn tdt_min_bytes(contract: TdtContract, file_name: &str) -> u64 {
         .find(|(name, _, _)| *name == file_name)
         .map(|(_, _, min)| *min)
         .unwrap_or(4096)
+}
+
+fn uses_v3_frontend(contract: TdtContract) -> bool {
+    matches!(contract.model_id, PARAKEET_V3_MODEL_ID | ORUKEET_MODEL_ID)
+}
+
+fn tdt_display_name(contract: TdtContract) -> String {
+    if contract.model_id == ORUKEET_MODEL_ID {
+        contract.display_version.to_string()
+    } else {
+        format!("Parakeet TDT {}", contract.display_version)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +261,21 @@ const PARAKEET_LEGACY_TOKENS_SOURCES: [(&str, &str); 1] = [
 ];
 const PARAKEET_LEGACY_ONNX_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const PARAKEET_LEGACY_TOKENS_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The pinned files the `model_id` route loads.
+pub(crate) fn route_model_artifacts(models_root: &Path, model_id: &str) -> Vec<(PathBuf, String)> {
+    let legacy_dir = models_root.join("parakeet");
+    let dir = if [PARAKEET_V3_MODEL_ID, PARAKEET_V2_MODEL_ID, ORUKEET_MODEL_ID].contains(&model_id)
+    {
+        legacy_dir.join(model_id)
+    } else {
+        legacy_dir
+    };
+    model_integrity_artifacts(models_root)
+        .into_iter()
+        .filter(|(path, _)| path.parent() == Some(dir.as_path()))
+        .collect()
+}
 
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let legacy_dir = models_root.join("parakeet");
@@ -228,6 +308,15 @@ pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, Str
             v2_dir.join(file_name),
             v2_sha256(file_name)
                 .expect("every v2 artifact has a pinned digest")
+                .to_string(),
+        )
+    }));
+    let orukeet_dir = legacy_dir.join(ORUKEET_MODEL_ID);
+    artifacts.extend(ORUKEET_ARTIFACTS.iter().map(|(file_name, _, _)| {
+        (
+            orukeet_dir.join(file_name),
+            orukeet_sha256(file_name)
+                .expect("every Orukeet artifact has a pinned digest")
                 .to_string(),
         )
     }));
@@ -352,6 +441,7 @@ fn load_token_table(vocab_path: &Path) -> Result<Vec<String>> {
 #[cfg(feature = "asr-parakeet")]
 struct ParakeetTdtRuntime {
     model_dir_key: String,
+    last_used: std::time::Instant,
     encoder: Session,
     decoder: Session,
     joiner: Session,
@@ -365,34 +455,109 @@ fn tdt_runtime_cache() -> &'static Mutex<Option<ParakeetTdtRuntime>> {
 }
 
 #[cfg(feature = "asr-parakeet")]
-fn build_tdt_session(path: &Path, label: &str, version: &str) -> Result<Session> {
+struct ParakeetRuntimeGuard {
+    cache: std::sync::MutexGuard<'static, Option<ParakeetTdtRuntime>>,
+    #[cfg(feature = "asr-transcribe-cpp")]
+    _route: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(feature = "asr-parakeet")]
+impl std::ops::Deref for ParakeetRuntimeGuard {
+    type Target = Option<ParakeetTdtRuntime>;
+    fn deref(&self) -> &Self::Target {
+        &self.cache
+    }
+}
+
+#[cfg(feature = "asr-parakeet")]
+impl std::ops::DerefMut for ParakeetRuntimeGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cache
+    }
+}
+
+#[cfg(feature = "asr-parakeet")]
+impl Drop for ParakeetRuntimeGuard {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.cache.as_mut() {
+            runtime.last_used = std::time::Instant::now();
+        }
+    }
+}
+
+pub(crate) fn release_tdt_runtime_if_idle(idle: std::time::Duration) -> bool {
+    #[cfg(feature = "asr-parakeet")]
+    if let Ok(mut cache) = tdt_runtime_cache().try_lock() {
+        if cache
+            .as_ref()
+            .is_some_and(|runtime| runtime.last_used.elapsed() >= idle)
+        {
+            cache.take();
+            return true;
+        }
+    }
+    #[cfg(not(feature = "asr-parakeet"))]
+    let _ = idle;
+    false
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn build_tdt_session(path: &Path, sha256: &str, label: &str, version: &str) -> Result<Session> {
     use ort::session::builder::GraphOptimizationLevel;
 
-    Session::builder()
-        .with_context(|| format!("Failed to create Parakeet {version} {label} session builder"))?
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "Failed to set optimization level for Parakeet {version} {label}: {error}"
-            )
-        })?
-        .commit_from_file(path)
-        .with_context(|| {
-            format!(
-                "Failed to load Parakeet {version} {label} from {}",
-                path.display()
-            )
-        })
+    let verified = crate::download::open_verified_model_artifact(path, sha256)?;
+    verified.load(|load_path| {
+        Session::builder()
+            .with_context(|| {
+                format!("Failed to create Parakeet {version} {label} session builder")
+            })?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to set optimization level for Parakeet {version} {label}: {error}"
+                )
+            })?
+            .commit_from_file(load_path)
+            .with_context(|| {
+                format!(
+                    "Failed to load Parakeet {version} {label} from {}",
+                    path.display()
+                )
+            })
+    })
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn tdt_pin(contract: TdtContract, file_name: &str) -> Result<&'static str> {
+    tdt_sha256(contract, file_name)
+        .ok_or_else(|| anyhow::anyhow!("Missing integrity pin for Parakeet {file_name}"))
 }
 
 #[cfg(feature = "asr-parakeet")]
 fn get_or_create_tdt_runtime(
     model_dir: &Path,
     contract: TdtContract,
-) -> Result<std::sync::MutexGuard<'static, Option<ParakeetTdtRuntime>>> {
-    let mut cache = tdt_runtime_cache()
+) -> Result<ParakeetRuntimeGuard> {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    let route = {
+        let guard = super::neural_engine::route_gate()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        super::neural_engine::stop_helper();
+        if let Some(root) = model_dir.parent().and_then(Path::parent) {
+            super::transcribe_cpp::clear_cached_parakeet_runtime(root);
+        }
+        guard
+    };
+    super::speech_residency::ensure_idle_release();
+    let cache = tdt_runtime_cache()
         .lock()
         .map_err(|error| anyhow::anyhow!("Parakeet TDT runtime cache is unavailable: {}", error))?;
+    let mut cache = ParakeetRuntimeGuard {
+        cache,
+        #[cfg(feature = "asr-transcribe-cpp")]
+        _route: route,
+    };
 
     let model_dir_key = model_dir.to_string_lossy().to_string();
     if cache
@@ -402,13 +567,24 @@ fn get_or_create_tdt_runtime(
         return Ok(cache);
     }
 
+    let _model_load = crate::llm::local_model_load::admit_asr(
+        &[model_dir],
+        AsrProviderType::Parakeet,
+        contract.model_id,
+        crate::llm::local_model_load::NativeAllocation::Constructor,
+    )?;
+
     tracing::info!(
         "Loading Parakeet TDT {} graphs from {}",
         contract.display_version,
         model_dir.display()
     );
 
-    let vocab = load_token_table(&model_dir.join(PARAKEET_VOCAB_FILE))?;
+    let vocab_file = crate::download::open_verified_model_artifact(
+        &model_dir.join(PARAKEET_VOCAB_FILE),
+        tdt_pin(contract, PARAKEET_VOCAB_FILE)?,
+    )?;
+    let vocab = load_token_table(vocab_file.load_path())?;
     // The blank id is what tells the decoder when to stop emitting at a frame.
     // If tokens.txt is not the file this export was built with, decoding still
     // produces fluent-looking text off the wrong ids, so check it up front.
@@ -424,22 +600,26 @@ fn get_or_create_tdt_runtime(
 
     let encoder = build_tdt_session(
         &model_dir.join(PARAKEET_TDT_ENCODER_FILE),
+        tdt_pin(contract, PARAKEET_TDT_ENCODER_FILE)?,
         "encoder",
         contract.display_version,
     )?;
     let decoder = build_tdt_session(
         &model_dir.join(PARAKEET_TDT_DECODER_FILE),
+        tdt_pin(contract, PARAKEET_TDT_DECODER_FILE)?,
         "decoder",
         contract.display_version,
     )?;
     let joiner = build_tdt_session(
         &model_dir.join(PARAKEET_TDT_JOINER_FILE),
+        tdt_pin(contract, PARAKEET_TDT_JOINER_FILE)?,
         "joiner",
         contract.display_version,
     )?;
 
     *cache = Some(ParakeetTdtRuntime {
         model_dir_key,
+        last_used: std::time::Instant::now(),
         encoder,
         decoder,
         joiner,
@@ -460,25 +640,50 @@ fn get_or_create_tdt_runtime(
 #[cfg(feature = "asr-parakeet")]
 fn legacy_session_cache() -> &'static Mutex<Option<Session>> {
     static CACHE: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    static REGISTRATION: OnceLock<std::sync::Arc<crate::model_residency::IdleModel>> =
+        OnceLock::new();
+    crate::model_residency::watch_cache(&REGISTRATION, 1024 * 1024 * 1024, cache);
+    cache
 }
 
 #[cfg(feature = "asr-parakeet")]
-pub(crate) fn clear_cached_session() {
-    if let Ok(mut cache) = legacy_session_cache().lock() {
-        if cache.take().is_some() {
-            tracing::info!("Cleared cached Parakeet legacy ONNX session");
+fn tdt_runtime_matches_model(
+    runtime_key: &str,
+    models_root: &Path,
+    normalized_model_id: &str,
+) -> bool {
+    runtime_key
+        == models_root
+            .join("parakeet")
+            .join(normalized_model_id)
+            .to_string_lossy()
+}
+
+#[cfg(feature = "asr-parakeet")]
+pub(crate) fn clear_cached_model_runtime(models_root: &Path, model_id: &str) {
+    let model_id = normalize_parakeet_model_id(model_id);
+    if model_id == PARAKEET_LEGACY_MODEL_ID {
+        if let Ok(mut cache) = legacy_session_cache().lock() {
+            if cache.take().is_some() {
+                tracing::info!("Cleared cached Parakeet legacy ONNX session");
+            }
         }
+        return;
     }
+
     if let Ok(mut cache) = tdt_runtime_cache().lock() {
-        if cache.take().is_some() {
-            tracing::info!("Cleared cached Parakeet TDT runtime");
+        if cache.as_ref().is_some_and(|runtime| {
+            tdt_runtime_matches_model(&runtime.model_dir_key, models_root, &model_id)
+        }) {
+            *cache = None;
+            tracing::info!(model_id, "Cleared cached Parakeet TDT runtime");
         }
     }
 }
 
 #[cfg(not(feature = "asr-parakeet"))]
-pub(crate) fn clear_cached_session() {}
+pub(crate) fn clear_cached_model_runtime(_models_root: &Path, _model_id: &str) {}
 
 #[cfg(feature = "asr-parakeet")]
 fn get_or_create_legacy_session(
@@ -496,7 +701,13 @@ fn get_or_create_legacy_session(
         "Creating new Parakeet legacy ONNX session from {}",
         onnx_path.display()
     );
-    let session = build_tdt_session(onnx_path, "legacy CTC encoder", "legacy")?;
+    let _model_load = crate::llm::local_model_load::guard(&[onnx_path])?;
+    let session = build_tdt_session(
+        onnx_path,
+        PARAKEET_LEGACY_ONNX_SOURCES[0].1,
+        "legacy CTC encoder",
+        "legacy",
+    )?;
     *cache = Some(session);
 
     tracing::info!("Parakeet legacy ONNX session cached successfully");
@@ -548,6 +759,7 @@ impl ParakeetProvider {
         match self.model_id.as_str() {
             PARAKEET_V2_MODEL_ID => Some(PARAKEET_V2),
             PARAKEET_V3_MODEL_ID => Some(PARAKEET_V3),
+            ORUKEET_MODEL_ID => Some(ORUKEET),
             _ => None,
         }
     }
@@ -594,10 +806,10 @@ impl ParakeetProvider {
         if self.is_legacy_model() {
             let onnx_sha256 = PARAKEET_LEGACY_ONNX_SOURCES[0].1;
             let tokens_sha256 = PARAKEET_LEGACY_TOKENS_SOURCES[0].1;
-            return crate::download::is_model_artifact_trusted(
+            return crate::download::is_model_artifact_installed(
                 &self.legacy_onnx_path(),
                 Some(onnx_sha256),
-            ) && crate::download::is_model_artifact_trusted(
+            ) && crate::download::is_model_artifact_installed(
                 &self.vocab_path(),
                 Some(tokens_sha256),
             );
@@ -608,7 +820,7 @@ impl ParakeetProvider {
             .expect("non-legacy Parakeet models have a TDT contract");
         contract.artifacts.iter().all(|(file_name, _, _)| {
             tdt_sha256(contract, file_name).is_some_and(|sha256| {
-                crate::download::is_model_artifact_trusted(
+                crate::download::is_model_artifact_installed(
                     &self.model_dir.join(file_name),
                     Some(sha256),
                 )
@@ -638,6 +850,9 @@ impl ParakeetProvider {
             }
             let ok = if file_name == PARAKEET_VOCAB_FILE {
                 is_valid_tokens_file(&path)
+            } else if file_name == ORUKEET_LICENSE_FILE || file_name == ORUKEET_NOTICE_FILE {
+                std::fs::metadata(&path)
+                    .is_ok_and(|meta| meta.len() >= tdt_min_bytes(contract, file_name))
             } else {
                 is_valid_onnx_file(&path, tdt_min_bytes(contract, file_name))
             };
@@ -648,15 +863,15 @@ impl ParakeetProvider {
 
         if !missing.is_empty() {
             return Some(format!(
-                "Parakeet TDT {} is not downloaded yet (missing {}). Download it in Settings -> ASR Models.",
-                contract.display_version,
+                "{} is not downloaded yet (missing {}). Download it in Settings -> ASR Models.",
+                tdt_display_name(contract),
                 missing.join(", ")
             ));
         }
         if !invalid.is_empty() {
             return Some(format!(
-                "Parakeet TDT {} artifacts look truncated or corrupt ({}). Re-download the model in Settings -> ASR Models.",
-                contract.display_version,
+                "{} artifacts look truncated or corrupt ({}). Re-download the model in Settings -> ASR Models.",
+                tdt_display_name(contract),
                 invalid.join(", ")
             ));
         }
@@ -733,43 +948,185 @@ fn normalize_parakeet_model_id(model_id: &str) -> String {
     match model_id.trim() {
         PARAKEET_V2_MODEL_ID => PARAKEET_V2_MODEL_ID.to_string(),
         PARAKEET_V3_MODEL_ID => PARAKEET_V3_MODEL_ID.to_string(),
+        ORUKEET_MODEL_ID => ORUKEET_MODEL_ID.to_string(),
         "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => PARAKEET_LEGACY_MODEL_ID.to_string(),
         _ => PARAKEET_V3_MODEL_ID.to_string(),
     }
 }
 
+/// Remove sustained digital silence from the trailing edge before the TDT
+/// frontend normalizes each mel band across the full utterance. Long dead air
+/// otherwise changes the mean and variance of the spoken frames and can change
+/// words that were already complete.
+///
+/// This deliberately does not use the speech VAD. A speech threshold can cut a
+/// quiet opening or final word, especially when a long silent tail dominates
+/// the file. Sixteen-bit WAV input maps every nonzero PCM value to a magnitude
+/// of at least 1 / 32768. This check is stricter still and only treats samples
+/// that are exactly zero as removable. A quarter-second boundary remains after
+/// the last nonzero sample, and tails shorter than two seconds stay untouched.
+/// The provider still reads duration from the original WAV, so history audio
+/// and segment offsets retain the full captured interval.
+#[cfg(any(feature = "asr-parakeet", test))]
+fn prepare_tdt_samples(mut samples: Vec<f32>) -> Vec<f32> {
+    const SAMPLE_RATE: u32 = 16_000;
+    const MIN_TRAILING_SILENCE_SECONDS: usize = 2;
+    const RETAINED_BOUNDARY_SECONDS: f32 = 0.25;
+
+    let Some(last_nonzero) = samples.iter().rposition(|sample| *sample != 0.0) else {
+        return samples;
+    };
+
+    let original_len = samples.len();
+    let trailing_len = original_len.saturating_sub(last_nonzero + 1);
+    if trailing_len < SAMPLE_RATE as usize * MIN_TRAILING_SILENCE_SECONDS {
+        return samples;
+    }
+
+    let boundary_samples = (SAMPLE_RATE as f32 * RETAINED_BOUNDARY_SECONDS) as usize;
+    let retained_len = (last_nonzero + 1 + boundary_samples).min(original_len);
+    let saved_ms = (original_len - retained_len) as f64 / 16.0;
+    if saved_ms > 100.0 {
+        tracing::info!(
+            "Parakeet TDT trimmed {:.0}ms of trailing digital silence before inference",
+            saved_ms
+        );
+    }
+    samples.truncate(retained_len);
+    samples
+}
+
 // ---------------------------------------------------------------------------
 // TDT inference: mel -> encoder -> greedy TDT decode
 // ---------------------------------------------------------------------------
+
+/// The fixed confidence this route reports: the greedy decoder keeps no token
+/// probabilities.
+const PARAKEET_TDT_CONFIDENCE: f64 = 0.88;
+
+/// A TDT decode: the text, and one timed row per word of it.
+///
+/// `words` is empty unless it holds exactly the words of `text`, in order, so
+/// a caller can treat a non-empty list as a complete word alignment.
+struct TdtTranscript {
+    text: String,
+    words: Vec<TranscriptSegment>,
+}
+
 #[cfg(feature = "asr-parakeet")]
+impl TdtTranscript {
+    /// Join per-window decodes, each already on the recording's timeline.
+    fn from_windows(windows: Vec<(String, Vec<TranscriptSegment>)>) -> Self {
+        let mut text = String::new();
+        let mut words = Vec::new();
+        for (decoded, timed) in windows {
+            let decoded = decoded.trim();
+            if !decoded.is_empty() {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(decoded);
+            }
+            words.extend(timed);
+        }
+        let complete = words
+            .iter()
+            .map(|word| word.text.as_str())
+            .eq(text.split_whitespace())
+            && words
+                .windows(2)
+                .all(|pair| pair[0].start_time <= pair[1].start_time);
+        if !complete {
+            words.clear();
+        }
+        Self { text, words }
+    }
+}
+
+#[cfg(all(test, feature = "asr-parakeet"))]
 fn run_parakeet_tdt(model_dir: &Path, audio_path: &Path, contract: TdtContract) -> Result<String> {
+    run_parakeet_tdt_timed(model_dir, audio_path, contract).map(|transcript| transcript.text)
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn run_parakeet_tdt_timed(
+    model_dir: &Path,
+    audio_path: &Path,
+    contract: TdtContract,
+) -> Result<TdtTranscript> {
+    let mut reader = crate::audio::utils::AudioWindowReader::open(audio_path)
+        .context("Failed to inspect audio for Parakeet")?;
+    if !reader.has_more() {
+        return Ok(TdtTranscript {
+            text: String::new(),
+            words: Vec::new(),
+        });
+    }
+    let host_bytes = crate::audio::utils::parakeet_host_bytes(reader.max_window_samples())?;
+    let mut guard = get_or_create_tdt_runtime(model_dir, contract)?;
+    let runtime = guard
+        .as_mut()
+        .context("Parakeet TDT runtime failed to initialize")?;
+    let windows = crate::audio::utils::process_timed_audio_windows(
+        &mut reader,
+        || {
+            crate::llm::local_model_load::admit_asr(
+                &[model_dir],
+                AsrProviderType::Parakeet,
+                contract.model_id,
+                crate::llm::local_model_load::NativeAllocation::Inference { host_bytes },
+            )
+        },
+        |samples, window_start| {
+            let (text, words) = run_parakeet_tdt_window(runtime, samples, contract)?;
+            let words = words
+                .into_iter()
+                .map(|word| TranscriptSegment {
+                    start_time: window_start + word.start,
+                    end_time: window_start + word.end,
+                    text: word.text,
+                    confidence: PARAKEET_TDT_CONFIDENCE,
+                })
+                .collect();
+            Ok((text, words))
+        },
+    )?;
+    Ok(TdtTranscript::from_windows(windows))
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn run_parakeet_tdt_window(
+    runtime: &mut ParakeetTdtRuntime,
+    samples: Vec<f32>,
+    contract: TdtContract,
+) -> Result<(String, Vec<super::parakeet_tdt::TimedWord>)> {
     use crate::audio::mel::MelSpectrogram;
     use ndarray::{Array, IxDyn};
     use ort::value::Tensor;
 
-    let samples = crate::audio::utils::load_audio_file(audio_path).with_context(|| {
-        format!(
-            "Failed to load audio for Parakeet {}",
-            contract.display_version
-        )
-    })?;
     if samples.is_empty() {
         tracing::warn!(
             "Parakeet {}: audio samples are empty",
             contract.display_version
         );
-        return Ok(String::new());
+        return Ok((String::new(), Vec::new()));
     }
+    let samples = prepare_tdt_samples(samples);
 
     // The 128-bin NeMo frontend, with per-feature mean/std normalization. The
     // encoder takes mel, not raw audio.
-    let spec = MelSpectrogram::parakeet_v3_defaults().compute_normalized(&samples);
+    let frontend = if uses_v3_frontend(contract) {
+        MelSpectrogram::parakeet_v3_defaults()
+    } else {
+        MelSpectrogram::parakeet_tdt_v2_defaults()
+    };
+    let spec = frontend.compute_normalized(&samples);
     if spec.is_empty() || spec[0].is_empty() {
         tracing::warn!(
             "Parakeet {}: mel spectrogram came back empty",
             contract.display_version
         );
-        return Ok(String::new());
+        return Ok((String::new(), Vec::new()));
     }
     let n_mels = spec.len();
     let n_frames = spec[0].len();
@@ -786,14 +1143,6 @@ fn run_parakeet_tdt(model_dir: &Path, audio_path: &Path, contract: TdtContract) 
     for bin in &spec {
         flat.extend(bin.iter().copied());
     }
-
-    let mut guard = get_or_create_tdt_runtime(model_dir, contract)?;
-    let runtime = guard.as_mut().with_context(|| {
-        format!(
-            "Parakeet {} runtime failed to initialize",
-            contract.display_version
-        )
-    })?;
 
     let (encoder_out, frames) = {
         let signal =
@@ -855,10 +1204,28 @@ fn run_parakeet_tdt(model_dir: &Path, audio_path: &Path, contract: TdtContract) 
             }
         }
 
+        #[cfg(test)]
+        if let Ok(path) = std::env::var("PLAINSONG_PARAKEET_ENCODER_TRACE") {
+            let length_i32 = encoded["encoded_lengths"]
+                .try_extract_array::<i32>()
+                .ok()
+                .and_then(|values| values.iter().next().copied());
+            let length_i64 = encoded["encoded_lengths"]
+                .try_extract_array::<i64>()
+                .ok()
+                .and_then(|values| values.iter().next().copied());
+            std::fs::write(
+                path,
+                serde_json::json!({"samples":samples.len(),"melFrames":n_frames,
+                "shape":shape,"decodedFrames":frames,"lengthI32":length_i32,"lengthI64":length_i64})
+                .to_string(),
+            )
+            .expect("write explicitly selected public encoder trace");
+        }
         (array.iter().copied().collect::<Vec<f32>>(), frames)
     };
 
-    let token_ids = super::parakeet_tdt::greedy_decode(
+    let tokens = super::parakeet_tdt::greedy_decode_timed(
         &mut runtime.decoder,
         &mut runtime.joiner,
         &encoder_out,
@@ -866,7 +1233,9 @@ fn run_parakeet_tdt(model_dir: &Path, audio_path: &Path, contract: TdtContract) 
         frames,
         contract.blank_id,
     )?;
+    let token_ids: Vec<usize> = tokens.iter().map(|token| token.id).collect();
     let text = super::parakeet_tdt::detokenize(&runtime.vocab, &token_ids);
+    let words = super::parakeet_tdt::detokenize_timed(&runtime.vocab, &tokens);
 
     tracing::info!(
         "Parakeet {} decoded {} frames -> {} tokens, {} chars",
@@ -875,15 +1244,15 @@ fn run_parakeet_tdt(model_dir: &Path, audio_path: &Path, contract: TdtContract) 
         token_ids.len(),
         text.len()
     );
-    Ok(text)
+    Ok((text, words))
 }
 
 #[cfg(not(feature = "asr-parakeet"))]
-fn run_parakeet_tdt(
+fn run_parakeet_tdt_timed(
     _model_dir: &Path,
     _audio_path: &Path,
     _contract: TdtContract,
-) -> Result<String> {
+) -> Result<TdtTranscript> {
     Err(anyhow::anyhow!(
         "Parakeet ONNX support is not compiled in. Rebuild with the `asr-parakeet` feature."
     ))
@@ -898,21 +1267,39 @@ fn run_parakeet_legacy_ctc(
     vocab_path: &Path,
     audio_path: &Path,
 ) -> Result<String> {
+    let mut reader = crate::audio::utils::AudioWindowReader::open(audio_path)
+        .context("Failed to inspect audio for Parakeet")?;
+    if !reader.has_more() {
+        return Ok(String::new());
+    }
+    let host_bytes = crate::audio::utils::parakeet_host_bytes(reader.max_window_samples())?;
+    let mut guard = get_or_create_legacy_session(onnx_path)?;
+    let session = guard.as_mut().context("ONNX session not initialized")?;
+    let vocab = crate::download::open_verified_model_artifact(
+        vocab_path,
+        PARAKEET_LEGACY_TOKENS_SOURCES[0].1,
+    )?;
+    crate::audio::utils::process_audio_windows(
+        &mut reader,
+        || crate::llm::local_model_load::working_buffers_with_extra(&[onnx_path], host_bytes),
+        |samples| run_parakeet_legacy_ctc_window(session, vocab.load_path(), samples),
+    )
+}
+
+#[cfg(feature = "asr-parakeet")]
+fn run_parakeet_legacy_ctc_window(
+    session: &mut Session,
+    vocab_path: &Path,
+    samples: Vec<f32>,
+) -> Result<String> {
     use crate::audio::mel::MelSpectrogram;
     use ndarray::{Array, IxDyn};
     use ort::value::Tensor;
 
-    let samples = crate::audio::utils::load_audio_file(audio_path)
-        .context("Failed to load audio for Parakeet")?;
     if samples.is_empty() {
         tracing::warn!("Parakeet: audio samples are empty");
         return Ok(String::new());
     }
-
-    let mut cache_guard = get_or_create_legacy_session(onnx_path)?;
-    let session = cache_guard
-        .as_mut()
-        .context("ONNX session not initialized")?;
 
     // Three export shapes exist in the wild for this graph:
     //   sherpa-onnx        x / x_lens                          (mel)
@@ -1113,11 +1500,17 @@ fn run_parakeet_legacy_ctc(
 #[async_trait]
 impl AsrProvider for ParakeetProvider {
     fn name(&self) -> &str {
-        "NVIDIA Parakeet"
+        if self.model_id == ORUKEET_MODEL_ID {
+            "Orukeet"
+        } else {
+            "NVIDIA Parakeet"
+        }
     }
 
     fn description(&self) -> &str {
-        if self.is_legacy_model() {
+        if self.model_id == ORUKEET_MODEL_ID {
+            "Orukeet v0.1.0 int8, experimental native ONNX transducer, currently offered for English dictation."
+        } else if self.is_legacy_model() {
             "NVIDIA Parakeet TDT CTC 110M, native ONNX inference, English, no Python."
         } else if self.model_id == PARAKEET_V2_MODEL_ID {
             "NVIDIA Parakeet TDT 0.6B v2, native ONNX transducer, English, no Python."
@@ -1136,7 +1529,7 @@ impl AsrProvider for ParakeetProvider {
         }
         if !self.has_trusted_required_files() {
             return Err(anyhow::anyhow!(
-                "Parakeet model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+                "Parakeet model files failed their integrity check. Download the model again in Settings > Models."
             ));
         }
 
@@ -1151,6 +1544,8 @@ impl AsrProvider for ParakeetProvider {
                 } else {
                     let contract = if model_dir.ends_with(PARAKEET_V2_MODEL_ID) {
                         PARAKEET_V2
+                    } else if model_dir.ends_with(ORUKEET_MODEL_ID) {
+                        ORUKEET
                     } else {
                         PARAKEET_V3
                     };
@@ -1172,6 +1567,22 @@ impl AsrProvider for ParakeetProvider {
     }
 
     fn model_info(&self) -> ModelInfo {
+        if self.model_id == ORUKEET_MODEL_ID {
+            return ModelInfo {
+                name: "Orukeet v0.1.0 int8 (experimental)".to_string(),
+                version: "0.1.0-int8".to_string(),
+                size_mb: 640.3,
+                parameters: "600M".to_string(),
+                // The weights are multilingual, but English is the only
+                // language this experimental route currently offers in the
+                // picker and the only one verified in Plainsong.
+                languages: vec!["en".to_string()],
+                word_error_rate: None,
+                real_time_factor: None,
+                license: "CC-BY-SA-4.0 weights; NVIDIA attribution applies".to_string(),
+                source_url: self.source_url(),
+            };
+        }
         if self.is_legacy_model() {
             return ModelInfo {
                 name: "Parakeet TDT CTC 110M".to_string(),
@@ -1233,28 +1644,32 @@ impl AsrProvider for ParakeetProvider {
         }
         if !self.has_trusted_required_files() {
             return Err(anyhow::anyhow!(
-                "Parakeet model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+                "Parakeet model files failed their integrity check. Download the model again in Settings > Models."
             ));
         }
         let start = std::time::Instant::now();
         let audio_path_owned = audio_path.to_path_buf();
         let audio_path_for_dur = audio_path_owned.clone();
 
-        let text = if self.is_legacy_model() {
+        let TdtTranscript { text, words } = if self.is_legacy_model() {
             let onnx_path = self.legacy_onnx_path();
             let vocab_path = self.vocab_path();
-            tokio::task::spawn_blocking(move || {
+            let text = tokio::task::spawn_blocking(move || {
                 run_parakeet_legacy_ctc(&onnx_path, &vocab_path, &audio_path_owned)
             })
             .await
-            .context("Parakeet legacy inference task panicked")??
+            .context("Parakeet legacy inference task panicked")??;
+            TdtTranscript {
+                text,
+                words: Vec::new(),
+            }
         } else {
             let model_dir = self.model_dir.clone();
             let contract = self
                 .tdt_contract()
                 .expect("non-legacy Parakeet models have a TDT contract");
             tokio::task::spawn_blocking(move || {
-                run_parakeet_tdt(&model_dir, &audio_path_owned, contract)
+                run_parakeet_tdt_timed(&model_dir, &audio_path_owned, contract)
             })
             .await
             .context("Parakeet TDT inference task panicked")??
@@ -1267,19 +1682,29 @@ impl AsrProvider for ParakeetProvider {
             start.elapsed().as_millis()
         );
 
-        let duration = Self::wav_duration_seconds(&audio_path_for_dur);
-        let segment = TranscriptSegment {
-            start_time: 0.0,
-            end_time: duration,
-            text: text.clone(),
-            confidence: 0.88,
+        // The TDT decoder's own frame positions time every word, the same
+        // per-word rows the GGUF route of these weights returns. Without them
+        // (the legacy CTC export, or a decode whose words did not line up with
+        // its text) the whole clip is one row, as before -- and a meeting
+        // then has to spread each ninety-second chunk's words evenly across
+        // the chunk to give them speakers.
+        let measured_word_timestamps = !words.is_empty();
+        let segments = if measured_word_timestamps {
+            words
+        } else {
+            vec![TranscriptSegment {
+                start_time: 0.0,
+                end_time: Self::wav_duration_seconds(&audio_path_for_dur),
+                text: text.clone(),
+                confidence: PARAKEET_TDT_CONFIDENCE,
+            }]
         };
 
         Ok(TranscriptionResult {
             text,
-            segments: vec![segment],
+            segments,
             language: self.result_language().to_string(),
-            confidence: 0.88,
+            confidence: PARAKEET_TDT_CONFIDENCE,
             processing_time_ms: start.elapsed().as_millis() as u64,
             model_name: self.model_id.clone(),
             model_id: self.model_id.clone(),
@@ -1290,7 +1715,9 @@ impl AsrProvider for ParakeetProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            measured_word_timestamps,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 
@@ -1347,15 +1774,20 @@ async fn download_tdt(
         let destination = model_dir.join(file_name);
         let sha256 = tdt_sha256(contract, file_name)
             .expect("every Parakeet TDT artifact has a pinned digest");
-        if crate::download::is_model_artifact_trusted(&destination, Some(sha256)) {
+        if crate::download::is_model_artifact_installed(&destination, Some(sha256)) {
             completed_bytes += expected_bytes;
             progress_cb((completed_bytes as f32 / total_bytes as f32) * 100.0);
             continue;
         }
 
+        let source_path = if contract.source_subdir.is_empty() {
+            file_name.to_string()
+        } else {
+            format!("{}/{}", contract.source_subdir, file_name)
+        };
         let url = format!(
             "https://huggingface.co/{}/resolve/{}/{}",
-            contract.repo, contract.revision, file_name
+            contract.repo, contract.revision, source_path
         );
         let cb = progress_cb.clone();
         let base = completed_bytes as f32;
@@ -1375,21 +1807,24 @@ async fn download_tdt(
             .await
             .with_context(|| {
                 format!(
-                    "Failed to download Parakeet {} {file_name}",
-                    contract.display_version
+                    "Failed to download {} {file_name}",
+                    tdt_display_name(contract)
                 )
             })?;
 
         let ok = if file_name == PARAKEET_VOCAB_FILE {
             is_valid_tokens_file(&destination)
+        } else if file_name == ORUKEET_LICENSE_FILE || file_name == ORUKEET_NOTICE_FILE {
+            std::fs::metadata(&destination)
+                .is_ok_and(|meta| meta.len() >= tdt_min_bytes(contract, file_name))
         } else {
             is_valid_onnx_file(&destination, tdt_min_bytes(contract, file_name))
         };
         if !ok {
             std::fs::remove_file(&destination).ok();
             return Err(anyhow::anyhow!(
-                "Downloaded Parakeet {} {} from {} but the artifact is invalid or truncated. Re-try the download.",
-                contract.display_version,
+                "Downloaded {} {} from {} but the artifact is invalid or truncated. Re-try the download.",
+                tdt_display_name(contract),
                 file_name,
                 url
             ));
@@ -1422,7 +1857,7 @@ async fn download_legacy(
         std::fs::remove_file(&vocab_dest).ok();
     }
 
-    if !crate::download::is_model_artifact_trusted(
+    if !crate::download::is_model_artifact_installed(
         &onnx_dest,
         Some(PARAKEET_LEGACY_ONNX_SOURCES[0].1),
     ) {
@@ -1465,7 +1900,7 @@ async fn download_legacy(
         }
     }
 
-    if !crate::download::is_model_artifact_trusted(
+    if !crate::download::is_model_artifact_installed(
         &vocab_dest,
         Some(PARAKEET_LEGACY_TOKENS_SOURCES[0].1),
     ) {
@@ -1540,6 +1975,106 @@ mod tests {
     /// A `tokens.txt` that passes validation: `<piece> <id>` per line.
     fn token_file_body(count: usize) -> String {
         (0..count).map(|id| format!("piece{id} {id}\n")).collect()
+    }
+
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    fn benchmark_cleanup_matches_only_the_measured_tdt_model() {
+        let models = PathBuf::from("/tmp/plainsong-models");
+        let v2 = models.join("parakeet").join(PARAKEET_V2_MODEL_ID);
+        let v3 = models.join("parakeet").join(PARAKEET_V3_MODEL_ID);
+
+        assert!(tdt_runtime_matches_model(
+            &v2.to_string_lossy(),
+            &models,
+            PARAKEET_V2_MODEL_ID
+        ));
+        assert!(!tdt_runtime_matches_model(
+            &v3.to_string_lossy(),
+            &models,
+            PARAKEET_V2_MODEL_ID
+        ));
+    }
+
+    #[test]
+    fn tdt_preprocessing_removes_clear_trailing_dead_air() {
+        let sample_rate = 16_000;
+        let mut samples = vec![0.06_f32; sample_rate * 2];
+        samples.extend(vec![0.0_f32; sample_rate * 15]);
+
+        let prepared = prepare_tdt_samples(samples);
+
+        assert!(prepared.len() < sample_rate * 3);
+        assert!(prepared.len() >= sample_rate);
+    }
+
+    #[test]
+    fn tdt_preprocessing_keeps_a_trailing_pause_under_two_seconds() {
+        let sample_rate = 16_000;
+        let mut samples = vec![0.06_f32; sample_rate * 2];
+        samples.extend(vec![0.0_f32; sample_rate * 19 / 10]);
+        let original = samples.clone();
+
+        assert_eq!(prepare_tdt_samples(samples), original);
+    }
+
+    #[test]
+    fn tdt_preprocessing_keeps_a_quiet_opening_when_trimming_looks_destructive() {
+        let sample_rate = 16_000;
+        let mut samples = vec![0.003_f32; sample_rate * 6];
+        samples.extend(vec![0.05_f32; sample_rate * 4]);
+        let original = samples.clone();
+
+        assert_eq!(prepare_tdt_samples(samples), original);
+    }
+
+    #[test]
+    fn tdt_preprocessing_keeps_a_quiet_opening_before_a_long_silent_tail() {
+        let sample_rate = 16_000;
+        let quiet_opening = vec![0.000_05_f32; sample_rate * 2];
+        let mut samples = quiet_opening.clone();
+        samples.extend(vec![0.05_f32; sample_rate * 2]);
+        samples.extend(vec![0.0_f32; sample_rate * 15]);
+
+        let prepared = prepare_tdt_samples(samples);
+
+        assert_eq!(&prepared[..quiet_opening.len()], quiet_opening.as_slice());
+    }
+
+    #[test]
+    fn tdt_preprocessing_keeps_a_quiet_final_word_before_digital_silence() {
+        let sample_rate = 16_000;
+        let mut spoken = vec![0.05_f32; sample_rate * 2];
+        spoken.extend(vec![0.000_05_f32; sample_rate]);
+        let mut samples = spoken.clone();
+        samples.extend(vec![0.0_f32; sample_rate * 15]);
+
+        let prepared = prepare_tdt_samples(samples);
+
+        assert_eq!(&prepared[..spoken.len()], spoken.as_slice());
+        assert!(prepared.len() > spoken.len());
+    }
+
+    #[test]
+    fn tdt_preprocessing_keeps_the_smallest_nonzero_sixteen_bit_sample() {
+        let sample_rate = 16_000;
+        let smallest_pcm_sample = 1.0_f32 / 32768.0;
+        let mut samples = vec![0.05_f32; sample_rate * 2];
+        samples.extend(vec![0.0_f32; sample_rate * 3]);
+        samples.push(smallest_pcm_sample);
+        samples.extend(vec![0.0_f32; sample_rate * 15]);
+
+        let prepared = prepare_tdt_samples(samples);
+
+        assert_eq!(prepared[sample_rate * 5], smallest_pcm_sample);
+    }
+
+    #[test]
+    fn tdt_preprocessing_keeps_silence_when_no_speech_boundary_is_known() {
+        let samples = vec![0.0_f32; 16_000 * 3];
+        let original = samples.clone();
+
+        assert_eq!(prepare_tdt_samples(samples), original);
     }
 
     #[test]
@@ -1802,6 +2337,165 @@ mod tests {
         assert_eq!(result.actual_engine.as_deref(), Some("provider_default"));
     }
 
+    #[cfg(feature = "asr-parakeet")]
+    #[test]
+    #[ignore = "requires explicitly selected public WAVs and cached pinned Parakeet assets"]
+    fn parakeet_v3_public_tail_trace() {
+        use sha2::Digest as _;
+        let root = PathBuf::from(std::env::var("PLAINSONG_PARAKEET_TRACE_ROOT").unwrap());
+        let models = PathBuf::from(std::env::var("PLAINSONG_MODELS_ROOT").unwrap());
+        let provider = ParakeetProvider::with_models_root(&models, Some(PARAKEET_V3_MODEL_ID));
+        for (name, _, _) in PARAKEET_V3_ARTIFACTS {
+            let bytes = std::fs::read(provider.model_dir.join(name)).unwrap();
+            assert_eq!(
+                hex::encode(sha2::Sha256::digest(bytes)),
+                v3_sha256(name).unwrap()
+            );
+        }
+        let inputs: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("inputs.json")).unwrap()).unwrap();
+        let mut results = Vec::new();
+        for (index, input) in inputs.as_array().unwrap().iter().enumerate() {
+            let wav = PathBuf::from(input["path"].as_str().unwrap());
+            assert_eq!(
+                hex::encode(sha2::Sha256::digest(std::fs::read(&wav).unwrap())),
+                input["sha256"].as_str().unwrap()
+            );
+            std::env::set_var(
+                "PLAINSONG_PARAKEET_ENCODER_TRACE",
+                root.join(format!("encoder-{index}.json")),
+            );
+            std::env::set_var(
+                "PLAINSONG_PARAKEET_DECODER_TRACE",
+                root.join(format!("decoder-{index}.json")),
+            );
+            let text = run_parakeet_tdt(&provider.model_dir, &wav, PARAKEET_V3).unwrap();
+            results.push(serde_json::json!({"path":wav,"text":text}));
+            std::fs::write(
+                root.join("results.json"),
+                serde_json::to_vec_pretty(&results).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// Regression for a real capture failure where holding dictation open
+    /// after speech changed "Concord returned" into "Concorde to". Both files
+    /// contain the same public LibriSpeech samples; the second adds 15 seconds
+    /// of zeros at the end.
+    #[cfg(feature = "asr-parakeet")]
+    #[tokio::test]
+    #[ignore = "requires pinned Parakeet v3 assets and the public LibriSpeech fixture"]
+    async fn parakeet_v3_ignores_long_trailing_dead_air() {
+        use sha2::Digest as _;
+
+        let Ok(models_root) = std::env::var("PLAINSONG_MODELS_ROOT") else {
+            eprintln!("PLAINSONG_MODELS_ROOT not set; skipping");
+            return;
+        };
+        let fixture = std::env::var("PLAINSONG_PARAKEET_FIXTURE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from("/tmp/plainsong-human-asr-20261003/audio/6930-75918-0000.wav")
+            });
+        if !fixture.is_file() {
+            eprintln!("public fixture missing at {}; skipping", fixture.display());
+            return;
+        }
+
+        let provider =
+            ParakeetProvider::with_models_root(Path::new(&models_root), Some(PARAKEET_V3_MODEL_ID));
+        assert!(
+            provider.is_available(),
+            "model not present at {}: {:?}",
+            provider.model_dir.display(),
+            provider.missing_or_invalid_reason()
+        );
+        for (name, _, _) in PARAKEET_V3_ARTIFACTS {
+            let bytes =
+                std::fs::read(provider.model_dir.join(name)).expect("read pinned model file");
+            assert_eq!(
+                hex::encode(sha2::Sha256::digest(bytes)),
+                v3_sha256(name).expect("pinned model digest"),
+                "unexpected Parakeet v3 artifact: {name}"
+            );
+        }
+
+        let corpus = fixture
+            .parent()
+            .and_then(Path::parent)
+            .expect("fixture belongs to corpus root");
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(corpus.join("manifest.json")).expect("read frozen corpus manifest"),
+        )
+        .expect("parse frozen corpus manifest");
+        let clips = manifest["clips"].as_array().expect("manifest clips");
+        assert_eq!(clips.len(), 8);
+        let words = |text: &str| {
+            text.split_whitespace()
+                .map(|word| {
+                    word.trim_matches(|character: char| !character.is_alphanumeric())
+                        .to_ascii_lowercase()
+                })
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>()
+        };
+        for clip in clips {
+            let path = corpus.join(clip["audioFile"].as_str().expect("audioFile"));
+            let bytes = std::fs::read(&path).expect("read frozen public clip");
+            assert_eq!(
+                hex::encode(sha2::Sha256::digest(&bytes)),
+                clip["wavSha256"].as_str().expect("wavSha256")
+            );
+            let result = run_parakeet_tdt(&provider.model_dir, &path, PARAKEET_V3)
+                .expect("transcribe frozen public clip");
+            assert_eq!(
+                words(&result),
+                words(clip["reference"].as_str().expect("reference")),
+                "public clip {}",
+                clip["id"].as_str().expect("id")
+            );
+        }
+
+        let mut reader = hound::WavReader::open(&fixture).expect("open public fixture");
+        let spec = reader.spec();
+        assert_eq!((spec.channels, spec.sample_rate), (1, 16_000));
+        assert_eq!(spec.sample_format, hound::SampleFormat::Int);
+        assert_eq!(spec.bits_per_sample, 16);
+        let fixture_samples: Vec<i16> = reader
+            .samples::<i16>()
+            .map(|sample| sample.expect("read public fixture sample"))
+            .collect();
+
+        let temp = temp_root("trailing-dead-air");
+        let padded = temp.join("padded.wav");
+        let mut writer = hound::WavWriter::create(&padded, spec).expect("create padded fixture");
+        for sample in &fixture_samples {
+            writer.write_sample(*sample).expect("write speech sample");
+        }
+        for _ in 0..(15 * spec.sample_rate) {
+            writer.write_sample(0_i16).expect("write silence sample");
+        }
+        writer.finalize().expect("finalize padded fixture");
+
+        let expected = "Concord returned to its place amidst the tents.";
+        for attempt in 1..=5 {
+            let original = run_parakeet_tdt(&provider.model_dir, &fixture, PARAKEET_V3)
+                .expect("transcribe original");
+            let with_dead_air = run_parakeet_tdt(&provider.model_dir, &padded, PARAKEET_V3)
+                .expect("transcribe padded fixture");
+            assert_eq!(original, expected, "unmodified fixture attempt {attempt}");
+            assert_eq!(with_dead_air, expected, "padded fixture attempt {attempt}");
+        }
+        assert_eq!(
+            ParakeetProvider::wav_duration_seconds(&padded),
+            fixture_samples.len() as f64 / spec.sample_rate as f64 + 15.0,
+            "reported segment duration must retain the original captured interval"
+        );
+
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
     #[test]
     fn v3_artifact_list_matches_the_upstream_repo_layout() {
         // These four names are what the download manager fetches and what
@@ -1864,5 +2558,475 @@ mod tests {
         assert_eq!(provider.result_language(), "en");
         assert!(provider.source_url().contains(PARAKEET_V2_REPO));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn orukeet_contract_is_isolated_pinned_and_uses_the_v3_frontend() {
+        assert_eq!(ORUKEET_REVISION.len(), 40);
+        assert_eq!(ORUKEET.source_subdir, "onnx/sherpa-v0.1.0-int8");
+        assert_eq!(ORUKEET.blank_id, PARAKEET_V3.blank_id);
+        assert_eq!(ORUKEET.encoder_dim, PARAKEET_V3.encoder_dim);
+        assert!(uses_v3_frontend(ORUKEET));
+        assert!(!uses_v3_frontend(PARAKEET_V2));
+
+        let names: Vec<_> = ORUKEET_ARTIFACTS.iter().map(|entry| entry.0).collect();
+        assert_eq!(
+            names,
+            vec![
+                "encoder.int8.onnx",
+                "decoder.int8.onnx",
+                "joiner.int8.onnx",
+                "tokens.txt",
+                "LICENSE-WEIGHTS",
+                "NOTICE.md",
+            ]
+        );
+        for (name, upstream, minimum) in ORUKEET_ARTIFACTS {
+            assert!(minimum < upstream, "{name}: invalid size floor");
+            assert_eq!(orukeet_sha256(name).expect("pinned digest").len(), 64);
+        }
+
+        let root = temp_root("orukeet-contract");
+        let provider = ParakeetProvider::with_models_root(&root, Some(ORUKEET_MODEL_ID));
+        assert_eq!(
+            provider.model_dir,
+            root.join("parakeet").join(ORUKEET_MODEL_ID)
+        );
+        assert_eq!(provider.name(), "Orukeet");
+        assert_eq!(provider.model_info().languages, vec!["en".to_string()]);
+        assert_eq!(provider.result_language(), "");
+        assert!(provider.source_url().contains(ORUKEET_REPO));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn orukeet_readiness_requires_retained_license_and_notice() {
+        let root = temp_root("orukeet-terms");
+        let model_dir = root.join("parakeet").join(ORUKEET_MODEL_ID);
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        for (file_name, _, minimum) in ORUKEET_ARTIFACTS {
+            if file_name == PARAKEET_VOCAB_FILE {
+                std::fs::write(model_dir.join(file_name), token_file_body(64)).expect("tokens");
+            } else {
+                sparse_file(&model_dir.join(file_name), minimum + 1);
+            }
+        }
+        std::fs::remove_file(model_dir.join(ORUKEET_NOTICE_FILE)).expect("remove notice");
+
+        let provider = ParakeetProvider::with_models_root(&root, Some(ORUKEET_MODEL_ID));
+        let reason = provider
+            .missing_or_invalid_reason()
+            .expect("notice is required");
+        assert!(reason.contains(ORUKEET_NOTICE_FILE), "got {reason:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(all(test, feature = "asr-parakeet"))]
+mod orukeet_recorded_audio {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[tokio::test]
+    #[ignore = "requires pinned Orukeet files and frozen public speech corpus"]
+    async fn orukeet_production_audio_probe() {
+        let root = PathBuf::from(
+            std::env::var("PLAINSONG_ORUKEET_EVAL_ROOT").expect("explicit eval root"),
+        );
+        assert!(root.starts_with("/tmp") || root.starts_with(std::env::temp_dir()));
+        let corpus = PathBuf::from("/tmp/plainsong-human-asr-20261003");
+        let models = root.join("production-models");
+        let model_dir = models.join("parakeet").join(ORUKEET_MODEL_ID);
+        std::fs::create_dir_all(&model_dir).unwrap();
+        for (name, bytes, _) in ORUKEET_ARTIFACTS {
+            let source = root.join("orukeet").join(name);
+            let payload = std::fs::read(&source).unwrap();
+            let digest = orukeet_sha256(name).unwrap();
+            assert_eq!(payload.len() as u64, bytes);
+            assert_eq!(hex::encode(Sha256::digest(&payload)), digest);
+            let destination = model_dir.join(name);
+            std::fs::copy(source, &destination).unwrap();
+            // Remembered in this process only; nothing is written beside it.
+            crate::download::verify_and_remember_model(&destination, digest)
+                .await
+                .unwrap();
+        }
+        let provider = ParakeetProvider::with_models_root(&models, Some(ORUKEET_MODEL_ID));
+        assert!(provider.is_available());
+        let started = std::time::Instant::now();
+        provider.prewarm().await.unwrap();
+        let preparation_ms = started.elapsed().as_millis();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(corpus.join("manifest.json")).unwrap()).unwrap();
+        let clips = manifest["clips"].as_array().unwrap();
+        assert_eq!(clips.len(), 8);
+        let mut observations = Vec::new();
+        for clip in clips {
+            let audio = std::fs::read(corpus.join(clip["audioFile"].as_str().unwrap())).unwrap();
+            assert_eq!(
+                hex::encode(Sha256::digest(&audio)),
+                clip["wavSha256"].as_str().unwrap()
+            );
+            let started = std::time::Instant::now();
+            let result = provider
+                .transcribe_bytes_with_options(
+                    &audio,
+                    &super::super::TranscriptionOptions::default(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.actual_provider, AsrProviderType::Parakeet);
+            assert!(!result.text.trim().is_empty());
+            assert!(result.language.is_empty());
+            observations.push(serde_json::json!({
+                "id": clip["id"], "reference": clip["reference"], "result": result,
+                "recognitionMs": started.elapsed().as_millis(),
+            }));
+        }
+        std::fs::write(root.join("production-orukeet.json"), serde_json::to_vec_pretty(
+            &serde_json::json!({"scope": "Production Orukeet provider on frozen public audio, no capture or cleanup", "preparationMs": preparation_ms, "observations": observations}),
+        ).unwrap()).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "asr-parakeet"))]
+mod readonly_parakeet_probe {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    const DESIGNER_SHA256: &str =
+        "54ae84d8543fe30ec0e8200bb308e7015511e39c7ca2a555f4f97dcf896b11b3";
+    const FINANCE_SHA256: &str = "b9fc014d38d230cbb2ada478855700ccc4baac92f640a3d98fb1c8bd1645b7ca";
+
+    fn probe_file_names(probe_root: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(probe_root)
+            .expect("read probe root")
+            .map(|entry| {
+                entry
+                    .expect("read probe entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    async fn model_snapshot(model_dir: &Path) -> Vec<serde_json::Value> {
+        let mut snapshot = Vec::new();
+        for (name, expected_bytes, _) in PARAKEET_V3_ARTIFACTS {
+            let path = model_dir.join(name);
+            let expected_sha256 = v3_sha256(name).expect("pinned v3 digest");
+            assert_eq!(
+                std::fs::metadata(&path).expect("model metadata").len(),
+                expected_bytes,
+                "unexpected model size for {name}"
+            );
+            assert!(
+                crate::download::verify_existing_model_in_process(&path, expected_sha256)
+                    .await
+                    .expect("hash existing model"),
+                "model hash mismatch for {name}"
+            );
+            snapshot.push(serde_json::json!({
+                "file": name,
+                "bytes": expected_bytes,
+                "sha256": expected_sha256,
+            }));
+        }
+        snapshot
+    }
+
+    #[tokio::test]
+    #[ignore = "requires explicit read-only pinned Parakeet models and frozen public audio"]
+    async fn default_parakeet_v3_on_frozen_public_audio_without_model_copies() {
+        let models_root = PathBuf::from(
+            std::env::var("PLAINSONG_READONLY_PARAKEET_MODELS_ROOT")
+                .expect("set PLAINSONG_READONLY_PARAKEET_MODELS_ROOT"),
+        );
+        assert!(models_root.is_absolute(), "models root must be absolute");
+        let probe_root = PathBuf::from(
+            std::env::var("PLAINSONG_READONLY_PARAKEET_PROBE_ROOT")
+                .expect("set PLAINSONG_READONLY_PARAKEET_PROBE_ROOT"),
+        );
+        assert!(probe_root.is_absolute(), "probe root must be absolute");
+        assert!(
+            probe_root.starts_with(std::env::temp_dir()),
+            "probe root must be under the system temporary directory"
+        );
+        assert!(probe_root.is_dir(), "probe root must already exist");
+        assert!(
+            !models_root.starts_with(&probe_root) && !probe_root.starts_with(&models_root),
+            "model and probe roots must be isolated"
+        );
+        let initial_probe_files = probe_file_names(&probe_root);
+        assert_eq!(
+            initial_probe_files,
+            vec!["designer.wav".to_string(), "finance.wav".to_string()],
+            "probe root must start with only the two frozen inputs"
+        );
+
+        let expected_inputs = [
+            (
+                "designer",
+                "designer.wav",
+                531_244_u64,
+                16.6_f64,
+                DESIGNER_SHA256,
+            ),
+            (
+                "finance",
+                "finance.wav",
+                876_844_u64,
+                27.4_f64,
+                FINANCE_SHA256,
+            ),
+        ];
+        let mut corpus_bindings = Vec::new();
+        let mut inputs = Vec::new();
+        for (id, file_name, expected_bytes, expected_seconds, expected_sha256) in expected_inputs {
+            let path = probe_root.join(file_name);
+            let bytes = std::fs::read(&path).expect("read frozen public audio");
+            assert_eq!(
+                bytes.len() as u64,
+                expected_bytes,
+                "unexpected bytes for {id}"
+            );
+            assert_eq!(
+                hex::encode(Sha256::digest(&bytes)),
+                expected_sha256,
+                "audio hash mismatch for {id}"
+            );
+            let duration_seconds = ParakeetProvider::wav_duration_seconds(&path);
+            assert!(
+                (duration_seconds - expected_seconds).abs() < 0.1,
+                "unexpected duration for {id}: {duration_seconds}"
+            );
+            corpus_bindings.push(serde_json::json!({
+                "id": id,
+                "file": file_name,
+                "bytes": expected_bytes,
+                "durationSeconds": duration_seconds,
+                "sha256": expected_sha256,
+            }));
+            inputs.push((id, bytes));
+        }
+
+        let provider = ParakeetProvider::with_models_root(&models_root, Some(PARAKEET_V3_MODEL_ID));
+        let before = model_snapshot(&provider.model_dir).await;
+        assert!(provider.is_available(), "pinned v3 model is not available");
+        assert_eq!(provider.download_status(), DownloadStatus::Downloaded);
+
+        let started = std::time::Instant::now();
+        provider.prewarm().await.expect("prewarm pinned v3 model");
+        let preparation_ms = started.elapsed().as_millis();
+        let mut observations = Vec::new();
+        for (id, audio) in &inputs {
+            let started = std::time::Instant::now();
+            let result = provider
+                .transcribe_bytes_with_options(
+                    audio,
+                    &super::super::TranscriptionOptions::default(),
+                )
+                .await
+                .expect("transcribe frozen public audio");
+            assert_eq!(result.requested_provider, AsrProviderType::Parakeet);
+            assert_eq!(result.actual_provider, AsrProviderType::Parakeet);
+            assert_eq!(result.model_id, PARAKEET_V3_MODEL_ID);
+            assert_eq!(result.requested_engine.as_deref(), Some("provider_default"));
+            assert_eq!(result.actual_engine.as_deref(), Some("provider_default"));
+            assert_eq!(result.vocabulary_hint_terms_applied, 0);
+            assert!(!result.text.trim().is_empty(), "empty transcript for {id}");
+            observations.push(serde_json::json!({
+                "id": id,
+                "recognitionMs": started.elapsed().as_millis(),
+                "result": result,
+            }));
+        }
+
+        let after = model_snapshot(&provider.model_dir).await;
+        assert_eq!(after, before, "model snapshot changed during probe");
+        let provider_metadata = provider.model_info();
+        clear_cached_model_runtime(&models_root, PARAKEET_V3_MODEL_ID);
+        drop(provider);
+        assert_eq!(
+            probe_file_names(&probe_root),
+            initial_probe_files,
+            "probe must not retain model copies, downloads, or temporary audio"
+        );
+
+        let results = serde_json::json!({
+            "scope": "Default Parakeet v3 provider on two hash-pinned public WAVs with default options and no hint, capture, cleanup, diarization, manager, app state, model copy, download, or file written beside the model",
+            "modelId": PARAKEET_V3_MODEL_ID,
+            "providerMetadata": provider_metadata,
+            "modelRoot": models_root,
+            "modelBindingsBefore": before,
+            "modelBindingsAfter": after,
+            "corpusBindings": corpus_bindings,
+            "preparationMs": preparation_ms,
+            "observations": observations,
+        });
+        std::fs::write(
+            probe_root.join("results.json"),
+            serde_json::to_vec_pretty(&results).expect("serialize probe results"),
+        )
+        .expect("write probe results");
+    }
+}
+
+#[cfg(all(test, feature = "asr-parakeet"))]
+mod natural_meeting_eval {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use std::io::Cursor;
+
+    /// Decode one WAV through the shipped v3 route and print its text and
+    /// timed words; with `PLAINSONG_PARAKEET_DECODER_TRACE` set, the greedy
+    /// decoder also writes every joiner step of the last window it decoded.
+    #[tokio::test]
+    #[ignore = "diagnostic; needs PLAINSONG_TRACE_MODELS_ROOT and PLAINSONG_TRACE_WAV"]
+    async fn decode_one_wav_with_timings() {
+        let models = PathBuf::from(std::env::var("PLAINSONG_TRACE_MODELS_ROOT").unwrap());
+        let wav = PathBuf::from(std::env::var("PLAINSONG_TRACE_WAV").unwrap());
+        let provider = ParakeetProvider::with_models_root(&models, Some(PARAKEET_V3_MODEL_ID));
+        let contract = provider.tdt_contract().unwrap();
+        for (file, _, _) in contract.artifacts {
+            let sha = tdt_sha256(contract, file).unwrap();
+            crate::download::verify_and_remember_model(&provider.model_dir.join(file), sha)
+                .await
+                .unwrap();
+        }
+        let transcript = run_parakeet_tdt_timed(&provider.model_dir, &wav, contract).unwrap();
+        eprintln!("TEXT: {}", transcript.text);
+        for word in &transcript.words {
+            eprintln!(
+                "WORD {:8.2} {:8.2} {}",
+                word.start_time, word.end_time, word.text
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires frozen public AMI audio and existing pinned Parakeet/Orukeet assets"]
+    async fn frozen_ami_meeting_chunks() {
+        let root = PathBuf::from("/tmp/plainsong-ami-eval-20261003");
+        let input = std::fs::read(root.join("ES2004a.Mix-Headset.first600s.wav")).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&input)),
+            "54463cc2b337b9b47b6210de678cd0d9aa464d5b74b4f6c0099608dd60dde309"
+        );
+        let mut reader = hound::WavReader::new(Cursor::new(input)).unwrap();
+        let spec = reader.spec();
+        assert_eq!(
+            (spec.sample_rate, spec.channels, spec.bits_per_sample),
+            (16_000, 1, 16)
+        );
+        let samples: Vec<i16> = reader.samples::<i16>().map(Result::unwrap).collect();
+        assert_eq!(samples.len(), 600 * 16_000);
+        let routes = [
+            (
+                PARAKEET_V3_MODEL_ID,
+                PathBuf::from("/tmp/plainsong-human-asr-20261003/data/Plainsong/models"),
+            ),
+            (
+                ORUKEET_MODEL_ID,
+                PathBuf::from("/tmp/plainsong-model-review-20261003/production-models"),
+            ),
+        ];
+        let mut observations = Vec::new();
+        for (model, models) in routes {
+            let dir = models.join("parakeet").join(model);
+            let provider = ParakeetProvider::with_models_root(&models, Some(model));
+            for (file, _, _) in provider.tdt_contract().unwrap().artifacts {
+                let path = dir.join(file);
+                let sha = tdt_sha256(provider.tdt_contract().unwrap(), file).unwrap();
+                assert_eq!(
+                    hex::encode(Sha256::digest(std::fs::read(&path).unwrap())),
+                    sha
+                );
+                crate::download::verify_and_remember_model(&path, sha)
+                    .await
+                    .unwrap();
+            }
+            assert!(provider.is_available());
+            let start = std::time::Instant::now();
+            provider.prewarm().await.unwrap();
+            let preparation_ms = start.elapsed().as_millis();
+            for (index, chunk) in samples.chunks(30 * 16_000).enumerate() {
+                let mut bytes = Cursor::new(Vec::new());
+                {
+                    let mut writer = hound::WavWriter::new(&mut bytes, spec).unwrap();
+                    for sample in chunk {
+                        writer.write_sample(*sample).unwrap();
+                    }
+                    writer.finalize().unwrap();
+                }
+                let start = std::time::Instant::now();
+                let result = provider.transcribe_bytes(bytes.get_ref()).await.unwrap();
+                assert_eq!(result.actual_provider, AsrProviderType::Parakeet);
+                observations.push(serde_json::json!({ "model": model, "start": index * 30, "end": (index + 1) * 30,
+                    "preparationMs": preparation_ms, "recognitionMs": start.elapsed().as_millis(), "result": result }));
+                std::fs::write(root.join("asr.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                    "scope": "Frozen first600seconds of continuous public human AMI audio through production local ASR in fixed non-overlapping30second windows; no VAD, diarization, capture, cleanup or competitor test",
+                    "observations": observations,
+                })).unwrap()).unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "asr-parakeet"))]
+#[path = "parakeet_early_window_probe.rs"]
+mod early_window_probe;
+
+#[cfg(all(test, feature = "asr-parakeet"))]
+mod tdt_transcript_tests {
+    use super::{TdtTranscript, TranscriptSegment};
+
+    fn word(text: &str, start: f64) -> TranscriptSegment {
+        TranscriptSegment {
+            start_time: start,
+            end_time: start + 0.2,
+            text: text.to_string(),
+            confidence: 0.88,
+        }
+    }
+
+    #[test]
+    fn windows_join_into_one_text_with_every_word_timed_on_the_recording() {
+        let transcript = TdtTranscript::from_windows(vec![
+            (
+                " hello there ".to_string(),
+                vec![word("hello", 0.4), word("there", 0.8)],
+            ),
+            (String::new(), Vec::new()),
+            ("general".to_string(), vec![word("general", 31.2)]),
+        ]);
+        assert_eq!(transcript.text, "hello there general");
+        assert_eq!(
+            transcript
+                .words
+                .iter()
+                .map(|word| (word.text.as_str(), word.start_time))
+                .collect::<Vec<_>>(),
+            [("hello", 0.4), ("there", 0.8), ("general", 31.2)]
+        );
+    }
+
+    #[test]
+    fn words_that_disagree_with_the_text_are_dropped_not_half_kept() {
+        let mismatched = TdtTranscript::from_windows(vec![(
+            "hello there".to_string(),
+            vec![word("hello", 0.4)],
+        )]);
+        assert_eq!(mismatched.text, "hello there");
+        assert!(mismatched.words.is_empty());
+
+        let backwards = TdtTranscript::from_windows(vec![(
+            "a b".to_string(),
+            vec![word("a", 2.0), word("b", 1.0)],
+        )]);
+        assert!(backwards.words.is_empty());
     }
 }

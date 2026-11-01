@@ -8,7 +8,7 @@ analytics SDK, or Plainsong-operated audio relay.
 
 - Dictation audio. By default it is temporary and removed once the words have
   been transcribed. Turning on "Keep dictation audio for Process again"
-  (Settings > Dictation) changes that: from then on each dictation's audio is
+  (on the Dictation page) changes that: from then on each dictation's audio is
   written into the recordings folder and kept until you delete that history
   entry. Dictation auto-delete is set to "Never" by default, so nothing else
   removes it — a year of dictations keeps a year of audio. With the vault on,
@@ -29,7 +29,7 @@ support bundle or plaintext settings.
 
 ## The vault and database encryption
 
-Turning the vault on in Settings > Privacy generates a database key, stores it
+Turning the vault on in Settings > Privacy & data > Encryption generates a database key, stores it
 in the macOS Keychain, and encrypts `plainsong.db` with SQLCipher. Meeting
 audio bundles are encrypted separately with a key derived from your vault
 password.
@@ -132,7 +132,7 @@ dictated words.
 
 Plainsong can be told to remember a speaker's voice so the same person is
 recognized in later meetings. It is off until you turn it on in Settings >
-General > Meetings > Remembered voices, and while it is off **nothing about
+Meetings > Remembered voices, and while it is off **nothing about
 anyone's voice is newly stored** — speaker separation runs exactly as it does
 with the feature absent. Turning the switch off does not delete signatures
 collected while it was on; use the deletion controls below to remove those.
@@ -168,7 +168,7 @@ is not affected by the remote-processing switch because nothing leaves.
 **Where it is included.** A local backup contains the whole database, so it
 contains the remembered voices too. Restoring a backup restores them.
 
-**How to delete it.** Settings > General > Meetings > Remembered voices lists
+**How to delete it.** Settings > Meetings > Remembered voices lists
 every voice by name and offers "Forget" per voice and "Delete all". Deleting
 one removes its samples and unlinks it from every transcript; "Delete all"
 also clears the per-meeting signatures kept so a voice could be matched again.
@@ -249,7 +249,10 @@ and the panel shows the related meetings it found locally.
 - Speech Recognition is optional and only used by the Apple on-device
   Dictation route.
 - Screen and System Audio Recording is optional and only used when you choose
-  Me + Them Meeting capture.
+  Me + Them Meeting capture. It lets Plainsong record the meeting audio playing
+  on the Mac (including through headphones); it never records the screen.
+  During a Me + Them meeting every sound the Mac plays is recorded, not only
+  the meeting app.
 
 You can revoke permissions at any time in System Settings. Plainsong will show
 the affected primary action as unavailable and provide a repair action rather

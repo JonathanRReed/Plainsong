@@ -55,7 +55,7 @@ export type ReadinessActionId =
 export interface ReadinessAction {
   id: ReadinessActionId;
   label: string;
-  destination: "setup" | "models" | "transcription" | "ai";
+  destination: "setup" | "models" | "transcription" | "meetings" | "ai";
 }
 
 export interface ReadinessCause {
@@ -160,13 +160,13 @@ const ACTIONS: Record<ReadinessActionId, ReadinessAction> = {
   },
   test_system_audio: {
     id: "test_system_audio",
-    label: "Test system audio",
-    destination: "transcription",
+    label: "Check meeting audio",
+    destination: "meetings",
   },
   configure_system_audio: {
     id: "configure_system_audio",
-    label: "Set up system audio",
-    destination: "transcription",
+    label: "Set up meeting audio",
+    destination: "meetings",
   },
 };
 
@@ -473,7 +473,7 @@ function fullCaptureAssessment(
         "degraded",
         cause(
           "system_audio_unverified",
-          "Mic-only meetings are ready. Test system audio before recording everyone on the call.",
+          "Mic-only meetings are ready. Check the meeting audio before recording everyone on the call.",
           "test_system_audio",
         ),
       );
@@ -483,7 +483,7 @@ function fullCaptureAssessment(
         "degraded",
         cause(
           "system_audio_unavailable",
-          "Mic-only meetings are ready, but system audio is not configured.",
+          "Mic-only meetings are ready, but Plainsong can't record the meeting audio on this Mac yet.",
           "configure_system_audio",
         ),
       );
@@ -493,7 +493,7 @@ function fullCaptureAssessment(
         "unknown",
         cause(
           "source_unavailable",
-          "Plainsong could not confirm the system-audio route.",
+          "Plainsong could not check the meeting audio.",
           "retry",
         ),
       );

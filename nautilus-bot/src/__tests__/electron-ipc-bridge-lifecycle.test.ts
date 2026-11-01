@@ -3,8 +3,11 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   finalizeMeetingWithinBudget,
+  interruptedMeetingMessage,
+  nextActiveMeetingPhase,
   nextActiveMeetingRecordingId,
   resolveMeetingStopId,
+  type MeetingLifecyclePhase,
 } from "../../electron/meeting-lifecycle";
 
 const mocks = vi.hoisted(() => ({
@@ -59,6 +62,47 @@ describe("Electron meeting lifecycle mirror", () => {
       }),
     ).toBe("meeting-live");
   });
+
+  it("follows a new meeting that starts while the last one is still transcribing", () => {
+    let activeId: string | null = "meeting-a";
+    let phase: MeetingLifecyclePhase | null = "processing";
+    for (const event of [
+      { phase: "preparing", recordingId: "meeting-b" },
+      { phase: "recording", recordingId: "meeting-b" },
+      // Meeting A finishing must not take the menu bar back.
+      { phase: "processing", recordingId: "meeting-a" },
+      { phase: "ready", recordingId: "meeting-a" },
+    ] as const) {
+      activeId = nextActiveMeetingRecordingId(activeId, event, phase);
+      phase = nextActiveMeetingPhase(phase, activeId, event);
+    }
+    expect(activeId).toBe("meeting-b");
+    expect(phase).toBe("recording");
+  });
+
+  it("does not let a new meeting's events replace one that is still capturing", () => {
+    expect(
+      nextActiveMeetingRecordingId(
+        "meeting-live",
+        { phase: "preparing", recordingId: "meeting-other" },
+        "recording",
+      ),
+    ).toBe("meeting-live");
+  });
+
+  it("tells a capture interruption apart from a transcription interruption", () => {
+    expect(interruptedMeetingMessage("recording")).toContain("Recording stopped unexpectedly");
+    expect(interruptedMeetingMessage("processing")).toContain("transcribe it again");
+    expect(interruptedMeetingMessage("processing")).not.toContain("Recording stopped");
+  });
+
+  it.each(["preparing", "recording", "stopping"] satisfies MeetingLifecyclePhase[])(
+    "does not promise saved audio before recovery validates a %s meeting",
+    (phase) => {
+      expect(interruptedMeetingMessage(phase)).not.toContain("was saved");
+      expect(interruptedMeetingMessage(phase)).toContain("check");
+    },
+  );
 
   it("uses the caller identifier for idempotent duplicate Stop", () => {
     expect(resolveMeetingStopId(null, "meeting-1")).toBe("meeting-1");
@@ -141,10 +185,110 @@ describe("IpcBridge shutdown lifecycle", () => {
     vi.useRealTimers();
   });
 
+  it("admits finalization work but rejects new capture while quit is pending", async () => {
+    const child = fakeChildProcess();
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const spawnProcess = vi.fn(
+      () => child,
+    ) as unknown as typeof import("node:child_process").spawn;
+    const receivedCommands: string[] = [];
+    replyToSidecarRequests(child, (request) => {
+      receivedCommands.push(request.method);
+      return { result: null };
+    });
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+    bridge.setQuitPending(true);
+
+    await expect(bridge.invokeSidecar("start_dictation", {})).rejects.toThrow(
+      "Plainsong is shutting down",
+    );
+    await expect(bridge.invokeSidecar("start_recording", {})).rejects.toThrow(
+      "Plainsong is shutting down",
+    );
+    await expect(
+      bridge.invokeSidecar("save_dictation_draft", { text: "late words" }),
+    ).resolves.toBeNull();
+    await expect(
+      bridge.invokeSidecar("stop_recording", { recordingId: "meeting-1" }),
+    ).resolves.toBeNull();
+
+    expect(receivedCommands).toEqual([
+      "save_dictation_draft",
+      "stop_recording",
+    ]);
+    bridge.shutdown();
+  });
+
+  it("restores capture admission when a pending quit is cancelled", async () => {
+    const child = fakeChildProcess();
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const spawnProcess = vi.fn(
+      () => child,
+    ) as unknown as typeof import("node:child_process").spawn;
+    replyToSidecarRequests(child, () => ({ result: "started" }));
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+    bridge.setQuitPending(true);
+    bridge.setQuitPending(false);
+
+    await expect(
+      bridge.invokeSidecar("start_dictation", {}),
+    ).resolves.toBe("started");
+    bridge.shutdown();
+  });
+
+  it("does not inherit quit-pending state in a new bridge", async () => {
+    const firstChild = fakeChildProcess();
+    const secondChild = fakeChildProcess();
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const firstBridge = new IpcBridge(
+      "/tmp/plainsong-sidecar",
+      vi.fn(() => firstChild) as unknown as typeof import("node:child_process").spawn,
+    );
+    firstBridge.start();
+    firstBridge.setQuitPending(true);
+
+    replyToSidecarRequests(secondChild, () => ({ result: "started" }));
+    const secondBridge = new IpcBridge(
+      "/tmp/plainsong-sidecar",
+      vi.fn(() => secondChild) as unknown as typeof import("node:child_process").spawn,
+    );
+    secondBridge.start();
+
+    await expect(
+      secondBridge.invokeSidecar("start_recording", {}),
+    ).resolves.toBe("started");
+    firstBridge.shutdown();
+    secondBridge.shutdown();
+  });
+
+  it("injects trusted relay credentials without forwarding ambient relay or OAuth keys", async () => {
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const { buildSidecarEnv } = await import("../../electron/sidecar-env");
+    const child = fakeChildProcess();
+    const spawnMock = vi.fn(() => child);
+    vi.stubEnv("PLAINSONG_CHATGPT_RELAY_KEY", "untrusted-ambient-relay");
+    vi.stubEnv("PLAINSONG_CHATGPT_RELAY_URL", "https://untrusted.example.invalid");
+    vi.stubEnv("OPENAI_API_KEY", "dummy-oauth-or-api-key");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnMock as unknown as typeof import("node:child_process").spawn, {
+      PLAINSONG_CHATGPT_RELAY_URL: "http://127.0.0.1:49152",
+      PLAINSONG_CHATGPT_RELAY_KEY: "trusted-session-relay",
+    });
+    try {
+      expect(buildSidecarEnv(process.env).PLAINSONG_CHATGPT_RELAY_KEY).toBeUndefined();
+      bridge.start();
+      const options = (spawnMock.mock.calls as unknown as Array<[string, string[], { env: NodeJS.ProcessEnv }]>)[0][2];
+      expect(options.env.PLAINSONG_CHATGPT_RELAY_URL).toBe("http://127.0.0.1:49152");
+      expect(options.env.PLAINSONG_CHATGPT_RELAY_KEY).toBe("trusted-session-relay");
+      expect(options.env.OPENAI_API_KEY).toBeUndefined();
+    } finally { bridge.shutdown();vi.unstubAllEnvs(); }
+  });
+
   it("rejects pending and new commands without leaking a shutdown EPIPE", async () => {
     const child = fakeChildProcess();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const { IpcBridge, SIDECAR_SHUTDOWN_GRACE_MS } = await import("../../electron/ipc-bridge");
     const spawnProcess = vi.fn(
       () => child
     ) as unknown as typeof import("node:child_process").spawn;
@@ -170,6 +314,8 @@ describe("IpcBridge shutdown lifecycle", () => {
     expect(consoleError).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(3000);
+    expect(child.kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(SIDECAR_SHUTDOWN_GRACE_MS - 3000);
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     consoleError.mockRestore();
   });
@@ -261,6 +407,186 @@ describe("IpcBridge crash-loop containment", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("stops automatic retries when startup requires credential access", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const children: FakeChild[] = [];
+    const spawnProcess = vi.fn(() => {
+      const child = fakeChildProcess();
+      children.push(child);
+      return child as never;
+    });
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+    const pending = bridge.invokeSidecar("get_settings", {});
+    const pendingRejection = expect(pending).rejects.toThrow("requires credential access");
+
+    children[0].stderr.write("startup failed [PLAINSONG_CRED");
+    children[0].stderr.write("ENTIAL_REQUIRED] unlock keychain");
+    children[0].emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+    expect(bridge.getRuntimeStatus()).toEqual({
+      ready: false,
+      reason: "credential_required",
+      message: "Sidecar startup requires credential access",
+    });
+    await pendingRejection;
+    consoleWarn.mockRestore();
+  });
+
+  it("upgrades an exit to credential-required when stderr drains afterward", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const children: FakeChild[] = [];
+    const spawnProcess = vi.fn(() => {
+      const child = fakeChildProcess();
+      children.push(child);
+      return child as never;
+    });
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+
+    children[0].emit("exit", 1, null);
+    children[0].stderr.write("[PLAINSONG_CREDENTIAL_REQUIRED]");
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+    expect(bridge.getRuntimeStatus()).toEqual({
+      ready: false,
+      reason: "credential_required",
+      message: "Sidecar startup requires credential access",
+    });
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("finds a credential marker before a long suffix exceeds the stderr tail", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const child = fakeChildProcess();
+    const spawnProcess = vi.fn(() => child as never);
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+
+    child.stderr.write(`[PLAINSONG_CREDENTIAL_REQUIRED]${"x".repeat(9_000)}`);
+    child.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    expect(spawnProcess).toHaveBeenCalledTimes(1);
+    expect(bridge.getRuntimeStatus().reason).toBe("credential_required");
+    consoleWarn.mockRestore();
+  });
+
+  it("retries once with credential access and scrubs the flag from later automatic spawns", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const children: FakeChild[] = [];
+    const spawnProcess = vi.fn(() => {
+      const child = fakeChildProcess();
+      children.push(child);
+      return child as never;
+    });
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge(
+      "/tmp/plainsong-sidecar",
+      spawnProcess,
+      { PLAINSONG_STARTUP_CREDENTIAL_ACCESS: "ambient-must-not-pass" },
+    );
+    bridge.start();
+    children[0].stderr.write("[PLAINSONG_CREDENTIAL_REQUIRED]");
+    children[0].emit("exit", 1, null);
+
+    expect(() => bridge.retryWithCredentialAccess()).not.toThrow();
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    const spawnCalls = spawnProcess.mock.calls as unknown as Array<
+      [string, string[], { env: NodeJS.ProcessEnv }]
+    >;
+    expect(spawnCalls[0][2].env.PLAINSONG_STARTUP_CREDENTIAL_ACCESS).toBeUndefined();
+    expect(spawnCalls[1][2].env.PLAINSONG_STARTUP_CREDENTIAL_ACCESS).toBe("1");
+    expect(() => bridge.retryWithCredentialAccess()).toThrow(/still running/i);
+
+    children[1].emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawnProcess).toHaveBeenCalledTimes(3);
+    expect(spawnCalls[2][2].env.PLAINSONG_STARTUP_CREDENTIAL_ACCESS).toBeUndefined();
+    bridge.shutdown();
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("ignores credential markers after a response and from stale generations", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const children: FakeChild[] = [];
+    const spawnProcess = vi.fn(() => {
+      const child = fakeChildProcess();
+      children.push(child);
+      return child as never;
+    });
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.start();
+    replyToSidecarRequests(children[0], () => ({ result: {} }));
+    await expect(bridge.invoke("get_settings", {})).resolves.toEqual({});
+    children[0].stderr.write("[PLAINSONG_CREDENTIAL_REQUIRED]");
+    children[0].emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+
+    children[0].stderr.write("[PLAINSONG_CREDENTIAL_REQUIRED]");
+    children[0].emit("exit", 1, null);
+    children[1].emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(spawnProcess).toHaveBeenCalledTimes(3);
+    expect(bridge.getRuntimeStatus().reason).toBe("crash");
+    bridge.shutdown();
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("handles runtime status and credential retry locally while the sidecar is down", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const children: FakeChild[] = [];
+    const spawnProcess = vi.fn(() => {
+      const child = fakeChildProcess();
+      children.push(child);
+      return child as never;
+    });
+    const { IpcBridge } = await import("../../electron/ipc-bridge");
+    const bridge = new IpcBridge("/tmp/plainsong-sidecar", spawnProcess);
+    bridge.onLocalCommand((_event, command) => {
+      if (command === "get_sidecar_runtime_status") {
+        return { handled: true, result: bridge.getRuntimeStatus() };
+      }
+      if (command === "retry_sidecar_with_credential_access") {
+        bridge.retryWithCredentialAccess();
+        return { handled: true, result: { started: true } };
+      }
+      return { handled: false };
+    });
+    bridge.start();
+    children[0].stderr.write("[PLAINSONG_CREDENTIAL_REQUIRED]");
+    children[0].emit("exit", 1, null);
+    const handler = mocks.handle.mock.calls.find(
+      ([channel]) => channel === "sidecar:invoke",
+    )?.[1] as (event: unknown, command: string, args?: unknown) => Promise<unknown>;
+
+    await expect(handler({}, "get_sidecar_runtime_status")).resolves.toEqual({
+      ready: false,
+      reason: "credential_required",
+      message: "Sidecar startup requires credential access",
+    });
+    await expect(handler({}, "retry_sidecar_with_credential_access")).resolves.toEqual({
+      started: true,
+    });
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    bridge.shutdown();
+    consoleWarn.mockRestore();
   });
 
   it("probes a replacement sidecar and announces recovery without a renderer request", async () => {
@@ -567,6 +893,28 @@ describe("IpcBridge sender validation", () => {
     expect(handler).toBeTruthy();
     return { bridge, child, handler };
   }
+
+  it("keeps overlay clipboard requests local and rejects untrusted senders first", async () => {
+    mocks.handle.mockClear();
+    const { bridge, handler } = await bridgeHandler();
+    const forward = vi.spyOn(bridge, "invoke").mockRejectedValue(new Error("must not forward"));
+    const local = vi.fn(async () => ({ handled: true, result: null }));
+    bridge.onLocalCommand(local);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(handler(topLevelFrameEvent("https://evil.example/x"), "__overlay_copy_text__", { text: "Safe fixture" })).rejects.toThrow(/untrusted sender/i);
+      expect(local).not.toHaveBeenCalled();
+      await expect(handler(topLevelFrameEvent("plainsong://bundle/dictation.html"), "__overlay_copy_text__", { text: "Safe fixture" })).resolves.toBeNull();
+      expect(local).toHaveBeenCalledTimes(1);
+      bridge.onLocalCommand(() => ({ handled: false }));
+      await expect(handler(topLevelFrameEvent("plainsong://bundle/dictation.html"), "__overlay_copy_text__", { text: "Safe fixture" })).rejects.toThrow("Overlay clipboard handler is unavailable.");
+      expect(forward).not.toHaveBeenCalled();
+    } finally {
+      bridge.shutdown();
+      warn.mockRestore();
+      forward.mockRestore();
+    }
+  });
 
   it("rejects commands from a frame main does not recognize", async () => {
     // The allowlist decides *what* may be asked for; this decides *who* may

@@ -6,7 +6,7 @@ fn absolute_override(value: OsString) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-fn directory_with_override(
+pub(crate) fn directory_with_override(
     variable: &str,
     fallback: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {

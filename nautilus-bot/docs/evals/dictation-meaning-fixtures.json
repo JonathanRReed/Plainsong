@@ -1,0 +1,323 @@
+[
+  {
+    "id": "negation-deploy",
+    "source": "synthetic",
+    "appCategory": "worklog",
+    "spokenText": "Do not deploy this tonight.",
+    "referenceOutput": "Do not deploy this tonight.",
+    "intendedFacts": ["Deployment must not happen tonight."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "negation", "anyOf": ["do not deploy", "don't deploy"] }
+    ]
+  },
+  {
+    "id": "corrected-amount",
+    "source": "synthetic",
+    "appCategory": "email",
+    "spokenText": "The approved budget is twelve thousand, sorry, fifteen thousand dollars.",
+    "referenceOutput": "The approved budget is $15,000.",
+    "intendedFacts": ["The approved budget is 15,000 dollars."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "corrected amount", "anyOf": ["15000 dollars", "$15000"] },
+      { "kind": "exclude", "label": "replaced amount", "anyOf": ["12000 dollars", "$12000"] }
+    ]
+  },
+  {
+    "id": "corrected-day",
+    "source": "synthetic",
+    "appCategory": "messaging",
+    "spokenText": "Let's meet Tuesday, no wait, Wednesday at three thirty.",
+    "referenceOutput": "Let's meet Wednesday at 3:30.",
+    "intendedFacts": ["The meeting is Wednesday at 3:30."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "corrected day", "anyOf": ["wednesday"] },
+      { "kind": "exclude", "label": "replaced day", "anyOf": ["tuesday"] },
+      { "kind": "include", "label": "meeting time", "anyOf": ["3 30", "three thirty"] }
+    ]
+  },
+  {
+    "id": "conditional-send",
+    "source": "synthetic",
+    "appCategory": "email",
+    "spokenText": "If legal approves the final copy, send the invoice today.",
+    "referenceOutput": "If Legal approves the final copy, send the invoice today.",
+    "intendedFacts": ["Sending the invoice today depends on Legal approving the final copy."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "condition", "anyOf": ["if legal approves"] },
+      { "kind": "include", "label": "action", "anyOf": ["send the invoice today"] }
+    ]
+  },
+  {
+    "id": "uncertain-launch",
+    "source": "synthetic",
+    "appCategory": "messaging",
+    "spokenText": "I think we might launch Friday, but I'm not certain yet.",
+    "referenceOutput": "I think we might launch Friday, but I'm not certain yet.",
+    "intendedFacts": ["Friday is possible, not confirmed."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "uncertainty", "anyOf": ["might", "could", "not certain", "uncertain"] },
+      { "kind": "include", "label": "possible day", "anyOf": ["friday"] }
+    ]
+  },
+  {
+    "id": "owner-database",
+    "source": "synthetic",
+    "appCategory": "worklog",
+    "spokenText": "Priya owns the database migration, and Marco will review it by Thursday.",
+    "referenceOutput": "Priya owns the database migration, and Marco will review it by Thursday.",
+    "intendedFacts": ["Priya owns the migration.", "Marco reviews it by Thursday."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "owner", "anyOf": ["priya owns the database migration"] },
+      { "kind": "include", "label": "reviewer and deadline", "anyOf": ["marco will review it by thursday", "marco reviews it by thursday"] }
+    ]
+  },
+  {
+    "id": "technical-flag",
+    "source": "synthetic",
+    "appCategory": "code_editor",
+    "spokenText": "Run cargo test dash dash locked, not cargo update.",
+    "referenceOutput": "Run `cargo test --locked`, not `cargo update`.",
+    "intendedFacts": ["Run cargo test with --locked.", "Do not run cargo update."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "exact command", "anyOf": ["cargo test locked"] },
+      { "kind": "include", "label": "forbidden command negation", "anyOf": ["not cargo update", "do not run cargo update"] },
+      { "kind": "literal_include", "label": "double-dash flag", "anyOf": ["--locked"] }
+    ]
+  },
+  {
+    "id": "quoted-copy",
+    "source": "synthetic",
+    "appCategory": "notes",
+    "spokenText": "The button must say quote Save a copy quote, not Save copy.",
+    "referenceOutput": "The button must say “Save a copy,” not “Save copy.”",
+    "intendedFacts": ["The exact approved label is Save a copy."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "approved label", "anyOf": ["save a copy"] },
+      { "kind": "include", "label": "rejected label context", "anyOf": ["not save copy"] },
+      { "kind": "literal_include", "label": "quoted approved label", "anyOf": ["“Save a copy,”", "\"Save a copy,\"", "“Save a copy”", "\"Save a copy\""] }
+    ]
+  },
+  {
+    "id": "ordered-list",
+    "source": "synthetic",
+    "appCategory": "notes",
+    "spokenText": "First back up the database. Second rotate the key. Third restart the worker.",
+    "referenceOutput": "1. Back up the database.\n2. Rotate the key.\n3. Restart the worker.",
+    "intendedFacts": ["Backup precedes key rotation.", "Key rotation precedes restart."],
+    "criticalInvariants": [
+      { "kind": "ordered", "label": "operation order", "terms": ["back up the database", "rotate the key", "restart the worker"] }
+    ]
+  },
+  {
+    "id": "double-negation-scope",
+    "source": "synthetic",
+    "appCategory": "email",
+    "spokenText": "I don't think we should cancel the review.",
+    "referenceOutput": "I don't think we should cancel the review.",
+    "intendedFacts": ["The speaker leans against cancelling the review."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "scoped negation", "anyOf": ["don't think we should cancel", "do not think we should cancel"] }
+    ]
+  },
+  {
+    "id": "unless-condition",
+    "source": "synthetic",
+    "appCategory": "worklog",
+    "spokenText": "Do not merge unless both security checks pass.",
+    "referenceOutput": "Do not merge unless both security checks pass.",
+    "intendedFacts": ["Merging requires both security checks to pass."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "merge prohibition", "anyOf": ["do not merge", "don't merge"] },
+      { "kind": "include", "label": "exception condition", "anyOf": ["unless both security checks pass"] }
+    ]
+  },
+  {
+    "id": "either-option",
+    "source": "synthetic",
+    "appCategory": "messaging",
+    "spokenText": "We can ship Monday or Tuesday, but not Wednesday.",
+    "referenceOutput": "We can ship Monday or Tuesday, but not Wednesday.",
+    "intendedFacts": ["Monday and Tuesday are options.", "Wednesday is excluded."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "allowed options", "anyOf": ["monday or tuesday"] },
+      { "kind": "include", "label": "excluded option", "anyOf": ["not wednesday"] }
+    ]
+  },
+  {
+    "id": "corrected-time",
+    "source": "synthetic",
+    "appCategory": "calendar",
+    "spokenText": "Book it for two, sorry, two thirty p.m.",
+    "referenceOutput": "Book it for 2:30 p.m.",
+    "intendedFacts": ["The event time is 2:30 p.m."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "corrected time", "anyOf": ["2 30 pm", "two thirty pm"] },
+      { "kind": "exclude", "label": "replaced time", "anyOf": ["for 2 pm", "for two pm"] }
+    ]
+  },
+  {
+    "id": "percentage-limit",
+    "source": "synthetic",
+    "appCategory": "worklog",
+    "spokenText": "Keep the error rate below zero point five percent.",
+    "referenceOutput": "Keep the error rate below 0.5 percent.",
+    "intendedFacts": ["The error-rate ceiling is 0.5 percent."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "upper bound", "anyOf": ["below 0 5 percent", "under 0 5 percent"] }
+    ]
+  },
+  {
+    "id": "owner-handoff",
+    "source": "synthetic",
+    "appCategory": "meeting_follow_up",
+    "spokenText": "Amina drafts the proposal, then Lee sends it to the client.",
+    "referenceOutput": "Amina will draft the proposal, then Lee will send it to the client.",
+    "intendedFacts": ["Amina drafts.", "Lee sends after Amina drafts."],
+    "criticalInvariants": [
+      { "kind": "ordered", "label": "handoff order", "terms": ["amina", "lee"] },
+      { "kind": "include", "label": "Lee's action", "anyOf": ["lee sends it to the client", "lee will send it to the client"] }
+    ]
+  },
+  {
+    "id": "api-identifier",
+    "source": "synthetic",
+    "appCategory": "code_editor",
+    "spokenText": "Rename fetch user I D to fetch user by I D, but keep the slash users endpoint.",
+    "referenceOutput": "Rename `fetchUserId` to `fetchUserById`, but keep the `/users` endpoint.",
+    "intendedFacts": ["Rename fetchUserId to fetchUserById.", "Keep /users."],
+    "dictionary": [
+      { "spokenForm": "fetch user I D", "replacement": "fetchUserId" },
+      { "spokenForm": "fetch user by I D", "replacement": "fetchUserById" }
+    ],
+    "criticalInvariants": [
+      { "kind": "include", "label": "old identifier", "anyOf": ["fetchuserid", "fetch user id"] },
+      { "kind": "include", "label": "new identifier", "anyOf": ["fetchuserbyid", "fetch user by id"] },
+      { "kind": "include", "label": "preserved endpoint", "anyOf": ["users endpoint"] },
+      { "kind": "literal_include", "label": "identifier spelling", "anyOf": ["fetchUserId"] },
+      { "kind": "literal_include", "label": "replacement identifier spelling", "anyOf": ["fetchUserById"] },
+      { "kind": "literal_include", "label": "endpoint syntax", "anyOf": ["/users"] }
+    ]
+  },
+  {
+    "id": "tentative-estimate",
+    "source": "synthetic",
+    "appCategory": "email",
+    "spokenText": "The migration will probably take around three hours.",
+    "referenceOutput": "The migration will probably take around three hours.",
+    "intendedFacts": ["Three hours is an estimate, not a promise."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "uncertainty", "anyOf": ["probably", "around", "approximately"] },
+      { "kind": "include", "label": "duration", "anyOf": ["3 hours", "three hours"] }
+    ]
+  },
+  {
+    "id": "partial-approval",
+    "source": "synthetic",
+    "appCategory": "messaging",
+    "spokenText": "I approve the copy, but I haven't approved the pricing.",
+    "referenceOutput": "I approve the copy, but I haven't approved the pricing.",
+    "intendedFacts": ["Copy is approved.", "Pricing is not approved."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "copy approval", "anyOf": ["approve the copy"] },
+      { "kind": "include", "label": "pricing rejection", "anyOf": ["haven't approved the pricing", "have not approved the pricing"] }
+    ]
+  },
+  {
+    "id": "range-not-single",
+    "source": "synthetic",
+    "appCategory": "notes",
+    "spokenText": "The estimate is between forty and sixty hours.",
+    "referenceOutput": "The estimate is between 40 and 60 hours.",
+    "intendedFacts": ["The estimate is a 40-to-60-hour range."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "range", "anyOf": ["between 40 and 60 hours", "40 to 60 hours"] }
+    ]
+  },
+  {
+    "id": "quoted-negation",
+    "source": "synthetic",
+    "appCategory": "ai_chat",
+    "spokenText": "Write exactly quote do not reset production quote.",
+    "referenceOutput": "Write exactly \"do not reset production\".",
+    "intendedFacts": ["The quoted text contains a prohibition.", "The speaker's request to write that text remains part of the message."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "quoted instruction content", "anyOf": ["do not reset production", "don't reset production"] },
+      { "kind": "include", "label": "surrounding request", "anyOf": ["write exactly"] },
+      { "kind": "literal_include", "label": "quoted instruction", "anyOf": ["“do not reset production”", "\"do not reset production\"", "“Do not reset production.”", "\"Do not reset production.\""] }
+    ]
+  },
+  {
+    "id": "dependency-order",
+    "source": "synthetic",
+    "appCategory": "worklog",
+    "spokenText": "After the backup finishes, rotate the credentials.",
+    "referenceOutput": "After the backup finishes, rotate the credentials.",
+    "intendedFacts": ["Credential rotation follows backup completion."],
+    "criticalInvariants": [
+      { "kind": "ordered", "label": "dependency", "terms": ["backup finishes", "rotate the credentials"] }
+    ]
+  },
+  {
+    "id": "exception-user",
+    "source": "synthetic",
+    "appCategory": "email",
+    "spokenText": "Archive every account except the service user.",
+    "referenceOutput": "Archive every account except the service user.",
+    "intendedFacts": ["The service user must not be archived."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "exception", "anyOf": ["except the service user", "excluding the service user"] }
+    ]
+  },
+  {
+    "id": "correction-owner",
+    "source": "synthetic",
+    "appCategory": "meeting_follow_up",
+    "spokenText": "Jordan owns the release notes, sorry, Casey owns the release notes.",
+    "referenceOutput": "Casey owns the release notes.",
+    "intendedFacts": ["Casey owns the release notes."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "corrected owner", "anyOf": ["casey owns the release notes"] },
+      { "kind": "exclude", "label": "replaced owner", "anyOf": ["jordan owns the release notes"] }
+    ]
+  },
+  {
+    "id": "abandoned-plan",
+    "source": "synthetic",
+    "appCategory": "worklog",
+    "spokenText": "We should ship Friday. Actually, I changed my mind, we should ship Monday, provided the rollback test passes. Priya owns the test, not Marcus.",
+    "referenceOutput": "We should ship Monday, provided the rollback test passes. Priya owns the test, not Marcus.",
+    "intendedFacts": ["Monday is the final intended ship day.", "Shipping requires the rollback test to pass.", "Priya owns the test; Marcus does not."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "final plan", "anyOf": ["ship monday"] },
+      { "kind": "include", "label": "ship condition", "anyOf": ["provided the rollback test passes", "if the rollback test passes"] },
+      { "kind": "include", "label": "test owner", "anyOf": ["priya owns the test"] },
+      { "kind": "include", "label": "excluded owner", "anyOf": ["not marcus"] },
+      { "kind": "exclude", "label": "abandoned day", "anyOf": ["friday"] }
+    ]
+  },
+  {
+    "id": "requested-plan-history",
+    "source": "synthetic",
+    "appCategory": "notes",
+    "spokenText": "Keep this history in the note: we originally planned Friday, then moved the release to Monday after legal asked for more time.",
+    "referenceOutput": "Keep this history in the note: we originally planned Friday, then moved the release to Monday after legal asked for more time.",
+    "intendedFacts": ["The note preserves the original Friday plan.", "The release moved to Monday because legal asked for more time."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "earlier plan", "anyOf": ["originally planned friday", "originally planned for friday"] },
+      { "kind": "include", "label": "revised day", "anyOf": ["release to monday"] },
+      { "kind": "include", "label": "reason", "anyOf": ["legal asked for more time"] }
+    ]
+  },
+  {
+    "id": "minimum-count",
+    "source": "synthetic",
+    "appCategory": "notes",
+    "spokenText": "We need at least three reviewers, not exactly three.",
+    "referenceOutput": "We need at least three reviewers, not exactly three.",
+    "intendedFacts": ["Three reviewers is the minimum, not a fixed count."],
+    "criticalInvariants": [
+      { "kind": "include", "label": "minimum", "anyOf": ["at least 3 reviewers", "at least three reviewers"] },
+      { "kind": "include", "label": "not exact", "anyOf": ["not exactly 3", "not exactly three"] }
+    ]
+  }
+]

@@ -1,0 +1,703 @@
+{
+  "schema": "plainsong-notes-fidelity-v1",
+  "description": "Round-four held-out synthetic meetings for the variant robustness eval. Written blind to the Rust verifier and to earlier held-out rounds; not used by Rust tests. Settings, names, organisations and products are invented.",
+  "meetings": [
+    {
+      "id": "heldout4-hackathon",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Wren",
+          "text": "Logistics: sixty hackers have registered and fourteen mentors have signed up. The food budget is 1,800 dollars, and separately we plan to rent thirty extra monitors."
+        },
+        {
+          "start": 11.0,
+          "end": 20.0,
+          "speaker": "Dario",
+          "text": "We agreed to reserve the atrium for the closing demos on the 22nd as long as the fire marshal signs off, and I'll order the name badges from Ellis by Monday."
+        },
+        {
+          "start": 21.0,
+          "end": 27.0,
+          "speaker": "Mei",
+          "text": "Ellis already emailed the badge proof this morning, so that part is done."
+        },
+        {
+          "start": 28.0,
+          "end": 36.0,
+          "speaker": "Wren",
+          "text": "Sponsor round-up: Tobias told me he called both sponsors yesterday, and they have renewed."
+        },
+        {
+          "start": 37.0,
+          "end": 45.0,
+          "speaker": "Dario",
+          "text": "Can I ask whether we should livestream the demos? That's only a question for now, not a task for anyone."
+        },
+        {
+          "start": 46.0,
+          "end": 52.0,
+          "speaker": "Mei",
+          "text": "I'll draft the judging rubric by Wednesday."
+        },
+        {
+          "start": 53.0,
+          "end": 61.0,
+          "speaker": "Wren",
+          "text": "Logistics: we decided not to rent another building. As I said, the atrium should be enough."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "reserve",
+            "atrium",
+            "as long as",
+            "fire",
+            "marshal"
+          ],
+          "owner": null,
+          "due": [
+            "the 22nd",
+            "the twenty-second"
+          ]
+        },
+        {
+          "task": [
+            "order",
+            "name",
+            "badges"
+          ],
+          "owner": "Dario",
+          "due": [
+            "Monday"
+          ]
+        },
+        {
+          "task": [
+            "draft",
+            "judging",
+            "rubric"
+          ],
+          "owner": "Mei",
+          "due": [
+            "Wednesday"
+          ]
+        }
+      ],
+      "names": [
+        "Wren",
+        "Dario",
+        "Mei",
+        "Tobias"
+      ],
+      "numbers": [
+        [
+          "sixty",
+          "60"
+        ],
+        [
+          "fourteen",
+          "14"
+        ],
+        [
+          "1,800",
+          "1800"
+        ],
+        [
+          "thirty",
+          "30"
+        ],
+        [
+          "22nd",
+          "twenty-second"
+        ]
+      ]
+    },
+    {
+      "id": "heldout4-newsletter",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Odette",
+          "text": "Editor's desk: we'll send the autumn issue to the printer on the 9th unless the council notice arrives late."
+        },
+        {
+          "start": 10.0,
+          "end": 17.0,
+          "speaker": "Linus",
+          "text": "Let me correct that: the printer moved our slot, so we send it on the 11th."
+        },
+        {
+          "start": 18.0,
+          "end": 28.0,
+          "speaker": "Fen",
+          "text": "Ads: a quarter-page ad costs forty pounds, or twenty-five pounds for members of the traders' association. The full page stays at ninety pounds."
+        },
+        {
+          "start": 29.0,
+          "end": 38.0,
+          "speaker": "Linus",
+          "text": "I won't publish the housing survey results until Fen has checked the numbers with the residents' group."
+        },
+        {
+          "start": 39.0,
+          "end": 45.0,
+          "speaker": "Odette",
+          "text": "Ads: the garage renewal is already paid."
+        },
+        {
+          "start": 46.0,
+          "end": 54.0,
+          "speaker": "Fen",
+          "text": "I'll collect the remaining ad payments by Friday, provided that Odette sends me the invoice list."
+        },
+        {
+          "start": 55.0,
+          "end": 61.0,
+          "speaker": "Odette",
+          "text": "Fine. We decided not to add a puzzle page this issue."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "send",
+            "autumn",
+            "issue",
+            "printer",
+            "unless",
+            "council",
+            "notice"
+          ],
+          "owner": null,
+          "due": [
+            "the 11th",
+            "the eleventh"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "publish",
+            "survey",
+            "results",
+            "until",
+            "checked"
+          ],
+          "owner": "Linus",
+          "due": []
+        },
+        {
+          "task": [
+            "collect",
+            "ad",
+            "payments",
+            "provided",
+            "sends"
+          ],
+          "owner": "Fen",
+          "due": [
+            "Friday"
+          ]
+        }
+      ],
+      "names": [
+        "Odette",
+        "Linus",
+        "Fen"
+      ],
+      "numbers": [
+        [
+          "11th",
+          "eleventh"
+        ],
+        [
+          "forty",
+          "40"
+        ],
+        [
+          "twenty-five",
+          "25"
+        ],
+        [
+          "ninety",
+          "90"
+        ]
+      ]
+    },
+    {
+      "id": "heldout4-moving-crew",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Bram",
+          "text": "Dispatch review: I noticed that Dexter, our scheduling app, double-booked two crews on the Hartley Street job."
+        },
+        {
+          "start": 11.0,
+          "end": 20.0,
+          "speaker": "Calla",
+          "text": "I'll move the Hartley Street job to Thursday. Actually, make that Friday, because the big van is in the shop on Thursday."
+        },
+        {
+          "start": 21.0,
+          "end": 30.0,
+          "speaker": "Joss",
+          "text": "Boxes: large boxes are four pounds each, and three pounds each only on orders of fifty or more."
+        },
+        {
+          "start": 31.0,
+          "end": 39.0,
+          "speaker": "Bram",
+          "text": "We agreed to take on the piano move on June 9th only if Joss finds another trained lifter."
+        },
+        {
+          "start": 40.0,
+          "end": 46.0,
+          "speaker": "Joss",
+          "text": "Nils told me he returned the rented dollies yesterday."
+        },
+        {
+          "start": 47.0,
+          "end": 54.0,
+          "speaker": "Calla",
+          "text": "Once we cancel Dexter, I'll switch dispatch to the shared calendar."
+        },
+        {
+          "start": 55.0,
+          "end": 61.0,
+          "speaker": "Bram",
+          "text": "Boxes: the supplier invoice is settled."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "move",
+            "hartley",
+            "street",
+            "job"
+          ],
+          "owner": "Calla",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "take",
+            "piano",
+            "move",
+            "only if",
+            "finds",
+            "lifter"
+          ],
+          "owner": null,
+          "due": [
+            "June 9",
+            "June 9th",
+            "June ninth"
+          ]
+        },
+        {
+          "task": [
+            "switch",
+            "dispatch",
+            "calendar",
+            "once",
+            "cancel",
+            "dexter"
+          ],
+          "owner": "Calla",
+          "due": []
+        }
+      ],
+      "names": [
+        "Bram",
+        "Calla",
+        "Joss",
+        "Nils"
+      ],
+      "numbers": [
+        [
+          "two",
+          "2"
+        ],
+        [
+          "four",
+          "4"
+        ],
+        [
+          "three",
+          "3"
+        ],
+        [
+          "fifty",
+          "50"
+        ],
+        [
+          "June 9",
+          "June 9th",
+          "June ninth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout4-vet-rota",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Imogen",
+          "text": "Rota check: I can confirm that Rafe will cover the weekend emergency line starting Saturday until Tullia returns from leave."
+        },
+        {
+          "start": 11.0,
+          "end": 18.0,
+          "speaker": "Rafe",
+          "text": "I won't sign off the new drug order until the stock count is finished."
+        },
+        {
+          "start": 19.0,
+          "end": 28.0,
+          "speaker": "Tullia",
+          "text": "Could I suggest we move the dental clinic to Tuesdays? It's just a suggestion, nobody needs to act on it yet."
+        },
+        {
+          "start": 29.0,
+          "end": 36.0,
+          "speaker": "Kofi",
+          "text": "I'll run the stock count on the 15th, after the vaccine delivery arrives."
+        },
+        {
+          "start": 37.0,
+          "end": 44.0,
+          "speaker": "Imogen",
+          "text": "Rota check: we decided not to close the clinic on bank holidays."
+        },
+        {
+          "start": 45.0,
+          "end": 53.0,
+          "speaker": "Tullia",
+          "text": "Kofi, the delivery got pushed back, so the count has to be on the 17th, not the 15th."
+        },
+        {
+          "start": 54.0,
+          "end": 58.0,
+          "speaker": "Kofi",
+          "text": "Right, the 17th it is."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "cover",
+            "emergency",
+            "line",
+            "until",
+            "returns"
+          ],
+          "owner": "Rafe",
+          "due": [
+            "Saturday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "sign",
+            "drug",
+            "order",
+            "until",
+            "stock",
+            "count"
+          ],
+          "owner": "Rafe",
+          "due": []
+        },
+        {
+          "task": [
+            "run",
+            "stock",
+            "count",
+            "after",
+            "delivery"
+          ],
+          "owner": "Kofi",
+          "due": [
+            "the 17th",
+            "the seventeenth"
+          ]
+        }
+      ],
+      "names": [
+        "Imogen",
+        "Rafe",
+        "Tullia",
+        "Kofi"
+      ],
+      "numbers": [
+        [
+          "17th",
+          "seventeenth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout4-garden-board",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Hester",
+          "text": "Treasurer's report: we have twelve raised beds and thirty-one members, and the tool budget for spring is 650 pounds."
+        },
+        {
+          "start": 11.0,
+          "end": 19.0,
+          "speaker": "Amos",
+          "text": "Plot fees stay at twenty pounds a year, but drop to ten pounds for anyone over seventy."
+        },
+        {
+          "start": 20.0,
+          "end": 29.0,
+          "speaker": "Yusra",
+          "text": "We agreed to buy the new compost bins if the council grant comes through, and I'll measure the shed wall on Saturday."
+        },
+        {
+          "start": 30.0,
+          "end": 36.0,
+          "speaker": "Hester",
+          "text": "Marguerite told us she already repaired the leaking water butt."
+        },
+        {
+          "start": 37.0,
+          "end": 45.0,
+          "speaker": "Amos",
+          "text": "I'll post the work-day notice on March 3, once Hester confirms the date with the allotment office."
+        },
+        {
+          "start": 46.0,
+          "end": 52.0,
+          "speaker": "Hester",
+          "text": "Treasurer's report: the insurance renewal is complete."
+        },
+        {
+          "start": 53.0,
+          "end": 58.0,
+          "speaker": "Yusra",
+          "text": "I'm not going to order more woodchip this season."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "buy",
+            "compost",
+            "bins",
+            "if",
+            "council",
+            "grant"
+          ],
+          "owner": null,
+          "due": []
+        },
+        {
+          "task": [
+            "measure",
+            "shed",
+            "wall"
+          ],
+          "owner": "Yusra",
+          "due": [
+            "Saturday"
+          ]
+        },
+        {
+          "task": [
+            "post",
+            "work-day",
+            "notice",
+            "once",
+            "confirms"
+          ],
+          "owner": "Amos",
+          "due": [
+            "March 3",
+            "March 3rd",
+            "March third"
+          ]
+        }
+      ],
+      "names": [
+        "Hester",
+        "Amos",
+        "Yusra",
+        "Marguerite"
+      ],
+      "numbers": [
+        [
+          "twelve",
+          "12"
+        ],
+        [
+          "thirty-one",
+          "31"
+        ],
+        [
+          "650"
+        ],
+        [
+          "twenty",
+          "20"
+        ],
+        [
+          "ten",
+          "10"
+        ],
+        [
+          "seventy",
+          "70"
+        ],
+        [
+          "March 3",
+          "March 3rd",
+          "March third"
+        ]
+      ]
+    },
+    {
+      "id": "heldout4-swim-gala",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Saoirse",
+          "text": "Gala planning: I can confirm the pool is booked, and the Morris timing system came back from repair yesterday."
+        },
+        {
+          "start": 11.0,
+          "end": 19.0,
+          "speaker": "Benedikt",
+          "text": "I'll print the heat sheets on Thursday, as long as Morris exports the entry list cleanly."
+        },
+        {
+          "start": 20.0,
+          "end": 28.0,
+          "speaker": "Lowri",
+          "text": "Should we ask the county club to lend us officials? I'm only raising it, I'm not volunteering anyone."
+        },
+        {
+          "start": 29.0,
+          "end": 36.0,
+          "speaker": "Kemal",
+          "text": "I'll recruit six timekeepers by the 19th. Wait, not the 19th, the 21st."
+        },
+        {
+          "start": 37.0,
+          "end": 46.0,
+          "speaker": "Saoirse",
+          "text": "Gala planning: entry is eight pounds per swimmer, or five pounds per swimmer for club members, and spectators get in free."
+        },
+        {
+          "start": 47.0,
+          "end": 55.0,
+          "speaker": "Benedikt",
+          "text": "We decided not to sell programmes this year, and I won't order medals until the entry count is final."
+        },
+        {
+          "start": 56.0,
+          "end": 64.0,
+          "speaker": "Lowri",
+          "text": "I'll send the results to the league secretary by the 27th, after Benedikt has checked them."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "print",
+            "heat",
+            "sheets",
+            "as long as",
+            "morris",
+            "exports"
+          ],
+          "owner": "Benedikt",
+          "due": [
+            "Thursday"
+          ]
+        },
+        {
+          "task": [
+            "recruit",
+            "timekeepers"
+          ],
+          "owner": "Kemal",
+          "due": [
+            "the 21st",
+            "the twenty-first"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "order",
+            "medals",
+            "until",
+            "entry",
+            "count"
+          ],
+          "owner": "Benedikt",
+          "due": []
+        },
+        {
+          "task": [
+            "send",
+            "results",
+            "league",
+            "secretary",
+            "after",
+            "checked"
+          ],
+          "owner": "Lowri",
+          "due": [
+            "the 27th",
+            "the twenty-seventh"
+          ]
+        }
+      ],
+      "names": [
+        "Saoirse",
+        "Benedikt",
+        "Lowri",
+        "Kemal"
+      ],
+      "numbers": [
+        [
+          "six",
+          "6"
+        ],
+        [
+          "21st",
+          "twenty-first"
+        ],
+        [
+          "eight",
+          "8"
+        ],
+        [
+          "five",
+          "5"
+        ],
+        [
+          "27th",
+          "twenty-seventh"
+        ]
+      ]
+    }
+  ]
+}

@@ -1,0 +1,980 @@
+{
+  "schema": "plainsong-notes-fidelity-v1",
+  "description": "Round-six held-out synthetic meetings for the variant robustness eval, written blind to earlier rounds and to the Rust implementation. Settings are a dental practice rota, a podcast production, a school trip, a bike-repair co-op, a translation agency and a community radio station. They cover conditional and negated commitments, negated group decisions, spoken headings, supplier and product names that look like people or places, restricted prices, quantities restated mid-meeting, ownership corrections, date corrections within a sentence and by another speaker with a confirmation, multi-word dates, questions and ideas that are not tasks, completed statuses and reported speech.",
+  "meetings": [
+    {
+      "id": "heldout6-dental-rota",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Wilhelmina",
+          "text": "Rota. We agreed to move the Saturday clinic to alternate weekends from October the ninth, but only if Cosima can find a second hygienist."
+        },
+        {
+          "start": 12.0,
+          "end": 21.0,
+          "speaker": "Ravi",
+          "text": "Rota: I'll cover the late shift on Thursday, no, Friday, unless the lab delivers the crowns early."
+        },
+        {
+          "start": 22.0,
+          "end": 33.0,
+          "speaker": "Cosima",
+          "text": "Supplies. Our supplier, Halvorsen Dental, quoted 45 pounds a box for the gloves, or 38 pounds a box for orders of 20 boxes or more."
+        },
+        {
+          "start": 34.0,
+          "end": 42.0,
+          "speaker": "Dag",
+          "text": "I'll order the new sterilizer from Halvorsen by the 26th, I mean the 28th."
+        },
+        {
+          "start": 43.0,
+          "end": 48.0,
+          "speaker": "Wilhelmina",
+          "text": "Dag will book the X-ray engineer for the 12th."
+        },
+        {
+          "start": 49.0,
+          "end": 58.0,
+          "speaker": "Dag",
+          "text": "Ravi already has the engineer's number, so Ravi should book it. Does anyone want to look at a second compressor? That's only a question, not a task."
+        },
+        {
+          "start": 59.0,
+          "end": 63.0,
+          "speaker": "Ravi",
+          "text": "Fine, I'll book the X-ray engineer."
+        },
+        {
+          "start": 64.0,
+          "end": 71.0,
+          "speaker": "Cosima",
+          "text": "Not the 12th, the 19th. The engineer is on leave that week."
+        },
+        {
+          "start": 72.0,
+          "end": 75.0,
+          "speaker": "Wilhelmina",
+          "text": "Fine, the 19th then."
+        },
+        {
+          "start": 76.0,
+          "end": 92.0,
+          "speaker": "Cosima",
+          "text": "Rota. Ines, the new receptionist, told me the patient reminder texts are already fixed, and the hygiene audit was approved last week. We decided not to extend the opening hours this winter, and I won't change the lunch cover until Wilhelmina signs off the rota."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "move",
+            "saturday",
+            "clinic",
+            "alternate",
+            "weekends",
+            "only if",
+            "cosima",
+            "find",
+            "hygienist"
+          ],
+          "owner": null,
+          "due": [
+            "October the ninth",
+            "October 9",
+            "October 9th"
+          ]
+        },
+        {
+          "task": [
+            "cover",
+            "late",
+            "shift",
+            "unless",
+            "lab",
+            "delivers",
+            "crowns"
+          ],
+          "owner": "Ravi",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "order",
+            "new",
+            "sterilizer"
+          ],
+          "owner": "Dag",
+          "due": [
+            "the 28th",
+            "the twenty-eighth"
+          ]
+        },
+        {
+          "task": [
+            "book",
+            "x-ray",
+            "engineer"
+          ],
+          "owner": "Ravi",
+          "due": [
+            "the 19th",
+            "the nineteenth"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "change",
+            "lunch",
+            "cover",
+            "until",
+            "wilhelmina",
+            "signs"
+          ],
+          "owner": "Cosima",
+          "due": []
+        }
+      ],
+      "names": [
+        "Wilhelmina",
+        "Ravi",
+        "Cosima",
+        "Dag",
+        "Ines"
+      ],
+      "numbers": [
+        [
+          "45"
+        ],
+        [
+          "38"
+        ],
+        [
+          "20",
+          "twenty"
+        ],
+        [
+          "October the ninth",
+          "October 9",
+          "October 9th"
+        ],
+        [
+          "28th",
+          "twenty-eighth"
+        ],
+        [
+          "19th",
+          "nineteenth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout6-podcast-production",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Lorcan",
+          "text": "Episodes. We decided to publish the new season on the 14th of November, provided that the sponsor reads are recorded by then."
+        },
+        {
+          "start": 12.0,
+          "end": 21.0,
+          "speaker": "Marisol",
+          "text": "Guests: I'll email the three guests about their interview slots by Tuesday, or rather Wednesday."
+        },
+        {
+          "start": 22.0,
+          "end": 33.0,
+          "speaker": "Thaddeus",
+          "text": "Budget. Mixing costs 120 pounds an episode, or 90 pounds an episode if we book ten episodes in one go."
+        },
+        {
+          "start": 34.0,
+          "end": 42.0,
+          "speaker": "Yevgenia",
+          "text": "Hosting. Dorrit from the hosting company told me the new feed was approved yesterday."
+        },
+        {
+          "start": 43.0,
+          "end": 52.0,
+          "speaker": "Yevgenia",
+          "text": "I'll proofread the transcripts by the 10th, only if the audio files are in the shared folder."
+        },
+        {
+          "start": 53.0,
+          "end": 59.0,
+          "speaker": "Marisol",
+          "text": "Lorcan will send the trailer to the network by the 12th."
+        },
+        {
+          "start": 60.0,
+          "end": 67.0,
+          "speaker": "Thaddeus",
+          "text": "Sorry, their team is away that week, so make it the 19th."
+        },
+        {
+          "start": 68.0,
+          "end": 80.0,
+          "speaker": "Lorcan",
+          "text": "Okay, the 19th works for me. And I won't pay the cover artist's invoice until the final artwork is approved."
+        },
+        {
+          "start": 81.0,
+          "end": 92.0,
+          "speaker": "Yevgenia",
+          "text": "We agreed not to add a second weekly episode this season. Marisol said the guest booking spreadsheet is already done."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "publish",
+            "new",
+            "season",
+            "provided",
+            "sponsor",
+            "reads"
+          ],
+          "owner": null,
+          "due": [
+            "the 14th of November",
+            "November 14",
+            "November 14th"
+          ]
+        },
+        {
+          "task": [
+            "email",
+            "guests",
+            "interview",
+            "slots"
+          ],
+          "owner": "Marisol",
+          "due": [
+            "Wednesday"
+          ]
+        },
+        {
+          "task": [
+            "proofread",
+            "transcripts",
+            "only if",
+            "audio",
+            "files",
+            "shared",
+            "folder"
+          ],
+          "owner": "Yevgenia",
+          "due": [
+            "the 10th",
+            "the tenth"
+          ]
+        },
+        {
+          "task": [
+            "send",
+            "trailer",
+            "network"
+          ],
+          "owner": "Lorcan",
+          "due": [
+            "the 19th",
+            "the nineteenth"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "pay",
+            "cover",
+            "artist's",
+            "invoice",
+            "until",
+            "final",
+            "artwork"
+          ],
+          "owner": "Lorcan",
+          "due": []
+        }
+      ],
+      "names": [
+        "Lorcan",
+        "Marisol",
+        "Thaddeus",
+        "Yevgenia",
+        "Dorrit"
+      ],
+      "numbers": [
+        [
+          "14th of November",
+          "November 14"
+        ],
+        [
+          "3",
+          "three"
+        ],
+        [
+          "120"
+        ],
+        [
+          "90"
+        ],
+        [
+          "10",
+          "ten"
+        ],
+        [
+          "10th",
+          "tenth"
+        ],
+        [
+          "19th",
+          "nineteenth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout6-school-trip",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Gwendolyn",
+          "text": "Trip planning. We decided to take the geography group to the Marlow Science Centre on the 22nd of October, as long as at least 40 permission slips come back."
+        },
+        {
+          "start": 12.0,
+          "end": 20.0,
+          "speaker": "Osei",
+          "text": "Transport: we need 3 coaches for the pupils. Actually, make that 4, the sixth form added a class."
+        },
+        {
+          "start": 21.0,
+          "end": 31.0,
+          "speaker": "Rosalind",
+          "text": "Costs. The trip is 12 pounds a pupil, or 8 pounds a pupil for pupils who get free school meals."
+        },
+        {
+          "start": 32.0,
+          "end": 44.0,
+          "speaker": "Anselm",
+          "text": "I'll book the coaches by the 12th, or rather the 14th, once the headteacher signs the risk assessment."
+        },
+        {
+          "start": 45.0,
+          "end": 52.0,
+          "speaker": "Gwendolyn",
+          "text": "Fitzroy from the Marlow Centre told me the workshop room is booked until noon."
+        },
+        {
+          "start": 53.0,
+          "end": 61.0,
+          "speaker": "Osei",
+          "text": "I won't chase the parents for payment until Rosalind has sent the reminder letter."
+        },
+        {
+          "start": 62.0,
+          "end": 74.0,
+          "speaker": "Rosalind",
+          "text": "I'll collect the permission slips from the office on Friday. Anselm, could you ask whether the museum cafe takes group bookings? That's only a question, not a task."
+        },
+        {
+          "start": 75.0,
+          "end": 82.0,
+          "speaker": "Anselm",
+          "text": "The risk assessment draft is already done, and the parent helper list was approved on Monday."
+        },
+        {
+          "start": 83.0,
+          "end": 94.0,
+          "speaker": "Gwendolyn",
+          "text": "We agreed not to run a second trip this term, and Osei told me the minibus is under repair."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "take",
+            "geography",
+            "group",
+            "as long as",
+            "permission",
+            "slips"
+          ],
+          "owner": null,
+          "due": [
+            "the 22nd of October",
+            "October 22",
+            "October 22nd"
+          ]
+        },
+        {
+          "task": [
+            "book",
+            "coaches",
+            "once",
+            "headteacher",
+            "signs",
+            "risk",
+            "assessment"
+          ],
+          "owner": "Anselm",
+          "due": [
+            "the 14th",
+            "the fourteenth"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "chase",
+            "parents",
+            "payment",
+            "until",
+            "rosalind",
+            "sent",
+            "reminder"
+          ],
+          "owner": "Osei",
+          "due": []
+        },
+        {
+          "task": [
+            "collect",
+            "permission",
+            "slips",
+            "office"
+          ],
+          "owner": "Rosalind",
+          "due": [
+            "Friday"
+          ]
+        }
+      ],
+      "names": [
+        "Gwendolyn",
+        "Osei",
+        "Rosalind",
+        "Anselm",
+        "Fitzroy"
+      ],
+      "numbers": [
+        [
+          "22nd of October",
+          "October 22"
+        ],
+        [
+          "40",
+          "forty"
+        ],
+        [
+          "4",
+          "four"
+        ],
+        [
+          "12",
+          "twelve"
+        ],
+        [
+          "8",
+          "eight"
+        ],
+        [
+          "14th",
+          "fourteenth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout6-bike-coop",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Isidore",
+          "text": "Workshop. We agreed to open the evening drop-in sessions from the sixth of November, provided that two volunteers sign up for each night."
+        },
+        {
+          "start": 12.0,
+          "end": 24.0,
+          "speaker": "Calla",
+          "text": "I'll order the spare inner tubes from Kettering Cycles by Tuesday, but I won't pay the invoice until Magnus checks the stock count."
+        },
+        {
+          "start": 25.0,
+          "end": 37.0,
+          "speaker": "Magnus",
+          "text": "Prices. A basic service is 25 pounds, or 15 pounds for members, and a full overhaul is 60 pounds, or 40 pounds for members."
+        },
+        {
+          "start": 38.0,
+          "end": 46.0,
+          "speaker": "Bettina",
+          "text": "Stands: the repair stands arrived last week and the wall rack is already fitted."
+        },
+        {
+          "start": 47.0,
+          "end": 55.0,
+          "speaker": "Isidore",
+          "text": "Does anyone want to look at selling helmets? That's a question for next month, not a task."
+        },
+        {
+          "start": 56.0,
+          "end": 63.0,
+          "speaker": "Magnus",
+          "text": "I'll run the market pop-up on the 8th."
+        },
+        {
+          "start": 64.0,
+          "end": 72.0,
+          "speaker": "Bettina",
+          "text": "Not the 8th, the 15th. The market organisers moved it."
+        },
+        {
+          "start": 73.0,
+          "end": 77.0,
+          "speaker": "Magnus",
+          "text": "Fine, the 15th then."
+        },
+        {
+          "start": 78.0,
+          "end": 91.0,
+          "speaker": "Bettina",
+          "text": "Workshop, last item. We decided not to sell second-hand bikes under the co-op name, and Tamar from the council told me the repair grant was approved."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "open",
+            "evening",
+            "drop-in",
+            "sessions",
+            "provided",
+            "two",
+            "volunteers",
+            "sign"
+          ],
+          "owner": null,
+          "due": [
+            "the sixth of November",
+            "November 6",
+            "November 6th"
+          ]
+        },
+        {
+          "task": [
+            "order",
+            "spare",
+            "inner",
+            "tubes"
+          ],
+          "owner": "Calla",
+          "due": [
+            "Tuesday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "pay",
+            "invoice",
+            "until",
+            "magnus",
+            "checks",
+            "stock",
+            "count"
+          ],
+          "owner": "Calla",
+          "due": []
+        },
+        {
+          "task": [
+            "run",
+            "market",
+            "pop-up"
+          ],
+          "owner": "Magnus",
+          "due": [
+            "the 15th",
+            "the fifteenth"
+          ]
+        }
+      ],
+      "names": [
+        "Isidore",
+        "Calla",
+        "Magnus",
+        "Bettina",
+        "Tamar"
+      ],
+      "numbers": [
+        [
+          "November 6",
+          "sixth of November"
+        ],
+        [
+          "2",
+          "two"
+        ],
+        [
+          "25"
+        ],
+        [
+          "15"
+        ],
+        [
+          "60"
+        ],
+        [
+          "40"
+        ],
+        [
+          "15th",
+          "fifteenth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout6-translation-agency",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Zuzana",
+          "text": "Projects. We decided to deliver the Brightwell manual in German and Polish on the 4th of December, once the client sends the final diagrams."
+        },
+        {
+          "start": 12.0,
+          "end": 24.0,
+          "speaker": "Ambrose",
+          "text": "I'll finish the Polish glossary by Wednesday, and I won't start the review until Lindiwe uploads the style guide."
+        },
+        {
+          "start": 25.0,
+          "end": 35.0,
+          "speaker": "Lindiwe",
+          "text": "Rates. Translation is 14 cents a word, or 11 cents a word for repeat clients."
+        },
+        {
+          "start": 36.0,
+          "end": 41.0,
+          "speaker": "Zuzana",
+          "text": "Cormac will upload the style guide by Tuesday."
+        },
+        {
+          "start": 42.0,
+          "end": 54.0,
+          "speaker": "Cormac",
+          "text": "No, that's Lindiwe's file, so Lindiwe should upload it. I'll send Brightwell the revised quote by the 2nd of December, because the client asked for it in writing."
+        },
+        {
+          "start": 55.0,
+          "end": 66.0,
+          "speaker": "Lindiwe",
+          "text": "Fine, I'll upload it by Tuesday. Should we look at a second translation tool? That's a question, not a task."
+        },
+        {
+          "start": 67.0,
+          "end": 76.0,
+          "speaker": "Ambrose",
+          "text": "Quality: the Hartley translation memory was already migrated, and the legal review was approved last week."
+        },
+        {
+          "start": 77.0,
+          "end": 84.0,
+          "speaker": "Zuzana",
+          "text": "Dalia at Brightwell told me the invoice has been paid in full."
+        },
+        {
+          "start": 85.0,
+          "end": 97.0,
+          "speaker": "Cormac",
+          "text": "Projects, last item. We agreed not to take rush jobs at weekends, and I won't accept the Kestrel contract until Zuzana approves the rates."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "deliver",
+            "brightwell",
+            "manual",
+            "once",
+            "client",
+            "sends",
+            "final",
+            "diagrams"
+          ],
+          "owner": null,
+          "due": [
+            "the 4th of December",
+            "December 4",
+            "December 4th"
+          ]
+        },
+        {
+          "task": [
+            "finish",
+            "polish",
+            "glossary"
+          ],
+          "owner": "Ambrose",
+          "due": [
+            "Wednesday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "start",
+            "review",
+            "until",
+            "lindiwe",
+            "uploads",
+            "style",
+            "guide"
+          ],
+          "owner": "Ambrose",
+          "due": []
+        },
+        {
+          "task": [
+            "upload",
+            "style",
+            "guide"
+          ],
+          "owner": "Lindiwe",
+          "due": [
+            "Tuesday"
+          ]
+        },
+        {
+          "task": [
+            "send",
+            "brightwell",
+            "revised",
+            "quote"
+          ],
+          "owner": "Cormac",
+          "due": [
+            "the 2nd of December",
+            "December 2",
+            "December 2nd"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "accept",
+            "kestrel",
+            "contract",
+            "until",
+            "zuzana",
+            "approves",
+            "rates"
+          ],
+          "owner": "Cormac",
+          "due": []
+        }
+      ],
+      "names": [
+        "Zuzana",
+        "Ambrose",
+        "Lindiwe",
+        "Cormac",
+        "Dalia"
+      ],
+      "numbers": [
+        [
+          "4th of December",
+          "December 4"
+        ],
+        [
+          "14",
+          "fourteen"
+        ],
+        [
+          "11",
+          "eleven"
+        ],
+        [
+          "2nd of December",
+          "December 2"
+        ]
+      ]
+    },
+    {
+      "id": "heldout6-community-radio",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 12.0,
+          "speaker": "Octavia",
+          "text": "Schedule. We agreed to move the folk hour to the evening slot from the 3rd of May, sorry, I mean the 5th of May, as long as the studio is free."
+        },
+        {
+          "start": 13.0,
+          "end": 23.0,
+          "speaker": "Jarek",
+          "text": "Fundraising: I'll email the local businesses about sponsorship by Friday, unless Octavia has written to them already."
+        },
+        {
+          "start": 24.0,
+          "end": 35.0,
+          "speaker": "Dhruv",
+          "text": "Membership. Membership is 20 pounds a year, or 12 pounds for students and pensioners, and the station insurance costs 640 pounds."
+        },
+        {
+          "start": 36.0,
+          "end": 47.0,
+          "speaker": "Leona",
+          "text": "Jingle: I'll record the new station jingle at the church hall on Saturday, only if the choir has at least 12 singers."
+        },
+        {
+          "start": 48.0,
+          "end": 55.0,
+          "speaker": "Octavia",
+          "text": "Jarek told me the council approved our broadcast licence renewal."
+        },
+        {
+          "start": 56.0,
+          "end": 65.0,
+          "speaker": "Dhruv",
+          "text": "I'll fix the transmitter aerial by the 30th unless it rains."
+        },
+        {
+          "start": 66.0,
+          "end": 74.0,
+          "speaker": "Octavia",
+          "text": "Studio: the new mixing desk was delivered on Monday and the old desk is already sold."
+        },
+        {
+          "start": 75.0,
+          "end": 90.0,
+          "speaker": "Leona",
+          "text": "Could we ask the library about a weekend slot? That's not a task, just an idea. We decided not to air the late-night phone-in this season, and I won't edit the jingle until Dhruv sends the final lyrics."
+        },
+        {
+          "start": 91.0,
+          "end": 100.0,
+          "speaker": "Jarek",
+          "text": "The lottery grant application was approved last week, and the van is already back from the garage."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "move",
+            "folk",
+            "hour",
+            "evening",
+            "slot",
+            "as long as",
+            "studio",
+            "free"
+          ],
+          "owner": null,
+          "due": [
+            "the 5th of May",
+            "May 5",
+            "May 5th"
+          ]
+        },
+        {
+          "task": [
+            "email",
+            "local",
+            "businesses",
+            "sponsorship",
+            "unless",
+            "octavia",
+            "written"
+          ],
+          "owner": "Jarek",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "record",
+            "station",
+            "jingle",
+            "only if",
+            "choir",
+            "12",
+            "singers"
+          ],
+          "owner": "Leona",
+          "due": [
+            "Saturday"
+          ]
+        },
+        {
+          "task": [
+            "fix",
+            "transmitter",
+            "aerial",
+            "unless",
+            "rains"
+          ],
+          "owner": "Dhruv",
+          "due": [
+            "the 30th",
+            "the thirtieth"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "edit",
+            "jingle",
+            "until",
+            "dhruv",
+            "sends",
+            "final",
+            "lyrics"
+          ],
+          "owner": "Leona",
+          "due": []
+        }
+      ],
+      "names": [
+        "Octavia",
+        "Jarek",
+        "Dhruv",
+        "Leona"
+      ],
+      "numbers": [
+        [
+          "5th of May",
+          "May 5"
+        ],
+        [
+          "20",
+          "twenty"
+        ],
+        [
+          "12",
+          "twelve"
+        ],
+        [
+          "640"
+        ],
+        [
+          "12",
+          "twelve"
+        ],
+        [
+          "30th",
+          "thirtieth"
+        ]
+      ]
+    }
+  ]
+}

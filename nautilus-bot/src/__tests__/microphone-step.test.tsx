@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { updateSettings } from "@/lib/backend/settings";
 import { MicrophoneStep } from "@/components/onboarding/microphone-step";
 
 type TestSettings = {
@@ -14,8 +15,10 @@ let currentSettings: TestSettings;
 
 vi.mock("@/lib/backend/settings", () => ({
   getSettings: vi.fn(async () => structuredClone(currentSettings)),
-  saveSettings: vi.fn(async (next: TestSettings) => {
-    currentSettings = structuredClone(next);
+  updateSettings: vi.fn(async (mutate: (settings: TestSettings) => void) => {
+    const next = structuredClone(currentSettings);
+    mutate(next);
+    currentSettings = next;
   }),
 }));
 
@@ -96,15 +99,63 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // Unmount while the animation-frame shim still exists so the hook can cancel it.
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
+async function beginMicrophoneTest() {
+  const button = await screen.findByRole("button", { name: "Test microphone" });
+  await waitFor(() => expect(button).toBeEnabled());
+  fireEvent.click(button);
+}
+
 describe("MicrophoneStep", () => {
+  it("hides diagnostic details when saving a microphone fails and keeps Retry available", async () => {
+    render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    const picker = await screen.findByLabelText("Microphone");
+    await waitFor(() => expect(picker).toBeEnabled());
+    vi.mocked(updateSettings).mockRejectedValueOnce(new Error(
+      "Error invoking remote method 'sidecar:invoke': Error: Failed to open /Users/test/Library/Application Support/Plainsong/settings.json",
+    ));
+    fireEvent.click(picker);
+    fireEvent.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Podcast Mic" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't save your microphone choice. Try again.");
+    expect(screen.getByRole("alert")).not.toHaveTextContent(/sidecar|\/Users|settings\.json/);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(picker).toHaveTextContent("System default");
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it("can choose the microphone before starting any audio preview", async () => {
+    enumerateDevices.mockResolvedValue([{ deviceId: "browser-podcast", kind: "audioinput", label: "Podcast Mic (USB)" }]);
+    render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    const picker = await screen.findByLabelText("Microphone");
+    await waitFor(() => expect(picker).toBeEnabled());
+    fireEvent.click(picker);
+    fireEvent.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Podcast Mic" }));
+    await waitFor(() => expect(currentSettings.audio.preferredInputDevice?.deviceId).toBe("usb-podcast-mic"));
+    expect(getUserMedia).not.toHaveBeenCalled();
+    await beginMicrophoneTest();
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledWith({ audio: { deviceId: { exact: "browser-podcast" } }, video: false }));
+  });
+
+
+  it("waits for Test microphone before opening the selected input", async () => {
+    render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    const picker = await screen.findByLabelText("Microphone");
+    await waitFor(() => expect(picker).toBeEnabled());
+    expect(getUserMedia).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Test microphone" }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalled());
+  });
+
+
+
   it("lists the microphones and says so once it hears the reader", async () => {
     const onHeardChange = vi.fn();
     render(<MicrophoneStep onHeardChange={onHeardChange} onOpenMicrophoneSettings={vi.fn()} />);
+    await beginMicrophoneTest();
 
     const picker = await screen.findByLabelText("Microphone");
     await waitFor(() => expect(picker).toBeEnabled());
@@ -118,7 +169,7 @@ describe("MicrophoneStep", () => {
     expect(screen.getByRole("meter", { name: "Microphone level" })).toBeInTheDocument();
 
     expect(await screen.findByText("We hear you")).toBeInTheDocument();
-    expect(onHeardChange).toHaveBeenLastCalledWith({ deviceName: "MacBook Pro Microphone" });
+    await waitFor(() => expect(onHeardChange).toHaveBeenLastCalledWith({ deviceName: "MacBook Pro Microphone" }));
   });
 
   it("saves the chosen microphone where Settings keeps it and reopens on it", async () => {
@@ -126,6 +177,7 @@ describe("MicrophoneStep", () => {
       { deviceId: "browser-podcast", kind: "audioinput", label: "Podcast Mic (USB)" },
     ]);
     render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    await beginMicrophoneTest();
 
     const picker = await screen.findByLabelText("Microphone");
     await waitFor(() => expect(picker).toBeEnabled());
@@ -151,14 +203,50 @@ describe("MicrophoneStep", () => {
     expect(stopTrack).toHaveBeenCalled();
   });
 
+  it("does not reopen capture when a device save rejects after unmount", async () => {
+    let rejectWrite!: (reason: Error) => void;
+    vi.mocked(updateSettings).mockImplementationOnce(() => new Promise((_, reject) => { rejectWrite = reject; }));
+    const { unmount } = render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    await beginMicrophoneTest();
+    await screen.findByText("We hear you");
+    fireEvent.click(screen.getByLabelText("Microphone"));
+    fireEvent.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Podcast Mic" }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(2));
+    unmount();
+    await act(async () => { rejectWrite(new Error("Settings locked")); });
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it("rolls a failed selection back to the persisted microphone and retries", async () => {
+    enumerateDevices.mockResolvedValue([
+      { deviceId: "browser-podcast", kind: "audioinput", label: "Podcast Mic (USB)" },
+    ]);
+    render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    await beginMicrophoneTest();
+    await screen.findByText("We hear you");
+    vi.mocked(updateSettings).mockRejectedValueOnce(new Error("Settings locked"));
+    const picker = screen.getByLabelText("Microphone");
+    fireEvent.click(picker);
+    fireEvent.click(within(await screen.findByRole("listbox")).getByRole("option", { name: "Podcast Mic" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Settings locked");
+    expect(picker).toHaveTextContent("System default (MacBook Pro Microphone)");
+    expect(currentSettings.audio.preferredInputDevice).toBeNull();
+    await waitFor(() => expect(getUserMedia).toHaveBeenLastCalledWith({ audio: true, video: false }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(currentSettings.audio.preferredInputDevice?.deviceId).toBe("usb-podcast-mic"));
+    await waitFor(() => expect(getUserMedia).toHaveBeenLastCalledWith({ audio: { deviceId: { exact: "browser-podcast" } }, video: false }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("takes back a heard check when the reader switches to a silent microphone", async () => {
     enumerateDevices.mockResolvedValue([
       { deviceId: "browser-podcast", kind: "audioinput", label: "Podcast Mic (USB)" },
     ]);
     const onHeardChange = vi.fn();
     render(<MicrophoneStep onHeardChange={onHeardChange} onOpenMicrophoneSettings={vi.fn()} />);
+    await beginMicrophoneTest();
     expect(await screen.findByText("We hear you")).toBeInTheDocument();
-    expect(onHeardChange).toHaveBeenLastCalledWith({ deviceName: "MacBook Pro Microphone" });
+    await waitFor(() => expect(onHeardChange).toHaveBeenLastCalledWith({ deviceName: "MacBook Pro Microphone" }));
 
     installFakeAudio(0);
     const picker = screen.getByLabelText("Microphone");
@@ -176,6 +264,7 @@ describe("MicrophoneStep", () => {
   it("names the default, not the chosen microphone, when it can only open the default", async () => {
     const onHeardChange = vi.fn();
     render(<MicrophoneStep onHeardChange={onHeardChange} onOpenMicrophoneSettings={vi.fn()} />);
+    await beginMicrophoneTest();
     await screen.findByText("We hear you");
 
     const picker = screen.getByLabelText("Microphone");
@@ -204,6 +293,7 @@ describe("MicrophoneStep", () => {
       },
     };
     render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    await beginMicrophoneTest();
 
     const picker = await screen.findByLabelText("Microphone");
     await waitFor(() => expect(picker).toBeEnabled());
@@ -230,6 +320,7 @@ describe("MicrophoneStep", () => {
       <MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={onOpenMicrophoneSettings} />,
     );
 
+    await beginMicrophoneTest();
     expect(await screen.findByText(title)).toBeInTheDocument();
     expect(screen.getByText(detail)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
@@ -247,8 +338,24 @@ describe("MicrophoneStep", () => {
     const { unmount } = render(
       <MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />,
     );
+    await beginMicrophoneTest();
     await screen.findByText("Listening");
     unmount();
     expect(stopTrack).toHaveBeenCalled();
   });
+  it("shows a retryable timeout without claiming permission was denied", async () => {
+    getUserMedia.mockReturnValueOnce(new Promise(() => {}));
+    render(<MicrophoneStep onHeardChange={vi.fn()} onOpenMicrophoneSettings={vi.fn()} />);
+    const button = await screen.findByRole("button", { name: "Test microphone" });
+    await waitFor(() => expect(button).toBeEnabled());
+    vi.useFakeTimers();
+    await act(async () => { fireEvent.click(button); });
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+    expect(screen.getByText("The microphone took too long to start")).toBeInTheDocument();
+    expect(screen.getByText(/did not respond within 30 seconds/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open System Settings" })).not.toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
+    expect(screen.getByText("Listening")).toBeInTheDocument();
+  });
+
 });

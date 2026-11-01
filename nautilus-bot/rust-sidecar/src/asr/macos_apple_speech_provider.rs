@@ -13,6 +13,16 @@ impl MacosAppleSpeechProvider {
         Self
     }
 
+    fn owned_audio(audio_data: &[u8]) -> Result<Vec<u8>> {
+        // Moving input into a blocking worker needs an owned copy. Apply the
+        // staging limit before that copy can allocate an unbounded buffer.
+        anyhow::ensure!(
+            audio_data.len() <= 512 * 1024 * 1024,
+            "macOS Speech input is too large to stage safely"
+        );
+        Ok(audio_data.to_vec())
+    }
+
     /// The one place the route's result is shaped, so the batch and bytes
     /// paths cannot drift apart on which fields they carry.
     fn result_from(
@@ -42,7 +52,9 @@ impl MacosAppleSpeechProvider {
             vocabulary_hint_terms_applied: transcription.vocabulary_hint_terms_applied,
             // Neither Apple engine returns speaker labels; the meeting route
             // diarizes this result locally.
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         }
     }
 }
@@ -100,23 +112,31 @@ impl AsrProvider for MacosAppleSpeechProvider {
     }
 
     async fn transcribe(&self, audio_path: &Path) -> Result<TranscriptionResult> {
-        Ok(Self::result_from(
-            platform::transcription::transcribe_with_engine(
-                PlatformEngine::MacosAppleSpeech,
-                Some(audio_path),
-                None,
-            )?,
-        ))
+        let audio_path = audio_path.to_path_buf();
+        platform::macos_speech::run_cancellable_batch(move || {
+            Ok(Self::result_from(
+                platform::transcription::transcribe_with_engine(
+                    PlatformEngine::MacosAppleSpeech,
+                    Some(&audio_path),
+                    None,
+                )?,
+            ))
+        })
+        .await
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
-        Ok(Self::result_from(
-            platform::transcription::transcribe_with_engine(
-                PlatformEngine::MacosAppleSpeech,
-                None,
-                Some(audio_data),
-            )?,
-        ))
+        let audio_data = Self::owned_audio(audio_data)?;
+        platform::macos_speech::run_cancellable_batch(move || {
+            Ok(Self::result_from(
+                platform::transcription::transcribe_with_engine(
+                    PlatformEngine::MacosAppleSpeech,
+                    None,
+                    Some(&audio_data),
+                )?,
+            ))
+        })
+        .await
     }
 
     /// The only provider that reads `apple_speech_required_engine`: it is the
@@ -134,19 +154,24 @@ impl AsrProvider for MacosAppleSpeechProvider {
         audio_data: &[u8],
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
-        Ok(Self::result_from(
-            platform::transcription::transcribe_with_engine_options(
-                PlatformEngine::MacosAppleSpeech,
-                None,
-                Some(audio_data),
-                PlatformTranscriptionOptions {
-                    apple_speech_required_engine: options.apple_speech_required_engine,
-                    contextual_strings: platform::macos_speech::contextual_strings_for_helper(
-                        options.vocabulary_hint.as_ref(),
-                    ),
-                },
-            )?,
-        ))
+        let audio_data = Self::owned_audio(audio_data)?;
+        let platform_options = PlatformTranscriptionOptions {
+            apple_speech_required_engine: options.apple_speech_required_engine,
+            contextual_strings: platform::macos_speech::contextual_strings_for_helper(
+                options.vocabulary_hint.as_ref(),
+            ),
+        };
+        platform::macos_speech::run_cancellable_batch(move || {
+            Ok(Self::result_from(
+                platform::transcription::transcribe_with_engine_options(
+                    PlatformEngine::MacosAppleSpeech,
+                    None,
+                    Some(&audio_data),
+                    platform_options,
+                )?,
+            ))
+        })
+        .await
     }
 
     fn download_status(&self) -> DownloadStatus {

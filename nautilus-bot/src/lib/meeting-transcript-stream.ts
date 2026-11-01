@@ -10,6 +10,8 @@
  * segment's start time claims the whole meeting began there.
  */
 
+import { containsTechnicalTerms } from "@/lib/meeting-ui-message";
+
 export const RECORDING_TRANSCRIPTION_STREAM_EVENT = "recording-transcription-stream";
 export const MEETING_AUDIO_SOURCE_WARNING_EVENT = "meeting-audio-source-warning";
 
@@ -38,7 +40,10 @@ export interface MeetingAudioSourceWarningEvent {
   source: "mic" | "system" | string;
   /**
    * `silence` from the dropout watchdog, `capture_failed` when a source's
-   * stream died and is being rebuilt, or a `SystemAudioFailureKind` from the
+   * stream died and is being rebuilt, `digital_silence` when the native tap
+   * kept calling back with nothing but exact zeros (`permission_denied` when
+   * the permission re-check then found it withdrawn), or a
+   * `SystemAudioFailureKind` from the
    * system-audio status emitter (see `emit_system_audio_status` in
    * rust-sidecar/src/audio/system_capture.rs). They are not the same event and
    * must not be described in the same words.
@@ -164,14 +169,30 @@ export function describeAudioSourceWarning(
     };
   }
 
+  if (
+    warning.source === "system" &&
+    (warning.reason === "digital_silence" || warning.reason === "permission_denied")
+  ) {
+    // The native tap kept calling back but delivered pure digital zeros:
+    // what macOS does when it stops sharing the sound, and unlike a quiet
+    // call. The sidecar re-checked the permission and chose the sentence.
+    return {
+      title: "Meeting audio stopped arriving",
+      message:
+        warning.detail?.trim() ||
+        "Check System Settings → Privacy & Security → Screen & System Audio Recording. Your microphone is still recording.",
+    };
+  }
+
   if (warning.reason !== "silence") {
     // A `SystemAudioFailureKind` — a route problem, not a quiet device. Pass
     // the sidecar's own account through rather than inventing device advice.
+    const detail = warning.detail?.trim();
     return {
       title: `${sourceLabel} is not being recorded`,
       message:
-        warning.detail?.trim() ||
-        `Plainsong lost the ${sourceLabel.toLowerCase()} route. Nothing from that source is being recorded.`,
+        (detail && !containsTechnicalTerms(detail) ? detail : null) ??
+        `Plainsong lost the ${sourceLabel.toLowerCase()}. Nothing from that source is being recorded. Test it again, or carry on with what is still recording.`,
     };
   }
 

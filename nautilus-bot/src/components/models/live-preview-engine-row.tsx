@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { formatModelSize } from "@/lib/asr-capabilities";
+import { ASR_LANGUAGE_NAMES, formatModelSize, plainModelName } from "@/lib/asr-capabilities";
 import { bytesToMib } from "@/components/models/downloaded-models";
 import { ReadinessMark } from "@/components/models/model-facts";
 import type { LivePreviewEngineStatus } from "@/lib/backend/ai";
@@ -13,10 +13,10 @@ import type { LivePreviewEngineStatus } from "@/lib/backend/ai";
  * ever stops saying that, someone has made the preview load-bearing.
  */
 const WHAT_IT_DOES =
-  "Draws the words in the dictation popup while you are still speaking, keeping what it has already heard instead of starting the transcription over every few hundred milliseconds.";
+  "Shows your words in the dictation popup while you are still speaking, building on what it has already heard instead of starting over every fraction of a second.";
 
 const WHAT_IT_DOES_NOT_DO =
-  "It never changes what Plainsong types for you. The inserted text is always the finished transcription from your dictation engine, made after you stop.";
+  "It never changes what Plainsong types for you. The inserted text always comes from your dictation speech model, after you stop.";
 
 /**
  * Why a file that is on disk is still not being loaded.
@@ -71,13 +71,13 @@ export function LivePreviewEngineRow({
 
   return (
     <section
-      aria-label="Live preview engine"
+      aria-label="Live preview model"
       className="mt-4 rounded-md border p-3"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-semibold">
-            Live preview engine · experimental
+            Live preview model · experimental
           </p>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
             {WHAT_IT_DOES}
@@ -118,8 +118,8 @@ export function LivePreviewEngineRow({
 
       {fileProblem && !busy ? (
         <p className="mt-2 text-sm leading-6 text-rust">
-          Plainsong could not verify the file on disk against its pinned
-          checksum, so it will not be loaded. Downloading again replaces it.
+          Plainsong couldn&apos;t verify the downloaded file, so it won&apos;t
+          use it. Downloading again replaces it.
         </p>
       ) : null}
 
@@ -130,19 +130,18 @@ export function LivePreviewEngineRow({
       ) : null}
 
       <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-        {status.displayName ?? "The streaming model"}
-        {status.license ? `, ${status.license}` : ""}. Its own model file
-        declares {languageCount}{" "}
-        {languageCount === 1 ? "language" : "languages"}
-        {languageCount > 0 ? ` (${status.languages.join(", ")})` : ""}; a
-        dictation language outside that list keeps the older preview instead.
-        Only English has been measured in Plainsong.
+        {status.displayName ? plainModelName(status.displayName) : "The live preview model"}
+        {status.license ? `, ${status.license}` : ""}. Its model file lists{" "}
+        {languageCount} {languageCount === 1 ? "language" : "languages"}
+        {languageCount > 0 ? ` (${status.languages.map((code) => ASR_LANGUAGE_NAMES[code] ?? code).join(", ")})` : ""}; for
+        any other dictation language, the standard preview is used. Only
+        English has been tested in Plainsong.
       </p>
 
       {!status.ready ? (
         <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-          Without it the live preview still works: Plainsong re-transcribes what
-          you have said so far every few hundred milliseconds, so the words
+          Without it the live preview still works: Plainsong transcribes what
+          you have said so far again every fraction of a second, so the words
           arrive a little behind you.
         </p>
       ) : null}

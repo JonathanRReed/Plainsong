@@ -1,0 +1,142 @@
+{
+  "schema": "plainsong-notes-variants-gold-v1",
+  "description": "Hand-written meaning annotations for docs/evals/notes-variants-holdout-r5-fixtures.json, written blind to earlier held-out rounds. Terms are lowercase prefixes matched against canonicalized words: number words become digits and ordinal suffixes are dropped. A commitment is mentioned when one verb prefix and one object prefix occur outside a condition span. Condition terms must all occur in the attached condition span. Dates list canonical forms, after any spoken correction. key marks a decision or conditional commitment that the prose must state with its condition and date. action marks a commitment that the action list must contain. Statuses list the only status or completion assertions the source makes. labels lists spoken headings or capture labels that name no participant, deliverable or product; a claim may not use a word that occurs only inside one. numbers lists each quantity (not calendar dates) with the prefixes of the words it is stated with in its own clause, and restriction prefixes a restatement must keep. actors maps each person to the verb prefixes the source makes that person the subject of, including speech acts the person actually made. Vendor, product and artwork names (Ferris, Bellamy, Tilly, Bertram, Vasquez) are not people and have no actor entry.",
+  "families": {
+    "heldout5-soil-lab": {
+      "fixtures": ["heldout5-soil-lab"],
+      "commitments": [
+        {"id": "send", "owner": null, "verb": ["send"], "object": ["sample"], "condition": ["extraction", "yield", "pass", "qc"], "dates": ["14"], "negated": false, "key": true, "action": true},
+        {"id": "label", "owner": "Tobin", "verb": ["label"], "object": ["tube"], "condition": null, "dates": ["thursday"], "negated": false, "key": false, "action": true},
+        {"id": "book", "owner": "Mireille", "verb": ["book"], "object": ["microscope", "confocal"], "condition": ["safety", "induction", "sign"], "dates": ["november 3"], "negated": false, "key": true, "action": true},
+        {"id": "order", "owner": "Saskia", "verb": ["order"], "object": ["kit"], "condition": ["qc", "result", "back"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "renew", "owner": null, "verb": ["renew"], "object": ["contract"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["ethics", "amendment"], "status": ["approv"]},
+        {"subject": ["backup", "freezer"], "status": ["repair"]},
+        {"subject": ["extraction", "yield"], "status": ["pass"], "conditionOnly": true},
+        {"subject": ["safety", "induction"], "status": ["sign"], "conditionOnly": true}
+      ],
+      "labels": [],
+      "numbers": [
+        {"value": "96", "terms": ["sample", "plate", "ferris", "quot"], "restriction": []},
+        {"value": "40", "terms": ["euro", "sample", "ferris", "quot"], "restriction": []},
+        {"value": "32", "terms": ["euro", "sample", "academic", "account", "ferris", "quot"], "restriction": ["academic"]}
+      ],
+      "actors": {"Saskia": ["agree", "ask", "decid", "order"], "Tobin": ["label", "out"], "Mireille": ["book"], "Petra": ["told"]}
+    },
+    "heldout5-wedding-venue": {
+      "fixtures": ["heldout5-wedding-venue"],
+      "commitments": [
+        {"id": "setup", "owner": null, "verb": ["set"], "object": ["table", "chair", "orangery"], "condition": ["guest", "list", "stay", "under", "120"], "dates": ["june 19"], "negated": false, "key": true, "action": true},
+        {"id": "menu", "owner": "Celeste", "verb": ["send"], "object": ["menu"], "condition": ["bram", "chang", "dessert"], "dates": ["june 6"], "negated": false, "key": true, "action": true},
+        {"id": "band", "owner": "Bram", "verb": ["confirm"], "object": ["band"], "condition": ["odile", "check", "noise", "limit"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "garden", "owner": null, "verb": ["use"], "object": ["garden"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["tasting"], "status": ["finish", "done"]},
+        {"subject": ["fireworks", "permit"], "status": ["refus"]}
+      ],
+      "labels": ["Room layout", "Catering"],
+      "numbers": [
+        {"value": "14", "terms": ["round", "table", "orangery", "set"], "restriction": []},
+        {"value": "112", "terms": ["chair", "orangery", "set"], "restriction": []},
+        {"value": "120", "terms": ["guest", "list", "stay", "under"], "restriction": []},
+        {"value": "58", "terms": ["pound", "head", "dinner", "bellamy", "quot", "caterer"], "restriction": []},
+        {"value": "34", "terms": ["pound", "head", "child", "bellamy", "quot", "caterer"], "restriction": ["child", "12"]}
+      ],
+      "actors": {"Odile": ["agree", "check", "told"], "Bram": ["confirm", "decid", "chang"], "Celeste": ["send", "mention"]}
+    },
+    "heldout5-rowing-committee": {
+      "fixtures": ["heldout5-rowing-committee"],
+      "commitments": [
+        {"id": "repair", "owner": "Garrick", "verb": ["repair"], "object": ["scull"], "condition": ["boatyard", "send", "part"], "dates": ["28"], "negated": false, "key": true, "action": true},
+        {"id": "certificate", "owner": "Anouk", "verb": ["renew"], "object": ["certificate"], "condition": null, "dates": ["friday"], "negated": false, "key": false, "action": true},
+        {"id": "coach", "owner": "Garrick", "verb": ["book"], "object": ["coach"], "condition": ["philippa", "sign", "budget"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "fees", "owner": null, "verb": ["rais"], "object": ["fee"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["oar"], "status": ["deliver", "paid"]},
+        {"subject": ["sponsorship", "money"], "status": ["paid"]},
+        {"subject": ["boatyard"], "status": ["shut"]}
+      ],
+      "labels": ["Treasurer's report", "Equipment", "Any other business"],
+      "numbers": [
+        {"value": "6", "terms": ["boat", "insur"], "restriction": []},
+        {"value": "38", "terms": ["rower", "regist", "season"], "restriction": []},
+        {"value": "2400", "terms": ["regatta", "budget", "pound"], "restriction": []},
+        {"value": "3", "terms": ["away", "fixture", "plan"], "restriction": []}
+      ],
+      "actors": {"Philippa": ["plan", "sign"], "Garrick": ["repair", "decid", "book"], "Anouk": ["renew"], "Desmond": ["suggest"], "Fenella": ["said"]}
+    },
+    "heldout5-choir-concert": {
+      "fixtures": ["heldout5-choir-concert"],
+      "commitments": [
+        {"id": "harpist", "owner": null, "verb": ["hire"], "object": ["harpist"], "condition": ["church", "let", "rehears", "nave"], "dates": [], "negated": false, "key": true, "action": true},
+        {"id": "programmes", "owner": "Leopold", "verb": ["print"], "object": ["programme"], "condition": null, "dates": ["april 16"], "negated": false, "key": false, "action": true},
+        {"id": "stands", "owner": "Leopold", "verb": ["order"], "object": ["stand"], "condition": ["arts", "council", "approv", "grant"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "record", "owner": null, "verb": ["record"], "object": ["concert"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["deposit"], "status": ["paid"]},
+        {"subject": ["printer"], "status": ["clos"]}
+      ],
+      "labels": ["Concert planning"],
+      "numbers": [
+        {"value": "18", "terms": ["soprano", "confirm", "spring", "concert"], "restriction": []},
+        {"value": "11", "terms": ["tenor", "confirm", "spring", "concert"], "restriction": []},
+        {"value": "15", "terms": ["ticket", "pound"], "restriction": []},
+        {"value": "10", "terms": ["ticket", "pound", "student", "valid", "card"], "restriction": ["student"]},
+        {"value": "140", "terms": ["seat", "sold", "tilly", "ticket"], "restriction": []}
+      ],
+      "actors": {"Margit": ["agree", "decid"], "Leopold": ["print", "order"], "Ysolde": ["correct"], "Oyelaran": ["said"]}
+    },
+    "heldout5-orchard-coop": {
+      "fixtures": ["heldout5-orchard-coop"],
+      "commitments": [
+        {"id": "deliver", "owner": "Eamon", "verb": ["deliver"], "object": ["apple"], "condition": ["lorry", "pass", "mot"], "dates": ["october 9"], "negated": false, "key": true, "action": true},
+        {"id": "train", "owner": "Brigid", "verb": ["train"], "object": ["volunteer"], "condition": ["insurer", "sign"], "dates": [], "negated": false, "key": true, "action": true},
+        {"id": "reader", "owner": "Tamsin", "verb": ["set"], "object": ["card", "reader"], "condition": null, "dates": ["friday"], "negated": false, "key": false, "action": true},
+        {"id": "agreement", "owner": "Brigid", "verb": ["sign"], "object": ["agreement"], "condition": ["hollis", "read"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "pitch", "owner": null, "verb": ["take"], "object": ["pitch"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["bertram", "grain", "dryer"], "status": ["install"]},
+        {"subject": ["press"], "status": ["clos"]},
+        {"subject": ["lorry"], "status": ["pass"], "conditionOnly": true},
+        {"subject": ["insurer"], "status": ["sign"], "conditionOnly": true}
+      ],
+      "labels": ["Harvest", "Market stall"],
+      "numbers": [
+        {"value": "340", "terms": ["crate", "apple", "pick"], "restriction": []},
+        {"value": "85", "terms": ["sack", "potato", "pick"], "restriction": []},
+        {"value": "1500", "terms": ["co", "op", "budget", "autumn", "market", "pound"], "restriction": []},
+        {"value": "6", "terms": ["saturday", "stall", "run", "plan", "market"], "restriction": []}
+      ],
+      "actors": {"Brigid": ["pick", "train", "decid", "sign"], "Hollis": ["plan", "read"], "Eamon": ["deliver"], "Tamsin": ["set"]}
+    },
+    "heldout5-museum-loan": {
+      "fixtures": ["heldout5-museum-loan"],
+      "commitments": [
+        {"id": "ship", "owner": null, "verb": ["ship"], "object": ["tapestry"], "condition": ["condition", "report", "sign"], "dates": ["march 3"], "negated": false, "key": true, "action": true},
+        {"id": "insurance", "owner": "Konstantin", "verb": ["arrang"], "object": ["insurance"], "condition": null, "dates": ["february 24"], "negated": false, "key": false, "action": true},
+        {"id": "courier", "owner": "Nkem", "verb": ["releas"], "object": ["courier", "booking"], "condition": ["insurance", "certificate", "arriv"], "dates": [], "negated": true, "key": true, "action": true},
+        {"id": "email", "owner": "Aurelie", "verb": ["email"], "object": ["loan", "agreement"], "condition": null, "dates": ["monday"], "negated": false, "key": false, "action": true},
+        {"id": "lend", "owner": null, "verb": ["lend"], "object": ["cushion", "cover"], "condition": null, "dates": [], "negated": true, "key": false, "action": false}
+      ],
+      "statuses": [
+        {"subject": ["climate", "survey"], "status": ["complet"]},
+        {"subject": ["courier", "route"], "status": ["confirm"]},
+        {"subject": ["broker"], "status": ["away"]},
+        {"subject": ["condition", "report"], "status": ["sign"], "conditionOnly": true}
+      ],
+      "labels": ["Transport"],
+      "numbers": [
+        {"value": "2", "terms": ["crate", "need", "move"], "restriction": []},
+        {"value": "3", "terms": ["art", "handler", "need", "move"], "restriction": []},
+        {"value": "6800", "terms": ["transport", "budget", "euro"], "restriction": []}
+      ],
+      "actors": {"Aurelie": ["agree", "ask", "email"], "Konstantin": ["arrang"], "Nkem": ["releas", "decid"], "Ottilie": ["told"]}
+    }
+  }
+}
