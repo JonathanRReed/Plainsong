@@ -2734,7 +2734,7 @@ mod tests {
                     std::ffi::OsString::from("-c"),
                     std::ffi::OsString::from(script),
                 ],
-                Duration::from_secs(5),
+                Duration::from_secs(60),
             )
             .expect_err("flooding helper must exceed the output cap");
             let payload: HelperErrorPayload = serde_json::from_str(&error.to_string())

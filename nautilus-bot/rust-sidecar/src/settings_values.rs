@@ -2099,6 +2099,11 @@ mod tests {
         settings.transcription.dictation_keep_warm = "on".into();
         assert!(!bundled_cleanup_prewarm_enabled(&settings));
         settings.transcription.dictation_ai_formatting = true;
+        if crate::hardware_tier::current() == crate::hardware_tier::HardwareTier::Light {
+            // Light Macs (and small CI hosts) start cleanup on demand instead.
+            assert!(!bundled_cleanup_prewarm_enabled(&settings));
+            return;
+        }
         assert!(bundled_cleanup_prewarm_enabled(&settings));
         settings.transcription.dictation_keep_warm = "off".into();
         assert!(!bundled_cleanup_prewarm_enabled(&settings));
@@ -2123,6 +2128,11 @@ mod tests {
             ai_provider: Some("bundled_local".into()),
             ..Default::default()
         }];
+        if crate::hardware_tier::current() == crate::hardware_tier::HardwareTier::Light {
+            // Light Macs (and small CI hosts) start cleanup on demand instead.
+            assert!(!bundled_cleanup_prewarm_enabled(&settings));
+            return;
+        }
         assert!(bundled_cleanup_prewarm_enabled(&settings));
         settings.privacy.dictation_ai.provider = "bundled_local".into();
         settings.transcription.dictation_custom_modes[0].ai_provider = Some("ollama".into());

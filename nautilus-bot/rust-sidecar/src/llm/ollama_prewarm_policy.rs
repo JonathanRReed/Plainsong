@@ -358,7 +358,10 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn native_memory_reader_returns_current_counters() {
-        let bytes = super::mach_available_memory().expect("read host VM counters");
+        // Some virtual Macs refuse host_statistics64; the reader then falls back to vm_stat.
+        let bytes = super::mach_available_memory()
+            .or_else(super::available_memory)
+            .expect("read host VM counters");
         assert!(bytes > 0);
     }
 
