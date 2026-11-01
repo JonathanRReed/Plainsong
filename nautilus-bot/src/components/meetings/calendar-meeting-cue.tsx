@@ -7,7 +7,10 @@ import {
 } from "@/lib/calendar-events";
 import { PreMeetingBriefPanel } from "@/components/meetings/pre-meeting-brief-panel";
 import { useCalendarEvents } from "@/hooks/use-calendar-events";
-import { openCalendarPrivacySettings } from "@/lib/backend/calendar";
+import {
+  CalendarAccessCard,
+  showsCalendarAccessCard,
+} from "@/components/meetings/calendar-access-card";
 
 interface CalendarMeetingCueProps {
   /**
@@ -54,96 +57,24 @@ export function CalendarMeetingCue({
     return null;
   }
 
-  if (calendar.view === "connect") {
-    return (
-      <div
-        className="mx-6 mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-border/80 bg-muted/30 px-4 py-3"
-        role="status"
-        aria-label="Connect your calendar"
-      >
-        <div className="flex min-w-0 items-start gap-2.5">
-          <CalendarClock
-            className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <div className="min-w-0">
-            <p className="text-sm font-medium">Connect your calendar</p>
-            {/* Says what it reads, what it does with it, and what it never
-                does. All three are load-bearing: this is the moment the
-                reader decides. */}
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              Plainsong can read the next few hours of your calendar on this Mac
-              and offer to start capture with the meeting's name already filled
-              in. It reads titles and times, never writes to your calendar, and
-              sends nothing anywhere.
-            </p>
-          </div>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={calendar.requesting}
-          // The prompt follows this click and only this click. There is no
-          // path from app launch to the macOS calendar dialog.
-          onClick={() => void calendar.connect()}
-        >
-          {calendar.requesting ? "Waiting for macOS…" : "Connect calendar"}
-        </Button>
-      </div>
-    );
+  if (showsCalendarAccessCard(calendar.view)) {
+    return <CalendarAccessCard calendar={calendar} className="mx-6 mb-4" />;
   }
 
-  if (calendar.view === "denied" || calendar.view === "write_only") {
-    const message =
-      calendar.view === "write_only"
-        ? "Plainsong can add calendar events but not read them, so it can't offer to start capture. Turn on Calendars for Plainsong in System Settings › Privacy & Security › Calendars, choosing full access."
-        : "Calendar access is turned off for Plainsong, so it can't offer to start capture. Turn it back on in System Settings › Privacy & Security › Calendars. Meetings record normally either way.";
-    return (
-      <div
-        className="mx-6 mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-border/80 bg-muted/30 px-4 py-3"
-        role="status"
-        aria-label="Calendar access is off"
-      >
-        <div className="flex min-w-0 items-start gap-2.5">
-          <CalendarClock
-            className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
-            aria-hidden="true"
-          />
-          <div className="min-w-0">
-            <p className="text-sm font-medium">Calendar access is off</p>
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              {message}
-            </p>
-          </div>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => void openCalendarPrivacySettings()}
-        >
-          Open System Settings
-        </Button>
-      </div>
-    );
-  }
-
-  // "restricted" is a managed Mac, where there is no switch for the reader to
-  // flip and no point sending them to look for one.
-  if (calendar.view === "restricted") {
-    return (
-      <p
-        className="mx-6 mb-4 text-sm text-muted-foreground"
-        role="status"
-      >
-        Calendar access is managed by this Mac's profile, so Plainsong can't
-        read your calendar. Meetings record normally.
-      </p>
-    );
-  }
-
+  const connectResult = calendar.connectResult;
   const event = calendar.nextEvent;
   const lead = calendar.lead;
   if (!event || !lead) {
+    // Right after a successful Connect there is often no meeting in the next
+    // half hour, and an empty header would read as "nothing happened".
+    if (calendar.view === "connected" && connectResult?.kind === "connected") {
+      return (
+        <p className="mx-6 mb-4 text-sm text-muted-foreground" role="status">
+          Calendar connected. Plainsong will offer to start capture when a
+          meeting is coming up.
+        </p>
+      );
+    }
     return null;
   }
   const prefill = buildCalendarCapturePrefill(event);
@@ -176,7 +107,12 @@ export function CalendarMeetingCue({
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
-          <Button size="sm" variant="outline" onClick={() => onStartCapture(prefill)}>
+          {prefill.conferenceUrl ? (
+            <Button size="sm" onClick={() => onStartCapture(prefill)}>
+              Join and capture
+            </Button>
+          ) : null}
+          <Button size="sm" variant="outline" onClick={() => onStartCapture({ ...prefill, conferenceUrl: undefined })}>
             Start capture
           </Button>
           <Button

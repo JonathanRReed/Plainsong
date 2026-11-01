@@ -5,7 +5,7 @@ Phase 0 compatibility catalog, updated for the macOS v1 launch gate on 2026-07-3
 **v1 scope: macOS only.** v1 ships an Apple Silicon macOS build; the Windows
 release leg was removed. The Windows table below is retained as the plan for a
 later release and is not a v1 gate — read the exit gate at the bottom as
-applying to the macOS table alone. `scripts/capture-packaged-macos-app-matrix-preflight.mjs`
+applying to the macOS table alone. `scripts/capture-packaged-macos-app-matrix-preflight.ts`
 already behaves this way: it skips every row whose platform heading is not
 `macOS`.
 

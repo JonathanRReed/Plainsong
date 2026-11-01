@@ -4,7 +4,7 @@ import {
   alignWords,
   normalizeForWer,
   scoreUtterance,
-} from "../../scripts/lib/asr-wer.mjs";
+} from "../../scripts/lib/asr-wer.ts";
 
 describe("ASR word error rate", () => {
   it("ignores case, punctuation and spoken-vs-written numbers", () => {
@@ -55,6 +55,7 @@ describe("ASR word error rate: written vs spoken numbers", () => {
     same("call me back at five five five one two three four", "Call me back at 555-1234");
     same("four thousand two hundred and fifty dollars", "$4,250");
     same("returns a four oh one", "returns a 401");
+    same("confectionary fifteen o eight", "Confectionary 1508");
     same("eight point two percent", "8.2%");
     same("room two fourteen", "room 214");
     same("the fourteenth of October", "the 14th of October");
@@ -64,6 +65,14 @@ describe("ASR word error rate: written vs spoken numbers", () => {
     same("twelve thousand", "12,000");
     same("three thirty", "3:30");
     same("twenty first", "21st");
+    same("the five hundred and sixty third night", "the 563rd night");
+    same("the seven hundred and eighteenth night", "the 718th night");
+    same("the one hundred twelfth floor", "the 112th floor");
+    same("five hundred first editions", "500 first editions");
+    same("two hundred and first", "201st");
+    same("seven hundred and eighteenth", "718th");
+    same("five hundred twentieth", "520th");
+    expect(normalizeForWer("twenty first")).toEqual(["20", "1st"]);
     same("okay", "OK");
     expect(normalizeForWer("five five five one two three four")).toEqual(["5551234"]);
   });
@@ -72,6 +81,23 @@ describe("ASR word error rate: written vs spoken numbers", () => {
     expect(normalizeForWer("oh I see")).toEqual(["oh", "i", "see"]);
     expect(normalizeForWer("the point is")).toEqual(["the", "point", "is"]);
     expect(normalizeForWer("a hundred reasons")).toEqual(["a", "hundred", "reasons"]);
+  });
+
+  it("scores an ambiguous spoken ordinal as either written form", () => {
+    // "three hundred and twenty second graders" may be 320 second graders or
+    // the 322nd graders; the dictation ITN keeps the words unless the
+    // ordinal reading is settled. No form is counted as an error.
+    const spoken = "three hundred and twenty second graders";
+    expect(scoreUtterance(spoken, "320 second graders").errors).toBe(0);
+    expect(scoreUtterance(spoken, "322nd graders").errors).toBe(0);
+    expect(scoreUtterance("set a thirty second timer", "Set a 30 second timer.").errors).toBe(0);
+    expect(scoreUtterance("the five hundred and sixty third night", "the 560 third night").errors).toBe(0);
+    for (const written of ["the twenty first item", "the 21st item", "the 20 first item"]) {
+      expect(scoreUtterance("the twenty first item", written).errors).toBe(0);
+    }
+    // A different number is still wrong.
+    expect(scoreUtterance(spoken, "324th graders").errors).toBe(1);
+    expect(scoreUtterance("the five hundred and sixty third night", "the 564th night").errors).toBe(1);
   });
 
   it("still counts a wrong number as an error", () => {

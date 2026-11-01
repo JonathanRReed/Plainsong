@@ -15,10 +15,15 @@
  */
 
 import type { Recording } from "@/types";
+import { plainMeetingNotesFailure } from "@/lib/meeting-ui-message";
 
 export const MEETING_ANALYSIS_STATUS_EVENT = "meeting-analysis-status";
 
-export type MeetingAnalysisPhase = "running" | "failed" | "completed";
+export type MeetingAnalysisPhase =
+  | "running"
+  | "waiting"
+  | "failed"
+  | "completed";
 
 export interface MeetingAnalysisStatusEvent {
   recordingId: string;
@@ -28,6 +33,7 @@ export interface MeetingAnalysisStatusEvent {
 
 const PHASES: readonly MeetingAnalysisPhase[] = [
   "running",
+  "waiting",
   "failed",
   "completed",
 ];
@@ -113,6 +119,22 @@ export interface MeetingAnalysisNotice {
   /** Whether a retry is worth offering — false while one is already running. */
   retryable: boolean;
   busy: boolean;
+  /** Plainsong will try again by itself; the wait can be stopped. */
+  waiting: boolean;
+}
+
+/**
+ * The sidecar's stored notice for notes that are waiting for the built-in
+ * model to get enough memory (`analysis::MEMORY_WAIT_NOTICE`).
+ */
+export const MEMORY_WAIT_NOTICE = "Notes will be written when memory frees up.";
+const MEMORY_WAIT_TITLE = "Notes will be written when you step away or memory frees up.";
+
+function localProcessingIsPaused(reason: string | null): boolean {
+  return Boolean(reason && (
+    reason.includes("An earlier Ollama request may still be running. Local processing is paused because its completion could not be confirmed.") ||
+    reason.includes("Local processing is paused because Plainsong could not read or update its Ollama safety marker in the configuration directory.")
+  ));
 }
 
 /**
@@ -121,17 +143,38 @@ export interface MeetingAnalysisNotice {
  * The live phase wins while it is saying something: a retry that is running is
  * more current than the failure it is trying to clear.
  */
+/**
+ * First line of notes the sidecar builds from the transcript alone when the
+ * summary fails (`TRANSCRIPT_FACTS_NOTICE` in llm/grounded.rs).
+ */
+const TRANSCRIPT_FACTS_PREFIX = "Summary couldn't be written.";
+
 export function describeMeetingAnalysis(args: {
   storedFailure: string | null;
   livePhase: MeetingAnalysisPhase | null;
   liveError: string | null;
+  /** The stored summary, to tell quoted fallback notes from no notes. */
+  summary?: string | null;
 }): MeetingAnalysisNotice | null {
   if (args.livePhase === "running") {
     return {
       title: "Writing meeting notes",
-      message: "Plainsong is generating the summary and action items again.",
+      // The first automatic pass and a retry both report "running", so the
+      // line must read right for either.
+      message: "Plainsong is writing the summary and action items.",
       retryable: false,
       busy: true,
+      waiting: false,
+    };
+  }
+  if (args.livePhase === "waiting") {
+    return {
+      title: MEMORY_WAIT_TITLE,
+      message:
+        "Plainsong will try again after the call ends, then every few minutes.",
+      retryable: true,
+      busy: false,
+      waiting: true,
     };
   }
   if (args.livePhase === "completed") {
@@ -142,13 +185,28 @@ export function describeMeetingAnalysis(args: {
   if (args.livePhase !== "failed" && !reason) {
     return null;
   }
+  if (args.livePhase !== "failed" && reason === MEMORY_WAIT_NOTICE) {
+    // The sidecar restores persisted waits after startup.
+    return {
+      title: MEMORY_WAIT_TITLE,
+      message: "Plainsong will retry automatically.",
+      retryable: true,
+      busy: false,
+      waiting: true,
+    };
+  }
 
+  const quotedFallback = args.summary?.trimStart().startsWith(TRANSCRIPT_FACTS_PREFIX) === true;
+  const cause =
+    plainMeetingNotesFailure(reason) ??
+    "The summary and action items failed and no reason was recorded.";
   return {
-    title: "Meeting notes were not written",
-    message:
-      reason ??
-      "The summary and action items failed and no reason was recorded.",
-    retryable: true,
+    title: quotedFallback ? "Summary couldn't be written" : "Meeting notes were not written",
+    message: quotedFallback
+      ? `${cause} Key lines from the transcript are saved in the notes.`
+      : cause,
+    retryable: !localProcessingIsPaused(reason),
     busy: false,
+    waiting: false,
   };
 }

@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { Cdp } from "../../scripts/capture-packaged-macos-launch-performance.mjs";
+import { Cdp } from "../../scripts/capture-packaged-macos-launch-performance.ts";
 
 describe("launch CDP client", () => {
   it("rejects a stalled request at its deadline", async () => {

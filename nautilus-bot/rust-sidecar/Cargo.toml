@@ -1,10 +1,10 @@
 [package]
 name = "plainsong"
-version = "0.9.0-beta.5"
+version = "0.9.0-beta.7"
 description = "Plainsong - free, open-source, local-first dictation and meeting capture"
 authors = ["Jonathan Reed"]
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 default-run = "plainsong-sidecar"
 license = "MIT"
 repository = "https://github.com/JonathanRReed/Plainsong"
@@ -29,12 +29,14 @@ path = "src/bin/plainsong-cli.rs"
 
 [dependencies]
 lazy_static = "1.4"
+unicode-normalization = "0.1.24"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Preserve measured audio times across JSON storage before exact enrichment checks.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 tokio = { version = "1", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-rusqlite = { version = "0.31", features = ["bundled", "chrono", "uuid"] }
+rusqlite = { version = "0.31", features = ["bundled", "chrono", "uuid", "blob"] }
 libsqlite3-sys = { version = "0.28", features = ["bundled"] }
 anyhow = "1"
 thiserror = "2"
@@ -44,7 +46,7 @@ dirs = "7"
 cpal = "0.18"
 hound = "3.5"
 crossbeam = "0.8"
-ringbuf = "0.5"
+ringbuf = "0.5.2"
 libc = "0.2"
 
 # ASR Dependencies
@@ -68,11 +70,11 @@ tokenizers = { version = "0.23", optional = true }
 
 # transcribe.cpp: one ggml runtime that hosts Parakeet TDT, Whisper, Nemotron
 # streaming, Qwen3-ASR, Cohere Transcribe, Voxtral and Moonshine v2 from a
-# single GGUF loader. Pulled in only by the `asr-transcribe-cpp` spike feature
-# (OFF by default, not in the release feature list) so the shipped binary is
-# unchanged; see artifacts/qa/transcribe-cpp-spike-2026-09-02.md for the
-# measurement and the adopt/defer recommendation. MIT-licensed, same as this
-# crate.
+# single GGUF loader. Pulled in only by the `asr-transcribe-cpp` feature, which
+# is off in Cargo's default set and enabled for macOS release builds by
+# scripts/sidecar-cargo-features.ts; see
+# artifacts/qa/transcribe-cpp-spike-2026-09-02.md for the original spike.
+# MIT-licensed, same as this crate.
 #
 # The crates.io release, NOT the git rev it was cut from. A `git` source is not
 # resolvable from a cargo cache that only holds registry crates, so
@@ -115,10 +117,6 @@ reqwest = { version = "0.13", features = ["json", "stream", "multipart"] }
 # Download management
 futures-util = "0.3"
 sha2 = "0.11"
-# MAC for on-disk model-integrity receipts (see download::model_integrity_mac_key).
-# Must track sha2's digest/crypto-common major version (0.11.x) or Mac::new_from_slice
-# fails to resolve due to duplicate digest crate versions.
-hmac = "0.13"
 rand = "0.10"
 async-trait = "0.1"
 hex = "0.4"
@@ -131,18 +129,12 @@ zeroize = "1.8"
 # false and secrets evaporated at process exit. apple-native = macOS Keychain;
 # windows-native compiles in only on Windows builds.
 keyring = { version = "3.6", features = ["apple-native", "windows-native"] }
+unicode-segmentation = "=1.12.0"
 regex = "1.11"
 urlencoding = "2.1"
 hostname = "0.4"
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 walkdir = "2.5"
-
-# Speaker diarization via pyannote community-1 (spike, OFF by default).
-# Optional and gated behind the `diarization-speakrs` Cargo feature; see the
-# feature comment below for the build status on this platform. `online` is
-# deliberately disabled: it pulls hf-hub, which would fetch model weights
-# outside the pinned-hash download manager.
-speakrs = { version = "0.5.0", optional = true, default-features = false, features = ["default-linalg"] }
 
 # EXPERIMENTAL Nemotron 3 Diarization (NVIDIA Sortformer v3) through
 # parakeet-rs (MIT OR Apache-2.0). Behind `diarization-nemotron`, off by
@@ -164,8 +156,14 @@ block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-av-foundation = { version = "0.3.2", features = ["AVFCapture", "AVMediaFormat", "block2"] }
 objc2-speech = "0.3.2"
-objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3.2", features = ["NSString"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSWorkspace", "NSRunningApplication", "NSPasteboard", "NSPasteboardItem"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSValue", "NSUUID"] }
+# Meeting audio: a device-independent Core Audio process tap (see
+# src/audio/macos_system_tap.rs). Already in the tree through CPAL; listed here
+# because the sidecar now calls these bindings itself.
+objc2-core-audio = { version = "0.3.2", default-features = false, features = ["std", "AudioHardware", "objc2", "objc2-foundation", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3.2", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFDictionary"] }
 
 [dev-dependencies]
 # Only "test-util" beyond what [dependencies] already enables via "full":
@@ -176,29 +174,34 @@ objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 tokio = { version = "1", features = ["test-util"] }
 
 [features]
-default = ["asr-all", "sqlcipher", "whisper-gpu", "local-llm"]
+default = ["asr-all", "sqlcipher", "whisper-gpu", "local-llm", "local-embeddings", "meeting-audio-16k"]
 
-# The bundled zero-setup dictation cleanup model (S1-mini by Superwhisper),
-# run in-process through Candle's quantized Qwen3 GGUF path. Adds no new
-# crate: candle-core/-nn/-transformers and tokenizers are already pulled in by
-# `asr-canary`/`asr-parakeet`, and `candle-metal` (shipped on macOS) routes it
-# through the GPU. In `default` because "works out of the box" is the point --
-# a build without it falls back to telling the user to pick Ollama or a cloud
-# provider, which is the pre-B6 behavior.
-local-llm = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager"]
+# Compact finalized meeting storage. Capture and first-pass ASR stay native-rate.
+meeting-audio-16k = []
+
+# The built-in text models: S1-mini dictation cleanup and the Qwen3 notes
+# models, run by the separate llama.cpp text helper (`text-helper/`). The
+# sidecar only downloads, verifies and starts them, so this pulls in no
+# inference crate. A build without it tells the user to pick Ollama or a
+# cloud provider.
+local-llm = ["download-manager"]
+
+# Built-in meaning search: text embedding models Plainsong downloads from
+# pinned revisions and runs in-process through ONNX Runtime on the CPU. Adds no
+# new crate: ort, ndarray and tokenizers already come with `asr-parakeet`.
+# In `default` so meaning search works without Ollama.
+local-embeddings = ["ort", "ndarray", "tokenizers", "download-manager"]
 
 # ASR Provider Features
 asr-whisper = ["whisper-rs", "download-manager"]
 asr-parakeet = ["ort", "ndarray", "download-manager", "audio-processing", "rustfft", "tokenizers"]
-asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing"]
+asr-canary = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "download-manager", "audio-processing", "rustfft"]
 asr-all = ["asr-whisper", "asr-parakeet", "asr-canary", "diarization"]
 
-# transcribe.cpp spike (OFF by default, and deliberately NOT in
-# scripts/sidecar-cargo-features.mjs, so neither the release build nor the
-# default `cargo build` compiles a byte of it). Adds one experimental local
-# route: Parakeet TDT 0.6B v3 in GGUF on Metal, through the same ggml runtime
-# Handy ships. Evidence lives in
-# artifacts/qa/transcribe-cpp-spike-2026-09-02.md.
+# Experimental local GGUF routes through transcribe.cpp on Metal. Enabled by
+# the macOS build wrapper, kept out of Cargo's cross-platform default set.
+# Model downloads stay optional. Native capture evidence:
+# docs/evals/unified-native-capture-2026-10-03/README.md.
 asr-transcribe-cpp = ["transcribe-cpp", "download-manager"]
 
 # Whisper GPU acceleration (Metal — macOS only). No CUDA feature is wired;
@@ -208,7 +211,7 @@ asr-transcribe-cpp = ["transcribe-cpp", "download-manager"]
 # CoreML is deliberately NOT enabled. It was, and it never worked: with the
 # feature on, whisper.cpp tries to load `ggml-<model>-encoder.mlmodelc` on every
 # model init, but nothing in this repo ever downloads that artifact — not
-# scripts/provision-asr-assets.mjs, not src/download/, not asr/whisper.rs. The
+# scripts/provision-asr-assets.ts, not src/download/, not asr/whisper.rs. The
 # models directory only ever contains `ggml-<model>.bin`. So every user on every
 # machine paid a failed load and an alarming
 # "failed to load Core ML model from ..." line in the log on every init, then
@@ -226,7 +229,7 @@ whisper-gpu = ["whisper-rs?/metal"]
 # of CPU F32. Note: candle-nn MUST also get the `metal` feature —
 # without it, the Metal rms-norm kernel isn't compiled and inference crashes.
 #
-# SHIPPED on macOS: scripts/sidecar-cargo-features.mjs adds it to the release
+# SHIPPED on macOS: scripts/sidecar-cargo-features.ts adds it to the release
 # build, to lint/test/benchmark, to CI, and to the third-party notices. Kept
 # out of `default` because it only compiles against Apple frameworks.
 # Measured on an M4 Pro with distil-large-v3.5, using a combined
@@ -244,7 +247,7 @@ candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/met
 # decoders bypass it (unstable / int4). The EP falls back to CPU if the
 # prebuilt ONNX Runtime binary lacks CoreML or initialization fails.
 #
-# Deliberately NOT shipped: scripts/sidecar-cargo-features.mjs leaves it out.
+# Deliberately NOT shipped: scripts/sidecar-cargo-features.ts leaves it out.
 # Measured on an M4 Pro with Moonshine base
 # (artifacts/qa/acceleration-receipt-2026-09-01.md): the encoder graph gets
 # split into 75 CoreML partitions (393 of 743 nodes supported), the merged
@@ -256,7 +259,13 @@ candle-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/met
 # so it stays on CPU with ~6% extra per-chunk overhead from the registered EP.
 # Re-enable only behind per-session opt-outs (plus `ModelCacheDirectory`,
 # `EnableOnSubgraphs`, `RequireStaticInputShapes`) and a new measurement.
-ort-coreml = ["ort/coreml"]
+ort-coreml = ["ort-coreml-ep"]
+# Links the ONNX Runtime build that carries the Core ML execution provider
+# without registering it anywhere by default (`ort-coreml` above does that for
+# every session and is a measured regression). Only callers that measured a win
+# opt in per session: pyannote community-1's ResNet34 embedding network
+# (`diarization::community1::inference`), ~20x faster on the GPU.
+ort-coreml-ep = ["ort/coreml"]
 
 # SQLCipher for encrypted SQLite (optional, requires OpenSSL)
 sqlcipher = ["rusqlite/sqlcipher", "libsqlite3-sys/bundled-sqlcipher"]
@@ -268,21 +277,12 @@ download-manager = ["indicatif"]
 audio-processing = []
 desktop-shell = []
 
-# Plainsong Plus, the optional paid hosted tier (OFF by default and NOT
-# LAUNCHED; deliberately NOT in scripts/sidecar-cargo-features.mjs, so no
-# release build contains it). Adds the `plainsong_plus` speech-to-text route,
-# the `plainsong-plus` cleanup provider and the account commands; without it
-# `plus_get_status` reports `available: false` and the renderer shows nothing.
-# The relay it talks to lives in infra/plus-worker.
-plainsong-plus = []
-
-# Speaker diarization (requires ONNX runtime)
+# Speaker diarization (requires ONNX runtime): the embedding + clustering
+# models and pyannote community-1 (`diarization::community1`, pure Rust on the
+# shared ONNX Runtime, no BLAS).
 diarization = ["ort", "ndarray", "rustfft"]
-# EXPERIMENTAL, OFF by default and NOT shipped: swap the embedding+AHC
-# diarizer for speakrs (pyannote community-1 in Rust on ONNX Runtime).
-diarization-speakrs = ["diarization", "dep:speakrs"]
-# EXPERIMENTAL, OFF by default and NOT shipped: Nemotron 3 Diarization for the
-# eval harness only (diarization::eval_tests::eval_nemotron_backend).
+# Optional experimental Nemotron 3 Diarization. Enabled in macOS builds;
+# model download and selection remain opt-in.
 diarization-nemotron = ["diarization", "dep:parakeet-rs"]
 
 [patch.crates-io]
@@ -291,6 +291,9 @@ diarization-nemotron = ["diarization", "dep:parakeet-rs"]
 # macOS 13 floor. This narrow vendor patch resolves only those two symbols at
 # runtime and preserves the upstream API and all non-macOS behavior.
 cpal = { path = "vendor/cpal-0.18.1" }
+candle-core = { path = "vendor/candle-core-0.10.2" }
+# Same pinned native revision, with one shared Qwen generation budget.
+transcribe-cpp-sys = { path = "vendor/transcribe-cpp-sys-0.2.3" }
 
 [profile.release]
 opt-level = 3
@@ -311,7 +314,7 @@ codegen-units = 1
 # C frame from this crate. Where third-party crates do install Rust callbacks
 # behind `extern "C"` trampolines -- cpal/coreaudio-rs render callbacks,
 # whisper-rs segment callbacks, ort logging -- the toolchain's plain `extern "C"`
-# ABI aborts on unwind by default (Rust 1.81+; this crate builds on 1.85+), so
+# ABI aborts on unwind by default (Rust 1.81+; this crate builds on 1.89+), so
 # those sites behave exactly as they did under abort rather than becoming
 # undefined. `guard_audio_callback` additionally catches panics inside the
 # realtime audio callbacks we own, so those degrade to an inert stream instead
@@ -320,7 +323,7 @@ panic = "unwind"
 # Not `true`: on macOS rustc strips with its bundled `rust-objcopy`, whose
 # output current dyld rejects ("mis-aligned LINKEDIT string pool"). That broke
 # every proc macro in a release build ("can't find crate for zerofrom_derive")
-# and left the sidecar unloadable by `dyld_info`. scripts/build-rust-sidecar.mjs
+# and left the sidecar unloadable by `dyld_info`. scripts/build-rust-sidecar.ts
 # strips the shipped binaries with the platform's own `strip` instead.
 strip = false
 

@@ -1,0 +1,616 @@
+{
+  "schema": "plainsong-notes-fidelity-v1",
+  "description": "Third held-out set of synthetic meetings for the notes variant eval, written without reference to the sidecar code or the earlier held-out sets. Each meeting mixes conditional and negated commitments, date corrections, spoken section labels, product or vendor names that read like people, restricted prices or quantities, non-task questions or suggestions, completed statuses and reported actions. Not used by Rust tests.",
+  "meetings": [
+    {
+      "id": "heldout3-nonprofit-pricing",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Odile",
+          "text": "Pricing review. The quote from Fenwick, our billing vendor, is twelve dollars per seat only for registered nonprofits, and the standard rate is nineteen dollars per seat."
+        },
+        {
+          "start": 10.0,
+          "end": 17.0,
+          "speaker": "Bram",
+          "text": "Can I ask whether Fenwick offers an annual discount? It's only a question; I'm not taking it on."
+        },
+        {
+          "start": 18.0,
+          "end": 27.0,
+          "speaker": "Talia",
+          "text": "I'll draft the pricing memo by Thursday, and we agreed to sign the Fenwick order once the board approves the nonprofit tier."
+        },
+        {
+          "start": 28.0,
+          "end": 34.0,
+          "speaker": "Odile",
+          "text": "Small correction for Talia. The memo is due Tuesday, not Thursday."
+        },
+        {
+          "start": 35.0,
+          "end": 38.0,
+          "speaker": "Talia",
+          "text": "Got it, Tuesday."
+        },
+        {
+          "start": 39.0,
+          "end": 46.0,
+          "speaker": "Odile",
+          "text": "Status: the security questionnaire is already done. We haven't approved the five extra admin seats."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "draft",
+            "pricing",
+            "memo"
+          ],
+          "owner": "Talia",
+          "due": [
+            "Tuesday"
+          ]
+        },
+        {
+          "task": [
+            "sign",
+            "fenwick",
+            "order",
+            "once",
+            "approves"
+          ],
+          "owner": null,
+          "due": []
+        }
+      ],
+      "names": [
+        "Odile",
+        "Bram",
+        "Talia"
+      ],
+      "numbers": [
+        [
+          "twelve",
+          "12"
+        ],
+        [
+          "nineteen",
+          "19"
+        ],
+        [
+          "five",
+          "5"
+        ]
+      ]
+    },
+    {
+      "id": "heldout3-library-rooms",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Wren",
+          "text": "Library planning. Ash Hall can lend us eight rooms except during exams, and the east wing has three rooms all term."
+        },
+        {
+          "start": 10.0,
+          "end": 18.0,
+          "speaker": "Dario",
+          "text": "Then I'll book the three east wing rooms by Tuesday, as long as facilities unlocks the booking portal."
+        },
+        {
+          "start": 19.0,
+          "end": 27.0,
+          "speaker": "Sunniva",
+          "text": "Ingrid from facilities already confirmed the fire inspection. I won't publish the timetable until Dario books the rooms."
+        },
+        {
+          "start": 28.0,
+          "end": 38.0,
+          "speaker": "Kofi",
+          "text": "Furniture: the north floor has forty study carrels, the annex has twelve group tables, and the chair budget is $2,400. I'll order the new chairs by the 9th."
+        },
+        {
+          "start": 39.0,
+          "end": 47.0,
+          "speaker": "Wren",
+          "text": "Furniture: one correction, the supplier is closed that week, so Kofi orders the chairs by the 16th instead."
+        },
+        {
+          "start": 48.0,
+          "end": 51.0,
+          "speaker": "Kofi",
+          "text": "Fine, the 16th."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "book",
+            "east",
+            "wing",
+            "rooms",
+            "as long as",
+            "unlocks"
+          ],
+          "owner": "Dario",
+          "due": [
+            "Tuesday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "publish",
+            "timetable",
+            "until",
+            "books"
+          ],
+          "owner": "Sunniva",
+          "due": []
+        },
+        {
+          "task": [
+            "order",
+            "chairs"
+          ],
+          "owner": "Kofi",
+          "due": [
+            "the 16th",
+            "the sixteenth"
+          ]
+        }
+      ],
+      "names": [
+        "Wren",
+        "Dario",
+        "Sunniva",
+        "Kofi",
+        "Ingrid"
+      ],
+      "numbers": [
+        [
+          "eight",
+          "8"
+        ],
+        [
+          "three",
+          "3"
+        ],
+        [
+          "forty",
+          "40"
+        ],
+        [
+          "twelve",
+          "12"
+        ],
+        [
+          "$2,400",
+          "2,400",
+          "2400"
+        ],
+        [
+          "16th",
+          "sixteenth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout3-bakery-supplier",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Mireille",
+          "text": "Supplier check-in. Harlan, the mill we use, now charges $27 a sack of flour, and there's a $4 delivery fee only on orders under ten sacks."
+        },
+        {
+          "start": 10.0,
+          "end": 18.0,
+          "speaker": "Tobias",
+          "text": "Clementine, the ordering app, keeps dropping the Saturday orders, so I'll export the order history on Monday."
+        },
+        {
+          "start": 19.0,
+          "end": 26.0,
+          "speaker": "Anouk",
+          "text": "If the export looks clean, I'll move us onto the new order template on June 4."
+        },
+        {
+          "start": 27.0,
+          "end": 34.0,
+          "speaker": "Mireille",
+          "text": "Anouk, the template move has to be June 11, not June 4. Harlan's rep is away that week."
+        },
+        {
+          "start": 35.0,
+          "end": 38.0,
+          "speaker": "Anouk",
+          "text": "Okay, June 11."
+        },
+        {
+          "start": 39.0,
+          "end": 46.0,
+          "speaker": "Tobias",
+          "text": "Can I suggest we try another mill for rye? Not an action for anyone, just something to think about."
+        },
+        {
+          "start": 47.0,
+          "end": 54.0,
+          "speaker": "Mireille",
+          "text": "Noted. Bettina already paid the March invoice, and the oven repair is finished."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "export",
+            "order",
+            "history"
+          ],
+          "owner": "Tobias",
+          "due": [
+            "Monday"
+          ]
+        },
+        {
+          "task": [
+            "move",
+            "order",
+            "template",
+            "if",
+            "looks"
+          ],
+          "owner": "Anouk",
+          "due": [
+            "June 11"
+          ]
+        }
+      ],
+      "names": [
+        "Mireille",
+        "Tobias",
+        "Anouk",
+        "Bettina"
+      ],
+      "numbers": [
+        [
+          "$27",
+          "27"
+        ],
+        [
+          "$4",
+          "4"
+        ],
+        [
+          "ten",
+          "10"
+        ],
+        [
+          "June 11"
+        ]
+      ]
+    },
+    {
+      "id": "heldout3-theatre-rehearsal",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Celeste",
+          "text": "Rehearsal schedule. The cast has fourteen actors, the crew has six stagehands, and the props budget is $850."
+        },
+        {
+          "start": 10.0,
+          "end": 19.0,
+          "speaker": "Ronan",
+          "text": "We agreed to add a Sunday matinee only if presales pass 200 tickets, and I'll print the programs by Friday."
+        },
+        {
+          "start": 20.0,
+          "end": 27.0,
+          "speaker": "Imke",
+          "text": "Rehearsal schedule, again: I won't lock the lighting cues until Yusuf finishes the set changes."
+        },
+        {
+          "start": 28.0,
+          "end": 35.0,
+          "speaker": "Yusuf",
+          "text": "I'll finish the set changes on Wednesday. Sorry, I mean Thursday, not Wednesday."
+        },
+        {
+          "start": 36.0,
+          "end": 45.0,
+          "speaker": "Celeste",
+          "text": "Can I ask, and this isn't a task for anyone, whether the matinee could use the smaller hall? Also, we haven't approved the fog machine."
+        },
+        {
+          "start": 46.0,
+          "end": 50.0,
+          "speaker": "Ronan",
+          "text": "Imke already booked the piano tuner."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "add",
+            "sunday",
+            "matinee",
+            "only if",
+            "pass"
+          ],
+          "owner": null,
+          "due": []
+        },
+        {
+          "task": [
+            "print",
+            "programs"
+          ],
+          "owner": "Ronan",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "lock",
+            "lighting",
+            "cues",
+            "until",
+            "finishes"
+          ],
+          "owner": "Imke",
+          "due": []
+        },
+        {
+          "task": [
+            "finish",
+            "set",
+            "changes"
+          ],
+          "owner": "Yusuf",
+          "due": [
+            "Thursday"
+          ]
+        }
+      ],
+      "names": [
+        "Celeste",
+        "Ronan",
+        "Imke",
+        "Yusuf"
+      ],
+      "numbers": [
+        [
+          "fourteen",
+          "14"
+        ],
+        [
+          "six",
+          "6"
+        ],
+        [
+          "$850",
+          "850"
+        ],
+        [
+          "200",
+          "two hundred"
+        ]
+      ]
+    },
+    {
+      "id": "heldout3-food-drive",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 8.0,
+          "speaker": "Marisol",
+          "text": "Food drive sync. Deliveries: Jasper, our refrigerated van, is already repaired."
+        },
+        {
+          "start": 9.0,
+          "end": 16.0,
+          "speaker": "Aksel",
+          "text": "Good. I'll drive Jasper to the north pantry on Thursday unless the inspection slips."
+        },
+        {
+          "start": 17.0,
+          "end": 26.0,
+          "speaker": "Fenna",
+          "text": "Box pricing: the standard price is five dollars a box, and only school pantries pay three dollars a box."
+        },
+        {
+          "start": 27.0,
+          "end": 36.0,
+          "speaker": "Marisol",
+          "text": "We haven't approved a backup van. I'd propose we revisit that in spring, but nobody needs to act on it now. Oskar already collected the donated pallets."
+        },
+        {
+          "start": 37.0,
+          "end": 43.0,
+          "speaker": "Aksel",
+          "text": "I'll send Fenna the route sheet by the 9th."
+        },
+        {
+          "start": 44.0,
+          "end": 51.0,
+          "speaker": "Fenna",
+          "text": "Deliveries: I need the route sheet by the 8th, not the 9th, Aksel."
+        },
+        {
+          "start": 52.0,
+          "end": 56.0,
+          "speaker": "Aksel",
+          "text": "Okay, the 8th then."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "drive",
+            "jasper",
+            "north",
+            "pantry",
+            "unless",
+            "slips"
+          ],
+          "owner": "Aksel",
+          "due": [
+            "Thursday"
+          ]
+        },
+        {
+          "task": [
+            "send",
+            "route",
+            "sheet"
+          ],
+          "owner": "Aksel",
+          "due": [
+            "the 8th",
+            "the eighth"
+          ]
+        }
+      ],
+      "names": [
+        "Marisol",
+        "Aksel",
+        "Fenna",
+        "Oskar"
+      ],
+      "numbers": [
+        [
+          "five",
+          "5"
+        ],
+        [
+          "three",
+          "3"
+        ],
+        [
+          "8th",
+          "eighth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout3-app-release",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Zofia",
+          "text": "Release planning. Rowan, our field-notes app, has 640 beta testers, and the support team has closed 95 bug reports."
+        },
+        {
+          "start": 10.0,
+          "end": 18.0,
+          "speaker": "Emeka",
+          "text": "I'll freeze the code on Wednesday after the translation pass lands, and Lise will write the release notes."
+        },
+        {
+          "start": 19.0,
+          "end": 27.0,
+          "speaker": "Lise",
+          "text": "Fine, I'll write the release notes by the 21st. Can I suggest a short changelog video too? That's only an idea, not an action."
+        },
+        {
+          "start": 28.0,
+          "end": 34.0,
+          "speaker": "Emeka",
+          "text": "Pricing: the Pro tier costs $6 a month, or $4 a month only for verified students."
+        },
+        {
+          "start": 35.0,
+          "end": 44.0,
+          "speaker": "Zofia",
+          "text": "Kenji already signed off on the privacy review. We haven't approved the tablet build yet, so I won't announce the launch until the tablet build is approved."
+        },
+        {
+          "start": 45.0,
+          "end": 52.0,
+          "speaker": "Lise",
+          "text": "Emeka, one correction. The code freeze is Thursday, not Wednesday, because the translation vendor slipped a day."
+        },
+        {
+          "start": 53.0,
+          "end": 56.0,
+          "speaker": "Emeka",
+          "text": "Right, Thursday then."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "freeze",
+            "code",
+            "after",
+            "lands"
+          ],
+          "owner": "Emeka",
+          "due": [
+            "Thursday"
+          ]
+        },
+        {
+          "task": [
+            "write",
+            "release",
+            "notes"
+          ],
+          "owner": "Lise",
+          "due": [
+            "the 21st",
+            "the twenty-first"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "announce",
+            "launch",
+            "until",
+            "approved"
+          ],
+          "owner": "Zofia",
+          "due": []
+        }
+      ],
+      "names": [
+        "Zofia",
+        "Emeka",
+        "Lise",
+        "Kenji"
+      ],
+      "numbers": [
+        [
+          "640"
+        ],
+        [
+          "95",
+          "ninety-five"
+        ],
+        [
+          "$6",
+          "6"
+        ],
+        [
+          "$4",
+          "4"
+        ],
+        [
+          "21st",
+          "twenty-first"
+        ]
+      ]
+    }
+  ]
+}

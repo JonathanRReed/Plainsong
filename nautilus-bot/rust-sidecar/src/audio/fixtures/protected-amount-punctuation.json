@@ -1,0 +1,17 @@
+[
+  {
+    "name": "public",
+    "source": "Here's a project finance which of course we all have to think about when we design this thing selling price is supposed to be twenty five euro profit aim for the company is fifty million euro the market range unlimited meaning international and the production cost should not exceed hopefully should be less than twelve fifty euro",
+    "candidate": "Here's a project finance, which of course we all have to think about when we design this thing. Selling price is supposed to be twenty five euro. Profit aim for the company is fifty million euro. The market range unlimited, meaning international, and the production cost should not exceed, hopefully should be less than twelve fifty euro."
+  },
+  {
+    "name": "separate",
+    "source": "The sale price is twelve euros and the profit aim is fifty euros keep both amounts separate",
+    "candidate": "The sale price is twelve euros and the profit aim is fifty euros. Keep both amounts separate."
+  },
+  {
+    "name": "cents",
+    "source": "The production cost must stay below twelve dollars and fifty cents the sale price is twenty five dollars",
+    "candidate": "The production cost must stay below twelve dollars and fifty cents; the sale price is twenty five dollars."
+  }
+]

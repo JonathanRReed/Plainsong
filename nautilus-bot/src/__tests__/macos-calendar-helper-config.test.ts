@@ -12,10 +12,10 @@ function read(relativePath: string): string {
 
 const HELPER_NAME = "plainsong-native-calendar-helper";
 const CALENDAR_USAGE_DESCRIPTION =
-  "Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac.";
+  "Plainsong reads your calendar to help you prepare for and capture meetings, and, if enabled, spell names locally. It does not change your calendar. If you choose cloud AI, selected meeting details may be sent to that provider.";
 
 describe("calendar helper entitlements", () => {
-  it("grants calendars and nothing else", () => {
+  it("grants calendars and contact names, and nothing else", () => {
     // The point of compiling a separate binary is that the app's own
     // signature — microphone, Apple Events, and the Accessibility grant it
     // holds at runtime — never has to carry calendar reading too.
@@ -24,12 +24,27 @@ describe("calendar helper entitlements", () => {
       ([, key]) => key,
     );
 
-    expect(keys).toEqual(["com.apple.security.personal-information.calendars"]);
+    expect(keys).toEqual([
+      "com.apple.security.personal-information.addressbook",
+      "com.apple.security.personal-information.calendars",
+    ]);
   });
 
-  it("keeps calendar access off the app and the inherited child policy", () => {
+  it("puts the calendar entitlement on the app that TCC attributes the prompt to", () => {
+    // The hardened runtime will not prompt for a responsible process whose
+    // signature lacks the entitlement; with it on the helper only, Connect
+    // calendar got an instant "no" and no prompt (0.9.0-beta.6).
+    const app = read("build-resources/entitlements.mac.plist");
+    expect(app).toMatch(
+      /<key>com\.apple\.security\.personal-information\.calendars<\/key>\s*<true\/>/,
+    );
+    expect(app).toMatch(
+      /<key>com\.apple\.security\.personal-information\.addressbook<\/key>\s*<true\/>/,
+    );
+  });
+
+  it("keeps calendar access off the inherited child policies", () => {
     for (const file of [
-      "build-resources/entitlements.mac.plist",
       "build-resources/entitlements.mac.inherit.plist",
       "build-resources/entitlements.mac.helper.plist",
       "build-resources/entitlements.mac.sidecar.plist",
@@ -37,6 +52,9 @@ describe("calendar helper entitlements", () => {
     ]) {
       expect(read(file)).not.toContain(
         "com.apple.security.personal-information.calendars",
+      );
+      expect(read(file)).not.toContain(
+        "com.apple.security.personal-information.addressbook",
       );
     }
   });
@@ -61,6 +79,16 @@ describe("calendar helper Info.plist", () => {
     expect(infoPlist).not.toContain("NSMicrophoneUsageDescription");
     expect(infoPlist).not.toContain("NSAppleEventsUsageDescription");
     expect(infoPlist).not.toContain("NSSpeechRecognitionUsageDescription");
+  });
+
+  it("explains Contacts in the same words as the app bundle", () => {
+    const config = read("electron-builder.yml");
+    const match = infoPlist.match(
+      /<key>NSContactsUsageDescription<\/key>\s*<string>([^<]+)<\/string>/,
+    );
+    expect(match).not.toBeNull();
+    expect(config).toContain(`NSContactsUsageDescription: "${match![1]}"`);
+    expect(read("scripts/verify-packaged-native-helpers.mjs")).toContain(match![1]);
   });
 
   it("is a valid property list", () => {
@@ -249,8 +277,8 @@ describe("scripts/verify-packaged-native-helpers.mjs", () => {
   });
 });
 
-describe("scripts/verify-macos-release-trust.mjs", () => {
-  const gate = read("scripts/verify-macos-release-trust.mjs");
+describe("scripts/verify-macos-release-trust.ts", () => {
+  const gate = read("scripts/verify-macos-release-trust.ts");
 
   it("holds the calendar helper to the app's signing identity", () => {
     for (const check of [
@@ -266,12 +294,12 @@ describe("scripts/verify-macos-release-trust.mjs", () => {
     }
   });
 
-  it("requires the entitlement to be on the helper and off the app", () => {
+  it("requires the entitlement on the helper and on the app", () => {
     expect(gate).toContain("calendarHelperHasCalendarEntitlement");
     expect(gate).toContain("calendarHelperHasNoUnrelatedEntitlements");
-    // The split is the whole point; a release that took the entitlement back
-    // into the app's signature would otherwise pass everything else.
-    expect(gate).toContain("appHasNoCalendarEntitlement");
+    // Without the app's copy macOS never shows the prompt the helper asks for.
+    expect(gate).toContain("appHasCalendarEntitlement");
+    expect(gate).not.toContain("appHasNoCalendarEntitlement");
   });
 });
 
@@ -313,6 +341,20 @@ describe("the calendar helper's privacy contract", () => {
         fields.some((field) => field.toLowerCase() === forbidden.toLowerCase()),
         `EventPayload must not carry ${forbidden}`,
       ).toBe(false);
+    }
+  });
+
+  it("documents calendar fields, refresh, persistence and cloud analysis in the privacy policy", () => {
+    const privacy = read("../PRIVACY.md");
+    const section = privacy.split("## Calendar access")[1]?.split("## Learning")[0] ?? "";
+    for (const disclosure of [
+      "calendar and account names", "titles", "conference URLs", "attendee names and email addresses",
+      "notes and location text", "20 seconds", "60 seconds", "local database",
+      "cloud provider", "Attendee email addresses", "removed from the model context",
+      "disconnects the calendar", "stops checking and reading it",
+      "saved in Plainsong's settings", "does not revoke the macOS permission",
+    ]) {
+      expect(section.replace(/\s+/g, " ")).toContain(disclosure);
     }
   });
 

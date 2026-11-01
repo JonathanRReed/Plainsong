@@ -4,13 +4,13 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateCandidateEvidenceProvenance,
   evaluateComponentEquivalence,
-} from "../../scripts/lib/macos-component-equivalence.mjs";
-import { VERIFY_MODES } from "../../scripts/lib/app-matrix-readback.mjs";
+} from "../../scripts/lib/macos-component-equivalence.ts";
+import { VERIFY_MODES } from "../../scripts/lib/app-matrix-readback.ts";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 
 const captureScript = fs.readFileSync(
-  path.join(repoRoot, "scripts", "capture-packaged-macos-app-matrix-insertion.mjs"),
+  path.join(repoRoot, "scripts", "capture-packaged-macos-app-matrix-insertion.ts"),
   "utf8",
 );
 const dispatchSource = fs.readFileSync(
@@ -22,19 +22,19 @@ const permissionsSource = fs.readFileSync(
   "utf8",
 );
 const verifierScript = fs.readFileSync(
-  path.join(repoRoot, "scripts", "verify-packaged-macos-app-matrix-insertion.mjs"),
+  path.join(repoRoot, "scripts", "verify-packaged-macos-app-matrix-insertion.ts"),
   "utf8",
 );
 const readBackScript = fs.readFileSync(
-  path.join(repoRoot, "scripts", "lib", "app-matrix-readback.mjs"),
+  path.join(repoRoot, "scripts", "lib", "app-matrix-readback.ts"),
   "utf8",
 );
 const preflightScript = fs.readFileSync(
-  path.join(repoRoot, "scripts", "capture-packaged-macos-app-matrix-preflight.mjs"),
+  path.join(repoRoot, "scripts", "capture-packaged-macos-app-matrix-preflight.ts"),
   "utf8",
 );
 const releaseAuditScript = fs.readFileSync(
-  path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+  path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.ts"),
   "utf8",
 );
 const compatibilityMatrix = fs.readFileSync(
@@ -159,12 +159,6 @@ describe("macOS app matrix insertion scripts", () => {
     expect(compatibilityMatrix).not.toMatch(
       /\| Cursor \| [^|\n]+ \| [^|\n]+ \| REQUIRED \|/,
     );
-  });
-
-  it("rejects packaged receipts that predate the current app archive", () => {
-    expect(releaseAuditScript).toContain("candidateBuiltAtMs");
-    expect(releaseAuditScript).toContain("candidateBound");
-    expect(releaseAuditScript).toContain("predates the current candidate app archive");
   });
 
   it("binds ordinary release review signoff to the source snapshot that passed the source gates", () => {

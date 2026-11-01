@@ -2,9 +2,7 @@
 //!
 //! The sidecar is a newline-delimited JSON-RPC process: `src/bin/sidecar.rs`
 //! reads a request off stdin and calls `dispatch_command`, which routes it to a
-//! handler. Everything the renderer can reach goes through that one door, so
-//! the door is the seam a future Tauri command layer would call directly
-//! (`docs/tauri-migration-plan.md`).
+//! handler. Everything the renderer can reach goes through that one door.
 //!
 //! ## Module map
 //!
@@ -58,33 +56,69 @@ mod asr_routing;
 mod audio;
 mod audio_import;
 mod audio_import_runtime;
+pub mod audio_output_mute;
 mod backup;
 mod crypto;
 mod db;
 mod diarization;
+#[cfg(test)]
+mod dictation_adversarial_tests;
+mod dictation_checkpoint;
 mod dictation_cleanup;
 mod dictation_commands;
 pub mod dictation_correction_capture;
+#[cfg(test)]
+mod dictation_delivery_field_tests;
 mod dictation_dictionary_csv;
+#[cfg(all(test, feature = "asr-transcribe-cpp"))]
+mod dictation_e2e_harness;
 mod dictation_fidelity;
+#[cfg(test)]
+mod dictation_lexical_hesitation_tests;
 mod dictation_live_preview;
 pub mod dictation_parity;
 pub mod dictation_pipeline;
 mod dictation_progress;
 mod dictation_reprocess;
+mod dictation_screen_context;
 pub mod dictation_secure_field;
 mod dictation_session;
+mod dictation_sounds_like;
+mod dictation_stage_ownership;
+mod dictation_submit;
 mod dictation_text;
 pub mod dictation_timing;
+pub mod dictation_vocabulary;
 mod dispatch;
 mod download;
 mod events;
 mod export;
 mod export_paths;
+pub mod hardware_tier;
 mod llm;
+#[cfg(all(test, feature = "sqlcipher"))]
+mod startup_migration_tests;
+pub use llm::notes_queue::spawn as spawn_waiting_notes_recovery;
 pub mod local_tools;
+mod meeting_aside_audio;
+#[doc(hidden)]
+pub mod meeting_asides;
 pub mod meeting_brief;
 pub mod meeting_detect;
+#[doc(hidden)]
+pub mod meeting_eval;
+pub mod memory_pressure;
+pub(crate) mod model_residency;
+mod publishing;
+pub mod qos;
+/// Headless pyannote community-1 runs for the parity and accuracy harness
+/// (`community1-eval` binary).
+#[cfg(feature = "diarization")]
+pub mod community1_eval {
+    pub use crate::diarization::community1::eval_file;
+}
+mod audio_compression;
+mod meeting_bleed;
 mod meeting_pipeline;
 mod meeting_transcribe;
 mod model_cache;
@@ -94,17 +128,33 @@ mod ort_utils;
 mod paths;
 mod permissions;
 mod playback;
-mod plus;
 mod provider_models;
 mod recording_audio;
 mod recording_lifecycle;
 pub mod recording_pause;
 mod recording_vault;
 mod remote_processing;
+mod restore_journal;
 mod retention;
 mod safe_fs;
 mod secrets;
+mod semantic_index;
+mod semantic_search;
+#[doc(hidden)]
+pub use secrets::enable_ephemeral_credentials_for_sidecar;
+
+/// The exact stop-time transform dictation applies before the final decode,
+/// for `asr-eval-batch --dictation-preprocess` to score recorded speech
+/// through the same path the app uses.
+#[doc(hidden)]
+pub fn encode_dictation_recognition_wav_for_eval(
+    samples: &mut Vec<f32>,
+    sample_rate: u32,
+) -> anyhow::Result<Vec<u8>> {
+    audio::encode_dictation_recognition_wav(samples, sample_rate)
+}
 pub mod settings;
+mod settings_patch;
 mod settings_values;
 pub mod sidecar_handle;
 mod speakers;
@@ -170,9 +220,13 @@ use tokio::sync::Mutex;
 
 // Re-exported so the split stays invisible to callers: `src/bin/sidecar.rs` and
 // every test still name `plainsong::dispatch_command`.
+pub use dictation_checkpoint::prepare_dictation_checkpoint_at_startup;
 pub use dispatch::dispatch_command;
+pub use llm::builtin_embeddings::run_embedding_helper_stdio;
+pub use publishing::spawn_note_publishing;
 pub use recording_lifecycle::spawn_meeting_call_detection;
 pub use recording_vault::sweep_runtime_playback_audio_for_sidecar;
+pub use semantic_index::spawn_semantic_index_worker;
 
 // Glob re-exports of the modules lib.rs was split into, so every call site left
 // here resolves the moved items by their old unqualified names. Nothing was
@@ -197,6 +251,7 @@ pub(crate) use retention::*;
 pub(crate) use settings_values::*;
 pub(crate) use speakers::*;
 pub(crate) use streaming_partials::*;
+pub use text_insert::run_with_main_run_loop;
 pub(crate) use text_insert::*;
 
 pub struct AppState {
@@ -216,7 +271,12 @@ pub struct AppState {
     dictation_release_pending: Arc<AtomicBool>,
     dictation_session_tracker: Arc<Mutex<DictationSessionTracker>>,
     dictation_runtime_state: Arc<Mutex<DictationSessionState>>,
+    dictation_model_release: Arc<DictationModelReleaseCoordinator>,
     dictation_start_options: Arc<Mutex<models::DictationStartOptions>>,
+    #[cfg(target_os = "macos")]
+    dictation_selection_owner: Mutex<Option<(u64, Arc<dictation_session::SessionSelectionOwner>)>>,
+    #[cfg(target_os = "macos")]
+    dictation_selection_policy_revision: std::sync::atomic::AtomicU64,
     pending_dictation_target: Arc<StdMutex<Option<PendingDictationTarget>>>,
     last_external_target: Arc<StdMutex<Option<PendingDictationTarget>>>,
     dictation_overlay_state: Arc<StdMutex<DictationOverlayState>>,
@@ -274,6 +334,7 @@ pub struct AppState {
     /// name; everything else stays here so a chip can still be offered without
     /// keeping a record of every voice in the room. Cleared by quitting.
     session_cluster_voices: Arc<StdMutex<diarization::voiceprints::SessionClusterVoices>>,
+    _storage_guard: restore_journal::ProfileGuard,
 }
 
 struct MeetingAudioPostprocessingGuard {
@@ -295,6 +356,28 @@ impl MeetingAudioPostprocessingGuard {
             recording_id: recording_id.to_string(),
             _operation_lease: None,
         }
+    }
+
+    fn try_coordinated(
+        active: Arc<StdMutex<HashMap<String, usize>>>,
+        recording_id: &str,
+        operation_lease: operation_coordinator::OperationLease,
+    ) -> Result<Self, String> {
+        {
+            let mut active_recordings = active.lock().unwrap_or_else(|error| error.into_inner());
+            if active_recordings
+                .get(recording_id)
+                .is_some_and(|count| *count > 0)
+            {
+                return Err("This meeting is still finishing earlier processing. Try transcription again when it finishes.".to_string());
+            }
+            active_recordings.insert(recording_id.to_string(), 1);
+        }
+        Ok(Self {
+            active,
+            recording_id: recording_id.to_string(),
+            _operation_lease: Some(operation_lease),
+        })
     }
 
     fn coordinated(
@@ -320,6 +403,148 @@ impl Drop for MeetingAudioPostprocessingGuard {
                 active_recordings.remove(&self.recording_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod meeting_postprocessing_retry_tests {
+    use super::*;
+    use operation_coordinator::{OperationCoordinator, OperationKind};
+    use std::sync::Barrier;
+
+    fn active() -> Arc<StdMutex<HashMap<String, usize>>> {
+        Arc::new(StdMutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn meeting_postprocessing_retry_rejects_active_id_without_changing_counts() {
+        let active = active();
+        let coordinator = OperationCoordinator::new();
+        let original = MeetingAudioPostprocessingGuard::coordinated(
+            Arc::clone(&active),
+            "a",
+            coordinator.try_acquire(OperationKind::PostProcess).unwrap(),
+        );
+        let before = active.lock().unwrap().clone();
+        let rejected = MeetingAudioPostprocessingGuard::try_coordinated(
+            Arc::clone(&active),
+            "a",
+            coordinator.try_acquire(OperationKind::PostProcess).unwrap(),
+        );
+        assert!(matches!(rejected, Err(ref message) if message ==
+            "This meeting is still finishing earlier processing. Try transcription again when it finishes."));
+        assert_eq!(*active.lock().unwrap(), before);
+        assert!(coordinator
+            .try_acquire(OperationKind::VaultMigration)
+            .is_err());
+        drop(original);
+        assert!(active.lock().unwrap().is_empty());
+        // Both the original and rejected request's leases have been released.
+        assert!(coordinator
+            .try_acquire(OperationKind::VaultMigration)
+            .is_ok());
+    }
+
+    #[test]
+    fn meeting_postprocessing_retry_allows_another_record_and_retry_after_release() {
+        let active = active();
+        let coordinator = OperationCoordinator::new();
+        let original = MeetingAudioPostprocessingGuard::coordinated(
+            Arc::clone(&active),
+            "a",
+            coordinator.try_acquire(OperationKind::PostProcess).unwrap(),
+        );
+        let other = MeetingAudioPostprocessingGuard::try_coordinated(
+            Arc::clone(&active),
+            "b",
+            coordinator.try_acquire(OperationKind::PostProcess).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(active.lock().unwrap().len(), 2);
+        drop(original);
+        assert!(coordinator
+            .try_acquire(OperationKind::VaultMigration)
+            .is_err());
+        let retry = MeetingAudioPostprocessingGuard::try_coordinated(
+            Arc::clone(&active),
+            "a",
+            coordinator.try_acquire(OperationKind::PostProcess).unwrap(),
+        )
+        .unwrap();
+        drop(other);
+        assert_eq!(active.lock().unwrap().get("a"), Some(&1));
+        drop(retry);
+        assert!(active.lock().unwrap().is_empty());
+        assert!(coordinator
+            .try_acquire(OperationKind::VaultMigration)
+            .is_ok());
+    }
+
+    #[test]
+    fn meeting_postprocessing_retry_respects_uncoordinated_guards() {
+        let active = active();
+        let coordinator = OperationCoordinator::new();
+        let original = MeetingAudioPostprocessingGuard::new(Arc::clone(&active), "a");
+        assert!(MeetingAudioPostprocessingGuard::try_coordinated(
+            Arc::clone(&active),
+            "a",
+            coordinator.try_acquire(OperationKind::PostProcess).unwrap(),
+        )
+        .is_err());
+        assert_eq!(active.lock().unwrap().get("a"), Some(&1));
+        // Rejection drops its lease even though the original guard has none.
+        assert!(coordinator
+            .try_acquire(OperationKind::VaultMigration)
+            .is_ok());
+        drop(original);
+        let retry = MeetingAudioPostprocessingGuard::try_coordinated(
+            Arc::clone(&active),
+            "a",
+            coordinator.try_acquire(OperationKind::PostProcess).unwrap(),
+        )
+        .unwrap();
+        drop(retry);
+        assert!(active.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn meeting_postprocessing_retry_concurrent_contenders_have_one_owner() {
+        let active = active();
+        let coordinator = OperationCoordinator::new();
+        let start = Arc::new(Barrier::new(2));
+        let attempted = Arc::new(Barrier::new(2));
+        let threads = (0..2)
+            .map(|_| {
+                let active = Arc::clone(&active);
+                let coordinator = Arc::clone(&coordinator);
+                let start = Arc::clone(&start);
+                let attempted = Arc::clone(&attempted);
+                std::thread::spawn(move || {
+                    let lease = coordinator.try_acquire(OperationKind::PostProcess).unwrap();
+                    start.wait();
+                    let result =
+                        MeetingAudioPostprocessingGuard::try_coordinated(active, "a", lease);
+                    // Retain the successful guard until both attempts have completed.
+                    attempted.wait();
+                    result
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert_eq!(active.lock().unwrap().get("a"), Some(&1));
+        assert!(coordinator
+            .try_acquire(OperationKind::VaultMigration)
+            .is_err());
+        drop(results);
+        assert!(active.lock().unwrap().is_empty());
+        assert!(coordinator
+            .try_acquire(OperationKind::VaultMigration)
+            .is_ok());
     }
 }
 
@@ -387,6 +612,23 @@ fn dictation_format_timeout(provider: AnalysisProvider) -> Duration {
         DICTATION_FORMAT_TIMEOUT_LOCAL
     }
 }
+
+/// An explicitly selected rewrite may spend longer producing useful text.
+/// A real local Gemma rewrite needed 16.6 s on its first call and 0.87 s
+/// afterward. Keep automatic cleanup's shorter limit; never add a delay when
+/// the model finishes early. All passes still share one pre-insert budget.
+fn dictation_format_timeout_for_policy(
+    provider: AnalysisProvider,
+    policy: DictationAiTransformPolicy,
+) -> Duration {
+    if policy == DictationAiTransformPolicy::StrictCleanup {
+        dictation_format_timeout(provider)
+    } else if provider.is_remote() {
+        Duration::from_secs(8)
+    } else {
+        Duration::from_secs(20)
+    }
+}
 const MAX_BENCHMARK_AUDIO_BYTES: usize = 6 * 1024 * 1024;
 /// Shown when a pre-insert LLM pass could not run. The user still gets their
 /// words — the locally formatted text — so this is a warning, not an error.
@@ -406,6 +648,42 @@ const DICTATION_TRANSLATE_FAILED_WARNING: &str =
 #[cfg(test)]
 mod dictation_format_timeout_tests {
     use super::*;
+
+    #[test]
+    fn explicit_rewrite_budget_covers_cold_local_load_without_doubling_between_passes() {
+        let provider = AnalysisProvider::Ollama;
+        let now = std::time::Instant::now();
+        let budget = dictation_format_timeout_for_policy(
+            provider,
+            DictationAiTransformPolicy::MeaningPreservingRewrite,
+        );
+        let mut shared = crate::dictation_timing::DictationPreInsertBudget::new();
+        assert!(shared.remaining(budget, now) > Duration::from_millis(16_576));
+        assert_eq!(
+            shared.remaining(budget, now + Duration::from_secs(17)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            shared.remaining(budget, now + Duration::from_secs(21)),
+            Duration::ZERO
+        );
+        for provider in [AnalysisProvider::Ollama, AnalysisProvider::OpenAi] {
+            assert_eq!(
+                dictation_format_timeout_for_policy(
+                    provider,
+                    DictationAiTransformPolicy::StrictCleanup
+                ),
+                dictation_format_timeout(provider)
+            );
+        }
+        assert_eq!(
+            dictation_format_timeout_for_policy(
+                AnalysisProvider::OpenAi,
+                DictationAiTransformPolicy::MeaningPreservingRewrite
+            ),
+            Duration::from_secs(8)
+        );
+    }
 
     // These exercise the exact mechanism `stop_dictation_for_sidecar` uses at
     // both of its pre-insert LLM call sites --
@@ -483,22 +761,14 @@ mod dictation_format_timeout_tests {
 
     #[test]
     fn the_meetings_lane_refuses_a_dictation_only_provider_by_name() {
-        for dictation_only in [
-            AnalysisProvider::BundledLocal,
-            AnalysisProvider::AppleLanguageModel,
-        ] {
-            let error = enforce_meeting_lane_provider_policy(dictation_only)
-                .expect_err("a dictation-only provider must not serve meetings");
-            assert!(
-                error.contains(dictation_only.as_settings_value()),
-                "the refusal must name the provider: {error}"
-            );
-            assert!(
-                error.contains("Ollama") && error.contains("Models"),
-                "the refusal must name the alternative and where to change it: {error}"
-            );
-        }
+        let dictation_only = AnalysisProvider::BundledLocal;
+        let error = enforce_meeting_lane_provider_policy(dictation_only)
+            .expect_err("a dictation-only provider must not serve meetings");
+        assert!(error.contains(dictation_only.as_settings_value()));
+        assert!(error.contains("Ollama") && error.contains("Models"));
         for allowed in [
+            AnalysisProvider::AppleLanguageModel,
+            AnalysisProvider::NativeText,
             AnalysisProvider::Ollama,
             AnalysisProvider::OpenAi,
             AnalysisProvider::Anthropic,
@@ -522,15 +792,21 @@ mod dictation_format_timeout_tests {
             AnalysisProvider::BundledLocal,
             AnalysisProvider::AppleLanguageModel,
         ] {
+            assert!(!provider.supports_custom_dictation_transform());
             let error = custom_transform_unsupported_error(provider);
             assert!(error.contains(provider.as_settings_value()), "{error}");
             assert!(error.contains("custom transform prompt"), "{error}");
             assert!(error.contains("Ollama"), "{error}");
+            assert!(error.contains("built-in instruction model"), "{error}");
         }
         // The refusal is keyed on the same predicate the dispatch uses, so a
         // provider that can follow a prompt never lands here.
-        for allowed in [AnalysisProvider::Ollama, AnalysisProvider::Anthropic] {
-            assert!(!allowed.is_zero_setup_local(), "{allowed:?}");
+        for allowed in [
+            AnalysisProvider::NativeText,
+            AnalysisProvider::Ollama,
+            AnalysisProvider::Anthropic,
+        ] {
+            assert!(allowed.supports_custom_dictation_transform(), "{allowed:?}");
         }
     }
 
@@ -724,6 +1000,8 @@ enum DictationSessionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DictationModelWarmState {
     Ready,
+    /// Loading in the background while the microphone already captures.
+    Loading,
     Deferred,
     NotRequired,
 }
@@ -732,6 +1010,7 @@ impl DictationModelWarmState {
     fn as_event_value(self) -> &'static str {
         match self {
             Self::Ready => "ready",
+            Self::Loading => "loading",
             Self::Deferred => "deferred",
             Self::NotRequired => "not_required",
         }
@@ -817,27 +1096,60 @@ struct DictationSessionTracker {
     /// and the loser would clear the tracker out from under the winner —
     /// discarding a dictation the user had already spoken.
     stopping_session_id: Option<u64>,
+    /// Explicit cancellation is distinct from an ordinary stop. Claim it
+    /// before waiting for capture cleanup so processing cannot proceed.
+    cancellation_requested_session_id: Option<u64>,
+    /// Delivery has crossed its final cancellation boundary.
+    delivery_started_session_id: Option<u64>,
+}
+
+impl DictationSessionTracker {
+    fn reset_for_app_state(&mut self) {
+        *self = Self {
+            next_session_id: self.next_session_id + 1,
+            ..Self::default()
+        };
+    }
+}
+
+#[derive(Debug)]
+struct RecentDictationDelivery {
+    snapshot: RecentDictationDeliverySnapshot,
+    undo: Option<text_insert::OwnedDictationEdit>,
 }
 
 #[derive(Debug, Clone)]
-struct RecentDictationDelivery {
+struct RecentDictationDeliverySnapshot {
+    owner_session_id: u64,
     text: String,
     app_target: Option<String>,
     app_bundle_id: Option<String>,
     delivered_at: chrono::DateTime<chrono::Utc>,
-    /// Only a positively confirmed cursor insertion can own an undo entry.
-    /// Clipboard copies and best-effort paste dispatches remain available for
-    /// retry, but must never authorize a system-wide undo keystroke.
-    undo_eligible: bool,
+    undo_available: bool,
 }
 
 const RECENT_DICTATION_DELIVERY_WINDOW_SECS: i64 = 45;
 
-/// One completed dictation result, kept so the user can re-paste or re-copy it
-/// after a failed or mis-targeted insertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DictationRecoveryState {
+    Raw,
+    Completed,
+    Cancelled,
+}
+
+/// Recognized text retained for manual recovery.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RecentDictationResult {
+    #[serde(skip)]
+    state: DictationRecoveryState,
+    #[serde(skip)]
+    owner_session_id: Option<u64>,
+    /// The history entry holding the same words, once it is saved. Deleting
+    /// that entry (by hand or by auto-delete) drops this result too, so the
+    /// menu bar never offers words the reader was told are gone.
+    #[serde(skip)]
+    history_id: Option<String>,
     text: String,
     app_target: Option<String>,
     app_bundle_id: Option<String>,
@@ -940,6 +1252,9 @@ mod multi_recording_analysis_bounds_tests {
 #[derive(Debug, Clone, PartialEq)]
 struct RecordingAnalysisSnapshot {
     transcript_revision: i64,
+    transcript_complete: bool,
+    transcript_degraded_reason: Option<String>,
+    capture_degraded_summary: Option<String>,
     /// The notes exactly as stored, so `verify_analysis_snapshot` can tell
     /// whether the reader edited them while analysis ran. NOT the composed
     /// notes handed to the model -- see `compose_analysis_notes`.
@@ -953,17 +1268,24 @@ struct RecordingAnalysisSnapshot {
     /// the attendee list has to change the fingerprint -- otherwise a stored
     /// summary would claim provenance over an input it was not produced from.
     attendee_names: Vec<String>,
+    speaker_names: Option<std::collections::BTreeMap<String, String>>,
 }
 
 fn analysis_input_fingerprint(snapshot: &RecordingAnalysisSnapshot, instruction: &str) -> String {
-    let canonical = serde_json::json!({
+    let mut canonical = serde_json::json!({
         "transcriptRevision": snapshot.transcript_revision,
+        "transcriptComplete": snapshot.transcript_complete,
+        "transcriptDegradedReason": &snapshot.transcript_degraded_reason,
+        "captureDegradedSummary": &snapshot.capture_degraded_summary,
         "meetingNotes": &snapshot.meeting_notes,
         "notesUpdatedAt": snapshot.notes_updated_at.as_ref(),
         "meetingTemplateId": &snapshot.meeting_template_id,
         "attendeeNames": &snapshot.attendee_names,
         "instruction": instruction,
     });
+    if let Some(speaker_names) = &snapshot.speaker_names {
+        canonical["speakerNames"] = serde_json::json!(speaker_names);
+    }
     models::analysis_content_hash(&canonical.to_string())
 }
 
@@ -1034,6 +1356,12 @@ struct GroundedActionItem {
     task: String,
     assignee: Option<String>,
     deadline: Option<String>,
+    /// The source sentences the item comes from, shown with it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<String>,
+    /// Quotes a commitment the transcript leaves unclear.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    unclear: bool,
     citations: Vec<llm::Citation>,
     grounded: bool,
 }
@@ -1085,6 +1413,8 @@ struct DictationOverlayState {
     dismissed: bool,
     started_at_ms: Option<i64>,
     message: Option<String>,
+    warnings: Vec<String>,
+    review_held: bool,
     preview: Option<String>,
     partial_text: Option<String>,
     session_id: Option<u64>,
@@ -1118,6 +1448,9 @@ struct DictationOverlayState {
     processing_stage: Option<String>,
     expected_transcribe_ms: Option<u64>,
     expected_polish_ms: Option<u64>,
+    /// This dictation takes its audio from a recording meeting (an aside),
+    /// so the pill says so after a remount too.
+    meeting_aside: bool,
 }
 
 impl Default for DictationOverlayState {
@@ -1127,6 +1460,8 @@ impl Default for DictationOverlayState {
             dismissed: false,
             started_at_ms: None,
             message: None,
+            warnings: Vec::new(),
+            review_held: false,
             preview: None,
             partial_text: None,
             session_id: None,
@@ -1157,7 +1492,15 @@ impl Default for DictationOverlayState {
             processing_stage: None,
             expected_transcribe_ms: None,
             expected_polish_ms: None,
+            meeting_aside: false,
         }
+    }
+}
+
+impl DictationOverlayState {
+    fn clear_warnings(&mut self) {
+        self.warnings.clear();
+        self.review_held = false;
     }
 }
 
@@ -1171,6 +1514,8 @@ struct RecordingOverlayState {
     system_audio_active: Option<bool>,
     consent_prompt_shown: Option<bool>,
     message: Option<String>,
+    microphone_input: Option<audio::MeetingMicrophoneInput>,
+    microphone_warning_dismissed: bool,
     /// Pause state, mirrored from the capture session so a renderer that
     /// hydrates from this snapshot can freeze its clock at the right second.
     paused: bool,
@@ -1204,10 +1549,63 @@ impl Default for RecordingOverlayState {
             system_audio_active: None,
             consent_prompt_shown: None,
             message: None,
+            microphone_input: None,
+            microphone_warning_dismissed: false,
             paused: false,
             closed_paused_ms: 0,
             pause_started_at_ms: None,
         }
+    }
+}
+
+fn dismiss_meeting_microphone_warning(
+    overlay: &mut RecordingOverlayState,
+    recording_id: &str,
+) -> bool {
+    if overlay.phase != "recording"
+        || overlay.recording_id.as_deref() != Some(recording_id)
+        || !overlay
+            .microphone_input
+            .as_ref()
+            .is_some_and(|input| input.used_fallback)
+    {
+        return false;
+    }
+    overlay.microphone_warning_dismissed = true;
+    true
+}
+
+#[cfg(test)]
+mod meeting_microphone_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn meeting_microphone_overlay_dismissal_is_session_owned() {
+        let mut overlay = RecordingOverlayState {
+            phase: "recording".into(),
+            recording_id: Some("a".into()),
+            microphone_input: Some(audio::MeetingMicrophoneInput {
+                requested_name: Some("Desk mic".into()),
+                resolved_name: "Built-in mic".into(),
+                used_fallback: true,
+                advisory: None,
+            }),
+            ..Default::default()
+        };
+        assert!(!dismiss_meeting_microphone_warning(&mut overlay, "b"));
+        assert!(!overlay.microphone_warning_dismissed);
+        assert!(dismiss_meeting_microphone_warning(&mut overlay, "a"));
+        assert_eq!(overlay.phase, "recording");
+        assert!(overlay.microphone_warning_dismissed);
+        assert_eq!(
+            serde_json::to_value(&overlay).unwrap()["microphoneWarningDismissed"],
+            true
+        );
+        overlay.phase = "processing".into();
+        assert!(!dismiss_meeting_microphone_warning(&mut overlay, "a"));
+        let reset = RecordingOverlayState::default();
+        assert!(reset.microphone_input.is_none());
+        assert!(!reset.microphone_warning_dismissed);
     }
 }
 
@@ -1411,6 +1809,7 @@ fn dictation_history_details_from_audit(
         // Filled from the history text row and the recording, not the audit
         // log: see `enrich_dictation_history_details`.
         raw_transcript: None,
+        recognition_review_words: None,
         audio_available: None,
         reprocessed_from_id: None,
         reprocessed_from_created_at: None,
@@ -1502,6 +1901,7 @@ fn dictation_history_details_is_empty(details: &models::DictationHistoryDetails)
         && details.route_preference.is_none()
         && details.resolved_hosting.is_none()
         && details.raw_transcript.is_none()
+        && details.recognition_review_words.is_none()
         && details.audio_available.is_none()
         && details.reprocessed_from_id.is_none()
         && details.reprocessed_from_created_at.is_none()
@@ -1605,7 +2005,7 @@ async fn ensure_asr_route_ready(
     }
     let diagnostics = state
         .asr_manager
-        .get_runtime_diagnostics(provider_type)
+        .get_runtime_diagnostics_for_model(provider_type, model_id)
         .await;
     let provider_available = asr::AsrProviderFactory::create_with_model(
         effective_provider,
@@ -1623,15 +2023,22 @@ async fn ensure_asr_route_ready(
 
     let runtime_message = diagnostics
         .runtime_message
-        .unwrap_or_else(|| "Runtime is not ready for the selected provider/model.".to_string());
-    let setup_action = diagnostics.runtime_details.setup_action.unwrap_or_else(|| {
-        "Open Settings -> ASR Models and complete the required runtime/model setup.".to_string()
-    });
-    Err(format!(
-        "ASR route '{} / {}{}' is not ready for {}. {} {}",
-        provider_type.display_name(),
+        .unwrap_or_else(|| "It isn't set up yet.".to_string());
+    let setup_action = diagnostics
+        .runtime_details
+        .setup_action
+        .unwrap_or_else(|| "Finish its setup in Settings > Models.".to_string());
+    tracing::warn!(
+        "ASR route {}/{}{} is not ready for {}: {:?}",
+        asr_provider_to_settings_value(provider_type),
         model_id,
-        if mlx_accelerated { " via MLX" } else { "" },
+        if mlx_accelerated { " (MLX)" } else { "" },
+        context,
+        diagnostics.runtime_status
+    );
+    Err(format!(
+        "{} isn't ready for {}. {} {}",
+        provider_type.speech_model_name(model_id),
         context,
         runtime_message,
         setup_action
@@ -1643,15 +2050,12 @@ async fn persist_repaired_meeting_route(
     provider_type: asr::AsrProviderType,
     model_id: &str,
 ) -> Result<String, String> {
-    state
-        .asr_manager
-        .set_provider_model_id(provider_type, model_id.to_string())
-        .await;
-    let normalized_model_id = state.asr_manager.provider_model_id(provider_type).await;
+    let normalized_model_id = normalize_asr_model_id(provider_type, model_id);
     let provider_key = asr_provider_to_settings_value(provider_type).to_string();
 
     let mut settings_manager = state.settings_manager.lock().await;
-    let transcription = &mut settings_manager.settings_mut().transcription;
+    let mut candidate = settings_manager.settings().clone();
+    let transcription = &mut candidate.transcription;
 
     if transcription.use_shared_asr_selection {
         transcription.use_shared_asr_selection = false;
@@ -1665,9 +2069,75 @@ async fn persist_repaired_meeting_route(
     transcription.meeting_provider = provider_key;
     transcription.meeting_model_id = normalized_model_id.clone();
     normalize_contextual_asr_settings(transcription);
-    settings_manager.save().map_err(|e| e.to_string())?;
+    let normalized_model_id = transcription.meeting_model_id.clone();
+    settings_manager
+        .commit_candidate(candidate)
+        .map_err(|e| e.to_string())?;
+    state
+        .asr_manager
+        .set_provider_model_id(provider_type, normalized_model_id.clone())
+        .await;
 
     Ok(normalized_model_id)
+}
+
+/// Whether a meeting that had to fall back from its configured route should
+/// write the substitute into settings.
+///
+/// A model that is merely not downloaded yet -- a new install's first meeting
+/// before its GGUF download finishes -- is a choice still on its way, so the
+/// substitute serves this meeting only and the next one tries the chosen
+/// route again. Rewriting the slot there would move the reader off the model
+/// they picked for good, with nothing but a log line to say so.
+fn meeting_route_repair_is_persistent(requested_status: &asr::manager::RuntimeStatus) -> bool {
+    !matches!(requested_status, asr::manager::RuntimeStatus::MissingModel)
+}
+
+/// Moves one recording off an optional English-only model when the
+/// transcription language names another language (see
+/// `english_only_route_language_substitute`). The saved selection is not
+/// changed. When no multilingual Parakeet is ready the chosen model runs and
+/// the warning says what to expect.
+async fn apply_english_only_language_substitute(
+    state: &AppState,
+    transcription: &settings::TranscriptionSettings,
+    provider: asr::AsrProviderType,
+    model_id: String,
+    what: &str,
+) -> (asr::AsrProviderType, String, Option<String>) {
+    let language = transcription.language.as_deref().unwrap_or_default();
+    let Some(substitute) =
+        english_only_route_language_substitute(provider, &model_id, Some(language))
+    else {
+        return (provider, model_id, None);
+    };
+    for (candidate_provider, candidate_model) in [
+        substitute,
+        (asr::AsrProviderType::Parakeet, "parakeet-tdt-0.6b-v3"),
+    ] {
+        if ensure_asr_route_ready(state, candidate_provider, candidate_model, what)
+            .await
+            .is_ok()
+        {
+            let warning = english_only_route_language_warning(
+                &provider.speech_model_name(&model_id),
+                language,
+                &candidate_provider.speech_model_name(candidate_model),
+                what,
+            );
+            return (
+                candidate_provider,
+                candidate_model.to_string(),
+                Some(warning),
+            );
+        }
+    }
+    let warning = format!(
+        "{} transcribes English only and the transcription language is set to '{}'. No multilingual Parakeet model is downloaded, so this {what} is transcribed as English.",
+        provider.speech_model_name(&model_id),
+        language.trim()
+    );
+    (provider, model_id, Some(warning))
 }
 
 async fn resolve_ready_meeting_selection(
@@ -1689,7 +2159,14 @@ async fn resolve_ready_meeting_selection(
     )
     .await
     {
-        Ok(()) => Ok((requested_selection.0, requested_selection.1, None)),
+        Ok(()) => Ok(apply_english_only_language_substitute(
+            state,
+            transcription,
+            requested_selection.0,
+            requested_selection.1,
+            "meeting",
+        )
+        .await),
         Err(requested_error) => {
             let meeting_policy =
                 meeting_route_policy_from_settings(&transcription.meeting_route_policy);
@@ -1724,14 +2201,32 @@ async fn resolve_ready_meeting_selection(
             if let Some((provider_type, model_id)) = repaired_candidate {
                 enforce_remote_asr_provider_policy(provider_type, remote_processing_enabled)?;
                 if provider_type != requested_selection.0 || model_id != requested_selection.1 {
+                    let requested_status = state
+                        .asr_manager
+                        .get_runtime_diagnostics_for_model(
+                            requested_selection.0,
+                            &requested_selection.1,
+                        )
+                        .await
+                        .runtime_status;
+                    if !meeting_route_repair_is_persistent(&requested_status) {
+                        let requested_name = requested_selection
+                            .0
+                            .speech_model_name(&requested_selection.1);
+                        let warning = format!(
+                            "{requested_name} isn't downloaded yet, so this meeting uses {}. Meetings use {requested_name} once it is downloaded.",
+                            provider_type.speech_model_name(&model_id),
+                        );
+                        return Ok((provider_type, model_id, Some(warning)));
+                    }
                     let persisted_model_id =
                         persist_repaired_meeting_route(state, provider_type, &model_id).await?;
                     let warning = format!(
-                        "Meeting route '{}' / '{}' was not ready. Switched meetings to '{}' / '{}'.",
-                        requested_selection.0.display_name(),
-                        requested_selection.1,
-                        provider_type.display_name(),
-                        persisted_model_id
+                        "{} wasn't ready, so meetings now use {}.",
+                        requested_selection
+                            .0
+                            .speech_model_name(&requested_selection.1),
+                        provider_type.speech_model_name(&persisted_model_id)
                     );
                     return Ok((provider_type, persisted_model_id, Some(warning)));
                 }
@@ -1740,7 +2235,7 @@ async fn resolve_ready_meeting_selection(
             }
 
             Err(format!(
-                "No meeting-capable ASR route is ready. {} Open Settings -> Storage -> Guided setup -> Set up meetings, or download a meeting model in Settings -> ASR / Providers.",
+                "No meeting model is ready yet. {} Download one from Settings > Meetings > Set up meetings, or in Settings > Models.",
                 requested_error
             ))
         }
@@ -1768,8 +2263,6 @@ async fn resolve_ready_dictation_selection(
         route_override,
         &transcription.dictation_route_preference,
     );
-    let requested_hosting =
-        provider_hosting_environment(requested_selection.0, &requested_selection.1);
 
     if route_matches_hosting(
         route_preference,
@@ -1786,13 +2279,16 @@ async fn resolve_ready_dictation_selection(
         .await
         {
             Ok(()) => {
-                return Ok((
+                let (provider, model_id, warning) = apply_english_only_language_substitute(
+                    state,
+                    transcription,
                     requested_selection.0,
                     requested_selection.1,
-                    route_preference,
-                    requested_hosting,
-                    None,
-                ))
+                    "capture",
+                )
+                .await;
+                let hosting = provider_hosting_environment(provider, &model_id);
+                return Ok((provider, model_id, route_preference, hosting, warning));
             }
             Err(requested_error) => {
                 if !provider_allows_automatic_dictation_fallback(requested_selection.0) {
@@ -1811,11 +2307,11 @@ async fn resolve_ready_dictation_selection(
                     let resolved_hosting =
                         provider_hosting_environment(requested_selection.0, &model_id);
                     let warning = format!(
-                        "Dictation route '{}' / '{}' was not ready. Using '{}' / '{}' for this capture.",
-                        requested_selection.0.display_name(),
-                        requested_selection.1,
-                        requested_selection.0.display_name(),
-                        model_id
+                        "{} wasn't ready, so this dictation used {}.",
+                        requested_selection
+                            .0
+                            .speech_model_name(&requested_selection.1),
+                        requested_selection.0.speech_model_name(&model_id)
                     );
                     return Ok((
                         requested_selection.0,
@@ -1850,11 +2346,11 @@ async fn resolve_ready_dictation_selection(
                     enforce_remote_asr_provider_policy(provider_type, remote_processing_enabled)?;
                     let resolved_hosting = provider_hosting_environment(provider_type, &model_id);
                     let warning = format!(
-                        "Dictation route '{}' / '{}' was not ready. Using '{}' / '{}' for this capture.",
-                        requested_selection.0.display_name(),
-                        requested_selection.1,
-                        provider_type.display_name(),
-                        model_id
+                        "{} wasn't ready, so this dictation used {}.",
+                        requested_selection
+                            .0
+                            .speech_model_name(&requested_selection.1),
+                        provider_type.speech_model_name(&model_id)
                     );
                     return Ok((
                         provider_type,
@@ -1895,12 +2391,15 @@ async fn resolve_ready_dictation_selection(
         enforce_remote_asr_provider_policy(provider_type, remote_processing_enabled)?;
         let resolved_hosting = provider_hosting_environment(provider_type, &model_id);
         let warning = format!(
-            "This dictation profile prefers {} routing. Using '{}' / '{}' instead of '{}' / '{}'.",
-            dictation_route_preference_to_settings_value(route_preference),
-            provider_type.display_name(),
-            model_id,
-            requested_selection.0.display_name(),
-            requested_selection.1
+            "This dictation profile prefers {}, so it used {} instead of {}.",
+            match route_preference {
+                DictationRoutePreference::Local => "speech models on this Mac",
+                DictationRoutePreference::Cloud => "cloud speech models",
+            },
+            provider_type.speech_model_name(&model_id),
+            requested_selection
+                .0
+                .speech_model_name(&requested_selection.1)
         );
         return Ok((
             provider_type,
@@ -2207,7 +2706,7 @@ fn enforce_remote_provider_policy(
 ) -> Result<(), String> {
     if provider.is_remote() && !remote_processing_enabled {
         return Err(format!(
-            "Remote provider '{}' is blocked by policy. Enable Settings > Security > Remote processing to continue.",
+            "Remote provider '{}' is blocked by policy. Turn on Settings > Privacy & data > Allow cloud AI processing to continue.",
             provider.as_settings_value()
         ));
     }
@@ -2220,7 +2719,7 @@ fn enforce_remote_asr_provider_policy(
 ) -> Result<(), String> {
     if provider.is_remote() && !remote_processing_enabled {
         return Err(format!(
-            "Remote ASR provider '{}' is blocked by policy. Enable Settings > Security > Remote processing to continue.",
+            "Remote ASR provider '{}' is blocked by policy. Turn on Settings > Privacy & data > Allow cloud AI processing to continue.",
             asr_provider_to_settings_value(provider)
         ));
     }
@@ -2248,7 +2747,7 @@ where
 /// provider and the alternative.
 fn custom_transform_unsupported_error(provider: AnalysisProvider) -> String {
     format!(
-        "'{}' can only clean up dictation; it cannot run a custom transform prompt. Choose Ollama or a cloud service for saved profiles and dictation commands.",
+        "'{}' can only clean up dictation; it cannot run a custom transform prompt. Choose the built-in instruction model, Ollama, or a cloud service for saved profiles and dictation commands.",
         provider.as_settings_value()
     )
 }
@@ -2270,32 +2769,9 @@ fn enforce_meeting_lane_provider_policy(provider: AnalysisProvider) -> Result<()
 
 fn missing_provider_secret_error(provider: AnalysisProvider) -> String {
     format!(
-        "Missing provider secret for '{}'. Add an API key in Settings > AI & Keys.",
+        "Missing provider secret for '{}'. Add an API key in Settings > Search & AI > API keys.",
         provider.as_settings_value()
     )
-}
-
-/// Plus has no API key: its credential is the entitlement token.
-#[cfg(feature = "plainsong-plus")]
-fn plainsong_plus_provider(provider: AnalysisProvider) -> bool {
-    provider == AnalysisProvider::PlainsongPlus
-}
-
-#[cfg(not(feature = "plainsong-plus"))]
-fn plainsong_plus_provider(_provider: AnalysisProvider) -> bool {
-    false
-}
-
-#[cfg(feature = "plainsong-plus")]
-async fn plus_access_token() -> Result<String, String> {
-    plus::access_token()
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(not(feature = "plainsong-plus"))]
-async fn plus_access_token() -> Result<String, String> {
-    Err("This build does not include Plainsong Plus.".to_string())
 }
 
 fn provider_secret_for(provider: AnalysisProvider) -> Result<String, String> {
@@ -2346,6 +2822,12 @@ async fn selected_analysis_runtime(
         })
         .unwrap_or_else(|| provider.default_model())
         .to_string();
+    if selected_model.is_empty() {
+        return Err(format!(
+            "Choose a model for provider '{}' before continuing",
+            provider.as_settings_value()
+        ));
+    }
     analysis_runtime_for_provider(
         state,
         provider,
@@ -2369,8 +2851,8 @@ async fn analysis_runtime_for_provider(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| provider.default_model())
         .to_string();
-    let api_key = if plainsong_plus_provider(provider) {
-        Some(plus_access_token().await?)
+    let api_key = if provider == AnalysisProvider::ChatGptPlan {
+        None
     } else if provider.is_remote() {
         Some(provider_secret_for(provider)?)
     } else {
@@ -2399,20 +2881,11 @@ async fn analysis_runtime_for_provider(
 
 #[cfg(target_os = "macos")]
 fn workspace_frontmost_application() -> Option<WorkspaceFrontmostApplication> {
-    // In-process NSWorkspace lookup — no process spawn on the dictation hot
-    // path. NSWorkspace.sharedWorkspace and frontmostApplication are thread-safe
-    // per Apple's documentation. Falls back to osascript only if this yields
-    // nothing (e.g. a sandbox or future OS change).
-    {
-        use objc2_app_kit::NSWorkspace;
-        let workspace = NSWorkspace::sharedWorkspace();
-        if let Some(app) = workspace.frontmostApplication() {
-            let name = app.localizedName().map(|s| s.to_string());
-            let bundle_id = app.bundleIdentifier().map(|s| s.to_string());
-            if name.is_some() || bundle_id.is_some() {
-                return Some(WorkspaceFrontmostApplication { name, bundle_id });
-            }
-        }
+    if let Some(app) = text_insert::frontmost_application_identity() {
+        return Some(WorkspaceFrontmostApplication {
+            name: app.name,
+            bundle_id: app.bundle_id,
+        });
     }
 
     workspace_frontmost_application_via_osascript()
@@ -2639,20 +3112,6 @@ fn current_frontmost_app_asn() -> Option<String> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn lsappinfo_value_for_key(asn: &str, key: &str) -> Option<String> {
-    let output = std::process::Command::new("lsappinfo")
-        .args(["info", "-only", key, asn])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    parse_lsappinfo_value(&String::from_utf8_lossy(&output.stdout))
-}
-
 /// `lsappinfo info -only <key>` uses two different shapes for its value.
 ///
 /// Most keys are reported as `key="value"` somewhere after the ASN:
@@ -2679,12 +3138,10 @@ fn lsappinfo_value_for_key(asn: &str, key: &str) -> Option<String> {
 #[cfg(any(test, target_os = "macos"))]
 fn parse_lsappinfo_value(stdout: &str) -> Option<String> {
     if let Some(rest) = stdout.trim_start().strip_prefix('"') {
-        if let Some(end) = rest.find('"') {
-            let value = rest[..end].trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
+        // A leading token is the answer even when it is empty: a later `="`
+        // belongs to another key.
+        let value = rest[..rest.find('"')?].trim();
+        return (!value.is_empty()).then(|| value.to_string());
     }
 
     let value_start = stdout.find("=\"")? + 2;
@@ -2699,16 +3156,16 @@ fn parse_lsappinfo_value(stdout: &str) -> Option<String> {
     }
 }
 
+// Both read the same remembered identity as delivery, so the name and bundle id
+// describe one process and repeated reads cost no `lsappinfo` launches.
 #[cfg(target_os = "macos")]
 fn get_frontmost_app_name() -> Option<String> {
-    let asn = current_frontmost_app_asn()?;
-    lsappinfo_value_for_key(&asn, "name").or_else(|| lsappinfo_value_for_key(&asn, "LSDisplayName"))
+    text_insert::frontmost_application_identity()?.name
 }
 
 #[cfg(target_os = "macos")]
 fn get_frontmost_app_bundle_id() -> Option<String> {
-    let asn = current_frontmost_app_asn()?;
-    lsappinfo_value_for_key(&asn, "bundleid")
+    text_insert::frontmost_application_identity()?.bundle_id
 }
 
 #[cfg(target_os = "windows")]
@@ -2847,14 +3304,18 @@ fn meeting_consent_notice_text() -> &'static str {
 
 #[cfg(target_os = "macos")]
 fn resolve_recent_external_target_context(state: &AppState) -> Option<PendingDictationTarget> {
-    let (app_name, app_bundle_id, browser_url) = capture_hotkey_target_context(true);
-    build_pending_dictation_target(
-        app_name,
-        app_bundle_id,
-        browser_url.as_deref().and_then(extract_host_from_url),
-        chrono::Utc::now().timestamp_millis(),
-    )
-    .or_else(|| take_recent_external_target(state).filter(consent_target_is_fresh))
+    // This passive notice must not request Automation access or wait for a
+    // browser. Application metadata and an already-captured target suffice.
+    workspace_frontmost_application()
+        .and_then(|app| {
+            build_pending_dictation_target(
+                app.name,
+                app.bundle_id,
+                None,
+                chrono::Utc::now().timestamp_millis(),
+            )
+        })
+        .or_else(|| take_recent_external_target(state).filter(consent_target_is_fresh))
 }
 
 #[cfg(target_os = "macos")]
@@ -2982,19 +3443,10 @@ mod tests;
 
 /// Build and return the application state without starting the desktop shell.
 /// Used by the sidecar binary to initialize the backend independently.
-/// Remove keychain entries and on-disk state left over from the former
-/// commercial licensing system. Best-effort and idempotent: it runs on every
-/// startup but only does work for users upgrading from a licensed build.
-fn cleanup_legacy_license_artifacts() {
-    const LEGACY_LICENSE_SECRETS: [&str; 4] = [
-        "license_key",
-        "license_instance_id",
-        "license_device_id",
-        "license_first_run_at",
-    ];
-    for key in LEGACY_LICENSE_SECRETS {
-        let _ = secrets::clear_internal_secret(key);
-    }
+/// Remove the on-disk state left over from the former commercial licensing
+/// system. Do not inspect or delete obsolete credential entries at startup:
+/// even an unused Keychain entry can require user interaction to access.
+fn cleanup_legacy_license_file() {
     if let Some(state_file) =
         crate::paths::data_dir().map(|d| d.join("Plainsong").join("nautilus_license.json"))
     {
@@ -3043,18 +3495,6 @@ async fn snapshot_live_database(state: &AppState) -> Result<std::path::PathBuf, 
     create_database_snapshot_at(snapshot_path, |path| db.backup_to(path))
 }
 
-/// Reopen the database connection after a restore replaced the on-disk file.
-/// Without this, AppState keeps reading/writing the old inode and the restored
-/// data is invisible until the next launch.
-async fn reopen_database_after_restore(state: &AppState) -> Result<(), String> {
-    let db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
-        .map_err(|e| format!("Could not read secure database key after restore: {e}"))?;
-    let reopened = db::Database::new_with_key(db_key.as_deref())
-        .map_err(|e| format!("Failed to reopen database after restore: {e}"))?;
-    *state.db.lock().await = reopened;
-    Ok(())
-}
-
 /// Reload a restored settings file through the normal SettingsManager loading
 /// and normalization path, replace the live manager, and reapply every cached
 /// runtime projection before notifying Electron and renderer windows.
@@ -3070,6 +3510,8 @@ async fn reload_settings_after_restore(
             .meeting_custom_prompt
             .clone();
         let privileged_privacy = settings_manager.settings().privacy.clone();
+        #[cfg(target_os = "macos")]
+        invalidate_active_selection_owner(state).await;
         settings_manager
             .reload_from_disk()
             .map_err(|error| format!("Failed to reload restored settings: {error}"))?;
@@ -3086,6 +3528,21 @@ async fn reload_settings_after_restore(
         )
     };
 
+    apply_restored_settings_to_runtime(
+        state,
+        handle,
+        previous_meeting_custom_prompt,
+        restored_settings,
+    )
+    .await
+}
+
+async fn apply_restored_settings_to_runtime(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    previous_meeting_custom_prompt: Option<String>,
+    restored_settings: settings::Settings,
+) -> Result<(), String> {
     apply_transcription_settings_to_asr_manager(
         &state.asr_manager,
         &restored_settings.transcription,
@@ -3168,8 +3625,8 @@ impl VaultStartupMigration {
         if let Some(reason) = &self.failure {
             return Some(format!(
                 "Plainsong could not encrypt its database, so it is still readable without your \
-                 vault key. Cause: {reason} Your meetings are unchanged. Try Settings > Privacy > \
-                 turn the vault on again, and if it keeps failing, check free disk space."
+                 vault key. Cause: {reason} Your meetings are unchanged. Try Settings > Privacy & data > \
+                 Encryption and turn the vault on again, and if it keeps failing, check free disk space."
             ));
         }
         self.encrypted_now.then(|| {
@@ -3245,12 +3702,43 @@ fn open_database_with_vault_key_recovery(
 /// errors. It cannot cover SIGKILL, a panic that aborts, or a power loss — and
 /// what is left behind is real recorded speech sitting in the OS temp
 /// directory. Sweeping at startup bounds how long that can persist.
-fn sweep_stale_dictation_temp_audio() {
-    const PREFIX: &str = "plainsong-dictation-";
+fn dictation_temp_audio_owner_pid(name: &str) -> Option<u32> {
+    let owned = name
+        .strip_prefix("plainsong-whisper-input-pid-")?
+        .strip_suffix(".wav")?;
+    let (pid, unique) = owned.split_once('-')?;
+    uuid::Uuid::parse_str(unique).ok()?;
+    let pid = pid.parse::<u32>().ok()?;
+    (pid > 0).then_some(pid)
+}
 
-    let temp_dir = std::env::temp_dir();
-    let Ok(entries) = std::fs::read_dir(&temp_dir) else {
-        return;
+fn dictation_temp_audio_owner_exists(pid: u32) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        let pid = i32::try_from(pid).ok()?;
+        // Signal zero queries existence; it does not signal the process.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return Some(true);
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => Some(false),
+            Some(libc::EPERM) => Some(true),
+            _ => None,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        None // Retain the file when ownership cannot be established.
+    }
+}
+
+fn sweep_dictation_temp_audio_in(
+    directory: &std::path::Path,
+    owner_exists: impl Fn(u32) -> Option<bool>,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
     };
 
     let mut removed = 0usize;
@@ -3259,7 +3747,10 @@ fn sweep_stale_dictation_temp_audio() {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with(PREFIX) || !name.ends_with(".wav") {
+        let Some(owner) = dictation_temp_audio_owner_pid(name) else {
+            continue;
+        };
+        if owner_exists(owner) != Some(false) {
             continue;
         }
         // Only regular files, never a symlink pointing somewhere else.
@@ -3274,18 +3765,65 @@ fn sweep_stale_dictation_temp_audio() {
         }
     }
 
-    if removed > 0 {
-        tracing::info!("Removed {} orphaned dictation audio file(s)", removed);
-    }
+    removed
+}
+
+fn sweep_stale_dictation_temp_audio() {
+    let started = std::time::Instant::now();
+    let removed =
+        sweep_dictation_temp_audio_in(&std::env::temp_dir(), dictation_temp_audio_owner_exists);
+    tracing::info!(
+        removed,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "Dictation scratch cleanup finished"
+    );
 }
 
 pub async fn build_app_state() -> Result<AppState, String> {
-    cleanup_legacy_license_artifacts();
-    sweep_stale_dictation_temp_audio();
+    build_app_state_with_credential_access(false).await
+}
 
-    let initial_db_key = secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
-        .map_err(|e| format!("Could not read secure database key: {}", e))?;
+/// Build application state, optionally allowing the initial vault-key lookup
+/// to display the operating system's credential prompt. Callers must only set
+/// this after an explicit user action.
+pub async fn build_app_state_with_credential_access(
+    allow_credential_access: bool,
+) -> Result<AppState, String> {
+    let mut startup_stage = std::time::Instant::now();
+    let mut checkpoint = |stage: &'static str| {
+        tracing::info!(
+            stage,
+            elapsed_us = startup_stage.elapsed().as_micros() as u64,
+            "Sidecar state startup stage"
+        );
+        startup_stage = std::time::Instant::now();
+    };
+    let data_dir = crate::paths::data_dir()
+        .ok_or("Could not find data directory")?
+        .join("Plainsong");
+    let settings_path = crate::paths::config_dir()
+        .ok_or("Could not find config directory")?
+        .join("Plainsong/settings.json");
+    let storage_guard = restore_journal::recover_at_startup(&data_dir, &settings_path)
+        .map_err(|error| format!("[PLAINSONG_RESTORE_RECOVERY_REQUIRED] {error:#}. Recovery files have been retained."))?;
+    cleanup_legacy_license_file();
+    // This scans the shared OS temp directory, which can contain tens of
+    // thousands of unrelated entries. Start the privacy cleanup immediately
+    // without making state initialization wait for that directory walk.
+    // Only dead owners are removed; active dictation keeps its scratch WAV.
+    tokio::task::spawn_blocking(sweep_stale_dictation_temp_audio);
 
+    checkpoint("restore_and_temp_cleanup_schedule");
+    let initial_db_key = if allow_credential_access {
+        secrets::get_internal_secret(VAULT_DB_KEY_SECRET)
+    } else {
+        secrets::get_internal_secret_noninteractive(VAULT_DB_KEY_SECRET)
+    }
+    .map_err(|e| {
+        format!("[PLAINSONG_CREDENTIAL_REQUIRED] Could not read secure database key: {e}")
+    })?;
+
+    checkpoint("vault_key");
     // Built before the database so the startup encryption repair below holds
     // the same `VaultMigration` exclusion the Settings-driven migration does.
     // Nothing else has a handle on this coordinator yet, so the lease can only
@@ -3318,50 +3856,38 @@ pub async fn build_app_state() -> Result<AppState, String> {
         }
     }
 
-    let settings_manager = settings::SettingsManager::new()
+    checkpoint("database");
+    let mut settings_manager = settings::SettingsManager::new()
         .map_err(|e| format!("Failed to initialize settings: {}", e))?;
 
-    let models_root = crate::paths::data_dir()
+    let app_data_dir = crate::paths::data_dir()
         .ok_or("Could not find data directory")?
-        .join("Plainsong")
-        .join("models");
-    let mut model_integrity_artifacts = download::managed_model_integrity_artifacts(&models_root);
-    model_integrity_artifacts.extend(asr::model_integrity_artifacts(&models_root));
-    // The bundled cleanup model is loaded into an in-process inference
-    // runtime, so it has to be in the same fail-closed receipt set as the ASR
-    // weights rather than trusted because the file happens to be there.
-    model_integrity_artifacts.extend(llm::bundled_local::model_integrity_artifacts(&models_root));
-    // This runs inline (fail-closed trust semantics are correct here), and
-    // an artifact without a cached-and-trusted receipt yet is re-hashed in
-    // full -- for many multi-gigabyte models on first launch after an
-    // upgrade, that can be a minute-scale stall. Log the count up front so
-    // it is attributable instead of looking like a hang.
-    tracing::info!(
-        "Re-verifying integrity receipts for {} local model artifact(s) at startup; \
-         already-cached ones are skipped quickly, uncached ones are re-hashed",
-        model_integrity_artifacts.len()
-    );
-    let integrity_migration =
-        download::migrate_legacy_model_integrity_receipts(&model_integrity_artifacts).await;
-    if integrity_migration.migrated_count > 0 {
-        tracing::info!(
-            "Recorded integrity receipts for {} existing local model artifact(s)",
-            integrity_migration.migrated_count
+        .join("Plainsong");
+    let models_root = app_data_dir.join("models");
+    // Startup hashes nothing. Each model is verified the first time this
+    // process loads it (see `download::open_verified_model_artifact`), and
+    // the active speech models are checked in the background below.
+    download::remove_legacy_verified_model_cache(&app_data_dir);
+
+    // An older install still on ONNX Parakeet v3 moves to this route once,
+    // and only when a copy it can serve from is already here (the GGUF, or
+    // the Core ML build on a Mac that runs it). Bytes are verified when it
+    // first loads; a mismatch then offers the download.
+    #[cfg(feature = "asr-transcribe-cpp")]
+    let parakeet_route_ready = {
+        // Readiness depends on which Parakeet family the language needs.
+        asr::neural_engine::set_transcription_language(
+            settings_manager
+                .settings()
+                .transcription
+                .language
+                .as_deref(),
         );
-    }
-    for path in integrity_migration.rejected_paths {
-        tracing::warn!(
-            "Existing local model failed application-pinned integrity verification: {}",
-            path.display()
-        );
-    }
-    for (path, error) in integrity_migration.errors {
-        tracing::warn!(
-            "Could not verify existing local model '{}': {}",
-            path.display(),
-            error
-        );
-    }
+        asr::transcribe_cpp::parakeet_route_ready(&models_root)
+    };
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    let parakeet_route_ready = false;
+    settings_manager.apply_parakeet_upgrade(parakeet_route_ready);
 
     let initial_dictation_options = dictation_options_from_settings(settings_manager.settings());
     let remote_processing_gate = Arc::new(remote_processing::RemoteProcessingGate::new(
@@ -3370,7 +3896,9 @@ pub async fn build_app_state() -> Result<AppState, String> {
             .privacy
             .remote_processing_enabled,
     ));
+    checkpoint("settings_and_model_paths");
     let asr_manager = Arc::new(asr::AsrManager::new());
+    let ollama_client = Arc::new(llm::OllamaClient::new());
     asr_manager
         .set_remote_processing_gate(Arc::clone(&remote_processing_gate))
         .await;
@@ -3383,19 +3911,82 @@ pub async fn build_app_state() -> Result<AppState, String> {
         &settings_manager.settings().transcription,
     )
     .await;
-    schedule_dictation_model_prewarm(&settings_manager.settings().transcription);
+    checkpoint("clients_and_transcription_settings");
+    let dictation_model_release = Arc::new(DictationModelReleaseCoordinator::default());
+    let initial_requested_route = resolve_transcription_provider_and_model(
+        &settings_manager.settings().transcription,
+        TranscriptionScope::Dictation,
+    );
+    let initial_effective_route = asr_manager
+        .resolved_local_route_for_cleanup(initial_requested_route.0, &initial_requested_route.1)
+        .await;
+    // Check the speech models a first dictation or meeting would load, at
+    // low priority, so that load rarely waits for a hash. Resolving the
+    // meeting route took about 180 ms on an 8 GB profile, so it runs off the
+    // startup path as well.
+    {
+        let asr_manager = Arc::clone(&asr_manager);
+        let transcription = settings_manager.settings().transcription.clone();
+        let mut artifacts = asr::route_model_artifacts(
+            &models_root,
+            initial_effective_route.0,
+            &initial_effective_route.1,
+        );
+        let models_root = models_root.clone();
+        tokio::spawn(async move {
+            let Ok(meeting_requested) = tokio::task::spawn_blocking(move || {
+                resolve_transcription_provider_and_model(
+                    &transcription,
+                    TranscriptionScope::Meeting,
+                )
+            })
+            .await
+            else {
+                return;
+            };
+            let meeting_effective = asr_manager
+                .resolved_local_route_for_cleanup(meeting_requested.0, &meeting_requested.1)
+                .await;
+            for artifact in
+                asr::route_model_artifacts(&models_root, meeting_effective.0, &meeting_effective.1)
+            {
+                if !artifacts.contains(&artifact) {
+                    artifacts.push(artifact);
+                }
+            }
+            download::preverify_models_in_background("speech", artifacts);
+        });
+    }
+    dictation_model_release.select_configured(DictationSpeechSelection {
+        requested: initial_requested_route,
+        effective: initial_effective_route,
+    });
+    checkpoint("dictation_route_and_verification_schedule");
+    let initial_keep_warm = dictation_keep_warm_enabled(
+        &settings_manager
+            .settings()
+            .transcription
+            .dictation_keep_warm,
+    );
+
+    apply_speech_model_residency(settings_manager.settings());
+    schedule_dictation_model_prewarm(
+        &settings_manager.settings().transcription,
+        &dictation_model_release,
+    );
     apply_bundled_cleanup_keep_warm(settings_manager.settings());
     schedule_bundled_cleanup_prewarm(settings_manager.settings());
+    schedule_ollama_dictation_prewarm(settings_manager.settings(), Arc::clone(&ollama_client));
     schedule_apple_language_model_probe();
     let streaming_transcriber = Arc::new(streaming::StreamingTranscriber::new(Arc::clone(
         &asr_manager,
     )));
 
-    Ok(AppState {
+    let state = AppState {
         db: Arc::new(Mutex::new(database)),
         audio_capture: Arc::new(Mutex::new(audio::AudioCapture::new())),
         asr_manager,
-        ollama_client: Arc::new(llm::OllamaClient::new()),
+        ollama_client,
         ollama_pull_active: Arc::new(AtomicBool::new(false)),
         ollama_pull_cancelled: Arc::new(AtomicBool::new(false)),
         ollama_pull_cancel_notify: Arc::new(tokio::sync::Notify::new()),
@@ -3408,7 +3999,12 @@ pub async fn build_app_state() -> Result<AppState, String> {
         dictation_release_pending: Arc::new(AtomicBool::new(false)),
         dictation_session_tracker: Arc::new(Mutex::new(DictationSessionTracker::default())),
         dictation_runtime_state: Arc::new(Mutex::new(DictationSessionState::Idle)),
+        dictation_model_release,
         dictation_start_options: Arc::new(Mutex::new(initial_dictation_options)),
+        #[cfg(target_os = "macos")]
+        dictation_selection_owner: Mutex::new(None),
+        #[cfg(target_os = "macos")]
+        dictation_selection_policy_revision: std::sync::atomic::AtomicU64::new(0),
         pending_dictation_target: Arc::new(StdMutex::new(None)),
         last_external_target: Arc::new(StdMutex::new(None)),
         dictation_overlay_state: Arc::new(StdMutex::new(DictationOverlayState::default())),
@@ -3434,7 +4030,11 @@ pub async fn build_app_state() -> Result<AppState, String> {
         session_cluster_voices: Arc::new(StdMutex::new(
             diarization::voiceprints::SessionClusterVoices::default(),
         )),
-    })
+        _storage_guard: storage_guard,
+    };
+    spawn_dictation_model_release(&state, initial_keep_warm);
+    checkpoint("state_and_background_schedule");
+    Ok(state)
 }
 
 /// Mark the runtime as shutting down before any active background work is
@@ -3442,6 +4042,7 @@ pub async fn build_app_state() -> Result<AppState, String> {
 /// that are still processing after this point.
 pub fn begin_sidecar_shutdown(state: &AppState) {
     state.sidecar_shutting_down.store(true, Ordering::SeqCst);
+    state.dictation_model_release.invalidate();
 }
 
 /// Push persisted transcription settings into the live `AsrManager`.
@@ -3643,16 +4244,45 @@ async fn record_onboarding_state_for_sidecar(
     serde_json::to_value(record).map_err(|e| e.to_string())
 }
 
+async fn set_dictation_external_correction_learning_for_sidecar(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    let mut manager = state.settings_manager.lock().await;
+    let persisted = manager
+        .set_dictation_external_correction_learning(enabled)
+        .map_err(|e| e.to_string())?;
+    emit_settings_changed(handle, manager.settings());
+    Ok(serde_json::json!(persisted))
+}
+
+async fn set_saved_prompts_for_sidecar(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    prompts: Vec<settings::SavedPrompt>,
+) -> Result<serde_json::Value, String> {
+    let mut manager = state.settings_manager.lock().await;
+    let canonical = manager
+        .set_saved_prompts(prompts)
+        .map_err(|e| e.to_string())?;
+    emit_settings_changed(handle, manager.settings());
+    serde_json::to_value(canonical).map_err(|e| e.to_string())
+}
+
 /// Sidecar-compatible save_settings: applies normalized settings and emits frontend events.
 async fn save_settings_for_sidecar(
     state: &AppState,
     handle: &crate::sidecar_handle::SidecarHandle,
-    mut settings: settings::Settings,
+    update: settings_patch::SettingsUpdate,
+    preserve_saved_prompts: bool,
 ) -> Result<serde_json::Value, String> {
-    let previous_shortcuts = {
-        let manager = state.settings_manager.lock().await;
-        manager.settings().shortcuts.clone()
+    let mut settings_manager = state.settings_manager.lock().await;
+    let mut settings = match update {
+        settings_patch::SettingsUpdate::Replace(settings) => *settings,
+        settings_patch::SettingsUpdate::Patch(patch) => patch.apply(settings_manager.settings())?,
     };
+    let previous_shortcuts = settings_manager.settings().shortcuts.clone();
     // Keeps the legacy `toggleDictation` key and the binding table telling the
     // same story whichever one the writer edited; see the function's doc for
     // which side wins when.
@@ -3666,6 +4296,15 @@ async fn save_settings_for_sidecar(
         );
     normalize_platform_optimization(&mut settings.transcription.platform_optimization);
     normalize_contextual_asr_settings(&mut settings.transcription);
+    // Turning Contacts names off drops the names already held, not only the
+    // next copy the app would send.
+    if !settings.transcription.dictation_contact_names {
+        crate::dictation_vocabulary::set_contact_names(Vec::new());
+    }
+
+    if !settings.transcription.dictation_calendar_names || settings.meetings.calendar_disconnected {
+        crate::dictation_vocabulary::set_calendar_names(Vec::new(), Vec::new());
+    }
 
     // Validated strictly on save, and only against what the *selected* model can
     // decode. A language the model cannot handle is refused with a reason rather
@@ -3696,28 +4335,22 @@ async fn save_settings_for_sidecar(
 
     let dictation_options = dictation_options_from_settings(&settings);
 
-    apply_transcription_settings_to_asr_manager(&state.asr_manager, &settings.transcription).await;
-
-    let (previous_provider, previous_meeting_custom_prompt, previous_dictation_ai_provider) = {
-        let sm = state.settings_manager.lock().await;
-        (
-            sm.settings().transcription.default_provider.clone(),
-            sm.settings().transcription.meeting_custom_prompt.clone(),
-            sm.settings().privacy.dictation_ai.provider.clone(),
-        )
-    };
-    if settings.transcription.default_provider != previous_provider {
-        let provider = state.asr_manager.get_provider(default_provider).await;
-        if !provider.is_available() {
-            handle.emit_event(
-                "asr-provider-warning",
-                format!(
-                    "{} is not ready for transcription",
-                    default_provider.display_name()
-                ),
-            );
-        }
-    }
+    let previous_provider = settings_manager
+        .settings()
+        .transcription
+        .default_provider
+        .clone();
+    let previous_meeting_custom_prompt = settings_manager
+        .settings()
+        .transcription
+        .meeting_custom_prompt
+        .clone();
+    let previous_dictation_ai_provider = settings_manager
+        .settings()
+        .privacy
+        .dictation_ai
+        .provider
+        .clone();
 
     // Both lanes get validated and canonicalized; neither is allowed to hold a
     // provider string the analysis code cannot resolve.
@@ -3787,9 +4420,10 @@ async fn save_settings_for_sidecar(
     settings.transcription.meeting_retention_preset =
         normalize_meeting_retention_preset(&settings.transcription.meeting_retention_preset)
             .to_string();
-    if settings.transcription.meeting_retention_custom_months == 0 {
-        settings.transcription.meeting_retention_custom_months = 1;
-    }
+    settings.transcription.meeting_retention_custom_months = settings
+        .transcription
+        .meeting_retention_custom_months
+        .clamp(1, 1200);
     settings.transcription.meeting_retention_delete_mode = normalize_meeting_retention_delete_mode(
         &settings.transcription.meeting_retention_delete_mode,
     )
@@ -3810,12 +4444,7 @@ async fn save_settings_for_sidecar(
     let remote_processing_enabled = settings.privacy.remote_processing_enabled;
     // Read before the settings move into the manager below.
     let dictation_ai_provider_after_save = settings.privacy.dictation_ai.provider.clone();
-    if !remote_processing_enabled {
-        state.remote_processing_gate.set_allowed(false);
-    }
-
     {
-        let mut settings_manager = state.settings_manager.lock().await;
         // Read security-owned values under the same lock as the replacement.
         // Otherwise a vault migration can commit after an earlier snapshot and
         // have its salt erased by this delayed save.
@@ -3830,12 +4459,80 @@ async fn save_settings_for_sidecar(
             &settings_manager.settings().onboarding,
             &mut settings.onboarding,
         );
-        *settings_manager.settings_mut() = settings;
-        settings_manager.save().map_err(|e| e.to_string())?;
+        let mut summary_database = if meeting_custom_prompt_changed {
+            Some(state.db.lock().await)
+        } else {
+            None
+        };
+        if let Some(database) = summary_database.as_mut() {
+            database
+                .invalidate_all_summary_provenance()
+                .map_err(|error| error.to_string())?;
+        }
+        #[cfg(target_os = "macos")]
+        let previous_settings = settings_manager.settings().clone();
+        settings_manager
+            .commit_whole_settings(settings, preserve_saved_prompts)
+            .map_err(|e| e.to_string())?;
+        drop(summary_database);
+        #[cfg(target_os = "macos")]
+        invalidate_selection_owner_for_settings_transition(
+            state,
+            &previous_settings,
+            settings_manager.settings(),
+        )
+        .await;
+        state
+            .remote_processing_gate
+            .set_allowed(remote_processing_enabled);
+        apply_transcription_settings_to_asr_manager(
+            &state.asr_manager,
+            &settings_manager.settings().transcription,
+        )
+        .await;
+        let current_requested_route = resolve_transcription_provider_and_model(
+            &settings_manager.settings().transcription,
+            TranscriptionScope::Dictation,
+        );
+        let current_effective_route = state
+            .asr_manager
+            .resolved_local_route_for_cleanup(current_requested_route.0, &current_requested_route.1)
+            .await;
+        let current_speech_selection = DictationSpeechSelection {
+            requested: current_requested_route,
+            effective: current_effective_route,
+        };
+        if settings_manager.settings().transcription.default_provider != previous_provider {
+            let provider = state.asr_manager.get_provider(default_provider).await;
+            if !provider.is_available() {
+                handle.emit_event(
+                    "asr-provider-warning",
+                    format!(
+                        "{} isn't ready to transcribe yet.",
+                        default_provider.speech_model_name(
+                            &settings_manager.settings().transcription.selected_model_id
+                        )
+                    ),
+                );
+            }
+        }
         emit_settings_changed(handle, settings_manager.settings());
-        schedule_dictation_model_prewarm(&settings_manager.settings().transcription);
+        reconcile_dictation_model_release(
+            state,
+            &settings_manager.settings().transcription,
+            current_speech_selection,
+        );
+        apply_speech_model_residency(settings_manager.settings());
+        schedule_dictation_model_prewarm(
+            &settings_manager.settings().transcription,
+            &state.dictation_model_release,
+        );
         apply_bundled_cleanup_keep_warm(settings_manager.settings());
         schedule_bundled_cleanup_prewarm(settings_manager.settings());
+        schedule_ollama_dictation_prewarm(
+            settings_manager.settings(),
+            Arc::clone(&state.ollama_client),
+        );
     }
 
     if bundled_cleanup_runtime_should_unload(
@@ -3850,15 +4547,7 @@ async fn save_settings_for_sidecar(
         );
     }
 
-    if remote_processing_enabled {
-        state.remote_processing_gate.set_allowed(true);
-    }
-
-    if meeting_custom_prompt_changed {
-        let mut db = state.db.lock().await;
-        db.invalidate_all_summary_provenance()
-            .map_err(|error| error.to_string())?;
-    }
+    drop(settings_manager);
 
     // `dictation_start_options` doubles as the live session's snapshot: stop
     // reads it to learn which route, model, target app and delivery mode the
@@ -3926,14 +4615,33 @@ async fn reset_app_state_for_sidecar(
             let bundle = db
                 .load_recording_audio_bundle(&recording.id)
                 .map_err(|error| error.to_string())?;
-            values.push((recording, bundle));
+            let compression_paths = db
+                .compression_paths_for_recording(&recording.id)
+                .map_err(|error| error.to_string())?;
+            values.push((recording, bundle, compression_paths));
         }
         values
     };
     let deleted_recordings = recordings_with_audio.len();
     let mut deleted_audio_files = 0usize;
     let mut failed_audio_file_deletions = Vec::new();
-    for (recording, bundle) in &recordings_with_audio {
+    let roots = approved_path_roots()?;
+    for (recording, bundle, compression_paths) in &recordings_with_audio {
+        // Reset owns the journal's old WAV as well as its published FLAC.
+        for path in compression_paths {
+            if !path.exists() {
+                continue;
+            }
+            match ensure_regular_file_in_roots(path, "compression audio during reset", &roots)
+                .and_then(|path| std::fs::remove_file(path).map_err(|e| e.to_string()))
+            {
+                Ok(()) => {
+                    deleted_audio_files += 1;
+                    recording_audio::sync_parent_directory(path).map_err(|e| e.to_string())?;
+                }
+                Err(error) => failed_audio_file_deletions.push(error),
+            }
+        }
         if bundle.assets().next().is_some() {
             let deletion = remove_owned_recording_audio(bundle, "app state reset");
             deleted_audio_files += deletion.deleted_files;
@@ -3972,11 +4680,40 @@ async fn reset_app_state_for_sidecar(
 
     let defaults = {
         let mut settings_manager = state.settings_manager.lock().await;
+        #[cfg(target_os = "macos")]
+        invalidate_active_selection_owner(state).await;
         reset_settings_preserving_encrypted_database_state(
             settings_manager.settings_mut(),
             db_encrypted,
         );
         settings_manager.save().map_err(|e| e.to_string())?;
+        apply_transcription_settings_to_asr_manager(
+            &state.asr_manager,
+            &settings_manager.settings().transcription,
+        )
+        .await;
+        // Replace residency protection under the same settings lock, before
+        // an old worker can observe defaults with the previous generation.
+        let requested = resolve_transcription_provider_and_model(
+            &settings_manager.settings().transcription,
+            TranscriptionScope::Dictation,
+        );
+        let effective = state
+            .asr_manager
+            .resolved_local_route_for_cleanup(requested.0, &requested.1)
+            .await;
+        reconcile_dictation_model_release(
+            state,
+            &settings_manager.settings().transcription,
+            DictationSpeechSelection {
+                requested,
+                effective,
+            },
+        );
+        schedule_dictation_model_prewarm(
+            &settings_manager.settings().transcription,
+            &state.dictation_model_release,
+        );
         settings_manager.settings().clone()
     };
     {
@@ -3984,7 +4721,6 @@ async fn reset_app_state_for_sidecar(
         lock_vault_runtime_after_reset(&mut vault_state, db_encrypted);
     }
 
-    apply_transcription_settings_to_asr_manager(&state.asr_manager, &defaults.transcription).await;
     state
         .remote_processing_gate
         .set_allowed(defaults.privacy.remote_processing_enabled);
@@ -3997,11 +4733,13 @@ async fn reset_app_state_for_sidecar(
     {
         let mut runtime_state = state.dictation_runtime_state.lock().await;
         *runtime_state = DictationSessionState::Idle;
+        crate::llm::speech_priority::set_dictation_active(false);
     }
     {
         let mut tracker = state.dictation_session_tracker.lock().await;
-        *tracker = DictationSessionTracker::default();
+        tracker.reset_for_app_state();
     }
+    state.dictation_model_release.notify();
     set_dictation_hotkey_flags(state, false, false).await;
     state
         .dictation_release_pending
@@ -4025,6 +4763,10 @@ async fn reset_app_state_for_sidecar(
     }
     if let Ok(mut results) = state.recent_dictation_results.lock() {
         results.clear();
+        handle.emit_event(
+            "dictation-recovery-results-changed",
+            serde_json::json!({ "results": &*results }),
+        );
     }
     if let Ok(mut templates) = state.recording_templates.lock() {
         templates.clear();
@@ -4036,11 +4778,6 @@ async fn reset_app_state_for_sidecar(
 
     let (cleared_provider_secrets, failed_provider_secret_clears) =
         clear_registered_provider_secrets_with(secrets::clear_provider_secret);
-    // A reset also forgets a Plainsong Plus license on this Mac.
-    #[cfg(feature = "plainsong-plus")]
-    if let Err(error) = plus::sign_out() {
-        tracing::warn!("Reset could not clear the Plainsong Plus license: {error}");
-    }
 
     handle.emit_event(
         "dictation-state-changed",
@@ -4123,15 +4860,37 @@ pub fn announce_vault_startup_migration(
     }
 }
 
+/// Run once by the sidecar before it loads anything, so the QA
+/// available-memory simulation measures Plainsong's own use from a clean
+/// start. Does nothing unless that simulation is set.
+pub fn prime_available_memory_simulation() {
+    llm::prime_available_memory_simulation();
+}
+
+/// Send the progress of speech-model downloads Plainsong starts on its own to
+/// the renderer as `speech-model-download-notice`.
+pub fn forward_speech_model_download_notices(handle: &crate::sidecar_handle::SidecarHandle) {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        let handle = handle.clone();
+        asr::neural_engine::set_download_notice_sink(Box::new(move |notice| {
+            handle.emit_event("speech-model-download-notice", notice.clone());
+        }));
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    let _ = handle;
+}
+
 /// Release process-global model caches before the sidecar exits.
 ///
 /// The binary calls this only after aborting request tasks. Keeping the cleanup
 /// in the library lets provider-owned globals be released before whisper.cpp's
 /// C-level process teardown runs.
 ///
-/// Nothing in here awaits any more, but the signature stays `async` because
-/// `bin/sidecar.rs` awaits it across the library boundary.
+/// Wait for cancelled meeting starts to stop devices and reconcile storage
+/// before releasing provider globals.
 pub async fn shutdown_for_sidecar() {
+    finish_cancelled_capture_starts().await;
     #[cfg(not(test))]
     {
         let tasks = {
@@ -4143,6 +4902,8 @@ pub async fn shutdown_for_sidecar() {
         join_background_tasks(tasks).await;
     }
     asr::whisper::clear_all_cached_models();
+    #[cfg(feature = "asr-transcribe-cpp")]
+    asr::transcribe_cpp::clear_cached_runtime();
 }
 
 /// Adopt exact legacy recording paths into the canonical bundle table before
@@ -4193,6 +4954,8 @@ fn hydrate_interrupted_recording_overlay(
     overlay.system_audio_active = None;
     overlay.consent_prompt_shown = None;
     overlay.message = Some(recovery.lifecycle_message.to_string());
+    overlay.microphone_input = None;
+    overlay.microphone_warning_dismissed = false;
 }
 
 /// Whether startup reconciliation should re-read one recording's audio.
@@ -4300,6 +5063,25 @@ pub async fn reconcile_interrupted_recordings_for_sidecar(
             );
             continue;
         }
+        // A meeting that crashed mid-capture never had its duration written,
+        // so audio recovered from disk would otherwise read as 0 seconds.
+        if recording.duration <= 0 {
+            if let Some(duration) = updates
+                .iter()
+                .find(|(role, _, _, _)| *role == recording_audio::RecordingAudioRole::Primary)
+                .and_then(|(_, _, metadata, _)| metadata.as_ref())
+                .map(|metadata| metadata.duration_seconds)
+                .filter(|duration| *duration > 0)
+            {
+                if let Err(error) = db.update_recording_duration(&recording.id, duration) {
+                    tracing::warn!(
+                        "Recovered audio for {} but its duration could not be written: {}",
+                        recording.id,
+                        error
+                    );
+                }
+            }
+        }
         let _ = db.log_audit_event(
             if stranded {
                 "recording_interrupted_reconciled"
@@ -4314,6 +5096,12 @@ pub async fn reconcile_interrupted_recordings_for_sidecar(
             "warning",
         );
         drop(db);
+        if let Err(error) = meeting_aside_audio::recover_open_asides(state, &recording.id).await {
+            tracing::warn!(
+                "Could not recover meeting aside for {}: {error}",
+                recording.id
+            );
+        }
         if !stranded {
             // The status is already correct and already seen. Only say the audio
             // rows changed; do not re-open the recovery overlay for a meeting the
@@ -4361,6 +5149,17 @@ pub fn spawn_storage_retention_maintenance(
     state: Arc<AppState>,
     handle: crate::sidecar_handle::SidecarHandle,
 ) {
+    let compression_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if let Err(error) = audio_compression::compress_next(&compression_state).await {
+                tracing::debug!("{error}");
+            }
+        }
+    });
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(24 * 60 * 60));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -4586,6 +5385,7 @@ mod playback_preparation_tests {
             &runtime,
             std::slice::from_ref(&dir),
             RuntimeAudioResolveMode::PlaybackPrimary,
+            &[],
         )
         .expect_err("locked vault must refuse");
         assert!(error.contains("Vault is locked"), "{error}");
@@ -4613,6 +5413,7 @@ mod playback_preparation_tests {
             &runtime,
             std::slice::from_ref(&dir),
             RuntimeAudioResolveMode::PlaybackPrimary,
+            &[],
         )
         .expect("unlocked vault resolves");
         assert!(resolved.holds_temporary_files());
@@ -4663,6 +5464,7 @@ mod playback_preparation_tests {
             &runtime,
             std::slice::from_ref(&dir),
             RuntimeAudioResolveMode::PlaybackPrimary,
+            &[],
         )
         .expect("dual-track meeting resolves for playback");
         assert!(
@@ -4686,6 +5488,7 @@ mod playback_preparation_tests {
             &runtime,
             std::slice::from_ref(&dir),
             RuntimeAudioResolveMode::Full,
+            &[],
         )
         .expect("post-processing resolves every track");
         assert!(all.mic.is_some() && all.system.is_some());
@@ -4721,6 +5524,7 @@ mod playback_preparation_tests {
             &runtime,
             std::slice::from_ref(&dir),
             RuntimeAudioResolveMode::PlaybackPrimary,
+            &[],
         )
         .expect_err("a length that contradicts the database must fail");
         assert!(error.contains("does not match stored metadata"), "{error}");
@@ -4797,6 +5601,7 @@ mod playback_preparation_tests {
             &runtime,
             std::slice::from_ref(&dir),
             RuntimeAudioResolveMode::PlaybackPrimary,
+            &[],
         )
         .expect_err("same-vault ciphertext from another recording must fail");
         assert!(error.contains("plaintext hash does not match"), "{error}");
@@ -4831,6 +5636,7 @@ mod playback_preparation_tests {
             &runtime,
             std::slice::from_ref(&dir),
             RuntimeAudioResolveMode::PlaybackPrimary,
+            &[],
         )
         .expect("plaintext resolves without a key");
         assert!(!resolved.holds_temporary_files());
@@ -4852,105 +5658,144 @@ mod playback_preparation_tests {
 mod diarization_model_picker_tests {
     use super::*;
 
+    /// The picker prints these descriptions and labels as they are, so they
+    /// say what a model does for the reader, not how it is built.
+    #[test]
+    fn picker_copy_names_no_method_or_format() {
+        for model in list_diarization_models() {
+            for word in [
+                "CPU",
+                "GPU",
+                "ONNX",
+                "int8",
+                "quantized",
+                "embedder",
+                "embeddings",
+                "clustering",
+                "192-dim",
+            ] {
+                assert!(
+                    !model.description.contains(word) && !model.label.contains(word),
+                    "{} names {word:?}",
+                    model.id
+                );
+            }
+            assert!(model.description.contains("voices"), "{}", model.id);
+        }
+    }
+
     /// Every option the picker offers has to be a model this build can run and
-    /// download. The experimental speakrs backend is compiled out by default,
-    /// so the default build must not list it: offering it there would let a
-    /// user select a model that fails at run time with "unknown diarization
-    /// model".
+    /// download: offering one elsewhere would let a user select a model that
+    /// fails at run time with "unknown diarization model".
     #[test]
-    fn default_build_offers_only_the_embedding_models() {
-        let ids: Vec<&str> = list_diarization_models()
-            .iter()
-            .map(|model| model.id)
-            .collect();
-
-        #[cfg(not(feature = "diarization-speakrs"))]
+    fn picker_offers_only_compiled_models() {
+        let models = list_diarization_models();
+        let ids: Vec<&str> = models.iter().map(|model| model.id).collect();
+        #[allow(unused_mut)]
+        let mut expected = vec!["ecapa_tdnn_speaker", "resnet34_speaker", "campplus_speaker"];
+        #[cfg(feature = "diarization")]
+        expected.push(download::COMMUNITY1_MODEL_ID);
+        #[cfg(feature = "diarization-nemotron")]
+        expected.push(download::NEMOTRON_DIARIZATION_MODEL_ID);
+        assert_eq!(ids, expected);
+        #[cfg(feature = "diarization-nemotron")]
         {
+            let model = models
+                .iter()
+                .find(|m| m.id == download::NEMOTRON_DIARIZATION_MODEL_ID)
+                .unwrap();
+            assert!(model.label.contains("experimental"));
+            assert_eq!(model.download_size, Some("400 MB"));
+            assert!(model.description.contains("OpenMDW-1.1"));
+            assert!(model.description.contains("Doesn't remember voices"));
             assert_eq!(
-                ids,
-                vec![
-                    "ecapa_tdnn_speaker",
-                    "resnet34_speaker",
-                    "campplus_speaker",
-                    "eres2netv2_speaker",
-                ]
+                diarization::DEFAULT_EMBEDDING_MODEL_ID,
+                "ecapa_tdnn_speaker"
             );
-            assert!(!ids.iter().any(|id| id.contains("speakrs")));
-        }
-
-        #[cfg(feature = "diarization-speakrs")]
-        {
-            // Appended last, after the four embedding models, so the default
-            // stays first in the picker.
-            assert_eq!(ids.len(), 5);
-            assert_eq!(ids[0], "ecapa_tdnn_speaker");
-            assert_eq!(ids[4], download::SPEAKRS_MODEL_ID);
         }
     }
 
-    /// Copy rule (STYLE.md §6): the label says what it is and that it is
-    /// experimental; the description makes no accuracy claim, because
-    /// Plainsong has published no DER for either backend.
-    #[cfg(feature = "diarization-speakrs")]
+    /// CC BY 4.0 requires attribution where the model is offered; the size
+    /// is on the picker row; the copy makes no accuracy claim (STYLE.md
+    /// section 6) and says "Recommended" only where a new install starts on it.
+    #[cfg(feature = "diarization")]
     #[test]
-    fn speakrs_option_is_labelled_experimental_and_claims_no_accuracy() {
+    fn community1_option_credits_pyannote_and_claims_no_accuracy() {
         let models = list_diarization_models();
-        let speakrs = models
+        let option = models
             .iter()
-            .find(|model| model.id == download::SPEAKRS_MODEL_ID)
-            .expect("speakrs option present when the backend is compiled in");
-
-        assert!(speakrs.label.contains("experimental"));
-        assert!(speakrs.label.contains("community-1"));
-        for claim in [
-            "most accurate",
-            "best accuracy",
-            "highest accuracy",
-            "recommended",
-        ] {
+            .find(|model| model.id == download::COMMUNITY1_MODEL_ID)
+            .expect("community-1 option present when the pipeline is compiled in");
+        assert_eq!(option.label, "pyannote community-1");
+        assert!(option.description.contains("by pyannote, CC BY 4.0"));
+        assert_eq!(option.download_size, Some("33 MB"));
+        assert!(option.description.contains("Remembers voices."));
+        assert_eq!(
+            option.description.starts_with("Recommended."),
+            crate::settings::fresh_install_diarization_model()
+                == Some(download::COMMUNITY1_MODEL_ID)
+        );
+        if !option.description.starts_with("Recommended.") {
+            assert!(option
+                .description
+                .contains("8 to 9 minutes per hour of audio"));
+        }
+        for claim in ["most accurate", "best accuracy", "highest accuracy"] {
             assert!(
-                !speakrs.description.to_lowercase().contains(claim),
-                "description must not claim {claim:?} without a measurement"
+                !option.description.to_lowercase().contains(claim),
+                "description must not claim {claim:?}"
             );
         }
-        // It costs a ten-file download; say so where the user chooses.
-        assert!(speakrs.description.contains("ten files"));
     }
 
-    /// The licensing state has to be in the copy the user reads before pressing
-    /// Download, not only in a doc comment and a QA receipt.
-    #[cfg(feature = "diarization-speakrs")]
+    /// The plan the meeting, the first-run step and Settings read agrees with
+    /// the picker and with the run rule: an id this build lacks is never
+    /// "installed", and a notice exists only when a stand-in would run.
     #[test]
-    fn speakrs_option_states_the_licensing_gap_before_download() {
-        let models = list_diarization_models();
-        let speakrs = models
-            .iter()
-            .find(|model| model.id == download::SPEAKRS_MODEL_ID)
-            .expect("speakrs option present when the backend is compiled in");
+    fn the_diarization_plan_agrees_with_the_picker_and_the_run_rule() {
+        let plan = diarization_model_plan("not_a_real_model");
+        assert!(!plan.selected_installed);
+        assert_eq!(plan.selected_label, "not_a_real_model");
+        assert_eq!(plan.selected_download_size, None);
+        assert_eq!(plan.run_model_id.is_none(), plan.fallback_notice.is_none());
 
-        assert!(speakrs
-            .description
-            .contains("mirrored without a declared license"));
-        assert!(speakrs.description.contains("CC-BY-4.0"));
-        assert!(speakrs.description.contains("gated"));
-        assert!(speakrs
-            .description
-            .contains("Not offered in shipped builds until resolved"));
+        let plan = diarization_model_plan(diarization::DEFAULT_EMBEDDING_MODEL_ID);
+        assert_eq!(plan.selected_label, "ECAPA-TDNN 512");
+        assert_eq!(plan.selected_download_size, Some("25 MB"));
+        assert_eq!(
+            plan.selected_installed,
+            is_diarization_model_available(None)
+        );
+        if plan.selected_installed {
+            assert_eq!(plan.run_model_id.as_deref(), Some("ecapa_tdnn_speaker"));
+            assert_eq!(plan.fallback_notice, None);
+        }
+        let json = serde_json::to_value(&plan).unwrap();
+        for key in [
+            "selectedModelId",
+            "selectedLabel",
+            "selectedDownloadSize",
+            "selectedInstalled",
+            "runModelId",
+            "fallbackNotice",
+        ] {
+            assert!(json.get(key).is_some(), "plan JSON has {key}");
+        }
     }
 
-    /// Availability is per model: asking about speakrs must not be answered by
-    /// the ECAPA-TDNN `.onnx` check, and an unknown id is never "available".
+    /// Availability is per model: asking about community-1 must not be answered
+    /// by the ECAPA-TDNN `.onnx` check, and an unknown id is never "available".
     #[test]
     fn availability_is_answered_per_model_id() {
         assert!(!is_diarization_model_available(Some(
             "not_a_real_model".to_string()
         )));
 
-        #[cfg(feature = "diarization-speakrs")]
+        #[cfg(feature = "diarization")]
         assert_eq!(
-            is_diarization_model_available(Some(download::SPEAKRS_MODEL_ID.to_string())),
-            download::is_speakrs_bundle_trusted(
-                &diarization::diarization_models_dir().join(download::SPEAKRS_BUNDLE_DIR)
+            is_diarization_model_available(Some(download::COMMUNITY1_MODEL_ID.to_string())),
+            download::is_community1_bundle_installed(
+                &diarization::diarization_models_dir().join(download::COMMUNITY1_BUNDLE_DIR)
             )
         );
     }

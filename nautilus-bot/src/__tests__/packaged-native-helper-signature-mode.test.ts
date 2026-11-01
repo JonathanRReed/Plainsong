@@ -1,8 +1,11 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { hasDeliberateSignature } from "../../scripts/verify-packaged-native-helpers.mjs";
+import {
+  checkSpeechHelperContract,
+  hasDeliberateSignature,
+} from "../../scripts/verify-packaged-native-helpers.mjs";
 
 const repoRoot = process.cwd();
 const gate = readFileSync(
@@ -68,10 +71,10 @@ describe("hasDeliberateSignature", () => {
   });
 
   it("treats a build script's own ad-hoc signature as signed", () => {
-    // The Speech, calendar, shortcut and Foundation Models helpers are each
-    // codesigned by their build script with a chosen entitlement plist. Those
-    // entitlements are a real claim about the binary and stay under assertion
-    // even in the unsigned-bundle mode.
+    // The Speech, calendar, shortcut, Foundation Models, Neural Engine speech
+    // and text helpers are each codesigned by their build script with a chosen
+    // entitlement plist. Those entitlements are a real claim about the binary
+    // and stay under assertion even in the unsigned-bundle mode.
     expect(
       hasDeliberateSignature({ status: 0, output: DELIBERATE_ADHOC_HELPER }),
     ).toBe(true);
@@ -97,7 +100,7 @@ describe("scripts/verify-packaged-native-helpers.mjs signature modes", () => {
     // bundle. Asserting entitlements there would be asserting on a signature
     // that does not exist yet.
     expect(gate).toContain("allowUnsigned: true");
-    expect(gate).toContain("verifyPackagedNativeHelpers(context)");
+    expect(gate).toContain("function verifyPackagedNativeHelpers(");
   });
 
   it("keeps the standalone gate strict by default", () => {
@@ -105,7 +108,7 @@ describe("scripts/verify-packaged-native-helpers.mjs signature modes", () => {
     // bundle. An unsigned helper there is a release defect, so the flag has to
     // be asked for rather than inferred.
     expect(gate).toContain('const allowUnsigned = args.includes("--allow-unsigned");');
-    expect(gate).toContain("{ allowUnsigned = false } = {}");
+    expect(gate).toContain("{ allowUnsigned = false, staticOnly = false, speechContractVerifier } = {}");
     expect(gate).toContain("a signed build must sign every ");
   });
 
@@ -128,5 +131,32 @@ describe("scripts/verify-packaged-native-helpers.mjs signature modes", () => {
     expect(afterSkips).toContain(
       "requirePackagedCalendarUsageDescriptions(appPath);",
     );
+  });
+
+  it("skips Speech helper process execution only in explicit static mode", () => {
+    const mockedChildProcessPath = vi.fn();
+
+    expect(
+      checkSpeechHelperContract("/tmp/Plainsong.app", {
+        staticOnly: true,
+        verifier: mockedChildProcessPath,
+      }),
+    ).toBe(false);
+    expect(mockedChildProcessPath).not.toHaveBeenCalled();
+
+    expect(
+      checkSpeechHelperContract("/tmp/Plainsong.app", {
+        verifier: mockedChildProcessPath,
+      }),
+    ).toBe(true);
+    expect(mockedChildProcessPath).toHaveBeenCalledOnce();
+    expect(mockedChildProcessPath).toHaveBeenCalledWith("/tmp/Plainsong.app");
+  });
+
+  it("keeps static mode explicit in CLI and afterPack metadata", () => {
+    expect(gate).toContain('const staticOnly = args.includes("--static-only");');
+    expect(gate).toContain("{ allowUnsigned, staticOnly }");
+    expect(gate).toContain("speechContractChecked,");
+    expect(gate).toContain("staticOnly,");
   });
 });

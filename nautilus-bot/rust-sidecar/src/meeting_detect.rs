@@ -719,6 +719,64 @@ mod macos {
         titles
     }
 
+    const DETECTION_BUNDLES: &[&str] = &[
+        "us.zoom.xos",
+        "com.microsoft.teams2",
+        "com.microsoft.teams",
+        "com.tinyspeck.slackmacgap",
+        "com.hnc.Discord",
+        "com.apple.FaceTime",
+        "Cisco-Systems.Spark",
+        "com.webex.meetingmanager",
+        "com.google.Chrome",
+        "com.google.Chrome.beta",
+        "com.google.Chrome.canary",
+        "com.apple.Safari",
+        "com.apple.SafariTechnologyPreview",
+        "company.thebrowser.Browser",
+        "com.microsoft.edgemac",
+        "com.microsoft.edgemac.Beta",
+        "org.mozilla.firefox",
+        "org.mozilla.firefoxdeveloperedition",
+    ];
+
+    struct AppIdentity {
+        bundle_id: String,
+        pid: i32,
+    }
+
+    fn fresh_app_identities(allowed: &[&str]) -> Option<Vec<AppIdentity>> {
+        use objc2::rc::autoreleasepool;
+        use objc2_app_kit::NSRunningApplication;
+        use objc2_foundation::NSString;
+
+        // Query each bundle directly. NSWorkspace.runningApplications is a
+        // run-loop-cached array, so a Tokio worker can otherwise miss launches
+        // and keep exited apps. This query sees both without a new process or
+        // requiring the caller to run AppKit's main loop.
+        autoreleasepool(|_| {
+            let mut found = Vec::new();
+            for bundle in allowed {
+                let bundle = NSString::from_str(bundle);
+                let running =
+                    NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle);
+                for app in running.iter() {
+                    let pid = app.processIdentifier();
+                    let Some(bundle_id) = app.bundleIdentifier().map(|id| id.to_string()) else {
+                        continue;
+                    };
+                    if pid > 0 && allowed.contains(&bundle_id.as_str()) {
+                        found.push(AppIdentity { bundle_id, pid });
+                        if found.len() == 128 {
+                            return Some(found);
+                        }
+                    }
+                }
+            }
+            Some(found)
+        })
+    }
+
     /// The running apps detection cares about. Only conferencing apps and the
     /// known browsers are returned; everything else on the machine is never
     /// looked at beyond its bundle id, and nothing is retained between polls.
@@ -730,22 +788,17 @@ mod macos {
         accessibility_granted: bool,
         mic_running_elsewhere: Option<bool>,
         active_call_bundle_id: Option<&str>,
-    ) -> Vec<RunningApp> {
-        use objc2_app_kit::NSWorkspace;
-
-        let workspace = NSWorkspace::sharedWorkspace();
-        let running = workspace.runningApplications();
+    ) -> Option<Vec<RunningApp>> {
+        let running = fresh_app_identities(DETECTION_BUNDLES)?;
         let mut apps = Vec::new();
-        for app in running.iter() {
-            let Some(bundle_id) = app.bundleIdentifier().map(|value| value.to_string()) else {
-                continue;
-            };
+        for app in running {
+            let bundle_id = app.bundle_id;
             let kind = call_app_for_bundle(&bundle_id);
             let is_browser = browser_for_bundle(&bundle_id).is_some();
             if kind.is_none() && !is_browser {
                 continue;
             }
-            let pid = app.processIdentifier();
+            let pid = app.pid;
             let wants_titles = super::should_read_window_titles(
                 &bundle_id,
                 mic_running_elsewhere,
@@ -756,14 +809,128 @@ mod macos {
             } else {
                 Vec::new()
             };
+            let name = kind
+                .map(|kind| kind.label())
+                .or_else(|| browser_for_bundle(&bundle_id))
+                .map(str::to_string);
             apps.push(RunningApp {
                 bundle_id,
-                name: app.localizedName().map(|value| value.to_string()),
+                name,
                 pid,
                 window_titles: titles,
             });
         }
-        apps
+        Some(apps)
+    }
+    #[cfg(test)]
+    mod fresh_snapshot_tests {
+        use super::*;
+        #[test]
+        fn enumeration_preserves_all_supported_apps_and_browsers() {
+            let expected = [
+                "us.zoom.xos",
+                "com.microsoft.teams2",
+                "com.microsoft.teams",
+                "com.tinyspeck.slackmacgap",
+                "com.hnc.Discord",
+                "com.apple.FaceTime",
+                "Cisco-Systems.Spark",
+                "com.webex.meetingmanager",
+                "com.google.Chrome",
+                "com.google.Chrome.beta",
+                "com.google.Chrome.canary",
+                "com.apple.Safari",
+                "com.apple.SafariTechnologyPreview",
+                "company.thebrowser.Browser",
+                "com.microsoft.edgemac",
+                "com.microsoft.edgemac.Beta",
+                "org.mozilla.firefox",
+                "org.mozilla.firefoxdeveloperedition",
+            ];
+            assert_eq!(DETECTION_BUNDLES, expected);
+        }
+
+        #[test]
+        fn enumeration_only_allows_existing_detection_targets() {
+            for bundle in DETECTION_BUNDLES {
+                assert!(
+                    call_app_for_bundle(bundle).is_some() || browser_for_bundle(bundle).is_some()
+                );
+            }
+        }
+        #[test]
+        fn native_snapshot_keeps_unrelated_apps_and_titles_out() {
+            let absent = fresh_app_identities(&["com.plainsong.not-an-installed-call-app"])
+                .expect("native snapshot");
+            assert!(absent.is_empty());
+            let apps = sample_running_apps(false, Some(false), None).expect("native snapshot");
+            assert!(apps.iter().all(|app| app.pid > 0
+                && DETECTION_BUNDLES.contains(&app.bundle_id.as_str())
+                && app.window_titles.is_empty()));
+        }
+
+        #[test]
+        #[ignore = "headless idle measurement; set PLAINSONG_CALL_DETECT_PROBE_OUT"]
+        fn idle_call_detection_probe() {
+            let out = std::env::var("PLAINSONG_CALL_DETECT_PROBE_OUT").unwrap();
+            let seconds: u64 = std::env::var("PLAINSONG_CALL_DETECT_PROBE_SECONDS")
+                .unwrap_or_else(|_| "600".into())
+                .parse()
+                .unwrap();
+            fn cpu_ms(who: i32) -> f64 {
+                let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+                // SAFETY: getrusage writes into a matching initialized-size buffer.
+                assert_eq!(unsafe { libc::getrusage(who, usage.as_mut_ptr()) }, 0);
+                let usage = unsafe { usage.assume_init() };
+                (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) as f64 * 1000.0
+                    + (usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) as f64 / 1000.0
+            }
+            let initial_cpu = cpu_ms(libc::RUSAGE_SELF);
+            let initial_children_cpu = cpu_ms(libc::RUSAGE_CHILDREN);
+            let started = std::time::Instant::now();
+            std::fs::write(format!("{out}.pid"), std::process::id().to_string()).unwrap();
+            let mut durations_us = Vec::new();
+            for _ in 0..seconds.div_ceil(5) {
+                let start = std::time::Instant::now();
+                let apps = sample_running_apps(false, Some(false), None).expect("app snapshot");
+                assert!(apps
+                    .iter()
+                    .all(|app| app.pid > 0 && app.window_titles.is_empty()));
+                durations_us.push(start.elapsed().as_micros() as u64);
+                std::thread::sleep(
+                    std::time::Duration::from_secs(5).saturating_sub(start.elapsed()),
+                );
+            }
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let own_cpu_ms = cpu_ms(libc::RUSAGE_SELF) - initial_cpu;
+            let children_cpu_ms = cpu_ms(libc::RUSAGE_CHILDREN) - initial_children_cpu;
+            std::fs::write(
+                out,
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "durationsUs": durations_us, "elapsedMs": elapsed_ms,
+                    "cpuMs": own_cpu_ms, "childrenCpuMs": children_cpu_ms,
+                    "treeCpuPercent": (own_cpu_ms + children_cpu_ms) / elapsed_ms * 100.0,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        #[test]
+        #[ignore = "requires an explicitly launched owned QA app"]
+        fn fresh_app_snapshot_probe() {
+            let bundle = std::env::var("PLAINSONG_APP_REFRESH_BUNDLE").unwrap();
+            let out = std::env::var("PLAINSONG_APP_REFRESH_OUT").unwrap();
+            std::fs::write(format!("{out}.ready"), std::process::id().to_string()).unwrap();
+            let mut observations = Vec::new();
+            for _ in 0..4 {
+                let apps = fresh_app_identities(&[bundle.as_str()]).expect("fresh app snapshot");
+                observations.push(serde_json::json!({"present":!apps.is_empty(),"pids":apps.iter().map(|app|app.pid).collect::<Vec<_>>() }));
+                std::fs::write(format!("{out}.step"), observations.len().to_string()).unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            std::fs::write(out, serde_json::to_vec_pretty(&observations).unwrap()).unwrap();
+        }
     }
 }
 

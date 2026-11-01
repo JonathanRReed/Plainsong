@@ -1,52 +1,50 @@
-import { useCallback, useEffect, useState } from "react";
-import { getSettings, saveSettings } from "@/lib/backend/settings";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getSettings, setSavedPrompts } from "@/lib/backend/settings";
 import { resolveSavedPrompts, type SavedPrompt } from "@/lib/saved-prompts";
 
-/**
- * The saved prompt library, loaded from settings and written back to it.
- *
- * `save_settings` takes the whole settings object, so every write here
- * re-reads settings first and edits only `ai.savedPrompts`. That is what
- * keeps a prompt edit from clobbering a change made on the Settings screen
- * between this component mounting and the reader pressing Save -- the same
- * read-modify-write discipline the Settings screen itself uses.
- *
- * A failure to load is not surfaced as an error banner: the picker is a
- * convenience over a chat box that works perfectly well without it, so the
- * failure mode is the shipped starters and no persistence, not a warning over
- * someone's meeting.
- */
 export function useSavedPrompts() {
   const [prompts, setPrompts] = useState<SavedPrompt[]>(() =>
     resolveSavedPrompts([]),
   );
   const [loaded, setLoaded] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const savedRevision = useRef(0);
+  const canPersist = useRef(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
+    canPersist.current = false;
+    setLoaded(false);
+    setLoadError(null);
+    const revision = savedRevision.current;
     try {
       const settings = await getSettings();
-      setPrompts(resolveSavedPrompts(settings.ai?.savedPrompts));
+      if (revision === savedRevision.current) {
+        setPrompts(resolveSavedPrompts(settings.ai?.savedPrompts));
+      }
+      canPersist.current = true;
+      setLoaded(true);
     } catch (error) {
       console.error("Failed to load saved prompts:", error);
-    } finally {
-      setLoaded(true);
+      setLoadError("Could not load saved prompts. Retry before making changes.");
     }
   }, []);
 
   useEffect(() => {
     let cancelled = false;
+    const revision = savedRevision.current;
     void (async () => {
       try {
         const settings = await getSettings();
-        if (cancelled) return;
+        if (cancelled || revision !== savedRevision.current) return;
         setPrompts(resolveSavedPrompts(settings.ai?.savedPrompts));
+        canPersist.current = true;
+        setLoaded(true);
       } catch (error) {
         if (!cancelled) {
           console.error("Failed to load saved prompts:", error);
+          setLoadError("Could not load saved prompts. Retry before making changes.");
         }
-      } finally {
-        if (!cancelled) setLoaded(true);
       }
     })();
     return () => {
@@ -54,24 +52,16 @@ export function useSavedPrompts() {
     };
   }, []);
 
-  /**
-   * Persist a whole resolved library.
-   *
-   * The list is written optimistically so the dialog does not flicker, then
-   * reconciled with whatever the sidecar's sanitizer actually kept -- which
-   * is the only honest source for "did that save".
-   */
   const persist = useCallback(async (next: readonly SavedPrompt[]) => {
-    setPrompts([...next]);
+    if (!canPersist.current) {
+      setSaveError("Load your saved prompts before making changes.");
+      return false;
+    }
     setSaveError(null);
     try {
-      const settings = await getSettings();
-      await saveSettings({
-        ...settings,
-        ai: { ...(settings.ai ?? {}), savedPrompts: [...next] },
-      });
-      const saved = await getSettings();
-      setPrompts(resolveSavedPrompts(saved.ai?.savedPrompts));
+      const saved = await setSavedPrompts(next);
+      savedRevision.current += 1;
+      setPrompts(resolveSavedPrompts(saved));
       return true;
     } catch (error) {
       console.error("Failed to save prompts:", error);
@@ -80,10 +70,9 @@ export function useSavedPrompts() {
           ? error.message
           : "Plainsong could not save your prompts.",
       );
-      await reload();
       return false;
     }
-  }, [reload]);
+  }, []);
 
-  return { prompts, loaded, saveError, persist, reload };
+  return { prompts, loaded, loadError, saveError, persist, reload };
 }

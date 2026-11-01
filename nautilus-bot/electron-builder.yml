@@ -10,12 +10,12 @@ copyright: Copyright © 2026 Jonathan Reed
 # semantic version stays in CFBundleShortVersionString, where it belongs.
 #
 # The number is `encodeBundleBuildVersion(version)` from
-# scripts/lib/bundle-build-version.mjs, which packs the version into one integer
-# and ranks a prerelease below the release it precedes (0.9.0-beta.5 → 900305,
+# scripts/lib/bundle-build-version.ts, which packs the version into one integer
+# and ranks a prerelease below the release it precedes (0.9.0-beta.7 → 900307,
 # and the 0.9.0 that follows → 900999). This file is static YAML, so it is
 # applied by hand and pinned to package.json by a unit test: a version bump that
 # forgets it fails there rather than in a shipped bundle.
-buildVersion: "900305"
+buildVersion: "900307"
 
 # Electron ships these fuses permissive by default, which would make a notarized
 # Plainsong a reusable gadget: `ELECTRON_RUN_AS_NODE=1` on the signed binary runs
@@ -87,9 +87,9 @@ protocols:
     schemes:
       - plainsong
 
-# Fail packaging before signing if a required native helper is absent, has the
-# wrong deployment target, or no longer matches its Rust protocol.
-afterPack: scripts/verify-packaged-native-helpers.mjs
+# Write updater configuration and verify native helpers before signing,
+# including the dir target used by the two-step notarization flow.
+afterPack: scripts/after-pack.mjs
 
 files:
   - dist/**
@@ -106,7 +106,7 @@ files:
   # its neighbours) imports exactly one real package, electron-updater.
   #
   # So the rule is inverted: exclude every top-level entry under node_modules
-  # that is not electron-updater or one of its transitive dependencies. Written
+  # that is not a main-process runtime package or one of its dependencies. Written
   # this way a new renderer dependency is excluded the day it is added, instead
   # of the day someone remembers to come back here. The cost is that a new
   # *main-process* dependency must be added to this list or the packaged app
@@ -126,7 +126,7 @@ files:
   # `@scope/name` is kept by naming `@scope` — the whole scope — and never by
   # `@scope/name`, which can never match anything. The test compares the two
   # sides on that same first segment for the same reason.
-  - "!node_modules/!(argparse|builder-util-runtime|debug|electron-updater|fs-extra|graceful-fs|js-yaml|jsonfile|lazy-val|lodash.escaperegexp|lodash.isequal|ms|sax|semver|tiny-typed-emitter|universalify)/**"
+  - "!node_modules/!(argparse|builder-util-runtime|debug|electron-updater|fs-extra|graceful-fs|jose|js-yaml|jsonfile|lazy-val|lodash.escaperegexp|lodash.isequal|ms|proper-lockfile|retry|sax|semver|signal-exit|tiny-typed-emitter|universalify)/**"
 
 extraResources:
   # Keep the project's MIT license and generated dependency attributions beside
@@ -162,7 +162,8 @@ mac:
   # Keep the bundle metadata aligned with the documented beta support floor.
   minimumSystemVersion: "13.0"
   hardenedRuntime: true
-  notarize: true
+  # scripts/release-mac.mjs owns the app ZIP and final DMG submissions.
+  notarize: false
   gatekeeperAssess: false
   entitlements: build-resources/entitlements.mac.plist
   entitlementsInherit: build-resources/entitlements.mac.inherit.plist
@@ -175,12 +176,22 @@ mac:
     - Contents/Resources/shortcut-helper/plainsong-native-shortcut-helper
     - Contents/Resources/calendar-helper/plainsong-native-calendar-helper
     - Contents/Resources/language-model-helper/plainsong-native-language-model-helper
+    - Contents/Resources/asr-helper/plainsong-native-asr-helper
+    - Contents/Resources/text-helper/plainsong-text-helper
   icon: build-resources/icon.icns
   # Required TCC usage strings — without these macOS terminates the app the
   # moment it accesses the microphone / speech recognition.
   extendInfo:
-    NSMicrophoneUsageDescription: "Plainsong transcribes your speech on your Mac for dictation and meeting capture. Audio stays on your device."
-    NSAudioCaptureUsageDescription: "Plainsong captures audio playing on your Mac to record and transcribe meetings. Depending on your transcription settings, meeting audio may be processed on this Mac or sent to the cloud provider you choose."
+    NSMicrophoneUsageDescription: "Plainsong uses your microphone for dictation and meeting capture. Depending on your transcription settings, audio is processed on this Mac or sent to the cloud provider you choose."
+    # Meeting audio (Me + Them) is read by the Rust sidecar through a Core Audio
+    # process tap, and its silent check runs in a child copy of the sidecar.
+    # Neither has entitlements of its own: like the microphone, TCC attributes
+    # the "Screen & System Audio Recording" prompt to the responsible process,
+    # this app, and shows this string. The app already holds audio-input; there
+    # is no separate hardened-runtime entitlement for process taps.
+    # scripts/verify-macos-system-audio.ts and verify-packaged-native-helpers.mjs
+    # pin this exact text.
+    NSAudioCaptureUsageDescription: "In Me + Them meetings, Plainsong records your microphone and all audio playing on this Mac, including other apps and notification sounds. This works with headphones on macOS 14.7 or later. It never records your screen. Depending on your transcription settings, meeting audio is processed on this Mac or sent to the cloud provider you choose."
     NSSpeechRecognitionUsageDescription: "Plainsong can use Apple's on-device speech recognition to transcribe your dictation."
     # Calendar reading is done by a separate signed helper, but TCC attributes a
     # spawned child's prompt to the RESPONSIBLE process — this app — and reads
@@ -191,8 +202,11 @@ mac:
     # (build-resources/info.mac.calendar-helper.plist) carries the identical
     # pair, and the strings are word-for-word the same because which one a
     # reader sees depends on their macOS version, not on what Plainsong does.
-    NSCalendarsUsageDescription: "Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac."
-    NSCalendarsFullAccessUsageDescription: "Plainsong reads your calendar on this Mac so it can offer to start capturing the meeting you are about to join. Nothing is written to your calendar and nothing leaves your Mac."
+    NSCalendarsUsageDescription: "Plainsong reads your calendar to help you prepare for and capture meetings, and, if enabled, spell names locally. It does not change your calendar. If you choose cloud AI, selected meeting details may be sent to that provider."
+    NSCalendarsFullAccessUsageDescription: "Plainsong reads your calendar to help you prepare for and capture meetings, and, if enabled, spell names locally. It does not change your calendar. If you choose cloud AI, selected meeting details may be sent to that provider."
+    # Read by the same helper, only after the user turns on Contacts names for
+    # dictation; same string in build-resources/info.mac.calendar-helper.plist.
+    NSContactsUsageDescription: "Plainsong uses names from Contacts to spell people's names in dictation. It reads only names, never changes Contacts, and they stay on this Mac."
   # macOS-only native helper (built by `shortcut-helper:build`) that observes
   # the dictation hotkey via a listen-only CGEventTap so press-and-hold works.
   # Packaged the same way as the Rust sidecar: it must be signed with the same
@@ -217,6 +231,21 @@ mac:
       to: language-model-helper
       filter:
         - plainsong-native-language-model-helper
+    # Neural Engine speech helper (built by `asr-helper:build`): Parakeet
+    # through FluidAudio, fed 16 kHz audio by the sidecar on stdin. Its own
+    # directory and an empty entitlement set, like the language model helper;
+    # the sidecar looks for it at exactly this path.
+    - from: dist-native/
+      to: asr-helper
+      filter:
+        - plainsong-native-asr-helper
+    # llama.cpp text helper (built by `text-helper:build`). Its own resource
+    # directory so the packaged-helper gate can name its path and its empty
+    # entitlement policy, like the Apple Foundation Models helper.
+    - from: dist-native/
+      to: text-helper
+      filter:
+        - plainsong-text-helper
     - from: rust-sidecar/binaries/
       to: sidecar
       filter:
@@ -268,17 +297,16 @@ dmg:
   #
   # `bun run electron:pack` was re-run after this line was added, so the
   # configuration is known to validate. What has NOT been exercised is
-  # electron-builder's dmg target end-to-end: that path signs and notarizes and
-  # this machine has no credentials. The first `release:mac` after this change
+  # electron-builder's dmg target end-to-end. The release runner owns the
+  # notarization step. The first `release:mac` after this change
   # must confirm a DMG was produced and mounts before anything is distributed.
   format: ULFO
-  # The DMG is the primary download. electron-builder notarizes the .app before
-  # creating this artifact, so sign the disk image here; the release workflow
-  # then submits the signed DMG separately and staples its own notary ticket.
+  # The release runner builds this from the already stapled app, then
+  # submits and staples the signed DMG before creating the updater ZIP.
   sign: true
   # Stapling changes the DMG bytes after electron-builder has finished. Do not
   # emit a pre-staple DMG blockmap/hash into beta-mac.yml; macOS updates use
-  # the ZIP and its blockmap, while the final DMG is covered by SHA256SUMS.txt.
+  # the ZIP and its blockmap, while the final DMG is covered by SHA256SUMS.
   writeUpdateInfo: false
   # The install gesture, stated in the window itself: app on the left,
   # /Applications on the right, drag between them. Without an explicit layout

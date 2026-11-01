@@ -17,6 +17,7 @@ use std::path::PathBuf;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Arc;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
@@ -1263,6 +1264,74 @@ pub fn probe_from_readiness(readiness: &AppleSpeechReadiness) -> EngineProbe {
     }
 }
 
+thread_local! {
+    static BATCH_CANCELLATION: std::cell::RefCell<Option<Arc<AtomicBool>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+struct BatchCancellationGuard(Arc<AtomicBool>);
+
+impl Drop for BatchCancellationGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+struct BatchWorkerScope(Option<Arc<AtomicBool>>);
+
+impl Drop for BatchWorkerScope {
+    fn drop(&mut self) {
+        BATCH_CANCELLATION.with(|slot| {
+            *slot.borrow_mut() = self.0.take();
+        });
+    }
+}
+
+fn batch_cancelled() -> bool {
+    BATCH_CANCELLATION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+    })
+}
+
+fn batch_cancelled_error() -> anyhow::Error {
+    typed_error(
+        "cancelled",
+        "macOS Speech transcription was cancelled.",
+        false,
+    )
+}
+
+/// The worker owns staged audio and its child until cleanup finishes. Dropping
+/// the awaiting task signals the worker, since spawn_blocking cannot be aborted.
+pub async fn run_cancellable_batch<T, F>(work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let _cancel_on_drop = BatchCancellationGuard(cancelled.clone());
+    tokio::task::spawn_blocking(move || {
+        let previous = BATCH_CANCELLATION.with(|slot| slot.replace(Some(cancelled)));
+        let _scope = BatchWorkerScope(previous);
+        if batch_cancelled() {
+            return Err(batch_cancelled_error());
+        }
+        work()
+    })
+    .await
+    .map_err(|error| {
+        typed_error_with_details(
+            "recognition_failed",
+            "macOS Speech transcription worker failed.",
+            true,
+            BTreeMap::from([("error".to_string(), error.to_string())]),
+        )
+    })?
+}
+
 /// Transcribes one file through the Apple Speech helper.
 ///
 /// `required_engine` is the engine the *caller's* decision depends on. Passing
@@ -1301,8 +1370,28 @@ pub fn transcribe_file(
         arguments.push(OsString::from("--contextual-strings-file"));
         arguments.push(file.path().as_os_str().to_os_string());
     }
-    let output =
-        run_helper_with_timeout(&helper, &arguments, helper_timeout_for_audio(audio_path))?;
+    if batch_cancelled() {
+        return Err(batch_cancelled_error());
+    }
+    // Apple's allocation is opaque. Hold a conservative allowance until the
+    // helper has exited; releasing it does not unload system-owned weights.
+    let system_admission = crate::llm::local_model_load::system_speech_runtime(
+        4 * 1024 * 1024 * 1024,
+    )
+    .map_err(|error| {
+        typed_error_with_details(
+            "resource_unavailable",
+            "Apple Speech needs more verified memory headroom before transcription.",
+            true,
+            BTreeMap::from([("error".to_string(), error.to_string())]),
+        )
+    })?;
+    let output = run_helper_with_timeout_and_admission(
+        &helper,
+        &arguments,
+        helper_timeout_for_audio(audio_path),
+        Some(system_admission),
+    )?;
     if !output.status.success() {
         return Err(helper_failure_from_output(
             &output,
@@ -2013,8 +2102,22 @@ fn run_helper_with_timeout(
     arguments: &[OsString],
     timeout: Duration,
 ) -> Result<Output> {
-    let mut child = Command::new(helper)
+    run_helper_with_timeout_and_admission(helper, arguments, timeout, None)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn run_helper_with_timeout_and_admission(
+    helper: &Path,
+    arguments: &[OsString],
+    timeout: Duration,
+    admission: Option<crate::llm::local_model_load::LoadReservation<'static>>,
+) -> Result<Output> {
+    if batch_cancelled() {
+        return Err(batch_cancelled_error());
+    }
+    let child = Command::new(helper)
         .args(arguments)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2029,50 +2132,30 @@ fn run_helper_with_timeout(
                 ]),
             )
         })?;
-
+    let mut child = OwnedBatchChild(child, admission);
     let mut stdout = child
+        .0
         .stdout
         .take()
         .context("Failed to capture the macOS Speech helper's standard output")?;
     let mut stderr = child
+        .0
         .stderr
         .take()
         .context("Failed to capture the macOS Speech helper's standard error")?;
-    let stdout_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
-
+    set_pipe_nonblocking(&stdout)?;
+    set_pipe_nonblocking(&stderr)?;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_closed = false;
+    let mut stderr_closed = false;
+    let mut status = None;
     let started = Instant::now();
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| "Failed while waiting for the macOS Speech helper")?
-        {
-            let stdout = stdout_reader
-                .join()
-                .map_err(|_| anyhow::anyhow!("macOS Speech helper stdout reader panicked"))?
-                .context("Failed to read macOS Speech helper stdout")?;
-            let stderr = stderr_reader
-                .join()
-                .map_err(|_| anyhow::anyhow!("macOS Speech helper stderr reader panicked"))?
-                .context("Failed to read macOS Speech helper stderr")?;
-            return Ok(Output {
-                status,
-                stdout,
-                stderr,
-            });
+        if batch_cancelled() {
+            return Err(batch_cancelled_error());
         }
-
         if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
             return Err(typed_error_with_details(
                 "timeout",
                 "macOS Speech helper timed out.",
@@ -2080,8 +2163,132 @@ fn run_helper_with_timeout(
                 BTreeMap::from([("timeout_seconds".to_string(), timeout.as_secs().to_string())]),
             ));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        if !stdout_closed {
+            stdout_closed =
+                drain_bounded_pipe(&mut stdout, &mut stdout_bytes, BATCH_STDOUT_LIMIT, "stdout")?;
+        }
+        if !stderr_closed {
+            stderr_closed =
+                drain_bounded_pipe(&mut stderr, &mut stderr_bytes, BATCH_STDERR_LIMIT, "stderr")?;
+        }
+        if status.is_none() {
+            status = child
+                .0
+                .try_wait()
+                .context("Failed while waiting for the macOS Speech helper")?;
+        }
+        if let Some(status) = status {
+            if stdout_closed && stderr_closed {
+                return Ok(Output {
+                    status,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                });
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const BATCH_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const BATCH_STDERR_LIMIT: usize = 64 * 1024;
+
+/// Reap on every exit path, including cancellation, pipe errors, and panic.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct OwnedBatchChild(
+    std::process::Child,
+    Option<crate::llm::local_model_load::LoadReservation<'static>>,
+);
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl Drop for OwnedBatchChild {
+    fn drop(&mut self) {
+        let cleanup = match self.0.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            _ => {
+                let _ = self.0.kill();
+                self.0.wait().map(|_| ())
+            }
+        };
+        if let Err(error) = &cleanup {
+            tracing::warn!(%error, "Could not confirm macOS Speech helper exit; retaining runtime admission");
+        }
+        finish_batch_admission(self.1.take(), cleanup);
+    }
+}
+
+/// Keep the runtime gate and memory claim if the owned child could not be
+/// reaped. An uncertain helper must not allow another inference operation.
+#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
+fn finish_batch_admission<T>(admission: Option<T>, cleanup: std::io::Result<()>) {
+    if cleanup.is_err() {
+        std::mem::forget(admission);
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn set_pipe_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> Result<()> {
+    let fd = pipe.as_raw_fd();
+    // The pipe remains owned by this worker while its descriptor is updated.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(typed_error_with_details(
+            "recognition_failed",
+            "Failed to configure macOS Speech helper output capture.",
+            true,
+            BTreeMap::from([(
+                "error".to_string(),
+                std::io::Error::last_os_error().to_string(),
+            )]),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn drain_bounded_pipe(
+    pipe: &mut impl Read,
+    bytes: &mut Vec<u8>,
+    limit: usize,
+    stream: &str,
+) -> Result<bool> {
+    let mut buffer = [0_u8; 8192];
+    // Yield to the cancellation and deadline checks even if the pipe floods.
+    for _ in 0..16 {
+        match pipe.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(count) => {
+                if count > limit.saturating_sub(bytes.len()) {
+                    return Err(typed_error_with_details(
+                        "output_limit_exceeded",
+                        "macOS Speech helper exceeded its output limit.",
+                        false,
+                        BTreeMap::from([
+                            ("stream".to_string(), stream.to_string()),
+                            ("limit_bytes".to_string(), limit.to_string()),
+                        ]),
+                    ));
+                }
+                bytes.extend_from_slice(&buffer[..count]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                return Err(typed_error_with_details(
+                    "recognition_failed",
+                    "Failed to read macOS Speech helper output.",
+                    true,
+                    BTreeMap::from([
+                        ("stream".to_string(), stream.to_string()),
+                        ("error".to_string(), error.to_string()),
+                    ]),
+                ));
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -2421,6 +2628,142 @@ mod tests {
     use std::time::Duration;
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     use tokio::io::AsyncBufReadExt;
+
+    #[test]
+    fn batch_admission_is_retained_when_cleanup_fails() {
+        struct FakeAdmission<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for FakeAdmission<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let released = std::sync::atomic::AtomicUsize::new(0);
+        super::finish_batch_admission(Some(FakeAdmission(&released)), Ok(()));
+        assert_eq!(released.load(std::sync::atomic::Ordering::Relaxed), 1);
+        super::finish_batch_admission(
+            Some(FakeAdmission(&released)),
+            Err(std::io::Error::other("stub wait failure")),
+        );
+        assert_eq!(
+            released.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "an unconfirmed reap must retain its admission"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_worker_runs_off_runtime_and_preserves_result() {
+        let runtime_thread = std::thread::current().id();
+        let result = super::run_cancellable_batch(move || {
+            assert_ne!(std::thread::current().id(), runtime_thread);
+            Ok(42)
+        })
+        .await
+        .expect("stub work should return its result");
+        assert_eq!(result, 42);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn batch_worker_cancellation_kills_and_reaps_stub_helper() {
+        let pid_path = std::env::temp_dir().join(format!(
+            "nautilus-speech-cancel-test-{}.pid",
+            uuid::Uuid::new_v4()
+        ));
+        let worker_pid_path = pid_path.clone();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(super::run_cancellable_batch(move || {
+            let result = super::run_helper_with_timeout(
+                std::path::Path::new("/bin/sh"),
+                &[
+                    std::ffi::OsString::from("-c"),
+                    std::ffi::OsString::from("echo $$ > \"$1\"; exec /bin/sleep 600"),
+                    std::ffi::OsString::from("stub"),
+                    worker_pid_path.into_os_string(),
+                ],
+                Duration::from_secs(30),
+            );
+            let code = result.as_ref().err().and_then(super::typed_error_code);
+            let _ = finished_tx.send(code);
+            result.map(|_| ())
+        }));
+        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+                    if let Ok(pid) = contents.trim().parse::<libc::pid_t>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stub child should start");
+        task.abort();
+        let _ = task.await;
+        let code = tokio::time::timeout(Duration::from_secs(5), finished_rx)
+            .await
+            .expect("cancellation must finish the owned worker")
+            .expect("worker completion signal");
+        assert_eq!(code.as_deref(), Some("cancelled"));
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "stub child must be gone");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        let _ = std::fs::remove_file(pid_path);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn batch_helper_timeout_and_output_limits_return_typed_errors() {
+        let error = super::run_helper_with_timeout(
+            std::path::Path::new("/bin/sleep"),
+            &[std::ffi::OsString::from("600")],
+            Duration::from_millis(50),
+        )
+        .expect_err("silent helper must time out");
+        assert_eq!(super::typed_error_code(&error).as_deref(), Some("timeout"));
+        for (stream, script) in [
+            ("stdout", "exec /usr/bin/yes x"),
+            ("stderr", "exec /usr/bin/yes x >&2"),
+        ] {
+            let error = super::run_helper_with_timeout(
+                std::path::Path::new("/bin/sh"),
+                &[
+                    std::ffi::OsString::from("-c"),
+                    std::ffi::OsString::from(script),
+                ],
+                Duration::from_secs(60),
+            )
+            .expect_err("flooding helper must exceed the output cap");
+            let payload: HelperErrorPayload = serde_json::from_str(&error.to_string())
+                .expect("output-limit error must preserve the protocol");
+            assert_eq!(payload.code, "output_limit_exceeded");
+            assert_eq!(
+                payload.details.get("stream").map(String::as_str),
+                Some(stream)
+            );
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn batch_pipe_rejects_oversize_bytes_without_buffer_growth() {
+        let mut bytes = Vec::new();
+        let error = super::drain_bounded_pipe(
+            &mut std::io::Cursor::new(vec![0; 9]),
+            &mut bytes,
+            8,
+            "stdout",
+        )
+        .expect_err("output beyond the cap must fail");
+        assert!(bytes.is_empty());
+        assert_eq!(
+            super::typed_error_code(&error).as_deref(),
+            Some("output_limit_exceeded")
+        );
+    }
 
     /// Every JSON literal below was captured verbatim from the compiled
     /// helper on this Mac (macOS 27.0, build 26A5406e, SDK 26.2) rather than

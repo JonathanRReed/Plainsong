@@ -48,7 +48,7 @@ describe("provider options per lane", () => {
     const options = analysisProviderOptionsForLane("dictationAi");
     expect(options[0]).toEqual({
       value: "bundled_local",
-      label: "Built-in (no setup)",
+      label: "Built-in cleanup (no setup)",
     });
     expect(options.map((option) => option.value)).toContain(
       "apple_language_model",
@@ -62,7 +62,7 @@ describe("provider options per lane", () => {
       (option) => option.value,
     );
     expect(values).not.toContain("bundled_local");
-    expect(values).not.toContain("apple_language_model");
+    expect(values).toContain("apple_language_model");
     expect(values).toContain("ollama");
     expect(values).toContain("anthropic");
   });
@@ -73,7 +73,6 @@ describe("provider options per lane", () => {
       (option) => !meetings.some((kept) => kept.value === option.value),
     );
     expect(dropped.map((option) => option.value).sort()).toEqual([
-      "apple_language_model",
       "bundled_local",
     ]);
     for (const option of dropped) {
@@ -96,28 +95,5 @@ describe("model choices", () => {
     expect(
       analysisModelChoices("openai", ["gpt-5.6-luna", "gpt-4o-transcribe"]),
     ).toEqual(["gpt-5.6-luna"]);
-  });
-});
-
-describe("Plainsong Plus in the lane pickers", () => {
-  it("is offered only when the sidecar reports it, and then in both lanes", () => {
-    for (const lane of ["dictationAi", "meetingsAi"] as const) {
-      expect(
-        analysisProviderOptionsForLane(lane).some((option) => option.value === "plainsong-plus"),
-      ).toBe(false);
-      expect(
-        analysisProviderOptionsForLane(lane, true).some(
-          (option) => option.value === "plainsong-plus",
-        ),
-      ).toBe(true);
-    }
-  });
-
-  it("offers the relay's two aliases as its models and counts as remote", () => {
-    expect(analysisModelChoices("plainsong-plus", [])).toEqual([
-      "plainsong-fast",
-      "plainsong-quality",
-    ]);
-    expect(isRemoteAnalysisProvider("plainsong-plus")).toBe(true);
   });
 });

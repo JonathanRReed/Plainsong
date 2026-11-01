@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SetupView } from "@/components/views/setup-view";
 import type { ProductReadinessSnapshot } from "@/features/readiness/product-readiness";
@@ -22,7 +22,7 @@ const setupStatusMock = vi.hoisted(() => ({
     notes: [],
   },
   microphoneReady: true,
-  systemAudioAvailable: false,
+  systemAudioAvailable: false as boolean | null,
   loopbackDevice: null as string | null,
   systemAudioCapability: {
     backend: "none",
@@ -216,6 +216,7 @@ const onboardingMocks = vi.hoisted(() => ({
 
 const navigationMocks = vi.hoisted(() => ({
   requestMainView: vi.fn(),
+  requestReadinessDestination: vi.fn(),
 }));
 
 vi.mock("@/features/readiness/product-readiness-context", () => ({
@@ -367,7 +368,7 @@ describe("SetupView", () => {
     expect(screen.getByRole("button", { name: "Rerun onboarding" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Fix dictation setup" }).length).toBeGreaterThan(0);
     expect(screen.getAllByRole("button", { name: "Set up meetings" }).length).toBeGreaterThan(0);
-    expect(screen.getByText(/every route's runtime state/i)).toBeInTheDocument();
+    expect(screen.getByText(/what each speech model needs/i)).toBeInTheDocument();
     expect(screen.getByText(/Permission and insert tests may open macOS settings/i)).toBeInTheDocument();
   });
 
@@ -454,6 +455,90 @@ describe("SetupView", () => {
     });
   });
 
+  it("keeps failed downloads beside the selected model and retries that model", async () => {
+    backendMocks.downloadAsrModels.mockRejectedValueOnce(new Error("Network unavailable"));
+    render(<SetupView />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Download" })[0]);
+
+    const failure = await screen.findByRole("alert");
+    expect(failure).toHaveTextContent("Download failed for Parakeet v3. Network unavailable");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry download" }));
+    await waitFor(() => expect(backendMocks.downloadAsrModels).toHaveBeenCalledTimes(2));
+    expect(backendMocks.downloadAsrModels).toHaveBeenLastCalledWith("parakeet", "parakeet-tdt-0.6b-v3");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not attach a delayed download failure to a newly selected model", async () => {
+    let rejectDownload!: (error: Error) => void;
+    backendMocks.downloadAsrModels.mockImplementationOnce(() => new Promise<void>((_, reject) => {
+      rejectDownload = reject;
+    }));
+    const { rerender } = render(<SetupView />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Download" })[0]);
+    const provider = setupStatusMock.providers.find((item) => item.providerType === "parakeet")!;
+    const originalModelId = provider.selectedModelId;
+    provider.selectedModelId = "new-model";
+    rerender(<SetupView />);
+    rejectDownload(new Error("Old model failed"));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Download" })[0]).toBeEnabled());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry download" })).not.toBeInTheDocument();
+    provider.selectedModelId = originalModelId;
+    rerender(<SetupView />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each(["resolve", "reject"])("keeps a newer download busy when an older verification %ss", async (outcome) => {
+    let finishVerification!: () => void;
+    backendMocks.verifyDictationSetup.mockImplementationOnce(() => new Promise((resolve, reject) => {
+      finishVerification = () => outcome === "resolve"
+        ? resolve({ ok: true, title: "Old verification", summary: "Old result", details: [] })
+        : reject(new Error("Old verification failed"));
+    }));
+    let finishDownload!: () => void;
+    backendMocks.downloadAsrModels.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      finishDownload = resolve;
+    }));
+    render(<SetupView />);
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: "Test dictation" }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Download" })[0]);
+    });
+    expect(backendMocks.verifyDictationSetup).toHaveBeenCalledTimes(1);
+    expect(backendMocks.downloadAsrModels).toHaveBeenCalledTimes(1);
+    await act(async () => finishVerification());
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Download" })[0]).toBeDisabled();
+    expect(setupStatusMock.refresh).not.toHaveBeenCalled();
+    await act(async () => finishDownload());
+    expect(screen.getAllByRole("button", { name: "Download" })[0]).toBeEnabled();
+    expect(setupStatusMock.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens model recovery for a blocked meeting route without running capture tests", () => {
+    setupStatusMock.productReadiness.meetingsCapture = {
+      domain: "meetings_capture", state: "blocked", cause: {
+        id: "meeting_route", message: "The selected local model cannot transcribe meetings.",
+        action: { id: "open_models", label: "Review models", destination: "models" },
+      },
+    } as any;
+    render(<SetupView />);
+    fireEvent.click(screen.getByRole("button", { name: "Review models" }));
+    expect(navigationMocks.requestReadinessDestination).toHaveBeenCalledWith("models");
+    expect(navigationMocks.requestMainView).not.toHaveBeenCalled();
+    expect(backendMocks.verifyMeetingSetup).not.toHaveBeenCalled();
+    expect(backendMocks.downloadAsrModels).not.toHaveBeenCalled();
+  });
+
+  it("does not offer stale route recovery once meeting capture is ready", () => {
+    setupStatusMock.productReadiness.meetingsCapture = {
+      ...setupStatusMock.productReadiness.meetingsCapture, state: "ready",
+    };
+    render(<SetupView />);
+    expect(screen.queryByRole("button", { name: "Review models" })).not.toBeInTheDocument();
+  });
+
   it("shows the active meeting routing policy", async () => {
     setupStatusMock.meetingRoutePolicy = "best_available";
 
@@ -505,7 +590,7 @@ describe("SetupView", () => {
     expect(screen.getByText("Meeting capture mode")).toBeInTheDocument();
     expect(screen.getByText("Mic only ready")).toBeInTheDocument();
     expect(screen.getAllByText(/Mic-only meetings are ready/i)).toHaveLength(2);
-    expect(screen.getByText("Me + Them not verified")).toBeInTheDocument();
+    expect(screen.getByText("Me + Them not ready")).toBeInTheDocument();
     expect(screen.queryByText("Me + Them verified")).not.toBeInTheDocument();
   });
 
@@ -522,35 +607,141 @@ describe("SetupView", () => {
     });
   });
 
-  it("runs the signal-based system audio test from setup", async () => {
+  it.each([false, true])("keeps verified system audio independent of meeting readiness %s", (meetingReady) => {
     setupStatusMock.systemAudioAvailable = true;
     setupStatusMock.systemAudioCapability = {
       ...setupStatusMock.systemAudioCapability,
       backend: "core_audio_process_tap",
-      routeDevice: "MacBook Pro Speakers",
-      routeId: "coreaudio:BuiltInSpeakerDevice",
+      ready: true,
+      readiness: "ready",
+    };
+    setupStatusMock.microphoneReady = meetingReady;
+    setupStatusMock.permissions.microphonePermissionReady = meetingReady;
+    if (meetingReady) {
+      setupStatusMock.productReadiness.meetingsCapture = {
+        domain: "meetings_capture", state: "ready", cause: null,
+      };
+    }
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Meeting audio").nextElementSibling).toHaveTextContent(/^Ready$/);
+    expect(screen.queryByText(/has never been tested/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/were all tested and heard/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Me + Them verified")).not.toBeInTheDocument();
+    expect(screen.queryByText("Both sides of a call will be recorded and transcribed.")).not.toBeInTheDocument();
+    if (!meetingReady) {
+      expect(screen.getByText("Meeting capture mode").nextElementSibling).toHaveTextContent("Not ready");
+      expect(screen.getAllByText("Meetings need a meeting-grade ASR route.").length).toBeGreaterThan(0);
+    }
+  });
+
+  it.each([
+    [false, "unverified", "core_audio_process_tap"],
+    [false, "failed", "core_audio_process_tap"],
+    [true, "unverified", "core_audio_process_tap"],
+    [false, "ready", "core_audio_process_tap"],
+    [true, "ready", "none"],
+  ])("does not verify system audio with ready=%s readiness=%s backend=%s", (ready, readiness, backend) => {
+    setupStatusMock.systemAudioAvailable = backend !== "none";
+    setupStatusMock.systemAudioCapability = {
+      ...setupStatusMock.systemAudioCapability, ready, readiness, backend,
+    };
+    setupStatusMock.meetingCaptureMode = "me_and_them";
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Meeting audio").nextElementSibling).not.toHaveTextContent(/^Ready$/);
+    expect(screen.queryByText(/were all tested and heard/)).not.toBeInTheDocument();
+  });
+
+  it.each([null, false])("does not verify missing system audio with availability %s", (available) => {
+    setupStatusMock.systemAudioAvailable = available;
+    setupStatusMock.systemAudioCapability = null;
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Meeting audio").nextElementSibling).toHaveTextContent(
+      available === null ? "Checking" : "Not available",
+    );
+  });
+
+  it("asks for the meeting-audio permission only when the reader chooses to", async () => {
+    setupStatusMock.systemAudioAvailable = true;
+    setupStatusMock.systemAudioCapability = {
+      ...setupStatusMock.systemAudioCapability,
+      backend: "core_audio_process_tap",
+      routeDevice: "Sound playing on this Mac",
+      routeId: "system-output:all-apps",
       readiness: "unverified",
       reason: null,
-      actionableReason: "Run Test system audio.",
+      permission: "not_determined",
+      actionableReason: "Choose Check meeting audio.",
     };
 
     render(<SetupView />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Open privacy settings" }));
-    expect(backendMocks.openPermissionSettings).toHaveBeenCalledWith("system_audio");
+    expect(screen.getByText("Meeting audio").nextElementSibling).toHaveTextContent("Needs your OK");
+    expect(screen.queryByRole("button", { name: "Open System Settings" })).not.toBeInTheDocument();
+    expect(backendMocks.testSystemAudioCapture).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Test system audio" }));
+    fireEvent.click(screen.getByRole("button", { name: "Allow meeting audio" }));
 
     await waitFor(() => {
       expect(backendMocks.testSystemAudioCapture).toHaveBeenCalledTimes(1);
-      expect(screen.getByText(/System audio test: Verified/i)).toBeInTheDocument();
+      expect(screen.getByText(/Meeting audio: Ready\. Records all audio playing on this Mac, including other apps and notification sounds, with or without headphones\./)).toBeInTheDocument();
     });
+  });
+
+  it("sends a denied meeting-audio permission to System Settings", () => {
+    setupStatusMock.systemAudioAvailable = true;
+    setupStatusMock.systemAudioCapability = {
+      ...setupStatusMock.systemAudioCapability,
+      backend: "core_audio_process_tap",
+      readiness: "unverified",
+      ready: false,
+      reason: "permission_denied",
+      permission: "denied",
+    };
+
+    render(<SetupView />);
+
+    expect(screen.getByText("Meeting audio").nextElementSibling).toHaveTextContent("Blocked by macOS");
+    fireEvent.click(screen.getByRole("button", { name: "Open System Settings" }));
+    expect(backendMocks.openPermissionSettings).toHaveBeenCalledWith("system_audio");
+  });
+
+  it.each([
+    ["Open Microphone", "microphone"],
+    ["Open Accessibility", "accessibility"],
+    ["Open System Settings", "system_audio"],
+  ])("reports a failed %s launch and allows retry", async (label, category) => {
+    setupStatusMock.systemAudioCapability = {
+      ...setupStatusMock.systemAudioCapability,
+      backend: "core_audio_process_tap",
+      ready: false,
+      permission: "denied",
+    };
+    backendMocks.openPermissionSettings.mockRejectedValueOnce(new Error("Settings could not open"));
+    render(<SetupView />);
+    const button = screen.getByRole("button", { name: label });
+    fireEvent.click(button);
+    expect(button).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Test dictation" })).toBeDisabled();
+    expect(backendMocks.openPermissionSettings).toHaveBeenCalledWith(category);
+    expect(await screen.findByRole("status")).toHaveTextContent("Settings could not open");
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+    await waitFor(() => expect(backendMocks.openPermissionSettings).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("runs permission repair actions from setup", async () => {
     render(<SetupView />);
 
     fireEvent.click(screen.getByRole("button", { name: "Request permissions" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open Accessibility" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Open Accessibility" }));
 
     await waitFor(() => {

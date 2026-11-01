@@ -24,15 +24,17 @@ export type DictationNumbersAsDigitsMap = Partial<
   Record<DictationBaseModePreset, boolean>
 >;
 
+const DEFAULT_VOICE_NUMBERS_AS_DIGITS = true;
+
 /**
- * On for the drafting presets, off for plain Voice.
+ * Digits by default for every preset. Voice retains small prose numbers.
  *
  * Mirrors `default_dictation_numbers_as_digits` in
  * `rust-sidecar/src/settings.rs`; the two have to agree or the switch shown
  * here would not be the behavior the sidecar applies.
  */
 export function defaultNumbersAsDigits(mode: DictationBaseModePreset): boolean {
-  return mode !== "voice";
+  return mode === "voice" ? DEFAULT_VOICE_NUMBERS_AS_DIGITS : true;
 }
 
 /**
@@ -69,19 +71,17 @@ export function resolveCustomModeNumbersAsDigits(
 export const DICTATION_NUMBERS_SECTION_HEADING = "Numbers as digits";
 
 export const DICTATION_NUMBERS_SECTION_DESCRIPTION =
-  "Write spoken numbers the way they read: “twelve dollars fifty” becomes $12.50, " +
-  "“march third at three thirty pm” becomes March 3 at 3:30 pm. Anything ambiguous " +
-  "is left as you said it — “one of them” and “two thirty” stay words.";
+  'Write "twelve dollars fifty" as $12.50 and "march third at three thirty pm" ' +
+  'as March 3 at 3:30 pm. Voice keeps "one of them" and small prose numbers as words. ' +
+  'Ambiguous phrases such as "two thirty" stay words. Turn off to write numbers as words.';
 
 /**
- * Per-mode helper line. Voice states the reason it ships off; the others say
- * what the setting is for. Copy has to describe what the app actually does
- * (STYLE §6), so nothing here promises a rule the stage does not implement.
+ * Per-mode description of the default number style.
  */
 export function numbersAsDigitsModeHint(mode: DictationBaseModePreset): string {
   switch (mode) {
     case "voice":
-      return "Off by default: raw voice mode keeps your words as spoken.";
+      return "On by default: digits for data, words for small prose numbers.";
     case "messages":
       return "On by default: times, prices and counts read better in chat.";
     case "email":
@@ -125,6 +125,6 @@ export const CUSTOM_MODE_NUMBERS_CHOICE_LABELS: Record<
   string
 > = {
   inherit: "Follow the base style",
-  on: "Always digits",
-  off: "Always as spoken",
+  on: "Digits",
+  off: "Words",
 };

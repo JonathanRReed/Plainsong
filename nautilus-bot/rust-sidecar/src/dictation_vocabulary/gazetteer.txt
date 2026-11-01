@@ -1,0 +1,297 @@
+# Plainsong built-in vocabulary, version 1 (2026-10-24).
+#
+# Spellings speech recognizers commonly get wrong: developer tools and
+# services, and given names and surnames from many languages whose spelling
+# does not follow English pronunciation. Hand-curated for Plainsong from
+# general knowledge (no third-party list was copied); covered by Plainsong's
+# own licence. Product names are trademarks of their owners and appear only
+# so they are spelled correctly.
+#
+# Plain English words are left out on purpose (Rust, Swift, Linear, Slack,
+# Notion, Mark, Rose): a recognizer already spells them, and an ordinary word
+# is never replaced.
+#
+# Format: one term per line, `Term | spoken form, spoken form`. A spoken form
+# is a plain-English respelling of how the term is usually said, used only to
+# match the audio. Lines starting with `#` and blank lines are ignored.
+
+## tools
+GitHub
+GitLab
+Bitbucket
+Jira
+Confluence
+Trello
+Asana
+Figma
+Miro
+Vercel | ver sell
+Netlify
+Heroku
+Cloudflare
+Kubernetes | koo ber net ees
+kubectl | cube control, cube cuddle
+Minikube
+Terraform
+Ansible
+Pulumi
+Grafana
+Prometheus
+Datadog
+PagerDuty
+Splunk
+Elasticsearch
+Kibana
+OpenSearch
+Kafka
+RabbitMQ
+Redis
+Memcached
+Postgres
+PostgreSQL | postgres q l
+MySQL | my sequel
+MariaDB
+SQLite | sequel light
+MongoDB
+Cassandra
+DynamoDB
+Firestore
+Firebase
+Supabase | soo pa base
+PlanetScale
+CockroachDB
+Databricks
+BigQuery
+Tableau
+Metabase
+Prisma
+Sequelize
+TypeScript
+JavaScript
+Node.js | node js
+Deno | dee no
+npm
+pnpm
+Webpack
+Vite | veet
+esbuild
+ESLint
+Next.js | next js
+Nuxt
+SvelteKit
+Svelte
+Vue.js | view js
+Tailwind
+Storybook
+Playwright
+Vitest
+PyTorch
+TensorFlow
+Keras
+NumPy | num pie
+scikit-learn | sigh kit learn
+Jupyter
+Hugging Face
+LangChain
+LlamaIndex
+Ollama | oh lama
+OpenAI
+Anthropic
+ChatGPT
+Copilot
+Xcode
+IntelliJ
+PyCharm
+WebStorm
+Neovim
+Golang
+Kotlin
+SwiftUI
+Django | jango
+FastAPI
+Laravel
+GraphQL
+gRPC
+Nginx | engine x
+Jenkins
+CircleCI
+Istio
+Kustomize
+Twilio
+SendGrid
+Mailchimp
+Shopify
+Salesforce
+HubSpot
+Zendesk
+Zapier
+Airtable
+Dropbox
+Webex
+Okta
+Auth0 | auth zero
+Retool
+Mixpanel
+PostHog
+Tauri | tow ree
+Xamarin
+Wireshark
+Grafana Loki
+Linode
+DigitalOcean
+Hetzner
+VMware
+Proxmox
+macOS
+iPadOS
+visionOS
+watchOS
+Ubuntu
+Debian
+Raspberry Pi
+
+## names
+Siobhan | shiv awn
+Niamh | neev
+Aoife | ee fa
+Saoirse | seer sha
+Caoimhe | kee va
+Sinead | shin aid
+Grainne | graw nya
+Aisling | ash ling
+Roisin | ro sheen
+Clodagh | clo da
+Mairead | ma raid
+Fionnuala | fin oo la
+Dearbhla | der vla
+Eoin
+Ciaran | keer an
+Padraig | paw drig
+Oisin | o sheen
+Cillian | kill ian
+Tadhg | tige
+Ruairi | roo ree
+Seamus | shay mus
+Eamon | ay mon
+Chukwuemeka | chook wem eka
+Chiamaka
+Ngozi
+Chinonso
+Obinna
+Nnamdi
+Chidi
+Chidinma
+Ifeoma
+Uchenna
+Emeka
+Adebayo
+Oluwaseun | oh loo wa shay oon
+Folasade | fo la sha day
+Olumide
+Temitope
+Babatunde
+Abimbola
+Yetunde
+Funmilayo
+Okonkwo
+Okafor
+Adeyemi
+Priya | pree ya
+Priyanka
+Aditya
+Lakshmi
+Raghavendra
+Srinivasan
+Anjali
+Deepika
+Aishwarya
+Venkatesh
+Subramanian
+Ramaswamy
+Krishnamurthy
+Gurpreet
+Harpreet
+Jaspreet
+Siddharth
+Shreya
+Kavya
+Nandini
+Chandrasekhar
+Bhattacharya
+Chatterjee
+Mukherjee
+Iyer
+Xiaoming | shao ming
+Zhang | jahng
+Liu | lew
+Qian | chyen
+Xinyi | shin yee
+Zihan
+Yichen
+Xuan | shwen
+Jiang
+Zhou | joe
+Zhao | jow
+Nguyen | win
+Phuong | fuh ung
+Thuy | twee
+Huong
+Quang
+Hoang
+Trinh
+Nhung
+Thao
+Tuan
+Wojciech | voy chek
+Malgorzata | mow go zhata
+Krzysztof | kshish tof
+Agnieszka | ag nyesh ka
+Grzegorz | gzheg osh
+Katarzyna
+Przemyslaw | psheh mis wahf
+Zbigniew | zbig nyev
+Kowalczyk | ko val chik
+Wisniewski | vish nyev ski
+Szymanski | shi man ski
+Lewandowski
+Zielinski
+Ximena | hee meh na
+Joaquin | wah keen
+Guadalupe
+Begona | beh go nya
+Inigo | in ee go
+Itziar
+Ainhoa | eye no ah
+Nuria
+Rocio | ro see oh
+Nakamura
+Takahashi
+Yamamoto
+Haruki
+Ryota
+Seo-yeon
+Ji-hoon
+Hyun-woo
+Youssef
+Dafydd | da vith
+Cerys
+Rhys | reese
+Gwyneth
+Mihai
+Ioana
+Bogdan
+Andrzej | ahn jay
+Dmitri
+Anastasia
+Yekaterina
+Giorgos
+Eleni
+Gokhan
+Cagla
+Mehmet
+Thandiwe | tan dee way
+Sipho
+Nomvula
+Kwame
+Akosua
+Ayodele

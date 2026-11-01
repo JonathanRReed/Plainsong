@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const source = fs.readFileSync(
   path.resolve(
     import.meta.dirname,
-    "../../scripts/capture-packaged-macos-launch-performance.mjs",
+    "../../scripts/capture-packaged-macos-launch-performance.ts",
   ),
   "utf8",
 );

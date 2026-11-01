@@ -112,11 +112,11 @@ fn is_usable_role(value: Option<&str>) -> bool {
 pub fn secure_field_refusal_message(signal: SecureFieldSignal) -> String {
     match signal {
         SecureFieldSignal::SecureTextFieldRole | SecureFieldSignal::SecureTextFieldSubrole => {
-            "The field in front is a password or secure input, so Plainsong did not insert or copy the words. They are kept in your dictation history."
+            "The field in front is a password or secure input, so Plainsong did not insert or copy the words. They stay in Plainsong: in your dictation history, or under Recent dictations when history is off."
                 .to_string()
         }
         SecureFieldSignal::SecureEventInput => {
-            "macOS has secure keyboard entry turned on (a password field, or an app such as Terminal with Secure Keyboard Entry) and Plainsong could not inspect the field in front, so it did not insert or copy the words. They are kept in your dictation history. Granting Accessibility lets Plainsong tell an ordinary field apart."
+            "macOS has secure keyboard entry turned on (a password field, or an app such as Terminal with Secure Keyboard Entry) and Plainsong could not inspect the field in front, so it did not insert or copy the words. They stay in Plainsong: in your dictation history, or under Recent dictations when history is off. Granting Accessibility lets Plainsong tell an ordinary field apart."
                 .to_string()
         }
     }
@@ -253,6 +253,7 @@ mod tests {
             );
             assert!(message.contains("did not insert or copy"), "{message}");
             assert!(message.contains("dictation history"), "{message}");
+            assert!(message.contains("Recent dictations"), "{message}");
 
             let capture = secure_field_capture_refusal_message(signal);
             assert!(capture.contains("did not copy"), "{capture}");

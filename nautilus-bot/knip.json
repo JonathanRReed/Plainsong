@@ -5,19 +5,26 @@
     "src/overlay-root.tsx",
     "electron/main.ts",
     "electron/preload.ts",
-    "scripts/capture-packaged-macos-app-matrix-insertion.mjs",
-    "scripts/capture-packaged-macos-recovery-shortcuts.mjs",
-    "scripts/sanitize-meeting-soak-receipt.mjs",
+    "scripts/capture-packaged-macos-app-matrix-insertion.ts",
+    "scripts/capture-packaged-macos-recovery-shortcuts.ts",
+    "scripts/eval-dictation-meaning.mjs",
+    "scripts/lib/isolated-ollama-eval.test.mjs",
+    "scripts/lib/ollama-eval-safety.test.mjs",
+    "scripts/sanitize-meeting-soak-receipt.ts",
+    "scripts/score-native-asr-eval.ts",
     "scripts/sign-macos.mjs",
     "scripts/verify-macos-speech-helper.mjs",
-    "scripts/verify-macos-system-audio.mjs",
-    "scripts/verify-packaged-macos-app-matrix-insertion.mjs",
-    "scripts/verify-packaged-native-helpers.mjs"
+    "scripts/verify-macos-system-audio.ts",
+    "scripts/verify-packaged-macos-app-matrix-insertion.ts",
+    "scripts/verify-packaged-native-helpers.mjs",
+    "scripts/qa/candidate-b24-tools/session-driver.ts",
+    "scripts/qa/record-release-review.ts",
+    "scripts/qa/write-candidate-receipts.ts"
   ],
   "project": [
     "src/**/*.{ts,tsx}",
     "electron/**/*.ts",
-    "scripts/**/*.mjs",
+    "scripts/**/*.{mjs,ts}",
     "vite.config.ts",
     "vitest.config.ts"
   ],
@@ -27,6 +34,7 @@
     "release/**"
   ],
   "ignoreBinaries": [
+    "check",
     "ditto",
     "ffmpeg",
     "hdiutil",
@@ -40,6 +48,8 @@
     "swiftc"
   ],
   "ignoreDependencies": [
+    "app-builder-lib",
+    "builder-util",
     "tailwindcss",
     "tw-animate-css"
   ],

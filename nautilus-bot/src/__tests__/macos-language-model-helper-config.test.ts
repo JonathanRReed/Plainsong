@@ -84,8 +84,8 @@ describe("the helper's own source", () => {
   });
 });
 
-describe("scripts/build-native-language-model-helper.mjs", () => {
-  const buildScript = read("scripts/build-native-language-model-helper.mjs");
+describe("scripts/build-native-language-model-helper.ts", () => {
+  const buildScript = read("scripts/build-native-language-model-helper.ts");
 
   it("pins the macOS 13 deployment target rather than the host SDK's", () => {
     expect(buildScript).toContain('const deploymentTarget = "arm64-apple-macosx13.0"');
@@ -125,7 +125,7 @@ describe("scripts/build-native-language-model-helper.mjs", () => {
     ).scripts;
 
     expect(scripts["language-model-helper:build"]).toBe(
-      "node scripts/build-native-language-model-helper.mjs",
+      "bun scripts/build-native-language-model-helper.ts",
     );
     for (const [name, command] of Object.entries(scripts)) {
       if (!command.includes("calendar-helper:build")) continue;
@@ -219,8 +219,8 @@ describe("scripts/verify-packaged-native-helpers.mjs", () => {
   });
 
   it("holds the helper to an empty entitlement set", () => {
-    expect(verifier).toContain(
-      "requireEmptyLanguageModelHelperEntitlements(paths.languageModelHelper)",
+    expect(verifier).toMatch(
+      /requireEmptyEntitlements\(\s*paths\.languageModelHelper,\s*"Apple Foundation Models helper",\s*\)/,
     );
   });
 });

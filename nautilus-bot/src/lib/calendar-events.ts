@@ -1,3 +1,4 @@
+import { calendarConferenceUrl } from "../../electron/calendar-conference-url";
 /**
  * Which calendar event, if any, the Meetings header should offer to capture.
  *
@@ -55,6 +56,7 @@ export interface CalendarEventSummary {
   calendarId: string;
   calendarName: string;
   videoService: CalendarVideoService | null;
+  conferenceUrl?: string | null;
   /** Empty when the event has no invitees, or when the helper is protocol 1. */
   attendees?: CalendarAttendee[];
 }
@@ -86,6 +88,16 @@ const VIDEO_SERVICE_LABELS: Record<CalendarVideoService, string> = {
 
 export function videoServiceLabel(service: CalendarVideoService): string {
   return VIDEO_SERVICE_LABELS[service];
+}
+
+/** Name the accepted join URL's service, rather than calendar metadata. */
+export function calendarJoinServiceLabel(value: unknown): string | null {
+  const accepted = calendarConferenceUrl(value);
+  if (!accepted) return null;
+  const host = new URL(accepted).hostname;
+  if (host === "meet.google.com") return videoServiceLabel("google_meet");
+  if (host === "teams.microsoft.com" || host === "teams.live.com") return videoServiceLabel("microsoft_teams");
+  return videoServiceLabel("zoom");
 }
 
 /**
@@ -259,6 +271,7 @@ export interface CalendarCapturePrefill {
   /** Becomes the recording's title, so auto-naming leaves it alone. */
   title: string;
   videoService: CalendarVideoService | null;
+  conferenceUrl?: string | null;
   /**
    * Who was invited, stored on the recording so the meeting keeps its
    * attendee list after the calendar entry has moved on. The current user is
@@ -291,26 +304,22 @@ export function buildCalendarCapturePrefill(
         : title,
     videoService: event.videoService,
     attendees: meetingAttendeesFromCalendar(event.attendees),
+    ...(calendarConferenceUrl(event.conferenceUrl)
+      ? { conferenceUrl: calendarConferenceUrl(event.conferenceUrl)! }
+      : {}),
   };
 }
 
 export type CalendarPermissionView =
   | "hidden"
+  | "check_failed"
   | "connect"
   | "denied"
   | "write_only"
   | "restricted"
   | "connected";
 
-/**
- * What the Meetings view should render for a given authorization.
- *
- * `unsupported_platform`, `helper_unavailable` and `unknown` all render
- * nothing. There is no calendar to connect on Windows, a missing helper is our
- * bug rather than the reader's decision, and an unparseable answer is not
- * grounds for putting a permission card over someone's meetings. A convenience
- * feature that cannot tell whether it is available should be quiet.
- */
+/** Unsupported platforms stay hidden; a failed check can offer recovery in Settings. */
 export function calendarPermissionView(
   authorization: CalendarAuthorization,
   connected: boolean,
@@ -326,6 +335,9 @@ export function calendarPermissionView(
       return "write_only";
     case "restricted":
       return "restricted";
+    case "helper_unavailable":
+    case "unknown":
+      return "check_failed";
     default:
       return "hidden";
   }

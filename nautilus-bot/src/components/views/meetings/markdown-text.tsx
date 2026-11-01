@@ -1,6 +1,12 @@
 import { useMemo } from "react";
 import { cn } from "@/lib/utils";
-import { parseMarkdownBlocks, type MarkdownSpan } from "@/lib/markdown";
+import {
+  parseMarkdownBlocks,
+  parseRecapQuote,
+  RECAP_TOPICS_PREFIX,
+  type MarkdownSpan,
+  type RecapQuote,
+} from "@/lib/markdown";
 
 interface MarkdownTextProps {
   value: string;
@@ -34,6 +40,33 @@ function Spans({ spans }: { spans: MarkdownSpan[] }) {
   );
 }
 
+function spanText(spans: MarkdownSpan[]): string {
+  return spans.map((entry) => entry.text).join("");
+}
+
+/**
+ * A recap's quoted source sentences: the words as said, in the transcript's
+ * serif behind the quote rule, then who said them and when, as metadata.
+ */
+function QuoteList({ quotes }: { quotes: RecapQuote[] }) {
+  return (
+    <ul className="max-w-prose space-y-3">
+      {quotes.map((quote, index) => (
+        <li key={index} className="border-l-2 border-gold-ambient/50 pl-3">
+          <blockquote className="manuscript text-[0.95rem] leading-[1.7]">“{quote.quote}”</blockquote>
+          {quote.speaker || quote.time ? (
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {quote.speaker ? <span className="font-medium text-foreground/80">{quote.speaker}</span> : null}
+              {quote.speaker && quote.time ? " · " : null}
+              {quote.time ? <span className="time-spec">{quote.time}</span> : null}
+            </p>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 /**
  * The set-down text, read as a document. Newsreader via `.manuscript`, because
  * this is the meeting record — the thing STYLE.md reserves the display serif
@@ -64,7 +97,13 @@ export function MarkdownText({ value, className }: MarkdownTextProps) {
               </Tag>
             );
           }
-          case "list":
+          case "list": {
+            const quotes = block.ordered
+              ? []
+              : block.items.map((item) => parseRecapQuote(spanText(item)));
+            if (quotes.length > 0 && quotes.every((quote) => quote !== null)) {
+              return <QuoteList key={index} quotes={quotes as RecapQuote[]} />;
+            }
             return block.ordered ? (
               <ol
                 key={index}
@@ -88,6 +127,7 @@ export function MarkdownText({ value, className }: MarkdownTextProps) {
                 ))}
               </ul>
             );
+          }
           case "quote":
             return (
               <blockquote
@@ -97,7 +137,16 @@ export function MarkdownText({ value, className }: MarkdownTextProps) {
                 <Spans spans={block.spans} />
               </blockquote>
             );
-          default:
+          default: {
+            const text = spanText(block.spans);
+            if (text.startsWith(RECAP_TOPICS_PREFIX) && !text.includes("\n")) {
+              return (
+                <p key={index} className="max-w-prose text-sm text-muted-foreground">
+                  <span className="font-medium text-foreground/80">Topics</span>{" "}
+                  {text.slice(RECAP_TOPICS_PREFIX.length)}
+                </p>
+              );
+            }
             return (
               <p
                 key={index}
@@ -106,6 +155,7 @@ export function MarkdownText({ value, className }: MarkdownTextProps) {
                 <Spans spans={block.spans} />
               </p>
             );
+          }
         }
       })}
     </div>

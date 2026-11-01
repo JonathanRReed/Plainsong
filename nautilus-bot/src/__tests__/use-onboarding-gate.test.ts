@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -24,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *    produces a screen.
  *
  * Both were previously proven only by a packaged-app run
- * (`scripts/capture-packaged-macos-onboarding-first-run.mjs`). This file
+ * (`scripts/capture-packaged-macos-onboarding-first-run.ts`). This file
  * proves them in-process so a future change to either constant, or to the
  * timer wiring, fails fast in `bunx vitest run` instead of only on a packaged
  * capture.
@@ -201,7 +201,7 @@ describe("useOnboardingGate on a completed install", () => {
     expect(result.current.decision.action).toBe("skip");
   });
 
-  it("still holds the splash for an install that never completed setup", async () => {
+  it("opens fresh setup as soon as settings arrive while readiness remains pending", async () => {
     backendMocks.getSettings.mockResolvedValue({ onboarding: {} });
     const { useOnboardingGate } = await import(
       "@/features/onboarding/use-onboarding-gate"
@@ -209,7 +209,8 @@ describe("useOnboardingGate on a completed install", () => {
     const { result } = renderHook(() => useOnboardingGate());
 
     await act(async () => {});
-    expect(result.current.decision.action).toBe("wait");
+    expect(result.current.decision.action).toBe("show");
+    expect(result.current.decision.unmet).toEqual([]);
   });
 
   it("does not go back to the splash when readiness refreshes after deciding", async () => {
@@ -234,5 +235,81 @@ describe("useOnboardingGate on a completed install", () => {
     readinessContext.loading = true;
     rerender();
     expect(result.current.decision.action).toBe("skip");
+  });
+});
+
+
+describe("useOnboardingGate completion ownership", () => {
+  beforeEach(() => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+      clear: () => storage.clear(),
+    });
+    readinessContext.loading = false;
+    readinessContext.error = null;
+    readinessContext.settings = { onboarding: {}, transcription: { dictationInsertionMode: "auto" } };
+    readinessContext.providers = [{ providerType: "distil_whisper" }];
+    readinessContext.permissions = { microphonePermissionReady: true, cursorInsertionReady: true };
+    readinessContext.dictationRoute = { ready: true };
+    backendMocks.recordOnboardingState.mockClear();
+    backendMocks.getSettings.mockReset();
+    backendMocks.getSettings.mockImplementation(() => new Promise(() => {}));
+  });
+
+  afterEach(() => {
+    cleanup();
+    localStorage.clear();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps ready fresh setup incomplete until explicit Finish", async () => {
+    const { useOnboardingGate } = await import("@/features/onboarding/use-onboarding-gate");
+    const { result, rerender } = renderHook(() => useOnboardingGate());
+    expect(result.current.decision.action).toBe("show");
+    expect(backendMocks.recordOnboardingState).not.toHaveBeenCalled();
+    readinessContext.dictationRoute = { ready: false };
+    rerender();
+    expect(result.current.decision.unmet).toEqual(["dictation_model"]);
+    readinessContext.dictationRoute = { ready: true };
+    rerender();
+    expect(backendMocks.recordOnboardingState).not.toHaveBeenCalled();
+    await act(async () => result.current.recordCompleted(false));
+    expect(backendMocks.recordOnboardingState).toHaveBeenCalledExactlyOnceWith({ event: "completed", meetingsCompleted: false });
+  });
+
+  it("does not adopt legacy completion after this launch showed setup, and keeps deferred requirements live", async () => {
+    localStorage.setItem("nautilus_onboarding_complete", "true");
+    readinessContext.dictationRoute = { ready: false };
+    const { useOnboardingGate } = await import("@/features/onboarding/use-onboarding-gate");
+    const { result, rerender } = renderHook(() => useOnboardingGate());
+    expect(result.current.decision.action).toBe("show");
+    readinessContext.dictationRoute = { ready: true };
+    rerender();
+    await act(async () => {});
+    expect(backendMocks.recordOnboardingState).not.toHaveBeenCalled();
+    readinessContext.permissions = { microphonePermissionReady: false, cursorInsertionReady: true };
+    rerender();
+    await act(async () => result.current.recordDeferred());
+    expect(backendMocks.recordOnboardingState).toHaveBeenCalledExactlyOnceWith({ event: "deferred", unmet: ["microphone_permission"] });
+  });
+
+  it.each([false, true])("adopts a healthy legacy install once after initial loading=%s", async (loading) => {
+    localStorage.setItem("nautilus_onboarding_complete", "true");
+    readinessContext.loading = loading;
+    const { useOnboardingGate } = await import("@/features/onboarding/use-onboarding-gate");
+    const { result, rerender } = renderHook(() => useOnboardingGate());
+    if (loading) {
+      expect(result.current.decision.action).toBe("wait");
+      readinessContext.loading = false;
+      rerender();
+    }
+    await act(async () => {});
+    expect(result.current.decision.action).toBe("skip");
+    expect(backendMocks.recordOnboardingState).toHaveBeenCalledExactlyOnceWith({ event: "migrated" });
+    rerender();
+    expect(backendMocks.recordOnboardingState).toHaveBeenCalledTimes(1);
   });
 });

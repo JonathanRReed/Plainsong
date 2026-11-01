@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { SavedPromptManagerDialog } from "@/components/prompts/saved-prompt-manager-dialog";
 import {
@@ -119,4 +119,23 @@ describe("SavedPromptManagerDialog", () => {
     expect(written[1].id).toBe("mine-1");
     expect(written).toHaveLength(BUILTIN_SAVED_PROMPTS.length + 1);
   });
+});
+
+it("holds save ownership and retains editable text after failure", async () => {
+  let rejectSave: (reason: Error) => void = () => {};
+  const onPersist = vi.fn(() => new Promise<boolean>((_, reject) => { rejectSave = reject; }));
+  render(<SavedPromptManagerDialog open onOpenChange={() => {}} prompts={resolveSavedPrompts([])} onPersist={onPersist} />);
+  fireEvent.click(screen.getByRole("button", { name: "New prompt" }));
+  fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "My draft" } });
+  fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Keep this text" } });
+  const save = screen.getByRole("button", { name: "Save prompt" });
+  act(() => { fireEvent.click(save); fireEvent.click(save); });
+  expect(onPersist).toHaveBeenCalledOnce();
+  expect(save).toBeDisabled();
+  expect(screen.getByLabelText("Prompt")).toBeDisabled();
+  await act(async () => { rejectSave(new Error("Read only")); });
+  expect(screen.getByLabelText("Name")).toHaveValue("My draft");
+  expect(screen.getByLabelText("Prompt")).toHaveValue("Keep this text");
+  expect(save).not.toBeDisabled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Read only");
 });

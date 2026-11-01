@@ -463,6 +463,7 @@ export const RETURN_ONLY_PROMPT = "Return only the prompt.";
 type QuickFixToastResult = {
   targetScope?: string | null;
   pasted?: boolean;
+  confirmed?: boolean;
   copied?: boolean;
   error?: string | null;
   inputText?: string | null;
@@ -616,6 +617,16 @@ function selectedTextFallbackDetail(result: QuickFixToastResult): string {
   return ` Could not replace ${targetLabel}.`;
 }
 
+function selectedTextSentMessage(
+  label: string,
+  result: QuickFixToastResult,
+): string {
+  const recovery = result.copied
+    ? " Result is on the clipboard; paste it manually if needed."
+    : "";
+  return `${label} sent to ${selectedTextTargetLabel(result)}. Check the target to confirm the change.${recovery}`;
+}
+
 export function formatQuickFixToastMessage(
   result: QuickFixToastResult,
 ): string {
@@ -624,6 +635,9 @@ export function formatQuickFixToastMessage(
   const fallbackDetail = selectedTextFallbackDetail(result);
 
   if (result.pasted) {
+    if (result.confirmed !== true) {
+      return selectedTextSentMessage(QUICK_FIX_LABEL, result);
+    }
     const targetLabel = selectedTextTargetLabel(result);
     if (quickFixCheckedUnchanged(result)) {
       return `${QUICK_FIX_LABEL} checked ${targetLabel}. No text edits.`;
@@ -656,6 +670,9 @@ export function formatSelectedTextActionStatusMessage(
   const metadata = selectedTextActionMetadata(action);
   const fallbackDetail = selectedTextFallbackDetail(result);
   if (result.pasted) {
+    if (result.confirmed !== true) {
+      return selectedTextSentMessage(`${metadata.quickLabel} result`, result);
+    }
     const targetLabel = selectedTextTargetLabel(result);
     return `${metadata.resultLabel} ${targetLabel}`;
   }
@@ -1395,7 +1412,7 @@ export function getDictationTextContextDescription(prefix: string): string {
     getDictationSpokenEditCommandExamples(normalizedPrefix),
   );
 
-  return `Voice commands transform existing text. Try ${contextExamples}. Editing commands also support phrases like ${editExamples}. Application context captures the frontmost app, window title, and selected text when available.`;
+  return `Voice commands transform existing text. Try ${contextExamples}. Editing commands also support phrases like ${editExamples}. On macOS, select a unique phrase by voice, then replace, capitalise, or delete it. Undo that reverses the last edit. Edits stop if the field changes or is secure. Application context captures the frontmost app, window title, and selected text when available.`;
 }
 
 export const DICTATION_TEXT_ACTIONS = {

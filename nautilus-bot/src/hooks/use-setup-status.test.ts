@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { buildSnapshot } from "@/hooks/use-setup-status";
+import { describe, expect, it, vi } from "vitest";
+import {
+  buildSnapshot,
+  probeMeetingNotesRoute,
+} from "@/hooks/use-setup-status";
 import { buildDownloadedModelIndex } from "@/components/models/downloaded-models";
 import type { PermissionDiagnostics } from "@/lib/backend/settings";
 import type { AsrProviderInfo } from "@/types";
@@ -98,6 +101,38 @@ function createPermissions(
 }
 
 describe("buildSnapshot", () => {
+  it("does not inspect cloud credentials while remote processing is off", async () => {
+    const settings = createSettings("clipboard_only");
+    settings.privacy.meetingsAi = { provider: "openai", modelId: null };
+    settings.privacy.remoteProcessingEnabled = false;
+    const inspectSecret = vi.fn(async () => {
+      throw new Error("protected secret lookup must stay inactive");
+    });
+
+    const probe = await probeMeetingNotesRoute(settings, {
+      hasProviderSecret: inspectSecret,
+    });
+    const snapshot = buildSnapshot(
+      settings,
+      createProviders(),
+      createPermissions(),
+      false,
+      null,
+      null,
+      {},
+      null,
+      null,
+      probe,
+    );
+
+    expect(inspectSecret).not.toHaveBeenCalled();
+    expect(probe.credentialPresent).toBeNull();
+    expect(snapshot.meetingNotesRoute).toEqual({
+      state: "unconfigured",
+      reason: "cloud AI is turned off, so OpenAI cannot write them.",
+    });
+  });
+
   it("treats clipboard-only dictation as ready without cursor insertion", () => {
     const snapshot = buildSnapshot(
       createSettings("clipboard_only"),
@@ -198,7 +233,14 @@ describe("buildSnapshot", () => {
       null,
       // Meetings only reads "ready" once the AI-notes lane has actually
       // answered; an unprobed lane is unknown, which degrades the domain.
-      { optedOut: false, localRuntimeReady: true, credentialPresent: null }
+      {
+        optedOut: false,
+        localRuntimeReady: true,
+        localModelReady: true,
+        localExecutionReady: true,
+        localModelId: "qwen3.5:4b",
+        credentialPresent: null,
+      }
     );
 
     expect(snapshot.systemAudioAvailable).toBe(true);
@@ -225,7 +267,13 @@ describe("buildSnapshot", () => {
       {},
       null,
       null,
-      { optedOut: false, localRuntimeReady: false, credentialPresent: null }
+      {
+        optedOut: false,
+        localRuntimeReady: false,
+        localModelReady: null,
+        localModelId: "qwen3.5:4b",
+        credentialPresent: null,
+      }
     );
 
     expect(snapshot.meetingNotesRoute.state).toBe("unconfigured");
@@ -246,7 +294,13 @@ describe("buildSnapshot", () => {
       {},
       null,
       null,
-      { optedOut: true, localRuntimeReady: false, credentialPresent: null }
+      {
+        optedOut: true,
+        localRuntimeReady: false,
+        localModelReady: null,
+        localModelId: "qwen3.5:4b",
+        credentialPresent: null,
+      }
     );
 
     expect(snapshot.meetingNotesRoute.state).toBe("opted_out");
@@ -428,7 +482,7 @@ describe("buildSnapshot", () => {
     expect(snapshot.dictationRoute.reason).toContain("is not available");
   });
 
-  it("uses the exact downloaded model when provider state points at another variant", () => {
+  it("does not override native missing-model status with another downloaded variant", () => {
     const settings = createSettings("clipboard_only");
     settings.transcription.dictationProvider = "whisper";
     settings.transcription.dictationModelId = "small.en";
@@ -464,8 +518,29 @@ describe("buildSnapshot", () => {
       downloadedModels,
     );
 
-    expect(snapshot.dictationReady).toBe(true);
-    expect(snapshot.dictationRoute.reason).toBeNull();
+    expect(snapshot.dictationReady).toBe(false);
+    expect(snapshot.dictationRoute.reason).toBe(provider.runtimeMessage);
+  });
+
+  it("keeps a partial Parakeet bundle blocked with the native missing-file reason", () => {
+    const providers = createProviders();
+    providers[1] = {
+      ...providers[1],
+      runtimeStatus: "missing_model",
+      runtimeMessage: undefined,
+      runtimeDetails: { missingFiles: ["decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"] },
+    };
+    const inventory = buildDownloadedModelIndex([{
+      name: "encoder.int8.onnx", provider: "parakeet",
+      path: "/models/parakeet/parakeet-tdt-0.6b-v3/encoder.int8.onnx",
+      sizeBytes: 64 * 1024 * 1024,
+    }]);
+    const snapshot = buildSnapshot(createSettings("clipboard_only"), providers,
+      createPermissions(), false, null, null, {}, inventory);
+    expect(snapshot.meetingReady).toBe(false);
+    expect(snapshot.meetingRoute.reason).toBe(
+      "Some of Parakeet v3's files are missing or damaged. Download it again.",
+    );
   });
 
   it("fails closed when the exact model inventory cannot be inspected", () => {
@@ -494,15 +569,172 @@ describe("buildSnapshot", () => {
       runtimeStatus: "ready",
     };
 
+    // Only Parakeet is listed, so nothing can stand in for it.
     const snapshot = buildSnapshot(
       createSettings("clipboard_only"),
-      providers,
+      [providers[1]],
       createPermissions(),
       false,
       null,
     );
 
     expect(snapshot.meetingReady).toBe(false);
-    expect(snapshot.meetingRoute.reason).toContain("has not confirmed");
+    expect(snapshot.meetingRoute.reason).toContain("has not been confirmed as the active speech model");
+
+    // With Distil-Whisper ready as the shared default, the sidecar records
+    // meetings on it instead, and setup says so.
+    const withFallback = buildSnapshot(
+      createSettings("clipboard_only"),
+      providers,
+      createPermissions(),
+      false,
+      null,
+    );
+    expect(withFallback.meetingReady).toBe(true);
+    expect(withFallback.meetingRoute.providerType).toBe("distil_whisper");
+    expect(withFallback.meetingRoute.summary).toBe(
+      "Large V3, until Parakeet v3 is ready",
+    );
+  });
+
+  describe("with GGUF Parakeet in the meeting slot", () => {
+    // `Settings::fresh_install` on Apple Silicon: both lanes on GGUF Parakeet,
+    // the shared default on ONNX Parakeet.
+    function freshAppleSiliconSettings() {
+      const settings = createSettings("clipboard_only");
+      Object.assign(settings.transcription, {
+        useSharedAsrSelection: false,
+        defaultProvider: "parakeet",
+        selectedModelId: "parakeet-tdt-0.6b-v3",
+        dictationProvider: "transcribe_cpp",
+        dictationModelId: "parakeet-tdt-0.6b-v3-q8_0",
+        meetingProvider: "transcribe_cpp",
+        meetingModelId: "parakeet-tdt-0.6b-v3-q8_0",
+      });
+      return settings;
+    }
+    const gguf = {
+      providerType: "transcribe_cpp",
+      name: "transcribe.cpp",
+      inferenceEnabled: true,
+      runtimeStatus: "ready",
+      runtimeMessage: "ready",
+      selectedModelId: "parakeet-tdt-0.6b-v3-q8_0",
+      modelOptions: [{ id: "parakeet-tdt-0.6b-v3-q8_0", label: "Parakeet TDT 0.6B v3 GGUF" }],
+    } as AsrProviderInfo;
+    const onnxMissing = {
+      ...createProviders()[1],
+      runtimeStatus: "missing_model",
+      runtimeMessage: "The selected provider model is missing.",
+    } as AsrProviderInfo;
+
+    it("calls meetings ready on the downloaded GGUF model without ONNX Parakeet", () => {
+      const downloaded = buildDownloadedModelIndex([{
+        name: "parakeet-tdt-0.6b-v3-Q8_0.gguf",
+        provider: "transcribe_cpp",
+        path: "/models/transcribe_cpp/parakeet-tdt-0.6b-v3-Q8_0.gguf",
+        sizeBytes: 739_508_576,
+      }]);
+      const snapshot = buildSnapshot(
+        freshAppleSiliconSettings(), [gguf, onnxMissing], createPermissions(),
+        false, null, null, {}, downloaded,
+      );
+      expect(snapshot.meetingRoute.ready).toBe(true);
+      expect(snapshot.meetingRoute.reason).toBeNull();
+      expect(snapshot.dictationRoute.ready).toBe(true);
+    });
+
+    it("calls both lanes ready on the Core ML build alone, with no GGUF on disk", () => {
+      // On macOS 14+ Apple Silicon the Parakeet download fetches only this.
+      const downloaded = buildDownloadedModelIndex([
+        {
+          name: "parakeet-tdt-0.6b-v3-coreml",
+          provider: "transcribe_cpp",
+          path: "/models/neural_engine/parakeet-tdt-0.6b-v3-coreml",
+          sizeBytes: 632_169_729,
+        },
+        {
+          name: "parakeet-ctc-110m-coreml",
+          provider: "transcribe_cpp",
+          path: "/models/neural_engine/parakeet-ctc-110m-coreml",
+          sizeBytes: 102_802_576,
+        },
+      ]);
+      const snapshot = buildSnapshot(
+        freshAppleSiliconSettings(), [gguf, onnxMissing], createPermissions(),
+        false, null, null, {}, downloaded,
+      );
+      expect(snapshot.dictationRoute.ready).toBe(true);
+      expect(snapshot.meetingRoute.ready).toBe(true);
+      expect(snapshot.meetingRoute.reason).toBeNull();
+    });
+
+    it("does not count an interrupted Core ML download as the model", () => {
+      const downloaded = buildDownloadedModelIndex([{
+        name: "parakeet-tdt-0.6b-v3-coreml (incomplete)",
+        provider: "transcribe_cpp",
+        path: "/models/neural_engine/parakeet-tdt-0.6b-v3-coreml",
+        sizeBytes: 100_000_000,
+      }]);
+      const snapshot = buildSnapshot(
+        freshAppleSiliconSettings(),
+        [{ ...gguf, runtimeStatus: "missing_model" }, onnxMissing],
+        createPermissions(), false, null, null, {}, downloaded,
+      );
+      expect(snapshot.dictationRoute.ready).toBe(false);
+    });
+
+    it("blocks meetings while the GGUF model is not on disk", () => {
+      const snapshot = buildSnapshot(
+        freshAppleSiliconSettings(),
+        [{ ...gguf, runtimeStatus: "missing_model" }, onnxMissing],
+        createPermissions(), false, null, null, {}, buildDownloadedModelIndex([]),
+      );
+      expect(snapshot.meetingRoute.ready).toBe(false);
+      expect(snapshot.meetingRoute.reason).toBe("Parakeet v3 is not downloaded yet.");
+    });
+
+    // A new install that downloaded ONNX Parakeet (or picked it in setup)
+    // and never fetched the GGUF model: the sidecar records meetings on ONNX
+    // Parakeet, the same weights, so setup must not block them.
+    const onnxOnDisk = buildDownloadedModelIndex([
+      "encoder-model.int8.onnx",
+      "decoder_joint-model.int8.onnx",
+      "nemo128.onnx",
+      "vocab.txt",
+    ].map((name) => ({
+      name,
+      provider: "parakeet",
+      path: `/models/parakeet/parakeet-tdt-0.6b-v3/${name}`,
+      sizeBytes: 1,
+    })));
+
+    it("calls meetings ready on ONNX Parakeet while the GGUF model is missing, and names it", () => {
+      const snapshot = buildSnapshot(
+        freshAppleSiliconSettings(),
+        [{ ...gguf, runtimeStatus: "missing_model" }, createProviders()[1]],
+        createPermissions(), false, null, null, {}, onnxOnDisk,
+      );
+      expect(snapshot.meetingRoute.ready).toBe(true);
+      expect(snapshot.meetingReady).toBe(true);
+      expect(snapshot.meetingRoute.reason).toBeNull();
+      expect(snapshot.meetingRoute.providerType).toBe("parakeet");
+      expect(snapshot.meetingRoute.modelId).toBe("parakeet-tdt-0.6b-v3");
+      // Both builds are Parakeet v3, so the summary names it once.
+      expect(snapshot.meetingRoute.summary).toBe("Parakeet v3");
+      expect(snapshot.meetingBlockers).toEqual([]);
+    });
+
+    it("does not stand in a dictation-only model, or a GGUF route the meeting slot does not name", () => {
+      const settings = freshAppleSiliconSettings();
+      settings.transcription.defaultProvider = "moonshine";
+      settings.transcription.selectedModelId = "moonshine-tiny";
+      const snapshot = buildSnapshot(
+        settings,
+        [{ ...gguf, runtimeStatus: "missing_model" }, onnxMissing, createLocalProviders()[0]],
+        createPermissions(), false, null, null, {}, buildDownloadedModelIndex([]),
+      );
+      expect(snapshot.meetingRoute.ready).toBe(false);
+    });
   });
 });

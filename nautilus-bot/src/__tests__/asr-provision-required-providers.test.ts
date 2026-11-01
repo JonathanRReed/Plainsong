@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
-const scriptPath = path.join(repoRoot, "scripts", "provision-asr-assets.mjs");
+const scriptPath = path.join(repoRoot, "scripts", "provision-asr-assets.ts");
 
 describe("ASR provisioner required-provider selection", () => {
   it("fails only the explicitly required local provider set", () => {
@@ -16,7 +16,7 @@ describe("ASR provisioner required-provider selection", () => {
 
     try {
       const result = spawnSync(
-        process.execPath,
+        "bun",
         [
           scriptPath,
           "--validate-only",

@@ -1,3 +1,4 @@
+import { stripTransportPrefix } from "@/lib/meeting-start-error";
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
@@ -7,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { useSavedPromptChat } from "@/components/prompts/use-saved-prompt-chat";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { StatusBanner } from "@/components/ui/status-banner";
 import { Separator } from "@/components/ui/separator";
 import { useProjects } from "@/hooks/use-projects";
 import { useRecordings } from "@/hooks/use-recordings";
@@ -23,10 +25,14 @@ import type {
   RelationshipMemory,
 } from "@/lib/backend/ai";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
-import { requestMainView, requestRecordingWorkspace } from "@/lib/navigation";
+import {
+  requestMainView,
+  requestReadinessDestination,
+  requestRecordingWorkspace,
+} from "@/lib/navigation";
 import { requestOnboarding } from "@/lib/onboarding";
 import { getSettings } from "@/lib/backend/settings";
-import { resolveDictationHotkeyMode } from "@/lib/dictation-hotkey-mode";
+import { resolveDisplayedDictationHotkeyMode } from "@/lib/dictation-hotkey-mode";
 import {
   defaultDictationShortcut,
   dictationInstruction,
@@ -52,6 +58,7 @@ import { formatDate, formatNumber, formatShortTime } from "@/lib/format-locale";
 import { getDictationInsights, type DictationInsights } from "@/lib/backend/dictation";
 import { DictationStats } from "@/components/views/dictation/dictation-stats";
 import { AiWaitOrb } from "@/components/ui/ai-wait-orb";
+import { SearchModelHint } from "@/components/memory/search-model-hint";
 
 /** How many recordings Recent shows; the Dictation and Meetings views hold the rest. */
 const RECENT_LIMIT = 12;
@@ -116,7 +123,10 @@ export function DashboardView() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [memoryQuery, setMemoryQuery] = useState("");
-  const [memoryMessages, setMemoryMessages] = useState<MeetingChatMessage[]>([]);
+  // `grounded` is false when the answer is not backed by the passages found.
+  const [memoryMessages, setMemoryMessages] = useState<
+    Array<MeetingChatMessage & { grounded?: boolean }>
+  >([]);
   const [memoryLoading, setMemoryLoading] = useState(false);
   // The question being answered, shown in the thread at once with a pending
   // reply under it: an answer across every transcript can take half a minute.
@@ -128,13 +138,29 @@ export function DashboardView() {
   const [relationshipMemoryError, setRelationshipMemoryError] = useState<string | null>(null);
   const {
     productReadiness,
+    meetingNotesRoute,
     loading: setupLoading,
   } = useProductReadinessStatus();
   const dictationReady = productReadiness.dictation.state === "ready";
-  // Capture-only: the quick action opens Meetings or routes to onboarding, and
-  // an unconfigured notes lane is not a reason to send someone to onboarding.
+  // Capture readiness controls the quick action. Missing notes do not block capture.
   const meetingReady = productReadiness.meetingsCapture.state === "ready";
   const fullCaptureReady = productReadiness.fullCapture.state === "ready";
+  const dictationRecovery = !setupLoading && !dictationReady
+    ? productReadiness.dictation.cause
+    : null;
+  const meetingRecovery = !setupLoading && !meetingReady
+    ? productReadiness.meetingsCapture.cause
+    : null;
+  const recoverDictation = () => dictationRecovery
+    ? requestReadinessDestination(dictationRecovery.action.destination)
+    : requestOnboarding("dictation");
+  const recoverMeeting = () => meetingRecovery
+    ? requestReadinessDestination(meetingRecovery.action.destination)
+    : requestOnboarding("meetings");
+  const notesRoute = meetingNotesRoute ?? { state: "ready", reason: null };
+  const notesNeedSetup = notesRoute.state === "unconfigured";
+  const notesChecking = notesRoute.state === "unknown";
+  const [meetingAiProvider, setMeetingAiProvider] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -178,14 +204,17 @@ export function DashboardView() {
       .then((settings) => {
         if (cancelled) return;
         const shortcut = settings.shortcuts.toggleDictation || defaultDictationShortcut();
-        const mode = resolveDictationHotkeyMode(
-          settings.transcription.dictationPushToTalk,
-          settings.transcription.dictationHandsFreeEnabled ?? false,
-        );
+        const mode = resolveDisplayedDictationHotkeyMode({
+          shortcut: settings.shortcuts.toggleDictation,
+          bindings: settings.shortcuts.dictationBindings,
+          pushToTalk: settings.transcription.dictationPushToTalk,
+          handsFreeEnabled: settings.transcription.dictationHandsFreeEnabled ?? false,
+        });
         setDictationHotkey({
           label: formatShortcutForDisplay(shortcut),
           instruction: dictationInstruction(shortcut, mode),
         });
+        setMeetingAiProvider(settings.privacy?.meetingsAi?.provider ?? null);
       })
       .catch(() => {
         // The default shortcut stays on screen; it is right for most people.
@@ -235,7 +264,11 @@ export function DashboardView() {
   const setupHeadline = setupLoading
     ? "Checking your voice workspace"
     : dictationReady && meetingReady && fullCaptureReady
-      ? "Everything is ready"
+      ? notesNeedSetup
+        ? "Capture is ready. Meeting notes need setup"
+        : notesChecking
+          ? "Capture is ready. Checking meeting notes"
+          : "Everything is ready"
       : dictationReady && meetingReady
         ? "Dictation and mic-only meetings are ready"
         : dictationReady
@@ -274,7 +307,9 @@ export function DashboardView() {
     // While the "/" picker is open the box holds a filter, not a question.
     if (queryOverride === undefined && savedPromptChat.pickerOpen) return;
     const query = (queryOverride ?? memoryQuery).trim();
-    if (!query) return;
+    // Enter while an answer is on its way would start a second run and
+    // throw the first answer away.
+    if (!query || memoryLoading) return;
     
     const requestId = Date.now();
     currentRequestIdRef.current = requestId;
@@ -283,7 +318,9 @@ export function DashboardView() {
     setPendingMemoryQuery(query);
     setMemoryError(null);
     try {
-      const result = await askMemory(buildThreadedMemoryQuery(query));
+      // The thread is context for the answer; the search looks for the
+      // new question alone.
+      const result = await askMemory(buildThreadedMemoryQuery(query), { searchQuery: query });
       
       // Check if this is still the current request
       if (currentRequestIdRef.current !== requestId) {
@@ -305,6 +342,7 @@ export function DashboardView() {
           role: "assistant",
           content: result.response,
           citations: result.citations,
+          grounded: typeof result.grounded === "boolean" ? result.grounded : undefined,
           createdAt: new Date().toISOString(),
         },
       ]);
@@ -314,7 +352,10 @@ export function DashboardView() {
     } catch (error) {
       // Only update error if this is still the current request
       if (currentRequestIdRef.current === requestId) {
-        setMemoryError(error instanceof Error ? error.message : String(error));
+        setMemoryError(
+          stripTransportPrefix(error instanceof Error ? error.message : String(error)) ||
+            "Plainsong couldn't answer that. Try again.",
+        );
       }
     } finally {
       // Only update loading state if this is still the current request
@@ -345,7 +386,7 @@ export function DashboardView() {
       const uniqueIds = [...new Set(hits.map((hit) => hit.recordingId))];
       setSelectedRecordingIds(uniqueIds);
     } catch (error) {
-      setAnalysisError(error instanceof Error ? error.message : "Transcript search failed");
+      setAnalysisError(error instanceof Error ? stripTransportPrefix(error.message) || "Transcript search failed" : "Transcript search failed");
     } finally {
       setIsSearching(false);
     }
@@ -360,7 +401,7 @@ export function DashboardView() {
       setMultiAnalysisResult(result.response);
       setMultiAnalysisCitations(result.citations);
     } catch (error) {
-      setAnalysisError(error instanceof Error ? error.message : "Cross-recording analysis failed");
+      setAnalysisError(error instanceof Error ? stripTransportPrefix(error.message) || "Cross-recording analysis failed" : "Cross-recording analysis failed");
     } finally {
       setIsAnalyzing(false);
     }
@@ -376,7 +417,8 @@ export function DashboardView() {
         actions={
           <Button
             variant={dictationReady ? "default" : "outline"}
-            onClick={() => requestMainView("dictation")}
+            onClick={() => dictationReady ? requestMainView("dictation") : recoverDictation()}
+            disabled={setupLoading}
           >
             {dictationReady ? (
               <Mic data-icon="inline-start" />
@@ -428,25 +470,32 @@ export function DashboardView() {
                     Dictate into whatever app you are in, record a meeting, then search back through
                     everything that was said.
                   </p>
+                  {!setupLoading && (dictationRecovery || meetingRecovery) ? (
+                    <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+                      {dictationRecovery ? <p>Dictation: {dictationRecovery.message}</p> : null}
+                      {meetingRecovery ? <p>Meetings: {meetingRecovery.message}</p> : null}
+                    </div>
+                  ) : null}
                   {/* Dictation is the header CTA and every view is in the
                       sidebar, so the hero only carries what those do not:
                       the meetings entry point and, while a lane is not
                       ready, the way to set it up. */}
                   <div className="mt-6 flex flex-wrap gap-2">
                     {!setupLoading && !dictationReady ? (
-                      <Button variant="outline" onClick={() => requestOnboarding("dictation")}>
+                      <Button variant="outline" onClick={recoverDictation}>
                         <Mic data-icon="inline-start" />
-                        Set up dictation
+                        {dictationRecovery ? `Dictation: ${dictationRecovery.action.label}` : "Set up dictation"}
                       </Button>
                     ) : null}
                     <Button
                       variant="outline"
+                      disabled={setupLoading}
                       onClick={() =>
-                        meetingReady ? requestMainView("recordings") : requestOnboarding("meetings")
+                        meetingReady ? requestMainView("recordings") : recoverMeeting()
                       }
                     >
                       <AudioWaveform data-icon="inline-start" />
-                      {meetingReady ? "Open meetings" : "Set up meetings"}
+                      {meetingReady ? "Open meetings" : meetingRecovery ? `Meetings: ${meetingRecovery.action.label}` : "Set up meetings"}
                     </Button>
                     {!setupLoading && dictationReady && meetingReady && !fullCaptureReady ? (
                       <Button variant="ghost" onClick={() => requestMainView("setup")}>
@@ -493,6 +542,37 @@ export function DashboardView() {
               </Card>
             )}
           </section>
+
+          {notesNeedSetup ? (
+            <StatusBanner
+              title="Meeting notes unavailable"
+              message={notesRoute.reason ?? "Choose a model that can write meeting notes."}
+              actions={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    requestReadinessDestination(
+                      meetingAiProvider === "ollama" ? "models" : "ai",
+                    )
+                  }
+                >
+                  {meetingAiProvider === "ollama" ? "Review models" : "Review Search & AI"}
+                </Button>
+              }
+            />
+          ) : notesChecking ? (
+            <StatusBanner
+              title="Checking meeting notes"
+              message={
+                notesRoute.reason ??
+                "Plainsong is checking whether the selected notes model is ready."
+              }
+              tone="muted"
+              role="status"
+            />
+          ) : null}
 
           {dictationInsights && dictationInsights.totalDictations > 0 ? (
             <DictationStats insights={dictationInsights} />
@@ -601,6 +681,8 @@ export function DashboardView() {
                     variant="ghost"
                     size="sm"
                     className="text-muted-foreground"
+                    // A pending answer would land in the cleared thread.
+                    disabled={memoryLoading}
                     onClick={() => {
                       setMemoryMessages([]);
                       setMemoryError(null);
@@ -620,6 +702,7 @@ export function DashboardView() {
                 <div className="flex gap-2">
                   <Input
                     value={memoryQuery}
+                    {...savedPromptChat.inputProps}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setMemoryQuery(e.target.value)}
                     onKeyDown={(e) => {
                       savedPromptChat.onInputKeyDown(e);
@@ -641,6 +724,7 @@ export function DashboardView() {
                   Type &ldquo;/&rdquo; for a saved prompt.
                 </p>
               </div>
+              <SearchModelHint />
               {memoryError && (
                 <div className="rounded-md border border-rust/30 bg-rust/10 p-3 text-sm text-rust">
                   {memoryError}
@@ -657,6 +741,12 @@ export function DashboardView() {
                       )}
                     >
                       <p className="text-sm">{message.content}</p>
+                      {message.role === "assistant" && message.grounded === false ? (
+                        <p className="mt-1 text-sm text-rust">
+                          Your recordings don&apos;t clearly support this answer. Check it
+                          against the meetings before relying on it.
+                        </p>
+                      ) : null}
                       {message.role === "user" && message.content.trim() ? (
                         <Button
                           type="button"

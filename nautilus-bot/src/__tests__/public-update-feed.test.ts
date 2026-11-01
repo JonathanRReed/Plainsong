@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   channelFeedUrl,
+  evaluateChannelManifest,
+  RELEASE_CHANNEL_POLICY,
   channelManifestUrl,
   evaluatePublicUpdateFeedEvidence,
   parseMacUpdateManifest,
@@ -11,7 +13,7 @@ import {
   updaterChannelManifestFilename,
   validatePublicFeedUrl,
   type PublicUpdateFeedEvidence,
-} from "../../scripts/lib/public-update-feed.mjs";
+} from "../../scripts/lib/public-update-feed.ts";
 import {
   updaterChannelManifestFilename as appUpdaterChannelManifestFilename,
   updaterFeedUrl,
@@ -20,24 +22,26 @@ import {
 const VERSION = "0.9.0-beta.2";
 const ZIP_NAME = `Plainsong-${VERSION}-arm64-mac.zip`;
 const ZIP_SHA256 = "a".repeat(64);
-const ZIP_SHA512 = "b".repeat(88);
+const ZIP_SHA512 = "b".repeat(86) + "==";
 const BLOCKMAP_SHA256 = "c".repeat(64);
 const MANIFEST_SHA256 = "d".repeat(64);
 
 function passingEvidence(): PublicUpdateFeedEvidence {
   return {
+    stableReleaseExists: RELEASE_CHANNEL_POLICY.stableReleaseExists,
     feedUrl: "https://updates.plainsong.example/beta/",
     feedBaseUrl: "https://updates.plainsong.example/",
     channelManifests: {
       stable: {
         url: "https://updates.plainsong.example/stable/latest-mac.yml",
-        status: 200,
+        status: 404,
         finalUrl: "https://updates.plainsong.example/stable/latest-mac.yml",
       },
       beta: {
         url: "https://updates.plainsong.example/beta/beta-mac.yml",
         status: 200,
         finalUrl: "https://updates.plainsong.example/beta/beta-mac.yml",
+        manifest: { version: VERSION, zipName: ZIP_NAME, sha512: ZIP_SHA512, size: 142_706_076 },
       },
     },
     requestedManifest: "beta-mac.yml",
@@ -223,36 +227,53 @@ describe("per-channel update feeds", () => {
     expect(resolveFeedBaseUrl("http://updates.plainsong.example/beta/")).toBeNull();
   });
 
-  it("blocks when either channel's manifest is unpublished", () => {
-    // The first stable release would otherwise have shipped with an empty
-    // stable feed and every stable check failing.
+  it("records stable 404 as expected only before the first stable release", () => {
     const evidence = passingEvidence();
-    evidence.channelManifests.stable = {
-      url: "https://updates.plainsong.example/stable/latest-mac.yml",
-      status: 404,
-      finalUrl: null,
-    };
-
-    const result = evaluatePublicUpdateFeedEvidence(evidence);
-    expect(result.pass).toBe(false);
-    expect(result.checks.stableChannelManifestReachable).toBe(false);
-    expect(result.checks.betaChannelManifestReachable).toBe(true);
+    expect(evaluatePublicUpdateFeedEvidence(evidence).pass).toBe(true);
+    expect(evaluateChannelManifest("stable", evidence.channelManifests.stable, evidence.feedBaseUrl, false))
+      .toEqual({ pass: true, state: "expected-absent-before-first-stable-release" });
+    evidence.stableReleaseExists = true;
+    expect(evaluatePublicUpdateFeedEvidence(evidence).checks.stableChannelManifestMatchesPolicy).toBe(false);
   });
 
-  it("blocks when a channel is probed against the wrong directory", () => {
+  it.each([200, 403, 500, null])("rejects unexpected stable status %s before stable exists", (status) => {
     const evidence = passingEvidence();
-    // The exact confusion the finding describes: stable's manifest fetched out
-    // of the beta bucket.
-    evidence.channelManifests.stable = {
-      url: "https://updates.plainsong.example/beta/latest-mac.yml",
-      status: 200,
-      finalUrl: "https://updates.plainsong.example/beta/latest-mac.yml",
-    };
+    evidence.channelManifests.stable!.status = status;
+    expect(evaluatePublicUpdateFeedEvidence(evidence).pass).toBe(false);
+  });
 
-    const result = evaluatePublicUpdateFeedEvidence(evidence);
-    expect(result.pass).toBe(false);
-    expect(result.checks.stableChannelManifestReachable).toBe(true);
-    expect(result.checks.stableChannelManifestUsesOwnDirectory).toBe(false);
+  it("requires a valid stable manifest after the first stable release", () => {
+    const evidence = passingEvidence();
+    evidence.stableReleaseExists = true;
+    evidence.channelManifests.stable!.status = 200;
+    evidence.channelManifests.stable!.manifest = {
+      version: "1.0.0", zipName: "Plainsong-1.0.0-arm64-mac.zip", sha512: ZIP_SHA512, size: 4096,
+    };
+    expect(evaluatePublicUpdateFeedEvidence(evidence).pass).toBe(true);
+    for (const manifest of [
+      { version: VERSION, zipName: ZIP_NAME, sha512: ZIP_SHA512, size: 4096 },
+      { version: "1.0.0", zipName: ZIP_NAME, sha512: ZIP_SHA512, size: 4096 },
+      { version: "1.0.0", zipName: "Plainsong-1.0.0-arm64-mac.zip", sha512: "wrong", size: 4096 },
+      { version: null, zipName: null, sha512: null, size: null },
+    ]) {
+      evidence.channelManifests.stable!.manifest = manifest;
+      expect(evaluatePublicUpdateFeedEvidence(evidence).pass).toBe(false);
+    }
+  });
+
+  it("rejects wrong channel URLs and redirects even for an expected 404", () => {
+    const evidence = passingEvidence();
+    evidence.channelManifests.stable!.url = "https://updates.plainsong.example/beta/latest-mac.yml";
+    expect(evaluatePublicUpdateFeedEvidence(evidence).pass).toBe(false);
+    evidence.channelManifests.stable!.url = "https://updates.plainsong.example/stable/latest-mac.yml";
+    evidence.channelManifests.stable!.finalUrl = "https://other.example/stable/latest-mac.yml";
+    expect(evaluatePublicUpdateFeedEvidence(evidence).pass).toBe(false);
+  });
+
+  it("never accepts a missing beta manifest", () => {
+    const evidence = passingEvidence();
+    evidence.channelManifests.beta!.status = 404;
+    expect(evaluatePublicUpdateFeedEvidence(evidence).pass).toBe(false);
   });
 
   it("blocks when a channel was never probed at all", () => {
@@ -261,7 +282,7 @@ describe("per-channel update feeds", () => {
 
     const result = evaluatePublicUpdateFeedEvidence(evidence);
     expect(result.pass).toBe(false);
-    expect(result.checks.stableChannelManifestReachable).toBe(false);
-    expect(result.checks.betaChannelManifestReachable).toBe(false);
+    expect(result.checks.stableChannelManifestMatchesPolicy).toBe(false);
+    expect(result.checks.betaChannelManifestMatchesPolicy).toBe(false);
   });
 });

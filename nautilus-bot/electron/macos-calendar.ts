@@ -1,3 +1,4 @@
+import { firstCalendarConferenceUrl } from "./calendar-conference-url";
 /**
  * The wire between the read-only EventKit helper and the renderer.
  *
@@ -8,9 +9,8 @@
  *
  * The renderer never sees the helper's raw payload. It sees `CalendarSnapshot`,
  * which carries titles and times, a service name, and the invitee list — and,
- * deliberately, no URLs, no locations and no notes. A conferencing link is
- * only ever reported as "this looks like a Zoom call"; the link itself stops
- * here.
+ * one validated conference URL for an explicit join action. Locations and
+ * notes stay in the helper.
  */
 
 /**
@@ -81,6 +81,7 @@ export interface CalendarEventSummary {
    * this code cannot support.
    */
   videoService: CalendarVideoService | null;
+  conferenceUrl?: string | null;
   /**
    * Who was invited. Empty for an event with no invitees, and for one read by
    * a protocol-1 helper left behind by a partial install — the field is
@@ -246,6 +247,9 @@ function parseEvent(raw: unknown): CalendarEventSummary | null {
     isAllDay: record.is_all_day === true,
     calendarId,
     calendarName: readString(record.calendar_name) ?? "",
+    conferenceUrl: firstCalendarConferenceUrl(
+      Array.isArray(record.conference_urls) ? record.conference_urls : [],
+    ),
     videoService: detectVideoService(
       Array.isArray(record.conference_urls) ? record.conference_urls : [],
     ),

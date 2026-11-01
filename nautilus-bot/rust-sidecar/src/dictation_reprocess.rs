@@ -10,6 +10,74 @@
 
 use super::*;
 
+const REPROCESS_PROGRESS_MESSAGE: &str = "Processing a saved dictation again…";
+
+/// Clear this operation's progress message on errors and cancellation too.
+/// A newer capture message belongs to its own operation and must survive.
+struct ReprocessProgressMessageGuard(Arc<StdMutex<DictationOverlayState>>);
+
+impl ReprocessProgressMessageGuard {
+    fn begin(overlay: &Arc<StdMutex<DictationOverlayState>>) -> Self {
+        if let Ok(mut state) = overlay.lock() {
+            state.message = Some(REPROCESS_PROGRESS_MESSAGE.to_string());
+        }
+        Self(Arc::clone(overlay))
+    }
+}
+
+impl Drop for ReprocessProgressMessageGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            if state.message.as_deref() == Some(REPROCESS_PROGRESS_MESSAGE) {
+                state.message = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod reprocess_progress_tests {
+    use super::*;
+
+    #[test]
+    fn early_error_clears_owned_progress_and_keeps_newer_message() {
+        let overlay = Arc::new(StdMutex::new(DictationOverlayState::default()));
+        let fail = || -> Result<(), String> {
+            let _progress = ReprocessProgressMessageGuard::begin(&overlay);
+            assert_eq!(
+                overlay.lock().unwrap().message.as_deref(),
+                Some(REPROCESS_PROGRESS_MESSAGE)
+            );
+            Err("recognizer heard nothing".to_string())
+        };
+        assert!(fail().is_err());
+        assert!(overlay.lock().unwrap().message.is_none());
+        let progress = ReprocessProgressMessageGuard::begin(&overlay);
+        overlay.lock().unwrap().message = Some("Listening".to_string());
+        drop(progress);
+        assert_eq!(
+            overlay.lock().unwrap().message.as_deref(),
+            Some("Listening")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_clears_owned_progress() {
+        let overlay = Arc::new(StdMutex::new(DictationOverlayState::default()));
+        let worker_overlay = Arc::clone(&overlay);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _progress = ReprocessProgressMessageGuard::begin(&worker_overlay);
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(overlay.lock().unwrap().message.is_none());
+    }
+}
+
 pub(crate) async fn tracker_insertion_mode(state: &AppState) -> String {
     let tracker = state.dictation_session_tracker.lock().await;
     tracker
@@ -37,6 +105,159 @@ pub(crate) struct DictationReprocessRequest {
     pub(crate) model_id: Option<String>,
 }
 
+fn reprocess_transform_policy(
+    settings: &settings::Settings,
+    custom_mode: Option<&settings::DictationCustomMode>,
+) -> DictationAiTransformPolicy {
+    // An explicit preset choice must not inherit another selected mode's prompt.
+    let mut resolved = settings.clone();
+    resolved.transcription.dictation_selected_custom_mode_id =
+        custom_mode.map(|mode| mode.id.clone());
+    resolved.transcription.dictation_custom_modes = custom_mode.into_iter().cloned().collect();
+    let options = models::DictationStartOptions {
+        profile: if custom_mode.is_some_and(|mode| mode.profile == "power_rewrite") {
+            models::DictationProfile::PowerRewrite
+        } else {
+            models::DictationProfile::NormalSpeed
+        },
+        ..Default::default()
+    };
+    dictation_ai_transform_policy(&resolved, &options)
+}
+
+async fn bounded_reprocess_ai_attempt<T>(
+    provider: AnalysisProvider,
+    policy: DictationAiTransformPolicy,
+    transform: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::time::timeout(
+        dictation_format_timeout_for_policy(provider, policy),
+        transform,
+    )
+    .await
+    .map_err(|_| "Dictation reprocess AI formatting timed out.".to_string())?
+}
+
+fn finish_reprocess_ai_attempt(
+    input: &str,
+    result: Result<(String, AnalysisProvider, String), String>,
+) -> DictationTextTransformOutput {
+    match result {
+        Ok((output_text, provider, model_id)) => DictationTextTransformOutput {
+            output_text,
+            used_ai: true,
+            provider: Some(provider.as_settings_value().to_string()),
+            model_id: Some(model_id),
+        },
+        Err(error) => {
+            tracing::warn!("Dictation reprocess kept the local transcript: {}", error);
+            DictationTextTransformOutput {
+                output_text: input.to_string(),
+                used_ai: false,
+                provider: None,
+                model_id: None,
+            }
+        }
+    }
+}
+
+fn reprocess_llm_allowed(smart_format_enabled: bool, policy: DictationAiTransformPolicy) -> bool {
+    smart_format_enabled || policy == DictationAiTransformPolicy::MeaningPreservingRewrite
+}
+
+fn reprocess_ai_selection(
+    settings: &settings::Settings,
+    custom_mode: Option<&settings::DictationCustomMode>,
+) -> Result<(AnalysisProvider, bool, String), String> {
+    let mut resolved = settings.clone();
+    if let Some(mode) = custom_mode {
+        if let Some(provider) = mode.ai_provider.as_deref() {
+            resolved.privacy.dictation_ai.provider = provider.to_string();
+        }
+        if let Some(model_id) = mode.ai_model_id.as_deref() {
+            resolved.privacy.dictation_ai.model_id = Some(model_id.to_string());
+        }
+    }
+    dictation_session_ai_selection(&resolved)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_reprocess_ai_transform(
+    state: &AppState,
+    settings: &settings::Settings,
+    custom_mode: Option<&settings::DictationCustomMode>,
+    input: &str,
+    prompt: &str,
+    policy: DictationAiTransformPolicy,
+    applied_dictionary_replacements: &[String],
+    english_rules: bool,
+) -> Result<(String, AnalysisProvider, String), String> {
+    let (provider, remote_processing_enabled, model) =
+        reprocess_ai_selection(settings, custom_mode)?;
+    let result = bounded_reprocess_ai_attempt(provider, policy, async {
+        match policy {
+            DictationAiTransformPolicy::StrictCleanup => {
+                let prompt = crate::dictation_fidelity::dictionary_spelling_prompt(
+                    prompt,
+                    applied_dictionary_replacements,
+                );
+                run_dictation_cleanup_with_provider(
+                    state,
+                    input,
+                    &prompt,
+                    provider,
+                    &model,
+                    remote_processing_enabled,
+                    // German "um" and Portuguese "um" are words: the AI pass
+                    // follows the local pipeline's language decision.
+                    settings.transcription.dictation_remove_disfluencies && english_rules,
+                )
+                .await
+            }
+            DictationAiTransformPolicy::MeaningPreservingRewrite => {
+                let custom_prompt = custom_mode
+                    .and_then(|mode| mode.custom_prompt.as_deref())
+                    .is_some_and(|text| !text.trim().is_empty())
+                    || settings
+                        .transcription
+                        .dictation_custom_prompt
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty());
+                let base = if custom_prompt {
+                    None
+                } else {
+                    ["messages", "email", "meeting_follow_up"]
+                        .into_iter()
+                        .find(|mode| dictation_mode_transform_prompt(mode) == Some(prompt))
+                        .and_then(builtin_dictation_rewrite_base)
+                };
+                let rewrite_prompt =
+                    meaning_preserving_rewrite_prompt(base.as_deref().unwrap_or(prompt));
+                let rewrite_prompt = crate::dictation_fidelity::dictionary_spelling_prompt(
+                    &rewrite_prompt,
+                    applied_dictionary_replacements,
+                );
+                run_custom_dictation_transform_with_provider(
+                    state,
+                    input,
+                    &rewrite_prompt,
+                    provider,
+                    &model,
+                    remote_processing_enabled,
+                )
+                .await
+            }
+        }
+    })
+    .await?;
+    crate::dictation_fidelity::validate_dictionary_replacements(
+        input,
+        &result.0,
+        applied_dictionary_replacements,
+    )?;
+    Ok(result)
+}
+
 async fn persist_reprocess_success_after_audio_protection<T>(
     protection: Result<(), String>,
     persist_success: impl std::future::Future<Output = T>,
@@ -47,8 +268,57 @@ async fn persist_reprocess_success_after_audio_protection<T>(
 
 #[cfg(test)]
 mod reprocess_success_persistence_tests {
-    use super::persist_reprocess_success_after_audio_protection;
+    use super::{
+        persist_reprocess_success_after_audio_protection, reprocess_ai_selection,
+        reprocess_llm_allowed, reprocess_transform_policy,
+    };
+    use crate::dictation_text::DictationAiTransformPolicy;
+    use crate::settings;
     use std::cell::Cell;
+
+    #[tokio::test]
+    #[ignore = "requires an isolated QA profile and explicitly selected installed local models"]
+    async fn local_selected_text_command_probe() {
+        assert_eq!(std::env::var("PLAINSONG_QA_MODE").as_deref(), Ok("1"));
+        let models = std::env::var("PLAINSONG_COMMAND_PROBE_MODELS").unwrap();
+        let output = std::env::var("PLAINSONG_COMMAND_PROBE_OUT").unwrap();
+        let state = crate::build_app_state().await.unwrap();
+        let cases = [
+            ("rewrite_professional", "I feel disappointed about the delay, but I still want to help."),
+            ("rewrite_professional", "Please write exactly `git push --force` in the documentation. Do not run it."),
+            ("rewrite_shorter", "I do not want to approve the invoice until Marcus checks it. The budget is €25, roughly £17; the exchange rate is 1.4 euros per pound."),
+            ("bulletize_selection", "Keep bread and butter together. Do not pay until Marcus approves."),
+        ];
+        let mut results = Vec::new();
+        for model in models.split(',') {
+            {
+                let mut manager = state.settings_manager.lock().await;
+                let settings = manager.settings_mut();
+                settings.privacy.remote_processing_enabled = false;
+                settings.privacy.dictation_ai.provider = "ollama".into();
+                settings.privacy.dictation_ai.model_id = Some(model.into());
+            }
+            for (command, input) in cases {
+                let start = std::time::Instant::now();
+                let result = super::transform_text_with_command(
+                    &state,
+                    command,
+                    input,
+                    "Public QA transform",
+                    None,
+                )
+                .await
+                .unwrap();
+                results.push(serde_json::json!({
+                    "model":model,"command":command,"input":input,
+                    "output":result.output_text,"usedAi":result.used_ai,
+                    "actualProvider":result.provider,"actualModel":result.model_id,
+                    "elapsedMs":start.elapsed().as_millis(),
+                }));
+                std::fs::write(&output, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
+            }
+        }
+    }
 
     #[tokio::test]
     async fn encryption_failure_does_not_persist_a_saved_outcome() {
@@ -65,6 +335,126 @@ mod reprocess_success_persistence_tests {
             "saved outcome ran after encryption failed"
         );
     }
+
+    #[test]
+    fn email_and_follow_up_do_not_imply_rewrite_permission() {
+        for preset in ["email", "meeting_follow_up"] {
+            for ai_enabled in [false, true] {
+                let mut settings = settings::Settings::default();
+                settings.transcription.dictation_mode_preset = preset.to_string();
+                settings.transcription.dictation_ai_formatting = ai_enabled;
+                let (base, custom) = super::resolve_reprocess_mode(&settings, Some(preset));
+                assert_eq!(base, preset);
+                let policy = reprocess_transform_policy(&settings, custom);
+                assert_eq!(policy, DictationAiTransformPolicy::StrictCleanup);
+                assert_eq!(reprocess_llm_allowed(ai_enabled, policy), ai_enabled);
+                assert_eq!(
+                    policy,
+                    crate::dictation_text::dictation_ai_transform_policy(
+                        &settings,
+                        &crate::models::DictationStartOptions::default(),
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reprocessing_routes_power_and_custom_modes_as_explicit_rewrites() {
+        for custom in [
+            settings::DictationCustomMode {
+                custom_prompt: Some("Tighten the prose.".to_string()),
+                profile: "normal_speed".to_string(),
+                ..Default::default()
+            },
+            settings::DictationCustomMode {
+                profile: "power_rewrite".to_string(),
+                ..Default::default()
+            },
+        ] {
+            let mut settings = settings::Settings::default();
+            settings.transcription.dictation_ai_formatting = false;
+            let policy = reprocess_transform_policy(&settings, Some(&custom));
+            assert_eq!(policy, DictationAiTransformPolicy::MeaningPreservingRewrite);
+            assert!(reprocess_llm_allowed(false, policy));
+            settings.transcription.dictation_selected_custom_mode_id = Some(custom.id.clone());
+            settings.transcription.dictation_custom_modes = vec![custom];
+            assert_eq!(
+                reprocess_transform_policy(&settings, None),
+                DictationAiTransformPolicy::StrictCleanup
+            );
+        }
+    }
+
+    #[test]
+    fn saved_global_prompt_requires_ai_formatting() {
+        let mut settings = settings::Settings::default();
+        settings.transcription.dictation_custom_prompt = Some("Tighten the prose.".to_string());
+        for enabled in [false, true] {
+            settings.transcription.dictation_ai_formatting = enabled;
+            assert_eq!(
+                reprocess_transform_policy(&settings, None),
+                if enabled {
+                    DictationAiTransformPolicy::MeaningPreservingRewrite
+                } else {
+                    DictationAiTransformPolicy::StrictCleanup
+                }
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_ai_attempt_keeps_exact_local_text_at_live_deadline() {
+        use crate::llm::Provider;
+        for provider in [Provider::Ollama, Provider::OpenAi] {
+            for policy in [
+                DictationAiTransformPolicy::StrictCleanup,
+                DictationAiTransformPolicy::MeaningPreservingRewrite,
+            ] {
+                let input = "5. Keep config.json.\n\n6. Do not deploy!";
+                let start = tokio::time::Instant::now();
+                let result = super::bounded_reprocess_ai_attempt(
+                    provider,
+                    policy,
+                    std::future::pending::<Result<(String, Provider, String), String>>(),
+                )
+                .await;
+                assert_eq!(
+                    start.elapsed(),
+                    crate::dictation_format_timeout_for_policy(provider, policy)
+                );
+                let fallback = super::finish_reprocess_ai_attempt(input, result);
+                assert_eq!(fallback.output_text, input);
+                assert!(!fallback.used_ai);
+                assert!(fallback.provider.is_none());
+                assert!(fallback.model_id.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn reprocessing_uses_the_requested_custom_modes_ai_route() {
+        let mut settings = settings::Settings::default();
+        settings.privacy.dictation_ai.provider = "openai".to_string();
+        settings.privacy.dictation_ai.model_id = Some("cloud-model".to_string());
+        settings.privacy.remote_processing_enabled = true;
+        let custom = settings::DictationCustomMode {
+            ai_provider: Some("ollama".to_string()),
+            ai_model_id: Some("gemma4:e4b".to_string()),
+            ..Default::default()
+        };
+
+        let (provider, remote_enabled, model) =
+            reprocess_ai_selection(&settings, Some(&custom)).expect("custom route resolves");
+        assert_eq!(provider, crate::llm::Provider::Ollama);
+        assert!(remote_enabled);
+        assert_eq!(model, "gemma4:e4b");
+
+        let (provider, _, model) =
+            reprocess_ai_selection(&settings, None).expect("global route resolves");
+        assert_eq!(provider, crate::llm::Provider::OpenAi);
+        assert_eq!(model, "cloud-model");
+    }
 }
 
 /// Whether a saved dictation's audio can be run again, decided from facts the
@@ -80,7 +470,7 @@ pub(crate) fn dictation_reprocess_audio_decision(
         return Err(if keep_audio_enabled {
             "This dictation was saved before \"Keep dictation audio\" was turned on, so there is no audio to process again. Newer dictations keep theirs.".to_string()
         } else {
-            "This dictation's audio was not kept. Turn on \"Keep dictation audio for Process again\" in Dictation settings; from then on each dictation keeps its audio until its history entry is deleted.".to_string()
+            "This dictation's audio was not kept. Turn on \"Keep dictation audio for Process again\" under Capture and insert on the Dictation page; from then on each dictation keeps its audio until its history entry is deleted.".to_string()
         });
     }
     if !audio_file_present {
@@ -91,7 +481,12 @@ pub(crate) fn dictation_reprocess_audio_decision(
         } else {
             format!(
                 "This dictation's audio file is gone. Dictation auto-delete is set to \"{}\", which removes kept audio with the entry; a longer setting keeps it for Process again.",
-                preset
+                match preset {
+                    "immediate" => "Immediately",
+                    "24h" => "After 24 hours",
+                    "72h" => "After 72 hours",
+                    _ => "Custom",
+                }
             )
         });
     }
@@ -143,11 +538,14 @@ pub(crate) async fn reprocess_dictation_impl(
     handle: &crate::sidecar_handle::SidecarHandle,
     request: DictationReprocessRequest,
 ) -> Result<models::DictationReprocessOutcome, String> {
+    // Foreground text work: background indexing yields the runtime to it.
+    let _foreground = crate::llm::local_model_load::foreground_work();
     // Reads stored audio, so it is excluded against backup/restore/vault work
     // exactly like meeting post-processing.
-    let _postprocessing_lease = state
-        .operation_coordinator
-        .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+    let _postprocessing_lease = state.operation_coordinator.try_acquire_named(
+        operation_coordinator::OperationKind::PostProcess,
+        "dictation reprocessing",
+    )?;
     let settings_snapshot = state.settings_manager.lock().await.settings().clone();
 
     let (source, dictionary_entries, snippets) = {
@@ -178,11 +576,9 @@ pub(crate) async fn reprocess_dictation_impl(
         &settings_snapshot.transcription.dictation_retention_preset,
     )?;
 
-    // Same ownership path as meeting audio: approved-root check, decryption
-    // when the vault holds it, and the storage gate so a retention sweep or
-    // delete cannot pull the file out from under the read.
+    // The resolver pins a private source snapshot under the storage gate.
+    // Retention can no longer remove the bytes while this read is in progress.
     let audio_bytes = {
-        let _storage_guard = state.audio_storage_gate.lock().await;
         let bundle = resolve_recording_audio_bundle_for_runtime(state, &source.id).await?;
         std::fs::read(&bundle.primary).map_err(|error| {
             format!(
@@ -283,11 +679,10 @@ pub(crate) async fn reprocess_dictation_impl(
         apple_speech_required_engine: None,
         request_speaker_labels: false,
         language: settings_snapshot.transcription.language.clone(),
+        acoustic_vocabulary: Vec::new(),
     };
 
-    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-        overlay.message = Some("Processing a saved dictation again…".to_string());
-    }
+    let _progress_message = ReprocessProgressMessageGuard::begin(&state.dictation_overlay_state);
     let transcription_started = std::time::Instant::now();
     let transcription_result = state
         .asr_manager
@@ -300,13 +695,19 @@ pub(crate) async fn reprocess_dictation_impl(
         .await
         .map_err(|error| {
             format!(
-                "Process again failed on {} / {}: {}",
-                provider_type.display_name(),
-                model_id,
+                "Process again failed with {}: {}",
+                provider_type.speech_model_name(&model_id),
                 error
             )
         })?;
     let transcription_latency_ms = transcription_started.elapsed().as_millis() as u64;
+
+    let recognition_review_words = models::collect_recognition_review_words(
+        transcription_result.actual_provider,
+        &transcription_result.segments,
+        &transcription_result.text,
+        duration_seconds.max(0) as f64,
+    );
 
     let raw_text =
         sanitize_dictation_output(&transcription_result.text, &transcription_result.text)
@@ -341,6 +742,11 @@ pub(crate) async fn reprocess_dictation_impl(
         });
     let pipeline_result = crate::dictation_pipeline::apply_dictation_pipeline(
         crate::dictation_pipeline::DictationPipelineInput {
+            spoken_language: crate::text::language::dictation_spoken_language(
+                settings_snapshot.transcription.language.as_deref(),
+                Some(transcription_result.language.as_str()),
+                translation_route == DictationTranslationRoute::WhisperNative,
+            ),
             text: raw_text.as_str(),
             dictionary_entries: &dictionary_entries,
             snippets: &snippets,
@@ -354,10 +760,16 @@ pub(crate) async fn reprocess_dictation_impl(
             command_mode_enabled: false,
             destination_category,
             numbers_as_digits,
+            // Process Again saves to history rather than a field, so only the
+            // user's destination-aware formatting setting applies.
+            structured_layout: settings_snapshot
+                .transcription
+                .dictation_category_formatting_enabled,
         },
     );
     let mut final_text = pipeline_result.text.trim().to_string();
     let mut used_ai = false;
+    let mut ai_rewrite_failed = false;
     let mut pipeline_stage_keys = pipeline_result.pipeline_stage_keys.clone();
 
     let custom_prompt = custom_mode
@@ -366,14 +778,14 @@ pub(crate) async fn reprocess_dictation_impl(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let llm_allowed = settings_snapshot.transcription.dictation_ai_formatting
-        || custom_mode
-            .as_ref()
-            .map(|mode| mode.profile == "power_rewrite")
-            .unwrap_or(false);
+    let transform_policy = reprocess_transform_policy(&settings_snapshot, custom_mode.as_ref());
+    let llm_allowed = reprocess_llm_allowed(
+        settings_snapshot.transcription.dictation_ai_formatting,
+        transform_policy,
+    );
     if !final_text.is_empty() {
         match base_preset.as_str() {
-            "messages" | "email" | "meeting_follow_up" => {
+            "messages" | "email" | "meeting_follow_up" | "notes" => {
                 // A custom mode built on this base supplies the prompt; any
                 // other custom mode must not hijack an explicit preset choice.
                 let prompt = custom_prompt.clone().unwrap_or_else(|| {
@@ -382,19 +794,25 @@ pub(crate) async fn reprocess_dictation_impl(
                         .to_string()
                 });
                 if llm_allowed && !prompt.is_empty() {
-                    match run_dictation_cleanup_with_selected_provider(
+                    let transformed = run_reprocess_ai_transform(
                         state,
+                        &settings_snapshot,
+                        custom_mode.as_ref(),
                         final_text.as_str(),
                         prompt.as_str(),
+                        transform_policy,
+                        &pipeline_result.applied_dictionary_replacements,
+                        pipeline_result.english_rules,
                     )
-                    .await
-                    {
+                    .await;
+                    match transformed {
                         Ok((output, _, _)) => {
                             final_text = output.trim().to_string();
                             used_ai = true;
                             pipeline_stage_keys.push("mode_transform".to_string());
                         }
                         Err(error) => {
+                            ai_rewrite_failed = true;
                             tracing::warn!(
                                 "Process again: '{}' transform kept the local transcript: {}",
                                 base_preset,
@@ -405,27 +823,25 @@ pub(crate) async fn reprocess_dictation_impl(
                             pipeline_stage_keys.push("mode_transform_fallback".to_string());
                         }
                     }
-                } else {
-                    final_text = match base_preset.as_str() {
-                        "messages" => rewrite_shorter_text(&final_text),
-                        _ => rewrite_professional_text(&final_text),
-                    };
-                    pipeline_stage_keys.push("mode_transform_fallback".to_string());
-                }
-            }
-            "notes" => {
-                let bulletized = format_dictation_notes(&final_text);
-                if bulletized != final_text {
-                    final_text = bulletized;
-                    pipeline_stage_keys.push("mode_transform".to_string());
+                } else if base_preset == "notes" {
+                    let bulletized = format_dictation_notes(&final_text);
+                    if bulletized != final_text {
+                        final_text = bulletized;
+                        pipeline_stage_keys.push("mode_transform".to_string());
+                    }
                 }
             }
             _ => {
                 if let (true, Some(prompt)) = (llm_allowed, custom_prompt.as_deref()) {
-                    match run_dictation_cleanup_with_selected_provider(
+                    match run_reprocess_ai_transform(
                         state,
+                        &settings_snapshot,
+                        custom_mode.as_ref(),
                         final_text.as_str(),
                         prompt,
+                        transform_policy,
+                        &pipeline_result.applied_dictionary_replacements,
+                        pipeline_result.english_rules,
                     )
                     .await
                     {
@@ -434,10 +850,13 @@ pub(crate) async fn reprocess_dictation_impl(
                             used_ai = true;
                             pipeline_stage_keys.push("smart_formatting".to_string());
                         }
-                        Err(error) => tracing::warn!(
-                            "Process again: custom-mode formatting kept the local output: {}",
-                            error
-                        ),
+                        Err(error) => {
+                            ai_rewrite_failed = true;
+                            tracing::warn!(
+                                "Process again: custom-mode formatting kept the local output: {}",
+                                error
+                            );
+                        }
                     }
                 }
             }
@@ -470,6 +889,7 @@ pub(crate) async fn reprocess_dictation_impl(
         });
 
     let transcript = models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: uuid::Uuid::new_v4().to_string(),
         recording_id: recording_id.clone(),
         segments: if stored_text == raw_text {
@@ -505,6 +925,8 @@ pub(crate) async fn reprocess_dictation_impl(
         actual_provider: Some(
             asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
         ),
+        measured_word_timestamps: transcription_result.measured_word_timestamps
+            && stored_text == raw_text,
         created_at: now,
     };
     let mode_label = custom_mode
@@ -568,11 +990,12 @@ pub(crate) async fn reprocess_dictation_impl(
 
     {
         let mut db = state.db.lock().await;
-        if let Err(error) = db.create_dictation_history_entry(
+        if let Err(error) = db.create_dictation_history_entry_with_recognition_review(
             &recording,
             &transcript,
             &history_text,
             kept_audio_metadata.as_ref(),
+            recognition_review_words.as_deref(),
         ) {
             if let Some(path) = kept_audio_path.as_deref() {
                 let _ = std::fs::remove_file(path);
@@ -633,6 +1056,7 @@ pub(crate) async fn reprocess_dictation_impl(
                 "actual_provider": asr_provider_to_settings_value(transcription_result.actual_provider),
                 "model_id": &transcription_result.model_id,
                 "transcription_latency_ms": transcription_latency_ms,
+                "ai_rewrite_failed": ai_rewrite_failed,
                 "outcome": "saved",
             })),
             "info",
@@ -654,9 +1078,6 @@ pub(crate) async fn reprocess_dictation_impl(
         );
     })
     .await?;
-    if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
-        overlay.message = None;
-    }
     handle.emit_event(
         "dictation-history-changed",
         serde_json::json!({
@@ -676,6 +1097,7 @@ pub(crate) async fn reprocess_dictation_impl(
         provider: asr_provider_to_settings_value(transcription_result.actual_provider).to_string(),
         model_id: transcription_result.model_id.clone(),
         used_ai,
+        ai_rewrite_failed,
         reprocessed_from_id: source.id.clone(),
         reprocessed_from_created_at: source.created_at,
         transcription_latency_ms,
@@ -713,12 +1135,124 @@ pub(crate) fn write_kept_dictation_audio(
     Ok(path)
 }
 
+fn format_reprocessed_dictation_text(
+    input: &str,
+    mode_preset: &str,
+    settings: &settings::Settings,
+    app_target: Option<&str>,
+) -> String {
+    let formatting_hint = resolve_dictation_formatting_hint(app_target, None, None);
+    // This is local formatting. The AI category-prompt toggle does not
+    // disable destination overrides, just as in live dictation.
+    let category = settings::resolve_dictation_app_category_with_overrides_and_hint(
+        &settings.transcription,
+        app_target,
+        None,
+        formatting_hint.as_deref(),
+    );
+    let text = sanitize_dictation_output(input, input);
+    let english_rules = crate::text::language::english_rules_apply(
+        crate::text::language::dictation_spoken_language(
+            settings.transcription.language.as_deref(),
+            None,
+            false,
+        ),
+        &text,
+    );
+    crate::text::format::smart_format_dictation_text_for_language(
+        text.trim(),
+        mode_preset,
+        category,
+        settings.transcription.dictation_category_formatting_enabled,
+        english_rules,
+    )
+    .trim()
+    .to_string()
+}
+
+#[cfg(test)]
+mod reprocess_text_category_tests {
+    use super::format_reprocessed_dictation_text;
+    use crate::settings::{DictationAppCategoryOverride, Settings};
+
+    fn code_override_settings(enabled: bool) -> Settings {
+        let mut settings = Settings::default();
+        settings.privacy.remote_processing_enabled = false;
+        settings.transcription.dictation_app_category_overrides =
+            vec![DictationAppCategoryOverride {
+                id: "preview-code".into(),
+                app_matcher: "TextEdit".into(),
+                category: "code_editor".into(),
+                enabled,
+            }];
+        settings
+    }
+
+    #[test]
+    fn text_preview_preserves_code_destination_override() {
+        let settings = code_override_settings(true);
+        assert_eq!(
+            format_reprocessed_dictation_text(
+                "cd dash dash verbose",
+                "voice",
+                &settings,
+                Some("TextEdit")
+            ),
+            "cd --verbose"
+        );
+    }
+
+    #[test]
+    fn text_preview_ignores_disabled_destination_override() {
+        let settings = code_override_settings(false);
+        assert_eq!(
+            format_reprocessed_dictation_text(
+                "cd dash dash verbose",
+                "voice",
+                &settings,
+                Some("TextEdit")
+            ),
+            crate::text::format::smart_format_dictation_text_for_app(
+                "cd dash dash verbose",
+                "voice",
+                Some("TextEdit")
+            )
+        );
+        assert_ne!(
+            format_reprocessed_dictation_text(
+                "cd dash dash verbose",
+                "voice",
+                &settings,
+                Some("TextEdit")
+            ),
+            "cd --verbose"
+        );
+    }
+
+    #[test]
+    fn text_preview_category_override_survives_disabled_ai_category_prompt() {
+        let mut settings = code_override_settings(true);
+        settings.transcription.dictation_category_formatting_enabled = false;
+        assert_eq!(
+            format_reprocessed_dictation_text(
+                "cd dash dash verbose",
+                "voice",
+                &settings,
+                Some("TextEdit")
+            ),
+            "cd --verbose"
+        );
+    }
+}
+
 pub(crate) async fn reprocess_dictation_text_impl(
     state: &AppState,
     text: String,
     mode_preset: String,
     app_target: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    // Foreground text work: background indexing yields the runtime to it.
+    let _foreground = crate::llm::local_model_load::foreground_work();
     let input = text.trim();
     if input.is_empty() {
         return Err("Dictation text is empty.".to_string());
@@ -731,68 +1265,82 @@ pub(crate) async fn reprocess_dictation_text_impl(
     } else {
         normalized_mode.clone()
     };
-    let formatting_hint = resolve_dictation_formatting_hint(app_target.as_deref(), None, None);
-
+    let mut ai_rewrite_failed = false;
     let (output_text, used_ai, provider, model_id) = match effective_mode.as_str() {
         "messages" | "email" | "meeting_follow_up" => {
-            // Reprocess honours the active custom mode's own prompt for exactly
-            // the same reason live dictation does; see
-            // `resolve_dictation_mode_transform_prompt`.
-            let (prompt, _prompt_source) =
-                resolve_dictation_mode_transform_prompt(&reprocess_settings, &effective_mode)
-                    .ok_or_else(|| {
+            let local_text = format_reprocessed_dictation_text(
+                input,
+                &effective_mode,
+                &reprocess_settings,
+                app_target.as_deref(),
+            );
+            let custom_mode = active_dictation_custom_mode(&reprocess_settings).filter(|mode| {
+                mode.base_mode_preset
+                    .as_deref()
+                    .map(normalize_dictation_base_mode_preset)
+                    .unwrap_or("voice")
+                    == effective_mode
+            });
+            let policy = reprocess_transform_policy(&reprocess_settings, custom_mode);
+            if reprocess_llm_allowed(
+                reprocess_settings.transcription.dictation_ai_formatting,
+                policy,
+            ) {
+                let (prompt, _prompt_source) =
+                    resolve_dictation_mode_transform_prompt(&reprocess_settings, &effective_mode)
+                        .ok_or_else(|| {
                         "No transform prompt is configured for this mode.".to_string()
                     })?;
-            match run_custom_dictation_transform_with_selected_provider(
-                state,
-                input,
-                prompt.as_str(),
-            )
-            .await
-            {
-                Ok((output, provider, model_id)) => (
-                    output,
-                    true,
-                    Some(provider.as_settings_value().to_string()),
-                    Some(model_id),
-                ),
-                Err(error) => {
-                    let fallback = match effective_mode.as_str() {
-                        "messages" => rewrite_shorter_text(input),
-                        "email" => rewrite_professional_text(input),
-                        "meeting_follow_up" => rewrite_professional_text(input),
-                        _ => input.to_string(),
-                    };
-                    tracing::warn!(
-                        "Dictation reprocess for mode '{}' fell back to local transform: {}",
-                        effective_mode,
-                        error
-                    );
-                    (fallback, false, None, None)
-                }
+                let english_rules = crate::text::language::english_rules_apply(
+                    crate::text::language::dictation_spoken_language(
+                        reprocess_settings.transcription.language.as_deref(),
+                        None,
+                        false,
+                    ),
+                    &local_text,
+                );
+                let result = run_reprocess_ai_transform(
+                    state,
+                    &reprocess_settings,
+                    custom_mode,
+                    &local_text,
+                    &prompt,
+                    policy,
+                    &[],
+                    english_rules,
+                )
+                .await;
+                let output = finish_reprocess_ai_attempt(&local_text, result);
+                ai_rewrite_failed = !output.used_ai;
+                (
+                    output.output_text,
+                    output.used_ai,
+                    output.provider,
+                    output.model_id,
+                )
+            } else {
+                (local_text, false, None, None)
             }
         }
-        "notes" => (bulletize_text(input), false, None, None),
+        "notes" => (format_dictation_notes(input), false, None, None),
         "voice" | "custom" => (
-            crate::text::format::smart_format_dictation_text_for_app(
-                sanitize_dictation_output(input, input).trim(),
+            format_reprocessed_dictation_text(
+                input,
                 &effective_mode,
-                formatting_hint.as_deref(),
-            )
-            .trim()
-            .to_string(),
+                &reprocess_settings,
+                app_target.as_deref(),
+            ),
             false,
             None,
             None,
         ),
         _ => (
-            crate::text::format::smart_format_dictation_text_for_app(
-                sanitize_dictation_output(input, input).trim(),
+            format_reprocessed_dictation_text(
+                input,
                 &effective_mode,
-                formatting_hint.as_deref(),
-            )
-            .trim()
-            .to_string(),
+                &reprocess_settings,
+                app_target.as_deref(),
+            ),
             false,
             None,
             None,
@@ -803,6 +1351,7 @@ pub(crate) async fn reprocess_dictation_text_impl(
         "modePreset": effective_mode,
         "outputText": output_text,
         "usedAi": used_ai,
+        "aiRewriteFailed": ai_rewrite_failed,
         "provider": provider,
         "modelId": model_id
     }))
@@ -849,6 +1398,8 @@ pub(crate) async fn transform_text_with_command(
     action_label: &str,
     app_category: Option<text::format::DictationAppCategory>,
 ) -> Result<DictationTextTransformOutput, String> {
+    // Foreground text work: background indexing yields the runtime to it.
+    let _foreground = crate::llm::local_model_load::foreground_work();
     if crate::dictation_parity::is_local_only_selected_text_command(command_key) {
         let raw_output = local_dictation_command_transform(command_key, input_text)?;
         let output_text = sanitize_dictation_output(raw_output.trim(), input_text)
@@ -868,12 +1419,15 @@ pub(crate) async fn transform_text_with_command(
 
     let base_prompt = resolve_dictation_command_prompt(state, command_key).await?;
     let category_fragment = app_category.and_then(text::format::dictation_category_prompt_fragment);
-    let prompt = append_category_prompt_fragment(base_prompt, category_fragment);
+    let prompt = append_category_prompt_fragment(base_prompt.clone(), category_fragment);
 
     let (raw_output, used_ai, provider, model_id) =
         match run_custom_dictation_transform_with_selected_provider(state, input_text, &prompt)
             .await
-        {
+            .and_then(|result| {
+                validate_dictation_command_rewrite(input_text, &result.0, &base_prompt)
+                    .map(|()| result)
+            }) {
             Ok((output, provider, model_id)) => (
                 output,
                 true,
@@ -983,7 +1537,13 @@ pub(crate) async fn resolve_selected_text_transform_app_category(
 pub(crate) async fn transform_selected_text_impl(
     state: &AppState,
     command_key: &str,
+    admission_nonce: &str,
 ) -> Result<serde_json::Value, String> {
+    state
+        .capture_admission
+        .consume_required(admission_nonce)
+        .map_err(|_| "Selected text transform admission proof is invalid".to_string())?;
+
     let action_label = crate::dictation_parity::dictation_command_selected_text_label(command_key)
         .ok_or_else(|| format!("Unsupported selected-text transform: {}", command_key))?;
 
@@ -1045,6 +1605,7 @@ pub(crate) async fn transform_selected_text_impl(
             "targetApp": target.0,
             "targetBundleId": target.1,
             "pasted": paste_outcome.pasted,
+            "confirmed": paste_outcome.confirmed,
             "copied": paste_outcome.copied,
             "error": paste_outcome.error,
             "usedAi": transform.used_ai,

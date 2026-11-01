@@ -21,6 +21,7 @@ pub(crate) fn validate_shortcut_settings(
 pub(crate) async fn qa_smoke_test_cursor_insert_impl(
     state: &AppState,
     text: Option<String>,
+    expected_bundle_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     if std::env::var_os("PLAINSONG_PACKAGED_QA_APP_MATRIX").as_deref()
         != Some(std::ffi::OsStr::new("1"))
@@ -43,6 +44,8 @@ pub(crate) async fn qa_smoke_test_cursor_insert_impl(
     #[cfg(not(target_os = "macos"))]
     let target = (get_frontmost_app_name(), None::<String>);
 
+    validate_qa_insertion_target(expected_bundle_id.as_deref(), target.1.as_deref())?;
+
     let outcome = paste_text_systemwide(
         &state.accessibility_trust_observed,
         &sample,
@@ -55,9 +58,46 @@ pub(crate) async fn qa_smoke_test_cursor_insert_impl(
         "targetApp": target.0,
         "targetBundleId": target.1,
         "pasted": outcome.pasted,
+        "confirmed": outcome.confirmed,
         "copied": outcome.copied,
         "error": outcome.error,
     }))
+}
+
+fn validate_qa_insertion_target(
+    expected: Option<&str>,
+    actual: Option<&str>,
+) -> Result<(), String> {
+    let expected = expected
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "QA insertion requires an expected target bundle ID".to_string())?;
+    if actual != Some(expected) {
+        return Err("QA insertion refused because the frontmost application changed".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod qa_insertion_target_tests {
+    use super::validate_qa_insertion_target;
+
+    #[test]
+    fn qa_insertion_requires_a_known_matching_target_before_delivery() {
+        assert!(validate_qa_insertion_target(
+            Some("com.apple.TextEdit"),
+            Some("com.apple.TextEdit")
+        )
+        .is_ok());
+        for (expected, actual) in [
+            (None, Some("com.apple.TextEdit")),
+            (Some(" "), Some("com.apple.TextEdit")),
+            (Some("com.apple.TextEdit"), None),
+            (Some("com.apple.TextEdit"), Some("com.apple.Notes")),
+        ] {
+            assert!(validate_qa_insertion_target(expected, actual).is_err());
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -196,6 +236,94 @@ pub(crate) async fn install_apple_speech_language_impl(
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn run_accessibility_repair(
+    identity: Result<String, String>,
+    register: impl FnOnce() -> Result<(), String>,
+    reset: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let identity = identity?;
+    if !matches!(
+        identity.as_str(),
+        "com.plainsong.app" | "com.jonathanreed.plainsong.local-qa"
+    ) {
+        return Err(
+            "Permission repair requires a supported Plainsong app bundle identifier.".to_string(),
+        );
+    }
+    register()?;
+    reset(&identity)
+}
+
+#[cfg(test)]
+mod accessibility_repair_target_tests {
+    use super::run_accessibility_repair;
+    use std::cell::Cell;
+
+    #[test]
+    fn resets_exact_running_identity_after_registration() {
+        for id in ["com.plainsong.app", "com.jonathanreed.plainsong.local-qa"] {
+            let registered = Cell::new(false);
+            run_accessibility_repair(
+                Ok(id.to_string()),
+                || {
+                    registered.set(true);
+                    Ok(())
+                },
+                |target| {
+                    assert!(registered.get());
+                    assert_eq!(target, id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn invalid_identity_never_registers_or_resets() {
+        for identity in [
+            Err("unpackaged or missing identifier".to_string()),
+            Ok(String::new()),
+            Ok(" com.plainsong.app".to_string()),
+            Ok("com..plainsong".to_string()),
+            Ok("com.foreign.app".to_string()),
+            Ok("com.plainsong.app.helper".to_string()),
+        ] {
+            assert!(run_accessibility_repair(
+                identity,
+                || panic!("invalid identity must not register"),
+                |_| panic!("invalid identity must not reset"),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn registration_failure_never_resets() {
+        assert_eq!(
+            run_accessibility_repair(
+                Ok("com.jonathanreed.plainsong.local-qa".to_string()),
+                || Err("registration failed".to_string()),
+                |_| panic!("failed registration must not reset"),
+            ),
+            Err("registration failed".to_string())
+        );
+    }
+
+    #[test]
+    fn reset_failure_is_returned() {
+        assert_eq!(
+            run_accessibility_repair(
+                Ok("com.plainsong.app".to_string()),
+                || Ok(()),
+                |_| Err("reset failed".to_string()),
+            ),
+            Err("reset failed".to_string())
+        );
+    }
+}
+
 pub(crate) async fn repair_cursor_insert_permissions_impl(
     state: &AppState,
 ) -> Result<PermissionDiagnostics, String> {
@@ -207,16 +335,16 @@ pub(crate) async fn repair_cursor_insert_permissions_impl(
             .accessibility_trust_observed
             .store(false, Ordering::Relaxed);
 
-        match reset_tcc_service("Accessibility", APP_BUNDLE_IDENTIFIER) {
-            Ok(()) => notes.push(
-                "Reset the macOS Accessibility privacy decision for Plainsong. Re-enable Plainsong in Privacy & Security > Accessibility if macOS shows it turned off."
-                    .to_string(),
-            ),
-            Err(error) => notes.push(format!(
-                "Could not reset the macOS Accessibility privacy decision automatically: {}",
-                error
-            )),
-        }
+        let (bundle_path, bundle_id) = crate::text_insert::running_app_bundle_identity()?;
+        run_accessibility_repair(
+            Ok(bundle_id),
+            || crate::text_insert::register_app_bundle(&bundle_path),
+            |bundle_id| reset_tcc_service("Accessibility", bundle_id),
+        )?;
+        notes.push(
+            "Reset the macOS Accessibility privacy decision for Plainsong. Re-enable Plainsong in Privacy & Security > Accessibility if macOS shows it turned off."
+                .to_string(),
+        );
 
         if !request_accessibility_permission() {
             notes.push(
@@ -243,6 +371,37 @@ pub(crate) async fn repair_cursor_insert_permissions_impl(
 
 pub(crate) fn microphone_setup_ready(input_present: bool, permission_granted: bool) -> bool {
     input_present && permission_granted
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn probe_accessibility_status(
+    insertion_observed: &std::sync::atomic::AtomicBool,
+    probe: impl FnOnce() -> bool,
+) -> (bool, bool) {
+    (probe(), insertion_observed.load(Ordering::Relaxed))
+}
+
+#[cfg(test)]
+mod accessibility_authorization_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_diagnostics_report_revocation_after_successful_insertion() {
+        let insertion_observed = std::sync::atomic::AtomicBool::new(false);
+        assert_eq!(
+            probe_accessibility_status(&insertion_observed, || true),
+            (true, false)
+        );
+        insertion_observed.store(true, Ordering::Relaxed);
+        assert_eq!(
+            probe_accessibility_status(&insertion_observed, || true),
+            (true, true)
+        );
+        assert_eq!(
+            probe_accessibility_status(&insertion_observed, || false),
+            (false, true)
+        );
+    }
 }
 
 pub(crate) async fn collect_permission_diagnostics(
@@ -344,16 +503,11 @@ pub(crate) async fn collect_permission_diagnostics(
             .lock()
             .ok()
             .and_then(|status| status.clone());
-        let accessibility_probe_ready = check_accessibility_permission();
+        let (accessibility_trusted, cursor_insertion_observed) = probe_accessibility_status(
+            &state.accessibility_trust_observed,
+            check_accessibility_permission,
+        );
         let post_event_ready = check_post_event_access();
-        let cursor_insertion_observed = state.accessibility_trust_observed.load(Ordering::Relaxed);
-        let accessibility_trusted = accessibility_probe_ready || cursor_insertion_observed;
-        if !accessibility_probe_ready && accessibility_trusted {
-            notes.push(
-                "Direct Accessibility insertion was verified by Plainsong in this session. The macOS permission probe may be stale for this app copy."
-                    .to_string(),
-            );
-        }
         if let Some(status) = last_cursor_insert_status.as_ref() {
             if status.copied_only {
                 let detail = status
@@ -536,6 +690,8 @@ pub(crate) struct DiarizationModelOption {
     pub(crate) label: &'static str,
     pub(crate) description: &'static str,
     pub(crate) installed: bool,
+    /// Download size as Finder shows it, for the buttons that offer it.
+    pub(crate) download_size: Option<&'static str>,
 }
 
 pub(crate) fn list_diarization_models() -> Vec<DiarizationModelOption> {
@@ -544,57 +700,121 @@ pub(crate) fn list_diarization_models() -> Vec<DiarizationModelOption> {
         DiarizationModelOption {
             id: "ecapa_tdnn_speaker",
             label: diarization::model_label("ecapa_tdnn_speaker"),
-            description: "Fast and accurate, recommended for most use cases (~25 MB)",
+            description: "Small and light on memory. Remembers voices.",
             installed: diarization::is_model_available("ecapa_tdnn_speaker"),
+            download_size: diarization::model_download_size("ecapa_tdnn_speaker"),
         },
         DiarizationModelOption {
             id: "resnet34_speaker",
             label: diarization::model_label("resnet34_speaker"),
-            description: "Balanced performance, good accuracy with moderate speed (~30 MB)",
+            description: "A small alternative. Remembers voices.",
             installed: diarization::is_model_available("resnet34_speaker"),
+            download_size: diarization::model_download_size("resnet34_speaker"),
         },
         DiarizationModelOption {
             id: "campplus_speaker",
             label: diarization::model_label("campplus_speaker"),
-            description: "Highest accuracy, best for challenging audio conditions (~35 MB)",
+            description: "A small alternative. Remembers voices.",
             installed: diarization::is_model_available("campplus_speaker"),
-        },
-        DiarizationModelOption {
-            id: "eres2netv2_speaker",
-            label: diarization::model_label("eres2netv2_speaker"),
-            description: "Modern int8-quantized embedder, 192-dim, compact (~28 MB)",
-            installed: diarization::is_model_available("eres2netv2_speaker"),
+            download_size: diarization::model_download_size("campplus_speaker"),
         },
     ];
 
-    // Only offered when the backend is compiled in, so the picker never lists
-    // a model this build has no code to run. The label says "experimental"
-    // because it is: no shipped build enables it, and Plainsong has no DER
-    // number of its own for either backend yet.
-    #[cfg(feature = "diarization-speakrs")]
+    // Offered wherever the ONNX pipeline is compiled in, so the picker never
+    // lists a model this build has no code to run.
+    #[cfg(feature = "diarization")]
     models.push(DiarizationModelOption {
-        id: download::SPEAKRS_MODEL_ID,
-        label: diarization::model_label(download::SPEAKRS_MODEL_ID),
-        description: SPEAKRS_PICKER_DESCRIPTION,
-        installed: diarization::is_model_available(download::SPEAKRS_MODEL_ID),
+        id: download::COMMUNITY1_MODEL_ID,
+        label: diarization::model_label(download::COMMUNITY1_MODEL_ID),
+        description: COMMUNITY1_PICKER_DESCRIPTION,
+        installed: diarization::is_model_available(download::COMMUNITY1_MODEL_ID),
+        download_size: diarization::model_download_size(download::COMMUNITY1_MODEL_ID),
     });
 
+    #[cfg(feature = "diarization-nemotron")]
+    models.push(DiarizationModelOption {
+        id: download::NEMOTRON_DIARIZATION_MODEL_ID,
+        label: diarization::model_label(download::NEMOTRON_DIARIZATION_MODEL_ID),
+        description: "Experimental. Handles up to eight people, including when they talk over each other. Doesn't remember voices. OpenMDW-1.1 license.",
+        installed: diarization::is_model_available(download::NEMOTRON_DIARIZATION_MODEL_ID),
+        download_size: diarization::model_download_size(download::NEMOTRON_DIARIZATION_MODEL_ID),
+    });
     models
 }
 
-/// What the picker says about the experimental speakrs entry, shown in the
-/// option itself and therefore before anything is downloaded.
-///
-/// The licensing sentence is here rather than only in a Rust doc comment and a
-/// QA receipt: the person who needs to know that these weights are mirrored
-/// without a declared license is the one deciding whether to fetch them.
-#[cfg(feature = "diarization-speakrs")]
-pub(crate) const SPEAKRS_PICKER_DESCRIPTION: &str = concat!(
-    "Full pyannote pipeline with overlap handling, via speakrs. Slower than ",
-    "the embedding models and unmeasured on your audio (~60 MB, ten files). ",
-    "Model weights mirrored without a declared license; upstream terms are ",
-    "CC-BY-4.0 and gated. Not offered in shipped builds until resolved."
+/// What the picker says about pyannote community-1, shown before anything is
+/// downloaded, in the reader's terms: what it is good at and what it costs.
+/// The download size is on the picker row itself. The credit is the CC BY 4.0
+/// attribution the weights require. "Recommended" only where a new install
+/// starts on it (`settings::fresh_install_diarization_model`); everywhere else
+/// it runs several times slower, so the description says how slow instead.
+/// The renderer prints these descriptions as they are.
+#[cfg(all(
+    feature = "diarization",
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "ort-coreml-ep"
+))]
+pub(crate) const COMMUNITY1_PICKER_DESCRIPTION: &str = concat!(
+    "Recommended. Tells speakers apart even when people talk over each other, ",
+    "with no limit on how many. Remembers voices. ",
+    "pyannote speaker-diarization-community-1 by pyannote, CC BY 4.0."
 );
+#[cfg(all(
+    feature = "diarization",
+    not(all(
+        target_os = "macos",
+        target_arch = "aarch64",
+        feature = "ort-coreml-ep"
+    ))
+))]
+pub(crate) const COMMUNITY1_PICKER_DESCRIPTION: &str = concat!(
+    "Tells speakers apart even when people talk over each other, ",
+    "with no limit on how many. Remembers voices. ",
+    "On this Mac it takes about 8 to 9 minutes per hour of audio ",
+    "and up to 0.7 GB of memory. ",
+    "pyannote speaker-diarization-community-1 by pyannote, CC BY 4.0."
+);
+
+/// What a meeting would do about speakers right now, for the selected model:
+/// whether it is downloaded, and which model would actually run (a
+/// downloaded stand-in, or none). One answer for the meeting's Download
+/// button, the first-run meeting step and the remembered-voices note, so none
+/// of them guesses the fallback rule on its own.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiarizationModelPlan {
+    pub(crate) selected_model_id: String,
+    pub(crate) selected_label: String,
+    pub(crate) selected_download_size: Option<&'static str>,
+    pub(crate) selected_installed: bool,
+    /// The model the next run would use; `None` when no speaker model is
+    /// downloaded at all.
+    pub(crate) run_model_id: Option<String>,
+    pub(crate) fallback_notice: Option<String>,
+}
+
+pub(crate) fn diarization_model_plan(selected_model_id: &str) -> DiarizationModelPlan {
+    let resolved = diarization::resolve_model_for_run(selected_model_id);
+    // A turned-off model is never offered for download: setup and the meeting
+    // offer the model that runs in its place, or the default when none can.
+    let offered_id = if selected_model_id == diarization::LICENSE_BLOCKED_SPEAKER_MODEL_ID {
+        resolved
+            .as_ref()
+            .map(|model| model.model_id.as_str())
+            .unwrap_or(diarization::DEFAULT_EMBEDDING_MODEL_ID)
+    } else {
+        selected_model_id
+    };
+    DiarizationModelPlan {
+        selected_model_id: offered_id.to_string(),
+        selected_label: diarization::model_label(offered_id).to_string(),
+        selected_download_size: diarization::model_download_size(offered_id),
+        selected_installed: is_diarization_model_available(Some(offered_id.to_string())),
+        run_model_id: resolved.as_ref().map(|resolved| resolved.model_id.clone()),
+        fallback_notice: resolved.and_then(|resolved| resolved.fallback_notice),
+    }
+}
 
 #[allow(non_snake_case)]
 pub(crate) fn is_diarization_model_available(modelId: Option<String>) -> bool {
@@ -619,12 +839,9 @@ pub(crate) async fn capture_selected_text_for_playback_impl(
     // Unlike meeting capture's compatibility path, this renderer-facing read
     // primitive is never allowed before the privileged Electron registrar has
     // issued a proof. The proof is short-lived and removed on this call.
-    if !state.capture_admission.is_enforcing() {
-        return Err("Selected text playback admission is not initialized".to_string());
-    }
     state
         .capture_admission
-        .consume(admission_nonce)
+        .consume_required(admission_nonce)
         .map_err(|_| "Selected text playback admission proof is invalid".to_string())?;
 
     #[cfg(target_os = "macos")]
@@ -665,7 +882,14 @@ pub(crate) async fn open_recording_audio_impl(
         return Err("Recording has no audio file path".to_string());
     }
 
-    let resolved = resolve_recording_audio_bundle_for_runtime(state, recording_id).await?;
+    let resolved = resolve_recording_audio_for_runtime(
+        state,
+        recording_id,
+        RuntimeAudioResolveMode::PlaybackPrimary,
+    )
+    .await?;
+    let resolved =
+        crate::meeting_aside_audio::mask_external_audio(state, recording_id, resolved).await?;
     open_path_in_default_app(&resolved.primary)?;
     schedule_recording_audio_bundle_cleanup(
         resolved,
@@ -676,7 +900,6 @@ pub(crate) async fn open_recording_audio_impl(
     let mut db = state.db.lock().await;
     let details = serde_json::json!({
         "recording_id": recording_id,
-        "audio_path": recording.audio_path,
     });
     if let Err(e) = db.log_audit_event("recording_audio_opened", Some(details), "info") {
         tracing::warn!("Failed to log audit event: {}", e);

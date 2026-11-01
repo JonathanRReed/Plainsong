@@ -16,7 +16,7 @@
  *      the half with teeth: it fails when someone writes "custom mode" into a
  *      new description months from now.
  *
- * The doc that goes with it is `docs/settings-inventory-2026-09-03.md`.
+ * The doc that goes with it is `docs/settings-inventory-2026-10-22.md`.
  */
 
 /** One settled word, and the single thing it is allowed to mean. */
@@ -42,12 +42,6 @@ export const SETTINGS_VOCABULARY: readonly VocabularyTerm[] = [
       "A saved bundle of dictation style, context source and delivery. Stored as `dictationCustomModes` and selected by `dictationModePreset`.",
   },
   {
-    term: "speech engine",
-    concept: "speech-engine",
-    means:
-      "The thing that turns speech into text: `dictationProvider`/`dictationModelId` for dictation, `meetingProvider`/`meetingModelId` for meetings.",
-  },
-  {
     term: "service",
     concept: "ai-service",
     means:
@@ -56,7 +50,8 @@ export const SETTINGS_VOCABULARY: readonly VocabularyTerm[] = [
   {
     term: "speech model",
     concept: "speech-model",
-    means: "The downloadable weights a speech engine runs.",
+    means:
+      "The model that turns speech into text: `dictationProvider`/`dictationModelId` for dictation, `meetingProvider`/`meetingModelId` for meetings. Which program runs it is Plainsong's choice, not the reader's, so Settings never names it.",
   },
   {
     term: "ai model",
@@ -64,9 +59,9 @@ export const SETTINGS_VOCABULARY: readonly VocabularyTerm[] = [
     means: "The model an AI service uses to write a summary or clean up a dictation.",
   },
   {
-    term: "speaker separation model",
+    term: "speaker model",
     concept: "diarization-model",
-    means: "The embedding model that splits a transcript up by who was talking.",
+    means: "The model that splits a transcript up by who was talking (the feature: telling speakers apart). `diarizationModelId`.",
   },
   {
     term: "on this mac",
@@ -141,13 +136,19 @@ export const RETIRED_SETTINGS_TERMS: readonly RetiredTerm[] = [
   },
   {
     pattern: /\bmeeting quality policy\b/i,
-    useInstead: "which meeting engine Plainsong offers first",
+    useInstead: "which meeting speech model Plainsong offers first",
     because:
       'It set no quality and enforced no policy: it only reorders the meetings list. It also sat two tabs from the list it reorders.',
   },
   {
+    pattern: /\bspeaker separation models?\b/i,
+    useInstead: "speaker model",
+    because:
+      "Meetings, setup and the download buttons already said speaker model; Settings was the one place with a longer name for the same download.",
+  },
+  {
     pattern: /\bshared route\b/i,
-    useInstead: "speech engine (dictation and meetings)",
+    useInstead: "speech model (dictation and meetings)",
     because: '"Route" is an internal word for an engine-and-model pair.',
   },
 ];

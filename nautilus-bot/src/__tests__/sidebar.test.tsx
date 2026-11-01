@@ -285,7 +285,17 @@ describe("Sidebar collapsed layout", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not call the built-in cleanup model cloud when remote AI is on", () => {
+  it("does not claim local-only when cloud speech is permitted alongside local text models", () => {
+    readinessContext.settings.privacy.remoteProcessingEnabled = true;
+    Object.assign(readinessContext.settings.transcription, {
+      useSharedAsrSelection: true, defaultProvider: "openai_cloud", selectedModelId: "gpt-transcribe",
+    });
+    render(<Sidebar activeView="dictation" onViewChange={vi.fn()} />);
+    expect(screen.getByRole("button", { name: /Cloud allowed/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Local only/ })).not.toBeInTheDocument();
+  });
+
+  it("reports cloud permission while naming the built-in cleanup model correctly", () => {
     // Regression guard: the chip used to test `provider !== "ollama"`, which
     // reported "Cloud Enabled · dictation cleanup uses 'bundled_local'" for a
     // model that runs in the sidecar process and opens no socket.
@@ -303,15 +313,15 @@ describe("Sidebar collapsed layout", () => {
           onViewChange={vi.fn()}
         />,
       );
-      const chip = screen.getByRole("button", { name: /Local only/ });
+      const chip = screen.getByRole("button", { name: /Cloud allowed/ });
       expect(chip.getAttribute("aria-label")).toContain("S1-mini");
-      expect(chip.getAttribute("aria-label")).not.toContain("Cloud");
+      expect(chip.getAttribute("aria-label")).not.toContain("runs in the cloud");
     } finally {
       readinessContext.settings.privacy = previous;
     }
   });
 
-  it("still says Cloud Enabled when a lane really does leave the machine", () => {
+  it("reports cloud permission and selected remote text providers", () => {
     const previous = readinessContext.settings.privacy;
     readinessContext.settings.privacy = {
       ...previous,
@@ -327,9 +337,9 @@ describe("Sidebar collapsed layout", () => {
           onViewChange={vi.fn()}
         />,
       );
-      const chip = screen.getByRole("button", { name: /Cloud Enabled/ });
+      const chip = screen.getByRole("button", { name: /Cloud allowed/ });
       expect(chip.getAttribute("aria-label")).toContain("meeting summaries");
-      expect(chip.getAttribute("aria-label")).not.toContain("dictation cleanup");
+      expect(chip.getAttribute("aria-label")).toContain("Anthropic");
     } finally {
       readinessContext.settings.privacy = previous;
     }
@@ -450,6 +460,48 @@ describe("Sidebar collapsed layout", () => {
     ).toEqual({ tab: "models" });
 
     window.removeEventListener(OPEN_SETTINGS_TAB_EVENT, settingsTabListener);
+  });
+
+  it("keeps meeting audio warnings out of ready dictation but preserves them elsewhere", () => {
+    const cause = {
+      id: "system_audio_unverified" as const,
+      message: "Test system audio before recording everyone on the call.",
+      action: { id: "test_system_audio" as const, label: "Test system audio", destination: "setup" as const },
+    };
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      fullCapture: { domain: "full_capture", state: "degraded", cause },
+      overall: { domain: "overall", state: "degraded", cause },
+    };
+    const props = { onViewChange: vi.fn(), onToggleCollapse: vi.fn() };
+    const view = render(<Sidebar {...props} activeView="dictation" />);
+    expect(screen.queryByRole("button", { name: /Test system audio/ })).not.toBeInTheDocument();
+    view.rerender(<Sidebar {...props} activeView="recordings" />);
+    expect(screen.getByRole("button", { name: /Test system audio/ })).toBeInTheDocument();
+    view.rerender(<Sidebar {...props} activeView="dashboard" />);
+    expect(screen.getByRole("button", { name: /Test system audio/ })).toBeInTheDocument();
+  });
+
+  it("still shows an actionable dictation model blocker in the dictation workspace", () => {
+    const cause = {
+      id: "dictation_route" as const,
+      message: "Download the selected dictation model.",
+      action: { id: "open_models" as const, label: "Review models", destination: "models" as const },
+    };
+    readinessContext.productReadiness = {
+      ...readinessContext.productReadiness,
+      dictation: { domain: "dictation", state: "blocked", cause },
+      overall: { domain: "overall", state: "blocked", cause },
+    };
+    const listener = vi.fn();
+    window.addEventListener(OPEN_SETTINGS_TAB_EVENT, listener);
+    try {
+      render(<Sidebar activeView="dictation" onViewChange={vi.fn()} />);
+      fireEvent.click(screen.getByRole("button", { name: "Setup needed. Download the selected dictation model." }));
+      expect((listener.mock.calls[0][0] as CustomEvent).detail).toEqual({ tab: "models" });
+    } finally {
+      window.removeEventListener(OPEN_SETTINGS_TAB_EVENT, listener);
+    }
   });
 
   it("says it is checking, and raises no Setup needed badge, while readiness loads", () => {

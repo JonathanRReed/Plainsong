@@ -504,6 +504,7 @@ impl DeepgramProvider {
         TranscriptionResult {
             text: parsed.text,
             segments: parsed.segments,
+            measured_word_timestamps: false,
             speaker_turns: parsed.speaker_turns,
             language: parsed.language.unwrap_or_else(|| "auto".to_string()),
             confidence,
@@ -517,6 +518,7 @@ impl DeepgramProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied,
+            vocabulary_candidates: Vec::new(),
         }
     }
 
@@ -526,7 +528,7 @@ impl DeepgramProvider {
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context(
-            "Deepgram API key not set. Add it in Settings → API Keys or set DEEPGRAM_API_KEY.",
+            "Deepgram API key not set. Add it in Settings > Search & AI > API keys or set DEEPGRAM_API_KEY.",
         )?;
         let start = std::time::Instant::now();
         let (parsed, keyterm_count) = self
@@ -603,7 +605,7 @@ impl AsrProvider for DeepgramProvider {
         options: &TranscriptionOptions,
     ) -> Result<TranscriptionResult> {
         let api_key = Self::api_key().context(
-            "Deepgram API key not set. Add it in Settings → API Keys or set DEEPGRAM_API_KEY.",
+            "Deepgram API key not set. Add it in Settings > Search & AI > API keys or set DEEPGRAM_API_KEY.",
         )?;
         let start = std::time::Instant::now();
         // Streamed rather than read into a `Vec`: see `streaming_wav_body`.

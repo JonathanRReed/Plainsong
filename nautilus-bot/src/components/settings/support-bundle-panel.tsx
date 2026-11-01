@@ -14,7 +14,7 @@ import {
  * `docs/beta/KNOWN-LIMITATIONS.md` said the installed beta could not make one
  * of these, so a tester's only options were a screenshot or installing Bun and
  * cloning the repository. This is the in-app version of
- * `scripts/capture-support-bundle.mjs`.
+ * `scripts/capture-support-bundle.ts`.
  *
  * The reader sees the file list and the rules first, on purpose: a bundle is
  * something they will forward to somebody, and the moment to decide is before
@@ -61,10 +61,10 @@ export function SupportBundlePanel() {
   };
 
   return (
-    <div className="space-y-3 border-t pt-4">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+    <section id="setting-support-bundle" aria-labelledby="support-bundle-heading" className="space-y-3">
+      <div className="space-y-3">
         <div className="space-y-1">
-          <p className="section-heading">Diagnostics</p>
+          <h3 id="support-bundle-heading" className="section-heading">Diagnostics bundle</h3>
           <p className="text-sm text-muted-foreground">
             A support bundle is a zip you can open and read before you send it.
             It carries versions, switches, counts, and log lines. It never
@@ -81,7 +81,7 @@ export function SupportBundlePanel() {
             {expanded ? "Hide what is included" : "Show what is included"}
           </Button>
           {/* Outline, not the gilded CTA: this tab's one earned gold button is
-              "Encrypt existing recordings". Making diagnostics compete with it
+              the earned one. Making diagnostics compete with it
               would be the flood STYLE.md §0 warns about. */}
           <Button
             variant="outline"
@@ -113,7 +113,7 @@ export function SupportBundlePanel() {
       ) : null}
 
       {expanded && preview ? (
-        <div className="space-y-4 rounded-2xl border border-border/60 bg-muted/20 p-4">
+        <div className="space-y-4 rounded-lg border border-border/60 bg-muted/20 p-4">
           <div className="space-y-2">
             <p className="section-heading">What goes in</p>
             <ul className="space-y-1.5 text-sm text-muted-foreground">
@@ -164,6 +164,6 @@ export function SupportBundlePanel() {
           The bundle was not written: {writeError}. Nothing was saved.
         </p>
       ) : null}
-    </div>
+    </section>
   );
 }

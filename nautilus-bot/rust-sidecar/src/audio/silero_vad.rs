@@ -93,7 +93,11 @@ struct OrtSileroVadBackend {
 #[cfg(any(feature = "asr-parakeet", feature = "diarization"))]
 impl OrtSileroVadBackend {
     fn load(onnx_path: &std::path::Path) -> Result<Self> {
-        let session = crate::ort_utils::build_session(onnx_path)
+        let model = crate::download::open_verified_model_artifact(
+            onnx_path,
+            crate::download::SILERO_VAD_ONNX_SHA256,
+        )?;
+        let session = crate::ort_utils::build_verified_session(&model)
             .context("Failed to load Silero VAD ONNX model")?;
         Ok(Self { session })
     }

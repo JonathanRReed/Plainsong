@@ -1,4 +1,5 @@
 import { invoke } from "@/lib/electron";
+import { editSettings, type SettingsPatch } from "@/lib/settings-patch";
 import type {
   PauseSpan,
   Recording,
@@ -17,6 +18,7 @@ import type {
   MeetingTranscriptDetails,
   AppleSpeechLanguageInstallResult,
 } from "@/types";
+import type { SavedPrompt } from "@/lib/saved-prompts";
 import type { OnboardingSettings, Settings } from "@/types/settings";
 import type { MeetingAttendee } from "@/lib/attendees";
 import type { DictationBindingIssue } from "../../electron/dictation-bindings";
@@ -30,6 +32,13 @@ export interface DictationStartOptions {
   languageOverride?: string | null;
   livePreviewEnabled?: boolean;
   deliveryMode?: "system" | "preview";
+}
+
+export interface DictationRecognitionReviewWord {
+  word: string;
+  score: number;
+  startTime: number;
+  endTime: number;
 }
 
 export interface DictationHistoryDetails {
@@ -68,6 +77,8 @@ export interface DictationHistoryDetails {
   translationApplied?: boolean | null;
   /** What the recognizer heard, when the dictation was saved with it. */
   rawTranscript?: string | null;
+  /** Lower-scored words from the original recognition, never the rewritten result. */
+  recognitionReviewWords?: DictationRecognitionReviewWord[] | null;
   /** Whether the kept audio is still on disk; null when none was kept. */
   audioAvailable?: boolean | null;
   /** Set on a "Process again" entry: the dictation whose audio it re-ran. */
@@ -94,6 +105,9 @@ export interface DictationInsights {
 
 interface MeetingChatCitation {
   text: string;
+  sourceKind?: "transcript" | "meeting_note" | null;
+  segmentId?: string | null;
+  lineId?: string | null;
   startTime?: number | null;
   endTime?: number | null;
   recordingId?: string | null;
@@ -172,6 +186,7 @@ export async function stopDictation(): Promise<string> {
 }
 
 export interface DictationReprocessResult {
+  aiRewriteFailed?: boolean;
   modePreset: string;
   outputText: string;
   usedAi: boolean;
@@ -182,9 +197,15 @@ export interface DictationReprocessResult {
 export async function reprocessDictationText(
   text: string,
   modePreset: string,
-  appTarget?: string | null
+  appTarget?: string | null,
+  options: { runId?: string } = {},
 ): Promise<DictationReprocessResult> {
-  return await invoke("reprocess_dictation_text", { text, modePreset, appTarget });
+  return await invoke("reprocess_dictation_text", {
+    text,
+    modePreset,
+    appTarget,
+    ...(options.runId !== undefined ? { runId: options.runId } : {}),
+  });
 }
 
 export async function getDictationHistoryDetails(
@@ -199,15 +220,15 @@ export async function getDictationInsights(): Promise<DictationInsights> {
 
 /**
  * One ranked hit from dictation history search. `snippet` wraps each matched
- * term in `[[`/`]]`; `matchedField` says whether the delivered text
- * (`final`) or what the recognizer heard (`raw`) matched.
+ * term in `[[`/`]]`; `matchedField` identifies saved corrections (`corrected`),
+ * the original result (`final`), or recognizer output (`raw`).
  */
 export interface DictationHistorySearchHit {
   recordingId: string;
   recordingTitle: string;
   createdAt: string;
   snippet: string;
-  matchedField: "final" | "raw" | string;
+  matchedField: "final" | "raw" | "corrected" | string;
   score: number;
 }
 
@@ -237,6 +258,7 @@ export interface DictationReprocessRequest {
  * sidecar inserts nothing and touches no clipboard; the entry is the result.
  */
 export interface DictationReprocessOutcome {
+  aiRewriteFailed?: boolean;
   recording: Recording;
   transcript: Transcript;
   finalText: string;
@@ -304,6 +326,7 @@ export interface SelectedTextTransformResult {
   targetApp?: string | null;
   targetBundleId?: string | null;
   pasted: boolean;
+  confirmed?: boolean;
   copied: boolean;
   error?: string | null;
   usedAi: boolean;
@@ -322,6 +345,8 @@ export async function getDictationAudioLevel(): Promise<number> {
 }
 
 export async function startRecording(options: {
+  joinConferenceUrl?: string;
+  onJoinFailure?: () => void;
   mic: boolean;
   systemAudio: boolean;
   projectId: string;
@@ -337,7 +362,15 @@ export async function startRecording(options: {
   /** The conferencing service, stored with the recording as its tag. */
   videoService?: string;
 }): Promise<string> {
-  return await invoke("begin_meeting_capture", { options });
+  const { joinConferenceUrl, onJoinFailure, ...captureOptions } = options;
+  if (joinConferenceUrl) {
+    const result = await invoke<{ recordingId: string; joinOpened: boolean }>(
+      "begin_calendar_meeting_capture", { options: captureOptions, conferenceUrl: joinConferenceUrl },
+    );
+    if (!result.joinOpened) onJoinFailure?.();
+    return result.recordingId;
+  }
+  return await invoke("begin_meeting_capture", { options: captureOptions });
 }
 
 export interface AudioInputDeviceInfo {
@@ -495,6 +528,27 @@ export async function getWaveformData(recordingId: string): Promise<number[]> {
   return await invoke("get_waveform_data", { recordingId });
 }
 
+/**
+ * Live loudness of each source of the active meeting: RMS from 0 to 1 over
+ * the last 100 ms. `null` for a source the meeting does not record, and both
+ * `null` when `recordingId` is not the active meeting.
+ */
+export interface MeetingSourceLevels {
+  mic: number | null;
+  system: number | null;
+  /**
+   * True once the meeting has run for a while without one non-zero sample of
+   * meeting audio, so a flat meter is not mistaken for a quiet call.
+   */
+  systemUnverified?: boolean;
+}
+
+export async function getMeetingSourceLevels(
+  recordingId: string
+): Promise<MeetingSourceLevels> {
+  return await invoke("get_meeting_source_levels", { recordingId });
+}
+
 export async function getRecordingWaveform(recordingId: string, points = 400): Promise<number[]> {
   return await invoke("get_recording_waveform", { recordingId, points });
 }
@@ -517,8 +571,8 @@ export async function getMeetingTranscriptDetails(
   return await invoke("get_meeting_transcript_details", { recordingId });
 }
 
-export async function deleteRecording(recordingId: string): Promise<void> {
-  await invoke("delete_recording", { recordingId });
+export async function deleteRecording(recordingId: string, deletePublishedFile = false): Promise<void> {
+  await invoke("delete_recording", { recordingId, ...(deletePublishedFile ? { deletePublishedFile } : {}) });
 }
 
 /** Re-run the full transcription pipeline for a meeting whose audio file is
@@ -568,11 +622,48 @@ export async function updateRecordingAttendees(
   return await invoke("update_recording_attendees", { recordingId, attendees });
 }
 
+export type EnhancedMeetingNotesDraft = {
+  text: string;
+  generatedAt: string;
+  rawNotesSnapshot: string;
+  summaryCitations: import("@/types").LlmCitation[];
+  actionItemCitations: Array<{ label: string; citations: import("@/types").LlmCitation[] }>;
+};
+
+export async function getMeetingEnhancedNoteDraft(recordingId: string): Promise<EnhancedMeetingNotesDraft | null> {
+  return await invoke("get_meeting_enhanced_note_draft", { recordingId });
+}
+
+export async function saveMeetingEnhancedNoteDraft(recordingId: string, draft: EnhancedMeetingNotesDraft): Promise<EnhancedMeetingNotesDraft> {
+  return await invoke("save_meeting_enhanced_note_draft", { recordingId, draft });
+}
+
+export async function deleteMeetingEnhancedNoteDraft(recordingId: string): Promise<null> {
+  return await invoke("delete_meeting_enhanced_note_draft", { recordingId });
+}
+
 export async function updateRecordingNotes(
   recordingId: string,
-  meetingNotes: string
+  meetingNotes: string,
+  recoveryDraftId?: string,
+  expectedMeetingNotes?: string,
 ): Promise<void> {
-  await invoke("update_recording_notes", { recordingId, meetingNotes });
+  await invoke("update_recording_notes", { recordingId, meetingNotes, ...(recoveryDraftId ? { recoveryDraftId } : {}), ...(expectedMeetingNotes !== undefined ? { expectedMeetingNotes } : {}) });
+}
+
+export interface MeetingNoteRecoveryDraft {
+  id: string;
+  recordingId: string;
+  baseNotes: string;
+  notes: string;
+}
+
+export async function queueMeetingNoteRecovery(draft: MeetingNoteRecoveryDraft): Promise<void> {
+  await invoke("queue_meeting_note_recovery", { draft });
+}
+
+export async function listMeetingNoteRecovery(): Promise<MeetingNoteRecoveryDraft[]> {
+  return await invoke("list_meeting_note_recovery");
 }
 
 export interface RecordingAnalysisPatch {
@@ -612,16 +703,30 @@ export async function updateMeetingChatMessages(
 export async function editTranscriptSpeakerTurn(
   recordingId: string,
   segmentIds: string[],
-  newText: string
+  newText: string,
+  expectedSegments: TranscriptSegmentExpectation[],
 ): Promise<void> {
-  await invoke("edit_transcript_speaker_turn", { recordingId, segmentIds, newText });
+  await invoke("edit_transcript_speaker_turn", { recordingId, segmentIds, newText, expectedSegments });
+}
+
+export interface TranscriptSegmentExpectation {
+  id: string;
+  text: string;
+  startTime: number;
+  endTime: number;
+  speakerId: string | null;
 }
 
 export async function deleteTranscriptSegments(
   recordingId: string,
-  segmentIds: string[]
+  segmentIds: string[],
+  expectedSegments?: TranscriptSegmentExpectation[],
 ): Promise<number> {
-  return await invoke("delete_transcript_segments", { recordingId, segmentIds });
+  return await invoke("delete_transcript_segments", {
+    recordingId,
+    segmentIds,
+    ...(expectedSegments ? { expectedSegments } : {}),
+  });
 }
 
 export async function retryMeetingAutoName(recordingId: string): Promise<void> {
@@ -634,6 +739,14 @@ export async function retryMeetingAutoName(recordingId: string): Promise<void> {
  */
 export async function retryMeetingAnalysis(recordingId: string): Promise<void> {
   await invoke("retry_meeting_analysis", { recordingId });
+}
+
+/**
+ * Stop the automatic retries of notes that are waiting for memory. The
+ * meeting keeps its retry button.
+ */
+export async function cancelMeetingNotesWait(recordingId: string): Promise<{ cancelled: boolean }> {
+  return await invoke("cancel_meeting_notes_wait", { recordingId });
 }
 
 /** One audio asset's state after a re-check, as the sidecar reports it. */
@@ -823,6 +936,7 @@ interface LearnDictationCorrectionRequest {
 
 export interface LearnDictationCorrectionResult {
   learned: boolean;
+  undoToken?: string | null;
   action?: "created" | "updated" | null;
   reason?: string | null;
   spokenForm?: string | null;
@@ -845,6 +959,10 @@ export interface DictationDictionaryCsvImportResult {
  */
 export const EXTERNAL_APP_CORRECTION_SOURCE = "external_app_readback";
 
+export type CorrectionApprovalDictionarySnapshot =
+  | { kind: "missing" }
+  | { kind: "entry"; entryId: string; revision: number; spokenForm: string; replacement: string };
+
 export interface DictationCorrectionSuggestion {
   id: string;
   originalText: string;
@@ -855,6 +973,7 @@ export interface DictationCorrectionSuggestion {
   source?: string | null;
   createdAt: string;
   updatedAt: string;
+  approvalDictionary?: CorrectionApprovalDictionarySnapshot | null;
 }
 
 export interface QueueDictationCorrectionSuggestionResult {
@@ -960,9 +1079,17 @@ export async function queueDictationCorrectionSuggestion(
 }
 
 export async function approveDictationCorrectionSuggestion(
-  suggestionId: string
+  suggestionId: string,
+  expectedDictionary: CorrectionApprovalDictionarySnapshot,
 ): Promise<LearnDictationCorrectionResult> {
-  return await invoke("approve_dictation_correction_suggestion", { suggestionId });
+  return await invoke("approve_dictation_correction_suggestion", { suggestionId, expectedDictionary });
+}
+
+export async function undoDictationCorrectionApproval(undoToken: string): Promise<{
+  entryId: string;
+  entry: DictationDictionaryEntry | null;
+}> {
+  return await invoke("undo_dictation_correction_approval", { undoToken });
 }
 
 export async function rejectDictationCorrectionSuggestion(suggestionId: string): Promise<void> {
@@ -976,14 +1103,14 @@ export async function listDictationSnippets(): Promise<DictationSnippet[]> {
 export async function createDictationSnippet(
   request: CreateDictationSnippetRequest
 ): Promise<DictationSnippet> {
-  return await invoke("create_dictation_snippet", { request });
+  return await invoke("create_dictation_snippet", { snippet: request });
 }
 
 export async function updateDictationSnippet(
   snippetId: string,
   request: UpdateDictationSnippetRequest
 ): Promise<DictationSnippet> {
-  return await invoke("update_dictation_snippet", { snippetId, request });
+  return await invoke("update_dictation_snippet", { snippetId, snippet: request });
 }
 
 export async function deleteDictationSnippet(snippetId: string): Promise<void> {
@@ -1043,6 +1170,11 @@ export async function listDownloadedModels(): Promise<DownloadedModelFile[]> {
   return await invoke("list_downloaded_models");
 }
 
+/** Delete one downloaded model file or bundle directory under the models folder. */
+export async function deleteModelFile(path: string): Promise<void> {
+  await invoke("delete_model", { path });
+}
+
 export async function refreshAsrRuntimeProbes(): Promise<void> {
   await invoke("refresh_asr_runtime_probes");
 }
@@ -1073,11 +1205,24 @@ export async function analyzeRecordings(
   return await invoke("analyze_recordings", { recordingIds, query, model });
 }
 
+export type SummaryRegenerationUndo = { canUndo: boolean; undoToken?: string };
+
+export async function getSummaryRegenerationUndo(recordingId: string): Promise<SummaryRegenerationUndo> {
+  return await invoke("get_summary_regeneration_undo", { recordingId });
+}
+
+export async function undoSummaryRegeneration(recordingId: string, undoToken: string): Promise<Recording> {
+  return await invoke("undo_summary_regeneration", { recordingId, undoToken });
+}
+
 export async function summarizeRecordingGrounded(
   recordingId: string,
-  model?: string
+  model?: string,
+  options: { persist?: boolean; runId?: string } = {}
 ): Promise<GroundedSummaryResult> {
-  return await invoke("summarize_recording_grounded", { recordingId, model });
+  return await invoke("summarize_recording_grounded", {
+    recordingId, model, persist: options.persist, runId: options.runId,
+  });
 }
 
 export async function extractActionItems(
@@ -1106,9 +1251,24 @@ export async function extractActionItemsGrounded(
   });
 }
 
-/** Ask a question across all meeting transcripts (AutoRAG Memory). */
-export async function askMemory(query: string): Promise<LlmAnalysisResult> {
-  return await invoke("ask_memory", { query });
+/** Ask across stored transcripts, optionally restricting the source records. */
+export async function askMemory(
+  query: string,
+  options: {
+    excludeRecordingId?: string;
+    sourceType?: "meeting" | "dictation";
+    runId?: string;
+    /** The bare question to search for, when `query` wraps it in context. */
+    searchQuery?: string;
+  } = {},
+): Promise<LlmAnalysisResult> {
+  return await invoke("ask_memory", {
+    query,
+    ...(options.searchQuery?.trim() ? { searchQuery: options.searchQuery.trim() } : {}),
+    ...(options.excludeRecordingId ? { excludeRecordingId: options.excludeRecordingId } : {}),
+    ...(options.sourceType ? { sourceType: options.sourceType } : {}),
+    ...(options.runId ? { runId: options.runId } : {}),
+  });
 }
 
 export async function getRelationshipMemory(): Promise<RelationshipMemory> {
@@ -1118,23 +1278,107 @@ export async function getRelationshipMemory(): Promise<RelationshipMemory> {
 export async function searchTranscripts(
   query: string,
   limit = 20,
-  projectIds?: string[]
+  projectIds?: string[],
+  sourceType?: "meeting" | "dictation",
+  recordingStatus?: "completed" | "recording" | "processing" | "error"
 ): Promise<SearchHit[]> {
-  return await invoke("search_transcripts", { query, limit, projectIds });
+  return await invoke("search_transcripts", {
+    query,
+    limit,
+    projectIds,
+    ...(sourceType ? { sourceType } : {}),
+    ...(recordingStatus ? { recordingStatus } : {}),
+  });
 }
 
 export async function getOllamaStatus(): Promise<boolean> {
   return await invoke("get_ollama_status");
 }
 
+export interface LocalTextRuntimeHealth {
+  state: "available" | "busy" | "completion_unknown" | "storage_error";
+  message: string | null;
+}
+
+export interface LocalTextRuntimeStatus {
+  runtimeHealth: LocalTextRuntimeHealth;
+  /** null means the selected model's execution destination was not verified. */
+  localGateApplies: boolean | null;
+}
+
+export async function getLocalTextRuntimeHealth(modelId?: string): Promise<LocalTextRuntimeStatus> {
+  return await invoke("get_local_text_runtime_health", modelId ? { modelId } : {});
+}
+
 interface ReindexResult {
   recordings: number;
   segments: number;
   errors: number;
+  /**
+   * True for the built-in route: the index was cleared and the background
+   * indexer rebuilds it, reporting through `semantic-index-progress` events.
+   */
+  background?: boolean;
 }
 
 export async function reindexEmbeddings(): Promise<ReindexResult> {
   return await invoke("reindex_embeddings");
+}
+
+interface BuiltInSearchModel {
+  id: string;
+  displayName: string;
+  vendor: string;
+  summary: string;
+  languages: string;
+  license: string;
+  termsUrl: string;
+  /** A use policy the publisher asks deployments to follow, shown beside the model. */
+  usePolicyUrl: string | null;
+  /** The model downloads and runs only after the user accepts `termsUrl`. */
+  requiresTermsAcceptance: boolean;
+  termsAccepted: boolean;
+  downloadBytes: number;
+  downloaded: boolean;
+  isDefault: boolean;
+}
+
+export interface EmbeddingStatus {
+  memorySearchMode: string;
+  embeddingCount: number;
+  ollamaAvailable: boolean;
+  /** False in a build without the built-in search runtime. */
+  builtInAvailable: boolean;
+  builtInModels: BuiltInSearchModel[];
+  selectedBuiltInModel: string;
+  /** Recordings the selected index covers; null when meaning search is off. */
+  indexedRecordings: number | null;
+  totalRecordings: number | null;
+  indexing: boolean;
+  downloading: boolean;
+  lastError: string | null;
+}
+
+export async function getEmbeddingStatus(): Promise<EmbeddingStatus> {
+  return await invoke("get_embedding_status");
+}
+
+export async function downloadEmbeddingModel(modelId: string): Promise<EmbeddingStatus> {
+  return await invoke("download_embedding_model", { modelId });
+}
+
+/** Stop a running search-model download. */
+export async function cancelEmbeddingModelDownload(): Promise<void> {
+  await invoke("cancel_embedding_model_download");
+}
+
+/** Record that the user accepted `termsUrl` for a built-in search model. */
+export async function acceptEmbeddingModelTerms(modelId: string, termsUrl: string): Promise<EmbeddingStatus> {
+  return await invoke("accept_embedding_model_terms", { modelId, termsUrl });
+}
+
+export async function deleteEmbeddingModel(modelId: string): Promise<EmbeddingStatus> {
+  return await invoke("delete_embedding_model", { modelId });
 }
 
 export async function listOllamaModels(): Promise<string[]> {
@@ -1211,7 +1455,15 @@ export interface SystemAudioCapability {
   ready: boolean;
   reason: SystemAudioFailureKind | null;
   actionableReason: string | null;
+  /**
+   * macOS's "System Audio Recording" permission for the built-in route
+   * (`core_audio_process_tap`); absent or null for any other route. Read
+   * without prompting, so `not_determined` means macOS has not asked yet.
+   */
+  permission?: SystemAudioPermission | null;
 }
+
+export type SystemAudioPermission = "granted" | "denied" | "not_determined" | "unknown";
 
 export interface SystemAudioTestResult {
   capability: SystemAudioCapability;
@@ -1436,6 +1688,22 @@ export interface DiarizationModelOption {
   label: string;
   description: string;
   installed: boolean;
+  /** Download size as Finder shows it, e.g. "33 MB". */
+  downloadSize?: string | null;
+}
+
+/**
+ * What a meeting would do about speakers right now: the selected model,
+ * whether it is downloaded, and which model the next run would use (a
+ * downloaded stand-in, or none at all).
+ */
+export interface DiarizationModelPlan {
+  selectedModelId: string;
+  selectedLabel: string;
+  selectedDownloadSize: string | null;
+  selectedInstalled: boolean;
+  runModelId: string | null;
+  fallbackNotice: string | null;
 }
 
 /** A remembered voice, as Settings lists it. Never carries the signature itself. */
@@ -1515,6 +1783,10 @@ export async function listDiarizationModels(): Promise<DiarizationModelOption[]>
   return await invoke("list_diarization_models");
 }
 
+export async function getDiarizationModelPlan(): Promise<DiarizationModelPlan> {
+  return await invoke("get_diarization_model_plan");
+}
+
 export async function isDiarizationModelAvailable(modelId?: string): Promise<boolean> {
   return await invoke("is_diarization_model_available", { modelId });
 }
@@ -1535,11 +1807,63 @@ export async function downloadSileroVadModel(): Promise<void> {
 /**
  * Readiness of the bundled zero-setup dictation cleanup model.
  *
- * `ready` is "every pinned file carries a trusted integrity receipt", not
- * "the files are on disk" -- the sidecar refuses to load weights it cannot
- * vouch for, so anything weaker here would show a green row for a model that
- * will not run.
+ * `ready` is "every pinned file is present and this session has not found it
+ * wrong", not "the folder has files". The sidecar hashes each file the first
+ * time it loads it in a session; a file that fails reads as not ready from
+ * then on, so the row offers the download instead of a model that will not
+ * run.
  */
+export interface NativeTextModelSize {
+  modelId: string;
+  size: "light" | "balanced" | "best";
+  label: string;
+  description: string;
+  displayName: string;
+  recommended: boolean;
+  downloadBytes: number;
+  bytesOnDisk: number;
+  ready: boolean;
+  missingFiles: string[];
+  modelMemoryBytes: number;
+  memoryRequiredBytes: number | null;
+  memoryAvailableBytes: number | null;
+  canLoadNow: boolean;
+  contextTokens: number;
+}
+
+export interface NativeTextModelStatus {
+  observedHelperMemory?: { footprintBytes: number; peakFootprintBytes: number; peakResidentBytes: number };
+  sizes?: NativeTextModelSize[];
+  recommendedModelId?: string;
+  provider: "native_text";
+  modelId: string;
+  displayName: string;
+  downloadBytes: number;
+  bytesOnDisk: number;
+  ready: boolean;
+  missingFiles: string[];
+  runtimePresent: boolean;
+  memoryAvailableBytes: number | null;
+  memoryRequiredBytes?: number | null;
+  canLoadNow: boolean;
+  runtimeHealth?: LocalTextRuntimeHealth;
+  qualified: boolean;
+  contextTokens: number;
+}
+
+export async function getNativeTextModelStatus(modelId?: string): Promise<NativeTextModelStatus> {
+  return await invoke("get_native_text_model_status", modelId ? { modelId } : undefined);
+}
+export async function downloadNativeTextModel(modelId?: string): Promise<NativeTextModelStatus> {
+  return await invoke("download_native_text_model", modelId ? { modelId } : undefined);
+}
+export async function cancelNativeTextModelDownload(): Promise<void> {
+  await invoke("cancel_native_text_model_download");
+}
+export async function deleteNativeTextModel(modelId?: string): Promise<NativeTextModelStatus> {
+  return await invoke("delete_native_text_model", modelId ? { modelId } : undefined);
+}
+
 export interface BundledCleanupModelStatus {
   provider: string;
   modelId: string;
@@ -1572,7 +1896,7 @@ export interface BundledCleanupModelStatus {
    * sentence from "this Mac is slow".
    */
   backendPresent: boolean;
-  /** Roughly what the model holds in memory while it is loaded. */
+  /** Conservative warm-model allowance, excluding per-request working memory. Not a measured peak. */
   residentBytes: number;
 }
 
@@ -1602,7 +1926,7 @@ export async function deleteBundledCleanupModel(): Promise<BundledCleanupModelSt
 export interface LivePreviewEngineStatus {
   /** Whether this build has a streaming engine at all. */
   supported: boolean;
-  /** Whether its weights are on disk AND carry a trusted integrity receipt. */
+  /** Whether its pinned weights are on disk and this session has not found them wrong. */
   ready: boolean;
   modelId: string | null;
   displayName: string | null;
@@ -1684,8 +2008,47 @@ export async function resetAppState(): Promise<ResetAppStateResult> {
   return await invoke("reset_app_state");
 }
 
-export async function saveSettings(settings: Settings): Promise<void> {
-  await invoke("save_settings", { settings });
+export async function setSavedPrompts(savedPrompts: readonly SavedPrompt[]): Promise<SavedPrompt[]> {
+  return invoke("set_saved_prompts", { savedPrompts });
+}
+
+let settingsWrites: Promise<void> = Promise.resolve();
+
+function enqueueSettingsWrite(write: () => Promise<void>): Promise<void> {
+  const result = settingsWrites.then(write);
+  settingsWrites = result.catch(() => {});
+  return result;
+}
+
+async function writeSettingsPatch(operations: SettingsPatch["operations"]): Promise<void> {
+  if (operations.length === 0) return;
+  await invoke("save_settings", { patch: operations, preserveSavedPrompts: true });
+}
+
+export function updateSettings(mutate: (draft: Settings) => void): Promise<void> {
+  return enqueueSettingsWrite(async () => {
+    const before = await getSettings();
+    await writeSettingsPatch(editSettings(before, mutate).operations);
+  });
+}
+
+export function patchSettings(changes: SettingsPatch): Promise<void> {
+  const operations = structuredClone(changes.operations);
+  return enqueueSettingsWrite(() => writeSettingsPatch(operations));
+}
+
+let externalCorrectionConsentWrites: Promise<void> = Promise.resolve();
+
+export function setDictationExternalCorrectionLearning(enabled: boolean): Promise<boolean> {
+  const write = externalCorrectionConsentWrites.then(async () => {
+    const confirmed = await invoke<unknown>("set_dictation_external_correction_learning", { enabled });
+    if (typeof confirmed !== "boolean") {
+      throw new Error("Plainsong did not confirm correction learning.");
+    }
+    return confirmed;
+  });
+  externalCorrectionConsentWrites = write.then(() => {}, () => {});
+  return write;
 }
 
 /** What happened to first-run setup. The sidecar supplies everything else. */

@@ -79,6 +79,42 @@ where
     })
 }
 
+/// [`build_session`] for a model file verified in this session: ONNX Runtime
+/// opens the verified file itself, not whatever its path names now, and a
+/// failed load drops the session's record of it. The graph must not name
+/// external data by a relative path; none of these single-file graphs do.
+pub(crate) fn build_verified_session(
+    model: &crate::download::VerifiedModelArtifact,
+) -> Result<Session> {
+    model.load(build_session)
+}
+
+/// [`build_session_with`] for a verified model file.
+pub(crate) fn build_verified_session_with<F>(
+    model: &crate::download::VerifiedModelArtifact,
+    configure: F,
+) -> Result<Session>
+where
+    F: FnOnce(
+        ort::session::builder::SessionBuilder,
+    ) -> Result<ort::session::builder::SessionBuilder>,
+{
+    model.load(|path| build_session_with(path, configure))
+}
+
+/// [`build_session_no_coreml`] for a verified model file.
+pub(crate) fn build_verified_session_no_coreml<F>(
+    model: &crate::download::VerifiedModelArtifact,
+    configure: F,
+) -> Result<Session>
+where
+    F: FnOnce(
+        ort::session::builder::SessionBuilder,
+    ) -> Result<ort::session::builder::SessionBuilder>,
+{
+    model.load(|path| build_session_no_coreml(path, configure))
+}
+
 /// Build a session with a customisation hook, still getting CoreML EP when
 /// available. The closure receives the builder after graph optimisation and
 /// CoreML EP have been configured, allowing callers to set thread counts or

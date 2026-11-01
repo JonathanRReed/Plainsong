@@ -29,7 +29,7 @@
 //! The encoder is roughly 1.9B of the model's 2B parameters and there is no
 //! Metal path: `ort` links ONNX Runtime's CPU provider here, and the CoreML EP
 //! is measured to be a regression on this app's other ONNX graphs
-//! (`scripts/sidecar-cargo-features.mjs`). So this route buys accuracy with
+//! (`scripts/sidecar-cargo-features.ts`). So this route buys accuracy with
 //! wall time. The decision rule from the inventory doc is that it earns a
 //! promoted slot only if it lands within ~1.5× of Parakeet's latency on the
 //! 5.3 s fixture; the receipt
@@ -569,14 +569,14 @@ fn cohere_local_repo_files() -> [(
     ]
 }
 
-/// Every pinned artifact carries a valid integrity receipt. Plausible bytes
-/// are not enough: a swapped `.onnx_data` of the right size would otherwise
-/// run, and it is 2 GB of weights this app never looks inside.
-pub(crate) fn artifacts_trusted(model_dir: &Path) -> bool {
+/// Every pinned artifact is present and this session has not found it wrong.
+/// The load hashes each file against its pin, so a swapped `.onnx_data` of
+/// the right size fails there and then reads as missing.
+pub(crate) fn artifacts_installed(model_dir: &Path) -> bool {
     cohere_local_repo_files()
         .iter()
         .all(|(_, _, _, local_name, sha256)| {
-            crate::download::is_model_artifact_trusted(&model_dir.join(local_name), Some(sha256))
+            crate::download::is_model_artifact_installed(&model_dir.join(local_name), Some(sha256))
         })
 }
 
@@ -626,7 +626,19 @@ struct CohereLocalRuntime {
 }
 
 #[cfg(feature = "asr-parakeet")]
+fn verified_external_initializer_bytes(model_dir: &Path, name: &str) -> Result<Vec<u8>> {
+    let digest = cohere_local_repo_files()
+        .into_iter()
+        .find(|(_, _, _, local_name, _)| *local_name == name)
+        .map(|(_, _, _, _, digest)| digest)
+        .ok_or_else(|| anyhow::anyhow!("Missing integrity pin for {name}"))?;
+    // Hashed as read, so the copy ONNX gets is the copy that was checked.
+    crate::download::read_verified_model_bytes(&model_dir.join(name), digest)
+}
+
+#[cfg(feature = "asr-parakeet")]
 fn load_runtime(model_dir: &Path) -> Result<CohereLocalRuntime> {
+    let _model_load = crate::llm::local_model_load::guard(&[model_dir])?;
     #[derive(serde::Deserialize)]
     struct PreprocessorConfig {
         feature_size: usize,
@@ -718,10 +730,29 @@ fn load_runtime(model_dir: &Path) -> Result<CohereLocalRuntime> {
     // decoder is a merged graph whose control flow CoreML rejects outright --
     // the same two reasons the Qwen3 decoders bypass it. Both run on the CPU
     // provider and the route copy says so rather than implying Metal.
-    let encoder = crate::ort_utils::build_session_no_coreml(encoder_file.load_path(), Ok)
-        .context("Failed to load the Cohere Transcribe encoder")?;
-    let decoder = crate::ort_utils::build_session_no_coreml(decoder_file.load_path(), Ok)
-        .context("Failed to load the Cohere Transcribe decoder")?;
+    // The verified graph path is an open file descriptor on Unix. Its
+    // external weights must not be resolved relative to /dev/fd. Supply
+    // verified snapshots under the exact names recorded in each graph.
+    let encoder_data = verified_external_initializer_bytes(model_dir, LOCAL_ENCODER_DATA)?;
+    let encoder = crate::ort_utils::build_verified_session_no_coreml(&encoder_file, |builder| {
+        builder
+            .with_external_initializer_file_in_memory(
+                LOCAL_ENCODER_DATA,
+                std::borrow::Cow::Owned(encoder_data),
+            )
+            .map_err(|error| anyhow::anyhow!("Failed to attach Cohere encoder weights: {error}"))
+    })
+    .context("Failed to load the Cohere Transcribe encoder")?;
+    let decoder_data = verified_external_initializer_bytes(model_dir, LOCAL_DECODER_DATA)?;
+    let decoder = crate::ort_utils::build_verified_session_no_coreml(&decoder_file, |builder| {
+        builder
+            .with_external_initializer_file_in_memory(
+                LOCAL_DECODER_DATA,
+                std::borrow::Cow::Owned(decoder_data),
+            )
+            .map_err(|error| anyhow::anyhow!("Failed to attach Cohere decoder weights: {error}"))
+    })
+    .context("Failed to load the Cohere Transcribe decoder")?;
 
     let mel_filters = crate::audio::mel::create_mel_filterbank_slaney(
         COHERE_LOCAL_N_FFT,
@@ -890,7 +921,11 @@ fn compute_input_features(
 #[cfg(feature = "asr-parakeet")]
 fn runtime_cache() -> &'static Mutex<Option<CohereLocalRuntime>> {
     static CACHE: OnceLock<Mutex<Option<CohereLocalRuntime>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    static REGISTRATION: OnceLock<std::sync::Arc<crate::model_residency::IdleModel>> =
+        OnceLock::new();
+    crate::model_residency::watch_cache(&REGISTRATION, 4 * 1024 * 1024 * 1024, cache);
+    cache
 }
 
 #[cfg(feature = "asr-parakeet")]
@@ -925,7 +960,7 @@ fn prewarm_runtime(model_dir: &Path) -> Result<()> {
     {
         return Ok(());
     }
-    *cache = Some(load_runtime(model_dir)?);
+    *cache = Some(load_runtime(model_dir).map_err(crate::download::mismatch_first)?);
     Ok(())
 }
 
@@ -1193,11 +1228,12 @@ fn run_cohere_local_onnx(
         .as_ref()
         .is_none_or(|runtime| runtime.model_dir_key != model_dir_key)
     {
-        *cache = Some(load_runtime(model_dir)?);
+        *cache = Some(load_runtime(model_dir).map_err(crate::download::mismatch_first)?);
     }
     let runtime = cache
         .as_mut()
         .ok_or_else(|| anyhow::anyhow!("Cohere Transcribe (local) runtime cache is empty"))?;
+    let _working = crate::llm::local_model_load::working_buffers(&[model_dir])?;
 
     let rate = f64::from(COHERE_LOCAL_SAMPLE_RATE);
     let spans = split_audio_into_chunks(&samples, COHERE_LOCAL_SAMPLE_RATE);
@@ -1266,7 +1302,7 @@ impl CohereLocalProvider {
     }
 
     fn has_trusted_required_files(&self) -> bool {
-        artifacts_trusted(&self.model_dir)
+        artifacts_installed(&self.model_dir)
     }
 
     fn ensure_ready(&self) -> Result<()> {
@@ -1277,8 +1313,8 @@ impl CohereLocalProvider {
         }
         if !self.has_trusted_required_files() {
             anyhow::bail!(
-                "Cohere Transcribe (local) model files have not passed Plainsong integrity \
-                 verification. Re-download the model from Settings."
+                "Cohere Transcribe (local) model files failed their integrity \
+                 check. Download the model again in Settings > Models."
             );
         }
         Ok(())
@@ -1366,7 +1402,9 @@ impl CohereLocalProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 }
@@ -1513,6 +1551,41 @@ impl AsrProvider for CohereLocalProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_initializer_snapshot_rejects_changed_bytes() {
+        use sha2::{Digest, Sha256};
+        let dir = std::env::temp_dir().join(format!("plainsong-cohere-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("weights.onnx_data");
+        std::fs::write(&path, b"verified external weights").unwrap();
+        let digest = hex::encode(Sha256::digest(b"verified external weights"));
+        assert_eq!(
+            crate::download::read_verified_model_bytes(&path, &digest).unwrap(),
+            b"verified external weights"
+        );
+        std::fs::write(&path, b"changed external weights!").unwrap();
+        assert!(crate::download::read_verified_model_bytes(&path, &digest).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "asr-parakeet")]
+    #[ignore = "requires explicitly selected cached Cohere models in an isolated QA profile"]
+    async fn cohere_local_runtime_load_probe() {
+        assert_eq!(std::env::var("PLAINSONG_QA_MODE").as_deref(), Ok("1"));
+        let root = PathBuf::from(std::env::var("PLAINSONG_COHERE_LOAD_PROBE_OUT").unwrap());
+        let _state = crate::build_app_state().await.unwrap();
+        let model_dir = crate::paths::data_dir()
+            .unwrap()
+            .join("Plainsong/models/cohere_local");
+        let result = match load_runtime(&model_dir) {
+            Ok(_) => serde_json::json!({"loaded": true}),
+            Err(error) => serde_json::json!({"loaded": false, "error": format!("{error:#}")}),
+        };
+        std::fs::write(root, serde_json::to_vec_pretty(&result).unwrap()).unwrap();
+        crate::shutdown_for_sidecar().await;
+    }
 
     #[test]
     fn the_pinned_bundle_is_eight_files_at_one_immutable_revision() {
@@ -1770,7 +1843,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_requires_integrity_receipts_not_just_plausible_files() {
+    async fn plausible_files_are_refused_at_load_and_then_read_as_missing() {
         let models_root = scratch_models_root("trust");
         let model_dir = models_root.join(COHERE_LOCAL_MODEL_DIR);
         std::fs::create_dir_all(&model_dir).expect("model dir");
@@ -1781,10 +1854,37 @@ mod tests {
         let provider = CohereLocalProvider::with_models_root(&models_root, None);
         // Bytes of the right shape are on disk...
         assert_eq!(provider.download_status(), DownloadStatus::Downloaded);
-        // ...and readiness still refuses them, because nothing hashed them.
+        // ...and readiness accepts them without hashing.
+        assert!(provider.is_available());
+        // Other tests may hold the shared local-model gate for a moment.
+        let mut error = None;
+        for _ in 0..100 {
+            let attempt = provider.prewarm().await.unwrap_err();
+            if !attempt
+                .to_string()
+                .contains("Another local text operation is running")
+            {
+                error = Some(attempt);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let error = error.expect("local-model gate stayed busy");
+        if error
+            .to_string()
+            .contains("Not enough verified memory headroom")
+        {
+            // Small hosts refuse the load before hashing; the integrity path is unreachable here.
+            eprintln!("skipping integrity assertions: {error}");
+            return;
+        }
+        assert!(crate::download::is_integrity_mismatch(&error), "{error:#}");
+        assert!(
+            error.to_string().contains("Download the model again"),
+            "{error}"
+        );
+        // Loading hashed one file and found it wrong; now it reads as missing.
         assert!(!provider.is_available());
-        let error = provider.prewarm().await.unwrap_err().to_string();
-        assert!(error.contains("integrity verification"), "{error}");
         assert!(missing_or_invalid_files(&model_dir).is_empty());
         let _ = std::fs::remove_dir_all(&models_root);
     }

@@ -6,9 +6,15 @@ Dictate into other apps and record meetings without a bot joining the call. Plai
 
 ![Dictation workspace](docs/images/plainsong-dictation.png)
 
-The app is free and MIT-licensed, with no trial, paid tiers, or required account. Optional cloud transcription and AI cleanup use your own provider keys, stored in the OS keychain. Those requests go to the selected provider, not through a Plainsong server. Local transcription remains the default.
+The app is free and MIT-licensed, with no trial, paid tiers, or required account. Optional cloud transcription and AI cleanup use your own provider keys, stored in the OS keychain. ChatGPT sign-in is a separate, text-only preview that has not yet been qualified with a real account in the installed app. Cloud requests go to the selected provider, not through a Plainsong server. Local transcription remains the default.
 
-## Install the beta
+## Download
+
+The source is at `0.9.0-beta.7`. The measurements in its release notes, with
+datasets and limits, are listed in
+[beta.7 evidence](nautilus-bot/docs/evals/beta7-evidence.md).
+
+The download below is the September 2026 beta.5 release.
 
 `0.9.0-beta.5` requires macOS 13+ on Apple Silicon. Windows and Linux are planned, not supported release targets.
 
@@ -26,11 +32,11 @@ Expected SHA-256:
 
 The file is 136,566,773 bytes, Developer ID signed, notarized, and stapled. Drag `Plainsong.app` into `/Applications` and open it there. No macOS security bypass is required.
 
-Grant Microphone access for recording and Accessibility access for text insertion. Download the default Parakeet TDT 0.6B v3 model, 640 MB, or the smaller Whisper `base.en`, 142 MB.
+Grant Microphone access for recording and Accessibility access for text insertion. The ONNX Parakeet TDT 0.6B v3 download is about 670 MB. Whisper `base.en` is about 148 MB. New beta.7 installs on Apple Silicon use a separate Parakeet build for dictation and meetings: on macOS 14 or later its Neural Engine files, about 735 MB (567 MB when the transcription language is English); on earlier versions a 739 MB file.
 
 ### Known limits
 
-Read transcripts before relying on them and keep your own backups. In the last two documented maker tests, toggle and hold-to-talk passed but hands-free dictation did not activate. Meetings longer than 45 seconds have not been soak-tested.
+Read transcripts before relying on them and keep your own backups. In the beta.5 maker tests, toggle and hold-to-talk passed but hands-free did not activate, and no meeting longer than 45 seconds was soak-tested. The beta.7 measurements use recorded audio. They do not cover live capture or insertion.
 
 As of the September 5, 2026 release, the real-hardware dictation matrix, long meeting tests, and updater journey remain unfinished. There is no 1.0 or Homebrew cask yet.
 
@@ -38,9 +44,9 @@ The app's update target is `https://updates.plainsong.jonathanrreed.com/beta/`, 
 
 ## Use it
 
-Press the global hotkey to dictate. Activation options are toggle, hold-to-talk through a native listener, and the currently unqualified hands-free mode. Dictation tools include snippets, a personal dictionary, modes, and editing commands.
+Press the global hotkey to dictate. Activation options are toggle, hold-to-talk through a native listener, and hands-free (see Known limits). Dictation tools include snippets, a personal dictionary, modes, and editing commands.
 
-Meeting capture records the microphone and system audio where available. Review transcripts, summaries, and action items, or search across meetings. AI analysis can use local Ollama or an explicitly configured cloud provider.
+On macOS 14.7+, Me + Them records the microphone and all audio playing on this Mac, including other apps and notification sounds. It works with headphones. Review transcripts, summaries, and action items, or search across meetings. AI analysis can use local Ollama or an explicitly configured cloud provider.
 
 ![Meetings workspace](docs/images/plainsong-meetings.png)
 

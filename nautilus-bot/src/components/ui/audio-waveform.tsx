@@ -145,9 +145,11 @@ export function AudioWaveform({
         ? currentLevels
         : new Array(totalBars).fill(currentLevels as number);
 
+      let moving = false;
       for (let i = 0; i < totalBars; i++) {
         const weight = weights[i];
-        const drift = (Math.sin(frame * 0.04 + i * 0.6) + 1) / 2;
+        // Idle bars rest in a still shape; only a live trace drifts.
+        const drift = (Math.sin((active ? frame : 0) * 0.04 + i * 0.6) + 1) / 2;
 
         let target: number;
         if (active) {
@@ -160,7 +162,9 @@ export function AudioWaveform({
         // Smooth interpolation
         const current = smoothedRef.current[i] ?? 0.15;
         const smoothing = active ? 0.18 : 0.06;
-        smoothedRef.current[i] = current + (target - current) * smoothing;
+        const next = current + (target - current) * smoothing;
+        if (Math.abs(target - next) > 0.002) moving = true;
+        smoothedRef.current[i] = next;
 
         const intensity = reducedMotion ? target : smoothedRef.current[i];
         const minBarH = variant === "pulse" ? 2 : config.barWidth;
@@ -193,7 +197,9 @@ export function AudioWaveform({
       }
 
       // Honor reduced motion: paint one static frame, no animation loop.
-      if (!reducedMotion) {
+      // An idle trace stops once its bars come to rest: a loop that never
+      // ended kept the GPU busy whenever the pill was on screen.
+      if (!reducedMotion && (active || moving)) {
         animationRef.current = requestAnimationFrame(draw);
       }
     };

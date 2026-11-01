@@ -3,16 +3,16 @@
 //! Plain export to a chosen format, optionally redacting emails/phones (basic)
 //! or also URLs/secrets/long numbers (strict) before writing.
 //!
-//! Every format is produced as text and redacted once, before
-//! `export::encode_export` turns it into the bytes the file gets. That is why
-//! a Word export cannot leak an unredacted string into its XML: the redaction
-//! runs on the Markdown the document is built from.
+//! JSON redacts string values while preserving keys and typed metadata.
+//! Other formats redact their words before encoding. Word redacts its
+//! Markdown source before it becomes an Office package.
 
 use crate::export::{self, export_recording, ExportContext, ExportFormat};
 use crate::models::Recording;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 pub fn export_with_policy(
     recording: &Recording,
@@ -29,8 +29,7 @@ pub fn export_with_policy(
         anyhow::anyhow!("Export format '{}' is not supported in this build", format)
     })?;
 
-    // Subtitles are redacted at the source (see `redacts_before_render`);
-    // every other format is redacted once, over the finished text.
+    // Subtitle structure stays intact by redacting source words before rendering.
     let pre_redacted = export_format.redacts_before_render().then(|| {
         (
             transcript.map(|t| redact_transcript(t, redaction_level)),
@@ -47,6 +46,8 @@ pub fn export_with_policy(
     let content = export_recording(recording, transcript, export_format, true, context)?;
     let redacted_content = if export_format.redacts_before_render() {
         content
+    } else if export_format == ExportFormat::Json {
+        redact_json_export(&content, redaction_level)?
     } else {
         apply_redaction(&content, redaction_level)
     };
@@ -81,6 +82,34 @@ pub fn export_with_policy(
         export_path: Some(export_path.to_string_lossy().to_string()),
         content: None,
     })
+}
+
+fn redact_json_export(content: &str, redaction_level: &str) -> Result<String> {
+    if redaction_level == "none" {
+        return Ok(content.to_string());
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_str(content).context("Failed to parse JSON export before redaction")?;
+
+    fn redact_strings(value: &mut serde_json::Value, level: &str) {
+        match value {
+            serde_json::Value::String(text) => *text = apply_redaction(text, level),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    redact_strings(item, level);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for value in fields.values_mut() {
+                    redact_strings(value, level);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    redact_strings(&mut value, redaction_level);
+    serde_json::to_string_pretty(&value).context("Failed to serialize redacted JSON export")
 }
 
 pub fn export(
@@ -135,6 +164,11 @@ fn redact_export_context(context: &ExportContext, redaction_level: &str) -> Expo
             .iter()
             .map(|(id, name)| (id.clone(), apply_redaction(name, redaction_level)))
             .collect(),
+        completed_action_tasks: context
+            .completed_action_tasks
+            .iter()
+            .map(|task| apply_redaction(task, redaction_level))
+            .collect(),
     }
 }
 
@@ -151,25 +185,28 @@ pub(crate) fn apply_redaction(content: &str, redaction_level: &str) -> String {
 /// no lookarounds, so candidates are matched broadly and then vetted here to
 /// keep export metadata lines and spoken dates intact.
 fn is_date_like(candidate: &str) -> bool {
-    let date_like =
+    static DATE_LIKE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4})(?:[\sT]+\d{1,2})?$")
-            .expect("valid date-like regex");
+            .expect("valid date-like regex")
+    });
     // The broad candidate pattern can absorb a leading '(' or '+' (e.g.
     // "(2026-07-20)"), which would break the ^-anchored date match, so strip
     // that prefix before vetting.
-    date_like.is_match(candidate.trim().trim_start_matches(['(', '+']))
+    DATE_LIKE.is_match(candidate.trim().trim_start_matches(['(', '+']))
 }
 
 fn redact_basic(content: &str) -> String {
-    let email =
-        Regex::new(r"(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b").expect("valid email regex");
+    static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b").expect("valid email regex")
+    });
     // Broad phone candidate: optional +/( prefix, then digits with common
     // separators. Real redaction is decided per match below so date-like
     // strings survive.
-    let phone = Regex::new(r"\+?\(?\d[\d\-\s\(\)]{7,}\d").expect("valid phone regex");
+    static PHONE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\+?\(?\d[\d\-\s\(\)]{7,}\d").expect("valid phone regex"));
 
-    let without_email = email.replace_all(content, "[REDACTED_EMAIL]");
-    phone
+    let without_email = EMAIL.replace_all(content, "[REDACTED_EMAIL]");
+    PHONE
         .replace_all(&without_email, |caps: &regex::Captures<'_>| {
             redact_phone_candidate(caps.get(0).expect("match 0 always present").as_str())
         })
@@ -223,14 +260,18 @@ fn redact_phone_candidate(matched: &str) -> String {
 }
 
 fn redact_strict(content: &str) -> String {
-    let url = Regex::new(r"(?i)\bhttps?://[^\s]+").expect("valid url regex");
-    let key_like = Regex::new(r"\b(sk|pk|api|token)[_-]?[a-z0-9]{8,}\b").expect("valid key regex");
-    let long_digits = Regex::new(r"\b\d{4,}\b").expect("valid digits regex");
+    static URL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\bhttps?://[^\s]+").expect("valid url regex"));
+    static KEY_LIKE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"\b(sk|pk|api|token)[_-]?[a-z0-9]{8,}\b").expect("valid key regex")
+    });
+    static LONG_DIGITS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\b\d{4,}\b").expect("valid digits regex"));
 
     let basic = redact_basic(content);
-    let without_urls = url.replace_all(&basic, "[REDACTED_URL]");
-    let without_keys = key_like.replace_all(&without_urls, "[REDACTED_SECRET]");
-    long_digits
+    let without_urls = URL.replace_all(&basic, "[REDACTED_URL]");
+    let without_keys = KEY_LIKE.replace_all(&without_urls, "[REDACTED_SECRET]");
+    LONG_DIGITS
         .replace_all(&without_keys, "[REDACTED_NUMBER]")
         .to_string()
 }
@@ -295,6 +336,8 @@ mod tests {
     fn redact_none_is_passthrough() {
         let input = "plain text with a@b.com";
         assert_eq!(apply_redaction(input, "none"), input);
+        let json = "  {\"contact\":\"a@b.com\",\"duration\":3600}\n";
+        assert_eq!(redact_json_export(json, "none").expect("passthrough"), json);
     }
 
     #[test]
@@ -329,6 +372,7 @@ mod tests {
 
     fn transcript_with(texts: &[&str]) -> crate::models::Transcript {
         crate::models::Transcript {
+            heard_through_speakers: Vec::new(),
             id: "t1".to_string(),
             recording_id: "r1".to_string(),
             segments: texts
@@ -350,8 +394,123 @@ mod tests {
             model_id: None,
             requested_provider: None,
             actual_provider: None,
+            measured_word_timestamps: false,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn json_export_redacts_nested_text_without_damaging_metadata() {
+        let mut recording = test_recording();
+        recording.duration = 3600;
+        recording.title = "https://example.com/review".to_string();
+        recording.summary =
+            Some("Call 555-123-4567; use sk_abcdef123456 for account 1234".to_string());
+        recording.attendees = vec![crate::models::MeetingAttendee {
+            name: "QA person".to_string(),
+            email: Some("qa.person@example.com".to_string()),
+            is_organizer: false,
+        }];
+        let mut transcript = transcript_with(&["Email qa.person@example.com or call 555-123-4567"]);
+        transcript.confidence = 0.987654321;
+        transcript.segments[0].start_time = 1000.25;
+        transcript.segments[0].end_time = 1001.75;
+        for level in ["basic", "strict", "unknown"] {
+            let response = export_with_policy(
+                &recording,
+                Some(&transcript),
+                "json",
+                None,
+                level,
+                true,
+                &ExportContext::default(),
+            )
+            .expect("JSON preview");
+            let output = response.content.expect("preview content");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&output).expect("redacted JSON stays valid");
+            assert_eq!(parsed["recording"]["duration_seconds"], 3600);
+            assert_eq!(
+                parsed["transcript"]["confidence"].as_f64(),
+                Some(0.987654321)
+            );
+            assert_eq!(
+                parsed["transcript"]["segments"][0]["start_time"].as_f64(),
+                Some(1000.25)
+            );
+            assert_eq!(
+                parsed["transcript"]["segments"][0]["end_time"].as_f64(),
+                Some(1001.75)
+            );
+            assert_eq!(parsed["recording"]["transcript_complete"], true);
+            assert_eq!(
+                parsed["recording"].get("capture_degraded_summary"),
+                Some(&serde_json::Value::Null)
+            );
+            assert_eq!(
+                parsed["recording"]["attendees"][0]["email"],
+                "[REDACTED_EMAIL]"
+            );
+            assert!(!output.contains("qa.person@example.com"));
+            assert!(!output.contains("555-123-4567"));
+            let summary = parsed["recording"]["summary"]
+                .as_str()
+                .expect("summary string");
+            assert!(summary.contains("[REDACTED_PHONE]"));
+            if level == "strict" {
+                assert_eq!(parsed["recording"]["title"], "[REDACTED_URL]");
+                assert!(summary.contains("[REDACTED_SECRET]"));
+                assert!(summary.contains("[REDACTED_NUMBER]"));
+            } else {
+                assert_eq!(parsed["recording"]["title"], recording.title);
+                assert!(summary.contains("sk_abcdef123456"));
+                assert!(summary.contains("account 1234"));
+            }
+            let destination = std::env::temp_dir().join(format!(
+                "plainsong-json-redaction-{}-{level}.json",
+                uuid::Uuid::new_v4()
+            ));
+            let saved = export_with_policy(
+                &recording,
+                Some(&transcript),
+                "json",
+                Some(destination.to_str().expect("UTF-8 export path")),
+                level,
+                false,
+                &ExportContext::default(),
+            )
+            .expect("save redacted JSON");
+            let saved_text = std::fs::read_to_string(&destination).expect("read saved JSON");
+            std::fs::remove_file(&destination).expect("remove test export");
+            let mut saved_json: serde_json::Value =
+                serde_json::from_str(&saved_text).expect("saved JSON stays valid");
+            let mut preview_json = parsed;
+            for json in [&mut saved_json, &mut preview_json] {
+                let exported_at = json
+                    .as_object_mut()
+                    .expect("JSON export object")
+                    .remove("exported_at")
+                    .expect("export timestamp");
+                assert!(exported_at
+                    .as_str()
+                    .is_some_and(|timestamp| !timestamp.is_empty()));
+            }
+            assert_eq!(saved_json, preview_json);
+            assert!(!saved.preview);
+            assert!(saved.content.is_none());
+            assert_eq!(saved.export_path.as_deref(), destination.to_str());
+        }
+    }
+
+    #[test]
+    fn json_redaction_refuses_invalid_input_without_returning_original_text() {
+        let input = "{private-fixture-unclosed";
+        let error = redact_json_export(input, "basic").expect_err("invalid JSON must refuse");
+        assert_eq!(
+            error.to_string(),
+            "Failed to parse JSON export before redaction"
+        );
+        assert!(!format!("{error:#}").contains(input));
     }
 
     #[test]

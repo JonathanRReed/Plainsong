@@ -39,6 +39,7 @@ fn key_binding(id: &str, accelerator: &str, mode_id: Option<&str>) -> DictationB
         action: DictationBindingAction::Dictation {
             mode_id: mode_id.map(str::to_string),
             behavior: "inherit".to_string(),
+            submit_after_insert: false,
         },
     }
 }
@@ -118,9 +119,62 @@ fn an_unreadable_binding_is_dropped_without_losing_the_rest() {
         bindings[0].action,
         DictationBindingAction::Dictation {
             mode_id: None,
-            behavior: "inherit".to_string()
+            behavior: "inherit".to_string(),
+            submit_after_insert: false,
         }
     );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn submit_after_insert_loads_off_unless_literally_true_and_round_trips() {
+    let raw = serde_json::json!({
+        "shortcuts": {
+            "dictationBindings": [
+                { "id": "absent", "trigger": { "kind": "key", "accelerator": "Cmd+Alt+A" },
+                  "action": { "kind": "dictation", "modeId": null, "behavior": "inherit" } },
+                { "id": "on", "trigger": { "kind": "key", "accelerator": "Cmd+Alt+B" },
+                  "action": { "kind": "dictation", "behavior": "hold", "submitAfterInsert": true } },
+                { "id": "string", "trigger": { "kind": "key", "accelerator": "Cmd+Alt+C" },
+                  "action": { "kind": "dictation", "submitAfterInsert": "true" } },
+                { "id": "null", "trigger": { "kind": "key", "accelerator": "Cmd+Alt+D" },
+                  "action": { "kind": "dictation", "submitAfterInsert": null } }
+            ]
+        }
+    });
+    let (root, settings_path) = temp_settings_file("bindings-submit", &raw);
+
+    let manager = SettingsManager::load_from_path(settings_path).expect("load settings");
+    let bindings = &manager.settings().shortcuts.dictation_bindings;
+    let submits: Vec<(&str, bool)> = bindings
+        .iter()
+        .map(|binding| match &binding.action {
+            DictationBindingAction::Dictation {
+                submit_after_insert,
+                ..
+            } => (binding.id.as_str(), *submit_after_insert),
+            other => panic!("unexpected action {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        submits,
+        [
+            ("absent", false),
+            ("on", true),
+            ("string", false),
+            ("null", false)
+        ]
+    );
+
+    let saved = serde_json::to_value(&manager.settings().shortcuts).expect("serialize");
+    let actions: Vec<&serde_json::Value> = saved["dictationBindings"]
+        .as_array()
+        .expect("bindings array")
+        .iter()
+        .map(|binding| &binding["action"])
+        .collect();
+    assert_eq!(actions[0].get("submitAfterInsert"), None);
+    assert_eq!(actions[1]["submitAfterInsert"], serde_json::json!(true));
     let _ = fs::remove_dir_all(&root);
 }
 

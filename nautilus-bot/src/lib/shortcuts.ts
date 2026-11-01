@@ -50,6 +50,8 @@ export function normalizeShortcut(shortcut: string): string {
  * same glyphs the nav shortcuts use, and "Ctrl + Shift + Space" elsewhere.
  */
 export function formatShortcutForDisplay(shortcut: string, isMac = isMacPlatform()): string {
+  if (/^right\s*command$/i.test(shortcut.trim())) return "Right Command";
+  if (/^right\s*option$/i.test(shortcut.trim())) return "Right Option";
   const parts = normalizeShortcut(shortcut).split("+").filter(Boolean);
   if (!isMac) {
     return parts.join(" + ");

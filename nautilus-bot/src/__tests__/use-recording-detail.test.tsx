@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useRecordingDetail } from "@/hooks/use-recording-detail";
-import type { Transcript } from "@/types";
+import type { Recording, Transcript } from "@/types";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -9,6 +9,24 @@ function deferred<T>() {
     resolve = resolvePromise;
   });
   return { promise, resolve };
+}
+
+function recording(
+  id: string,
+  overrides: Partial<Recording> = {},
+): Recording {
+  return {
+    id,
+    title: `Meeting - ${id}`,
+    projectId: "default",
+    duration: 14,
+    createdAt: "2026-03-08T18:57:36.000Z",
+    updatedAt: "2026-03-08T18:57:52.000Z",
+    sourceType: "meeting",
+    audioPath: `/tmp/${id}.wav`,
+    status: "error",
+    ...overrides,
+  };
 }
 
 const eventMocks = vi.hoisted(() => ({
@@ -28,7 +46,7 @@ vi.mock("@/lib/electron", () => ({
 }));
 
 const backendMocks = vi.hoisted(() => ({
-  getRecording: vi.fn(async (recordingId: string) => ({
+  getRecording: vi.fn(async (recordingId: string): Promise<Recording> => ({
     id: recordingId,
     title: "Meeting - 2026-03-08 13:57",
     projectId: "default",
@@ -423,57 +441,188 @@ describe("useRecordingDetail", () => {
     expect(result.current.speakerNames).toEqual({ speaker_0: "Alice" });
   });
 
-  it("auto-refreshes a processing meeting until canonical detail data lands", async () => {
+  it("keeps one processing poll on the two-second cadence and uses the latest callback", async () => {
+    vi.useFakeTimers();
+    const initial = recording("meeting-processing", { status: "processing" });
+    const refreshed = recording("meeting-processing", {
+      status: "processing",
+      updatedAt: "2026-03-08T18:57:58.000Z",
+    });
+    const firstPoll = deferred<Recording>();
+    const secondPoll = deferred<Recording>();
     backendMocks.getRecording
-      .mockResolvedValueOnce({
-        id: "meeting-processing",
-        title: "Meeting - Processing",
-        projectId: "default",
-        duration: 14,
-        createdAt: "2026-03-08T18:57:36.000Z",
-        updatedAt: "2026-03-08T18:57:52.000Z",
-        sourceType: "meeting",
-        audioPath: "/tmp/meeting.wav",
-        status: "processing",
-      } as unknown as Awaited<ReturnType<typeof backendMocks.getRecording>>)
-      .mockResolvedValueOnce({
-        id: "meeting-processing",
-        title: "Meeting - Processing",
-        projectId: "default",
-        duration: 14,
-        createdAt: "2026-03-08T18:57:36.000Z",
-        updatedAt: "2026-03-08T18:57:58.000Z",
-        sourceType: "meeting",
-        audioPath: "/tmp/meeting.wav",
-        status: "completed" as const,
-      });
+      .mockResolvedValueOnce(initial)
+      .mockImplementationOnce(() => firstPoll.promise)
+      .mockImplementationOnce(() => secondPoll.promise);
+    const firstCallback = vi.fn();
+    const latestCallback = vi.fn();
 
-    const { result } = renderHook(() =>
-      useRecordingDetail({
-        isOpen: true,
-      }),
+    const { result, rerender, unmount } = renderHook(
+      ({ onLoaded }: { onLoaded: (value: Recording) => void }) =>
+        useRecordingDetail({
+          isOpen: true,
+          onRecordingLoaded: (value) => onLoaded(value),
+        }),
+      { initialProps: { onLoaded: firstCallback } },
     );
 
-    await act(async () => {
-      await result.current.loadRecordingDetail({
-        id: "meeting-processing",
-        title: "Meeting - Processing",
-        projectId: "default",
-        duration: 14,
-        createdAt: "2026-03-08T18:57:36.000Z",
-        updatedAt: "2026-03-08T18:57:52.000Z",
-        sourceType: "meeting",
-        audioPath: "/tmp/meeting.wav",
-        status: "processing",
+    try {
+      await act(async () => {
+        await result.current.loadRecordingDetail(initial);
       });
+      await act(async () => {});
+      expect(backendMocks.getRecording).toHaveBeenCalledTimes(2);
+
+      rerender({ onLoaded: latestCallback });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(backendMocks.getRecording).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        firstPoll.resolve(refreshed);
+        await firstPoll.promise;
+      });
+      expect(result.current.selectedRecording?.updatedAt).toBe(
+        "2026-03-08T18:57:58.000Z",
+      );
+      expect(latestCallback).toHaveBeenCalledWith(refreshed);
+      expect(firstCallback).toHaveBeenCalledTimes(1);
+      expect(backendMocks.getRecording).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1999);
+      });
+      expect(backendMocks.getRecording).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(backendMocks.getRecording).toHaveBeenCalledTimes(3);
+    } finally {
+      unmount();
+      secondPoll.resolve(refreshed);
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the newer same-recording refresh when responses resolve out of order", async () => {
+    const initial = recording("meeting-refresh-race");
+    const olderResponse = deferred<Recording>();
+    const newerResponse = deferred<Recording>();
+    const onRecordingLoaded = vi.fn();
+    backendMocks.getRecording.mockResolvedValueOnce(initial);
+
+    const { result } = renderHook(() =>
+      useRecordingDetail({ isOpen: true, onRecordingLoaded }),
+    );
+    await act(async () => {
+      await result.current.loadRecordingDetail(initial);
+    });
+    onRecordingLoaded.mockClear();
+    backendMocks.getRecording
+      .mockImplementationOnce(() => olderResponse.promise)
+      .mockImplementationOnce(() => newerResponse.promise);
+
+    let olderRefresh!: Promise<Recording | null>;
+    let newerRefresh!: Promise<Recording | null>;
+    act(() => {
+      olderRefresh = result.current.refreshSelectedRecording(initial.id);
+      newerRefresh = result.current.refreshSelectedRecording(initial.id);
     });
 
-    await waitFor(() => {
-      expect(result.current.selectedRecording?.status).toBe("completed");
+    const newer = recording(initial.id, { summary: "New summary" });
+    await act(async () => {
+      newerResponse.resolve(newer);
+      await newerRefresh;
+    });
+    expect(result.current.selectedRecording?.summary).toBe("New summary");
+
+    const older = recording(initial.id, { summary: "Old summary" });
+    await act(async () => {
+      olderResponse.resolve(older);
+      await olderRefresh;
     });
 
-    expect(backendMocks.getRecording).toHaveBeenCalledTimes(2);
-    expect(backendMocks.getTranscript).toHaveBeenCalledTimes(2);
-    expect(backendMocks.getMeetingTranscriptDetails).toHaveBeenCalledTimes(2);
+    expect(result.current.selectedRecording?.summary).toBe("New summary");
+    expect(onRecordingLoaded).toHaveBeenCalledTimes(1);
+    expect(onRecordingLoaded).toHaveBeenCalledWith(newer);
+  });
+
+  it("invalidates an older refresh when a local recording update is confirmed", async () => {
+    const initial = recording("meeting-local-write", { summary: "Initial summary" });
+    const staleResponse = deferred<Recording>();
+    const onRecordingLoaded = vi.fn();
+    backendMocks.getRecording.mockResolvedValueOnce(initial);
+
+    const { result } = renderHook(() =>
+      useRecordingDetail({ isOpen: true, onRecordingLoaded }),
+    );
+    await act(async () => {
+      await result.current.loadRecordingDetail(initial);
+    });
+    onRecordingLoaded.mockClear();
+    backendMocks.getRecording.mockImplementationOnce(() => staleResponse.promise);
+
+    let pendingRefresh!: Promise<Recording | null>;
+    act(() => {
+      pendingRefresh = result.current.refreshSelectedRecording(initial.id);
+      result.current.setSelectedRecording(
+        recording(initial.id, { summary: "Confirmed local summary" }),
+      );
+    });
+
+    const stale = recording(initial.id, { summary: "Stale server summary" });
+    let refreshResult: Recording | null | undefined;
+    await act(async () => {
+      staleResponse.resolve(stale);
+      refreshResult = await pendingRefresh;
+    });
+
+    expect(refreshResult).toBeNull();
+    expect(result.current.selectedRecording?.summary).toBe(
+      "Confirmed local summary",
+    );
+    expect(onRecordingLoaded).not.toHaveBeenCalled();
+  });
+
+  it("invalidates an old refresh when navigation returns from B to A", async () => {
+    const firstA = recording("meeting-a", { summary: "First A" });
+    const meetingB = recording("meeting-b", { summary: "Meeting B" });
+    const currentA = recording("meeting-a", { summary: "Current A" });
+    const oldAResponse = deferred<Recording>();
+    const onRecordingLoaded = vi.fn();
+    backendMocks.getRecording.mockResolvedValueOnce(firstA);
+
+    const { result } = renderHook(() =>
+      useRecordingDetail({ isOpen: true, onRecordingLoaded }),
+    );
+    await act(async () => {
+      await result.current.loadRecordingDetail(firstA);
+    });
+    onRecordingLoaded.mockClear();
+    backendMocks.getRecording
+      .mockImplementationOnce(() => oldAResponse.promise)
+      .mockResolvedValueOnce(meetingB)
+      .mockResolvedValueOnce(currentA);
+
+    let staleRefresh!: Promise<Recording | null>;
+    act(() => {
+      staleRefresh = result.current.refreshSelectedRecording(firstA.id);
+    });
+    await act(async () => {
+      await result.current.loadRecordingDetail(meetingB);
+      await result.current.loadRecordingDetail(currentA);
+    });
+    onRecordingLoaded.mockClear();
+
+    const staleA = recording("meeting-a", { summary: "Stale A" });
+    await act(async () => {
+      oldAResponse.resolve(staleA);
+      await staleRefresh;
+    });
+
+    expect(result.current.selectedRecording?.summary).toBe("Current A");
+    expect(onRecordingLoaded).not.toHaveBeenCalled();
   });
 });

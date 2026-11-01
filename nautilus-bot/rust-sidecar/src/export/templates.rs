@@ -115,6 +115,13 @@ impl TemplateManager {
                 "{{summary}}",
                 data.summary.as_deref().unwrap_or_default().to_string(),
             ),
+            (
+                "{{source_limitations}}",
+                data.source_limitations
+                    .as_ref()
+                    .map(|text| format!("Source limitations: {text}"))
+                    .unwrap_or_default(),
+            ),
         ];
         let values = values.map(|(placeholder, value)| {
             let value = if template.format == ExportFormat::Html {
@@ -125,7 +132,12 @@ impl TemplateManager {
             (placeholder, value)
         });
 
-        Ok(render_placeholders(&template.template, &values))
+        let (rendered, source_limitations_rendered) =
+            render_placeholders(&template.template, &values);
+        if data.source_limitations.is_some() && !source_limitations_rendered {
+            anyhow::bail!("This template cannot include the recording's source limitations. Choose another template or add {{{{source_limitations}}}} to this template.");
+        }
+        Ok(rendered)
     }
 
     /// Register built-in templates
@@ -253,6 +265,7 @@ pub struct RenderData {
     pub speakers: Vec<SpeakerInfo>,
     pub action_items: Vec<String>,
     pub summary: Option<String>,
+    pub source_limitations: Option<String>,
 }
 
 /// Speaker information
@@ -270,6 +283,8 @@ pub struct SpeakerInfo {
 const MEETING_TEMPLATE: &str = r#"# {{title}}
 
 **Date:** {{date}} | **Duration:** {{duration}}
+
+{{source_limitations}}
 
 ---
 
@@ -301,6 +316,8 @@ const MEETING_TEMPLATE: &str = r#"# {{title}}
 /// Journal template
 const JOURNAL_TEMPLATE: &str = r#"# {{date}} - {{title}}
 
+{{source_limitations}}
+
 {{transcript}}
 
 ---
@@ -314,6 +331,8 @@ const MEDICAL_TEMPLATE: &str = r#"MEDICAL TRANSCRIPTION
 Date: {{date}}
 Duration: {{duration}}
 Title: {{title}}
+
+{{source_limitations}}
 
 TRANSCRIPT:
 -----------
@@ -330,6 +349,8 @@ const INTERVIEW_TEMPLATE: &str = r#"# {{title}}
 **Interview Date:** {{date}}  
 **Duration:** {{duration}}
 
+{{source_limitations}}
+
 ---
 
 ## Transcript
@@ -344,6 +365,8 @@ const INTERVIEW_TEMPLATE: &str = r#"# {{title}}
 
 /// Quick notes template
 const QUICK_TEMPLATE: &str = r#"{{date}} - {{duration}}
+
+{{source_limitations}}
 
 {{transcript}}
 "#;
@@ -366,6 +389,7 @@ const PODCAST_TEMPLATE: &str = r#"<!DOCTYPE html>
         <h1>{{title}}</h1>
         <p>{{date}} | {{duration}}</p>
     </div>
+    <p>{{source_limitations}}</p>
     <div class="transcript">
         {{transcript}}
     </div>
@@ -380,6 +404,8 @@ duration: {{duration}}
 ---
 
 # {{title}}
+
+{{source_limitations}}
 
 ## Transcript
 
@@ -458,21 +484,23 @@ fn escape_html(value: &str) -> String {
     escaped
 }
 
-fn render_placeholders(template: &str, values: &[(&str, String)]) -> String {
+fn render_placeholders(template: &str, values: &[(&str, String)]) -> (String, bool) {
     let mut output = String::with_capacity(template.len());
     let mut remaining = template;
+    let mut source_limitations_rendered = false;
 
     while let Some(start) = remaining.find("{{") {
         output.push_str(&remaining[..start]);
         let placeholder_start = &remaining[start..];
         let Some(relative_end) = placeholder_start.find("}}") else {
             output.push_str(placeholder_start);
-            return output;
+            return (output, source_limitations_rendered);
         };
         let end = start + relative_end + 2;
         let placeholder = &remaining[start..end];
         if let Some((_, value)) = values.iter().find(|(key, _)| *key == placeholder) {
             output.push_str(value);
+            source_limitations_rendered |= placeholder == "{{source_limitations}}";
         } else {
             output.push_str(placeholder);
         }
@@ -480,7 +508,7 @@ fn render_placeholders(template: &str, values: &[(&str, String)]) -> String {
     }
 
     output.push_str(remaining);
-    output
+    (output, source_limitations_rendered)
 }
 
 #[cfg(test)]
@@ -500,6 +528,7 @@ mod tests {
             }],
             action_items: vec!["<iframe src=javascript:alert(1)>".to_string()],
             summary: Some("<style>body{display:none}</style>".to_string()),
+            source_limitations: None,
         }
     }
 
@@ -527,5 +556,75 @@ mod tests {
         assert!(output.contains("<svg onload=alert(1)>"));
         assert!(output.contains("<iframe src=javascript:alert(1)>"));
         assert!(output.contains("<style>body{display:none}</style>"));
+    }
+
+    #[test]
+    fn built_in_templates_preserve_known_source_limitations() {
+        let manager = TemplateManager::new();
+        let warning = "This transcript is incomplete. Capture lost 2 chunks & a <speaker> turn.";
+        let mut data = hostile_render_data();
+        data.source_limitations = Some(warning.to_string());
+
+        for template in manager.list_templates() {
+            let output = manager.render(&template.id, &data).unwrap();
+            let expected = if template.format == ExportFormat::Html {
+                escape_html(warning)
+            } else {
+                warning.to_string()
+            };
+            assert!(
+                output.contains(&expected),
+                "{} lost its source warning",
+                template.id
+            );
+            assert!(output.contains("Source limitations:"));
+
+            data.source_limitations = None;
+            let clean_output = manager.render(&template.id, &data).unwrap();
+            assert!(!clean_output.contains("Source limitations:"));
+            assert!(!clean_output.contains("{{source_limitations}}"));
+            data.source_limitations = Some(warning.to_string());
+        }
+    }
+
+    #[test]
+    fn custom_template_cannot_silently_drop_known_source_limitations() {
+        let mut manager = TemplateManager::new();
+        let mut template = manager.get_template("quick").unwrap().clone();
+        template.id = "custom".to_string();
+        template.template = "{{transcript}}".to_string();
+        manager.register_template(template);
+        let mut data = hostile_render_data();
+        data.source_limitations = Some("This transcript is incomplete.".to_string());
+
+        let error = manager
+            .render("custom", &data)
+            .expect_err("custom template lost the warning");
+        assert!(error.to_string().contains("source limitations"));
+        data.source_limitations = None;
+        assert_eq!(manager.render("custom", &data).unwrap(), data.transcript);
+
+        let mut malformed = manager.get_template("custom").unwrap().clone();
+        malformed.template = "{{unknown {{source_limitations}}".to_string();
+        manager.register_template(malformed);
+        data.source_limitations = Some("This transcript is incomplete.".to_string());
+        assert!(manager.render("custom", &data).is_err());
+    }
+
+    #[test]
+    fn html_source_limitations_are_escaped_without_expanding_user_placeholders() {
+        let mut manager = TemplateManager::new();
+        let mut template = manager.get_template("podcast").unwrap().clone();
+        template.id = "custom".to_string();
+        template.template = "<p>{{source_limitations}}</p>".to_string();
+        manager.register_template(template);
+        let mut data = hostile_render_data();
+        data.source_limitations = Some("Lost <svg onload='alert(1)'> & {{title}}".to_string());
+
+        let output = manager.render("custom", &data).unwrap();
+        assert_eq!(
+            output,
+            "<p>Source limitations: Lost &lt;svg onload=&#39;alert(1)&#39;&gt; &amp; {{title}}</p>"
+        );
     }
 }

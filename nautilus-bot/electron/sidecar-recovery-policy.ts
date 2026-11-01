@@ -6,9 +6,10 @@ const MICROPHONE_PREPARATION_TIMEOUTS: Partial<Record<string, string>> = {
 export const MICROPHONE_RECOVERY_MESSAGE =
   "Microphone setup stalled. Plainsong restarted audio capture automatically. Retry in a moment, then reconnect or choose another microphone if it happens again.";
 
-// One Core Audio preparation attempt is bounded to 1.5 seconds in Rust. This
-// budget leaves room for that attempt, one process replacement, and one final
-// attempt without ever stacking the old 1.5s + 10s + 1.5s + 10s path.
+// Rust bounds microphone preparation itself to three seconds. The process
+// replacement has its own budget. Never race a capture-start command against
+// this timer: rejecting its promise does not cancel the sidecar operation and
+// can report failure while recording later becomes active.
 const MICROPHONE_RECOVERY_BUDGET_MS = 6_000;
 
 export const SIDECAR_SHUTDOWN_MESSAGE = "Plainsong is shutting down";
@@ -39,14 +40,13 @@ export async function retryOnceAfterMicrophonePreparationTimeout<T>(
   recover: (remainingMs: number) => Promise<void>,
   recoveryBudgetMs = MICROPHONE_RECOVERY_BUDGET_MS,
 ): Promise<T> {
-  // The six-second budget exists only for microphone startup recovery. Model
-  // downloads and other legitimate long-running sidecar work already use the
-  // command-specific timeout in IpcBridge and must not be cut off here.
+  // Capture attempts use IpcBridge's command timeout. Only replacing an
+  // unhealthy process uses this recovery timer.
   if (!MICROPHONE_PREPARATION_TIMEOUTS[command]) {
     return await attempt();
   }
 
-  const startedAt = Date.now();
+  let startedAt = 0;
 
   const runWithinBudget = async <R>(work: () => Promise<R>): Promise<R> => {
     const remainingMs = recoveryBudgetMs - (Date.now() - startedAt);
@@ -71,13 +71,14 @@ export async function retryOnceAfterMicrophonePreparationTimeout<T>(
   };
 
   try {
-    return await runWithinBudget(attempt);
+    return await attempt();
   } catch (firstError) {
     if (!shouldRecycleSidecarAfterCommandError(command, firstError)) {
       throw firstError;
     }
   }
 
+  startedAt = Date.now();
   try {
     const remainingMs = recoveryBudgetMs - (Date.now() - startedAt);
     await runWithinBudget(() => recover(Math.max(0, remainingMs)));
@@ -86,7 +87,7 @@ export async function retryOnceAfterMicrophonePreparationTimeout<T>(
   }
 
   try {
-    return await runWithinBudget(attempt);
+    return await attempt();
   } catch (secondError) {
     if (!shouldRecycleSidecarAfterCommandError(command, secondError)) {
       throw secondError;

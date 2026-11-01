@@ -34,6 +34,12 @@ describe("parseDeepLink", () => {
     expect(parseDeepLink("PLAINSONG://RECORD")).toEqual({ ok: true, command: { kind: "record" } });
   });
 
+  it("rejects pressure injection URLs", () => {
+    for (const url of ["plainsong://qa_pressure", "plainsong://pressure/warning", "plainsong://open?PLAINSONG_QA_PRESSURE_FILE=/tmp/pressure"]) {
+      expect(parseDeepLink(url).ok).toBe(false);
+    }
+  });
+
   it("ignores unknown commands, paths and hosts instead of guessing", () => {
     expect(parseDeepLink("plainsong://delete")).toEqual({ ok: false, reason: "unknown_command" });
     expect(parseDeepLink("plainsong://record/now")).toEqual({ ok: false, reason: "unknown_command" });

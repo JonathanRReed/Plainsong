@@ -25,7 +25,8 @@ function statusFixture(
     backend: "metal",
     backendMeetsBudget: true,
     backendPresent: true,
-    residentBytes: 484_219_808,
+    residentBytes:
+      484_219_808 + 151_936 * 1_024 * 4 + 11_422_654 + 128 * 1_024 * 1_024,
     ...overrides,
   };
 }
@@ -64,6 +65,7 @@ describe("the built-in cleanup model row", () => {
     // The honest half: a user must not discover this when a custom mode
     // quietly stops using AI.
     expect(region.textContent).toContain("does not summarize");
+    expect(region.textContent).toContain("custom prompt");
     // "Saved profiles", not "custom modes": one word per concept, checked by
     // src/__tests__/settings-vocabulary.test.ts.
     expect(region.textContent).toContain("saved profiles");
@@ -82,7 +84,7 @@ describe("the built-in cleanup model row", () => {
         onDelete={() => {}}
       />,
     );
-    expect(screen.getByText(/473 MiB to download/)).toBeTruthy();
+    expect(screen.getByText(/496 MB to download/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Download" }));
     expect(onDownload).toHaveBeenCalledTimes(1);
   });
@@ -117,14 +119,14 @@ describe("the built-in cleanup model row", () => {
         onDelete={onDelete}
       />,
     );
-    expect(screen.getByText(/On this Mac · 473 MiB/)).toBeTruthy();
+    expect(screen.getByText(/On this Mac · 496 MB/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     expect(onDelete).toHaveBeenCalledTimes(1);
   });
 
-  it("names the files that failed verification rather than saying 'not ready'", () => {
-    // Bytes on disk but no trusted receipt: the model will not load, and the
-    // row has to say which file to blame.
+  it("says how many files failed verification rather than saying 'not ready'", () => {
+    // Bytes on disk that failed this session's check: the model will not load, and the
+    // row has to say so and what fixes it, without printing file names.
     render(
       <BundledCleanupModelRow
         status={statusFixture({
@@ -141,14 +143,13 @@ describe("the built-in cleanup model row", () => {
     const region = screen.getByRole("region", {
       name: "Built-in dictation cleanup model",
     });
-    expect(region.textContent).toContain("s1-mini-q4_k_m.gguf");
-    expect(region.textContent).toContain("failed verification");
+    expect(region.textContent).toContain(
+      "1 model file is missing or didn't pass verification, so the model won't load. Downloading again replaces it.",
+    );
+    expect(region.textContent).not.toContain(".gguf");
   });
 
-  it("says the CPU fallback cannot keep up with a long dictation", () => {
-    // Measured: 11.26 s p50 for 199 words against a 6 s budget. A user who is
-    // not told this discovers it as a "took too long" warning on every long
-    // capture, with no way to connect the warning to its cause.
+  it("explains the slow fallback without promising hardware-specific timing", () => {
     render(
       <BundledCleanupModelRow
         status={statusFixture({
@@ -169,17 +170,19 @@ describe("the built-in cleanup model row", () => {
     const region = screen.getByRole("region", {
       name: "Built-in dictation cleanup model",
     });
-    expect(region.textContent).toContain("CPU");
-    expect(region.textContent).toContain("11 to 13");
-    expect(region.textContent).toContain("six-second limit");
+    expect(region.textContent).not.toMatch(/\b(?:CPU|GPU)\b/);
+    expect(region.textContent).toContain("longer dictations");
+    expect(region.textContent).toContain("cleanup time limit");
+    expect(region.textContent).toContain("basic formatting");
+    expect(region.textContent).not.toMatch(/\b(?:two|five|11 to 13) seconds?\b/i);
     // Rust is the "not yet / cannot" color; there is no amber in this app.
     const warning = Array.from(region.querySelectorAll("p")).find((node) =>
-      node.textContent?.includes("11 to 13"),
+      node.textContent?.includes("longer dictations"),
     );
     expect(warning?.className).toContain("text-rust");
   });
 
-  it("does not warn about speed when the GPU is doing the work", () => {
+  it("does not warn about speed when the fast path is doing the work", () => {
     render(
       <BundledCleanupModelRow
         status={statusFixture({ ready: true, missingFiles: [] })}
@@ -193,11 +196,12 @@ describe("the built-in cleanup model row", () => {
     const region = screen.getByRole("region", {
       name: "Built-in dictation cleanup model",
     });
-    expect(region.textContent).toContain("GPU");
-    expect(region.textContent).not.toContain("11 to 13");
+    expect(region.textContent).toContain("Cleanup time depends on the length of the dictation");
+    expect(region.textContent).not.toMatch(/\b(?:CPU|GPU)\b/);
+    expect(region.textContent).not.toMatch(/\b(?:two|five|11 to 13) seconds?\b/i);
   });
 
-  it("says a build with no runtime cannot clean up at all", () => {
+  it("says when this Mac cannot run the cleanup model at all", () => {
     // Different sentence from the CPU one: "this build cannot run it" is not
     // "this Mac is slow", and only one of them is fixed by a faster Mac.
     render(
@@ -219,16 +223,16 @@ describe("the built-in cleanup model row", () => {
     const region = screen.getByRole("region", {
       name: "Built-in dictation cleanup model",
     });
-    expect(region.textContent).toContain("no runtime");
-    expect(region.textContent).not.toContain("11 to 13");
+    expect(region.textContent).toContain(
+      "The built-in cleanup model isn't available on this Mac, so AI cleanup is skipped",
+    );
+    expect(region.textContent).not.toMatch(/\b(?:two|five|11 to 13) seconds?\b/i);
   });
 
-  it("states the memory it holds while it is loaded", () => {
-    // Keeping a model warm costs half a gigabyte of RAM; a user choosing
-    // between routes is entitled to that number before they choose.
+  it("distinguishes the download size from conservative warm-memory needs", () => {
     render(
       <BundledCleanupModelRow
-        status={statusFixture({ ready: true, missingFiles: [] })}
+        status={statusFixture()}
         busy={false}
         progressPercent={null}
         error={null}
@@ -239,8 +243,15 @@ describe("the built-in cleanup model row", () => {
     const region = screen.getByRole("region", {
       name: "Built-in dictation cleanup model",
     });
-    expect(region.textContent).toContain("462 MiB of memory");
+    expect(region.textContent).toContain("496 MB to download");
+    expect(region.textContent).toContain(
+      "Estimated memory while kept warm: 1.3 GB, plus working memory during cleanup.",
+    );
+    expect(region.textContent).toContain(
+      "Plainsong checks free memory first and skips AI cleanup",
+    );
     expect(region.textContent).toContain("Keep the model");
+    expect(region.textContent).not.toMatch(/measured RAM|uses exactly/i);
   });
 
   it("shows nothing measured rather than inventing a state", () => {
@@ -254,7 +265,7 @@ describe("the built-in cleanup model row", () => {
         onDelete={() => {}}
       />,
     );
-    expect(screen.getByText(/nothing measured to show/)).toBeTruthy();
+    expect(screen.getByText(/nothing to show here yet/)).toBeTruthy();
   });
 });
 

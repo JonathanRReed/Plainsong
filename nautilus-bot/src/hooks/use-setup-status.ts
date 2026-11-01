@@ -11,8 +11,18 @@ import {
   hasProviderSecret,
   type PermissionDiagnostics,
 } from "@/lib/backend/settings";
-import { getOllamaStatus } from "@/lib/backend/ai";
-import { isRemoteAnalysisProvider } from "@/components/models/ai-lanes";
+import {
+  getNativeTextModelStatus,
+  getAppleLanguageModelAvailability,
+  getLocalTextRuntimeHealth,
+  getOllamaStatus,
+  listOllamaModelCatalog,
+  listOllamaModels,
+} from "@/lib/backend/ai";
+import {
+  isDictationOnlyAnalysisProvider,
+  isRemoteAnalysisProvider,
+} from "@/components/models/ai-lanes";
 import {
   AI_NOTES_PREFERENCE_EVENT,
   readAiNotesOptOut,
@@ -32,6 +42,7 @@ import {
   type SystemAudioCapability,
 } from "@/lib/backend/recordings";
 import {
+  isCloudProvider,
   isDownloadableProvider,
   isMeetingEligibleProvider,
   isMeetingEligibleModel,
@@ -40,10 +51,17 @@ import {
 import {
   buildProductReadinessSnapshot,
   type ProductReadinessSnapshot,
+  type ProductReadinessEvidence,
 } from "@/features/readiness/product-readiness";
-import { listen } from "@/lib/electron";
+import { invoke, listen } from "@/lib/electron";
+import { routeDisplayLabel } from "@/lib/asr-route-catalog";
 import type { AsrProviderInfo, AsrProviderType } from "@/types";
 import type { Settings } from "@/types/settings";
+import { probeOllamaModelReadiness } from "@/lib/ollama-model-readiness";
+import {
+  CHATGPT_PLAN_PROVIDER,
+  getChatGptPlanStatus,
+} from "@/lib/backend/chatgpt-plan";
 
 interface SetupRouteStatus {
   providerType: AsrProviderType | null;
@@ -77,6 +95,7 @@ interface SetupStatusSnapshot {
   fullCaptureBlockers: string[];
   meetingNotesRoute: MeetingNotesRouteAssessment;
   productReadiness: ProductReadinessSnapshot;
+  productReadinessEvidence: ProductReadinessEvidence;
 }
 
 /**
@@ -87,7 +106,13 @@ interface SetupStatusSnapshot {
 export interface MeetingNotesRouteProbe {
   optedOut: boolean;
   localRuntimeReady: boolean | null;
+  localModelReady: boolean | null;
+  localModelId: string | null;
   credentialPresent: boolean | null;
+  nativeMemoryReady?: boolean;
+  localExecutionReady?: boolean | null;
+  localExecutionMessage?: string | null;
+  accountRoute?: "ready" | "check_account" | "connect" | "choose_model";
 }
 
 interface SetupStatusSourceState {
@@ -121,7 +146,25 @@ function resolveSharedSelection(settings: Settings | null, kind: "dictation" | "
   };
 }
 
-function summarizeRoute(provider: AsrProviderInfo | null, modelId: string | null) {
+/** The speech model's name as the model pickers show it. */
+function speechModelName(
+  provider: AsrProviderInfo,
+  modelId: string,
+): string {
+  const modelLabel =
+    provider.modelOptions.find((option) => option.id === modelId)?.label ?? modelId;
+  return routeDisplayLabel(provider.providerType, modelId, modelLabel);
+}
+
+/**
+ * "Parakeet v3", or "Deepgram · Nova-3" for a cloud service. A local model
+ * is named on its own: which program runs it on this Mac is not the reader's
+ * concern, while a cloud service is where the audio goes.
+ */
+function summarizeRoute(
+  provider: AsrProviderInfo | null,
+  modelId: string | null,
+) {
   if (!provider) {
     return "Not selected";
   }
@@ -130,9 +173,73 @@ function summarizeRoute(provider: AsrProviderInfo | null, modelId: string | null
     return provider.name;
   }
 
-  const modelLabel =
-    provider.modelOptions.find((option) => option.id === modelId)?.label ?? modelId;
-  return `${provider.name} · ${modelLabel}`;
+  const name = speechModelName(provider, modelId);
+  return isCloudProvider(provider.providerType) ? `${provider.name} · ${name}` : name;
+}
+
+type RouteDiagnostics = Pick<AsrProviderInfo,
+  "providerType" | "selectedModelId" | "runtimeStatus" | "runtimeDetails"
+> & { runtimeMessage: string | null };
+
+type RouteDiagnosticsMap = Map<string, RouteDiagnostics | null>;
+
+function routeDiagnosticsKey(providerType: AsrProviderType, modelId: string) {
+  return `${providerType}:${modelId}`;
+}
+
+/**
+ * The meeting route the sidecar falls back to when the configured one is not
+ * ready, or null when none is. Mirrors `preferred_meeting_provider_candidates`
+ * and `select_ready_meeting_candidate` in rust-sidecar/src/asr_routing.rs:
+ * the meeting slot, then ONNX Parakeet when the slot names a GGUF route (the
+ * same weights), then the shared default, the dictation slot, ONNX Parakeet
+ * and Distil-Whisper. whisper.cpp, Apple Speech and transcribe.cpp are
+ * candidates only when the meeting slot itself names them; cloud routes only
+ * under Best available and only when the meeting slot names them. Each
+ * candidate runs on the model its provider has selected, which must be a
+ * meeting model and on disk.
+ */
+function readyMeetingSubstitute(
+  settings: Settings,
+  providers: AsrProviderInfo[],
+  downloadedModels: DownloadedModelIndex | null,
+): { provider: AsrProviderInfo; modelId: string } | null {
+  const transcription = settings.transcription;
+  const meetingProvider = (transcription.meetingProvider ?? null) as AsrProviderType | null;
+  const policy = transcription.meetingRoutePolicy === "best_available" ? "best_available" : "prefer_local";
+  const defaultProvider = (transcription.defaultProvider ?? null) as AsrProviderType | null;
+  const dictationProvider =
+    (transcription.dictationProvider as AsrProviderType | undefined) ?? defaultProvider;
+  const candidates: Array<AsrProviderType | null> = [
+    meetingProvider,
+    meetingProvider === "transcribe_cpp" ? "parakeet" : null,
+    defaultProvider,
+    dictationProvider,
+    "parakeet",
+    "distil_whisper",
+  ];
+  const slotOnly = new Set<AsrProviderType>(["whisper", "macos_apple_speech", "transcribe_cpp"]);
+  const seen = new Set<AsrProviderType>();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    const named = candidate === meetingProvider;
+    if (slotOnly.has(candidate) && !named) continue;
+    if (isCloudProvider(candidate) && (policy === "prefer_local" || !named)) continue;
+    const provider = providers.find((item) => item.providerType === candidate);
+    if (!provider) continue;
+    const modelId = provider.selectedModelId;
+    if (
+      provider.inferenceEnabled &&
+      provider.runtimeStatus === "ready" &&
+      isMeetingEligibleProvider(candidate) &&
+      isMeetingEligibleModel(candidate, modelId ?? "") &&
+      (isModelOnDisk(downloadedModels, candidate, modelId) ?? true)
+    ) {
+      return { provider, modelId };
+    }
+  }
+  return null;
 }
 
 function buildRouteStatus(
@@ -141,20 +248,37 @@ function buildRouteStatus(
   providers: AsrProviderInfo[],
   permissions: PermissionDiagnostics | null,
   downloadedModels: DownloadedModelIndex | null,
-  modelInventoryError: string | null
+  modelInventoryError: string | null,
+  routeDiagnostics: RouteDiagnosticsMap,
 ): SetupRouteStatus {
   const { providerType, modelId } = resolveSharedSelection(settings, kind);
   const provider =
     providers.find((item) => item.providerType === providerType) ?? null;
 
   if (!providerType || !provider) {
+    // A meeting slot naming a route this build does not list (GGUF Parakeet
+    // on an Intel Mac) still records on the sidecar's fallback.
+    const substitute =
+      kind === "meeting" && providerType && settings
+        ? readyMeetingSubstitute(settings, providers, downloadedModels)
+        : null;
+    if (substitute) {
+      return {
+        providerType: substitute.provider.providerType,
+        modelId: substitute.modelId,
+        provider: substitute.provider,
+        summary: summarizeRoute(substitute.provider, substitute.modelId),
+        ready: true,
+        reason: null,
+      };
+    }
     return {
       providerType,
       modelId,
       provider,
       summary: "Not selected",
       ready: false,
-      reason: "Choose a transcription route.",
+      reason: "Choose a speech model.",
     };
   }
 
@@ -175,9 +299,13 @@ function buildRouteStatus(
       modelInventoryError
   );
   const exactModelReady = modelOnDisk ?? selectedModelMatches;
-  const runtimeReady =
-    provider.runtimeStatus === "ready" ||
-    (modelOnDisk === true && provider.runtimeStatus === "missing_model");
+  const diagnosticKey = modelId ? routeDiagnosticsKey(provider.providerType, modelId) : null;
+  const checked = diagnosticKey !== null && routeDiagnostics.has(diagnosticKey);
+  const diagnostics = diagnosticKey ? routeDiagnostics.get(diagnosticKey) : null;
+  const runtimeStatus = checked ? diagnostics?.runtimeStatus : provider.runtimeStatus;
+  const runtimeMessage = checked ? diagnostics?.runtimeMessage : provider.runtimeMessage;
+  const runtimeDetails = checked ? diagnostics?.runtimeDetails : provider.runtimeDetails;
+  const runtimeReady = runtimeStatus === "ready";
   const baseReady = Boolean(
     provider.inferenceEnabled &&
       runtimeReady &&
@@ -197,7 +325,7 @@ function buildRouteStatus(
       provider,
       summary: routeSummary,
       ready: false,
-      reason: `${provider.name} is dictation-only. Meetings need a meeting-grade ASR route.`,
+      reason: `${modelId ? speechModelName(provider, modelId) : provider.name} is for dictation only. Choose a speech model for meetings.`,
     };
   }
 
@@ -231,6 +359,31 @@ function buildRouteStatus(
     };
   }
 
+  if (kind === "meeting" && !baseReady && settings) {
+    const substitute = readyMeetingSubstitute(settings, providers, downloadedModels);
+    if (
+      substitute &&
+      !(substitute.provider.providerType === providerType && substitute.modelId === modelId)
+    ) {
+      // The configured meeting route is not ready, but the sidecar records
+      // meetings on this one meanwhile: ready, naming the model that runs.
+      const substituteSummary = summarizeRoute(substitute.provider, substitute.modelId);
+      return {
+        providerType: substitute.provider.providerType,
+        modelId: substitute.modelId,
+        provider: substitute.provider,
+        // Both builds of Parakeet v3 share a name: the model that runs is
+        // the same one, so there is nothing to wait for in the summary.
+        summary:
+          substituteSummary === routeSummary
+            ? substituteSummary
+            : `${substituteSummary}, until ${routeSummary} is ready`,
+        ready: true,
+        reason: null,
+      };
+    }
+  }
+
   return {
     providerType,
     modelId,
@@ -240,16 +393,19 @@ function buildRouteStatus(
     reason: baseReady
       ? null
       : !modelId
-        ? `Choose a ${kind} model for ${provider.name}.`
+        ? `Choose a ${kind} speech model.`
         : !modelIsKnown
-          ? `${modelId} is not available for ${provider.name}. Choose or download a model.`
+          ? `${speechModelName(provider, modelId)} is not available in this version of Plainsong. Choose another speech model.`
           : modelInventoryBlocked
-            ? modelInventoryError ?? "Could not inspect downloaded transcription models."
+            ? modelInventoryError ?? "Could not check which speech models are downloaded."
             : modelOnDisk === false
-              ? `${modelId} is not downloaded for ${provider.name}.`
+              ? `${speechModelName(provider, modelId)} is not downloaded yet.`
               : !exactModelReady
-                ? `${provider.name} has not confirmed ${modelId} as its active model.`
-                : provider.runtimeMessage ?? `${provider.name} is not ready yet.`,
+                ? `${speechModelName(provider, modelId)} has not been confirmed as the active speech model yet.`
+                : runtimeStatus === "missing_model" &&
+                    runtimeDetails?.missingFiles?.length
+                  ? `Some of ${speechModelName(provider, modelId)}'s files are missing or damaged. Download it again.`
+                  : runtimeMessage ?? `${speechModelName(provider, modelId)} is not ready yet.`,
   };
 }
 
@@ -264,6 +420,7 @@ export function buildSnapshot(
   downloadedModels: DownloadedModelIndex | null = null,
   modelInventoryError: string | null = null,
   meetingNotesProbe: MeetingNotesRouteProbe | null = null,
+  routeDiagnostics: RouteDiagnosticsMap = new Map(),
 ): SetupStatusSnapshot {
   const dictationRoute = buildRouteStatus(
     "dictation",
@@ -271,7 +428,8 @@ export function buildSnapshot(
     providers,
     permissions,
     downloadedModels,
-    modelInventoryError
+    modelInventoryError,
+    routeDiagnostics,
   );
   const meetingRoute = buildRouteStatus(
     "meeting",
@@ -279,7 +437,8 @@ export function buildSnapshot(
     providers,
     permissions,
     downloadedModels,
-    modelInventoryError
+    modelInventoryError,
+    routeDiagnostics,
   );
   const effectiveSystemAudioAvailable = systemAudioCapability
     ? systemAudioCapability.backend !== "none"
@@ -350,14 +509,14 @@ export function buildSnapshot(
     ...meetingBlockers,
     effectiveSystemAudioAvailable === false
       ? systemAudioCapability?.actionableReason ??
-        "System audio capture is not available yet. Start in Mic only mode or configure a route."
+        "Plainsong can't record the meeting audio on this Mac yet, so meetings record your microphone only."
       : null,
     effectiveSystemAudioAvailable === true && !systemAudioVerified
       ? systemAudioCapability?.actionableReason ??
-        "A system-audio route was detected, but callbacks are unverified. Run Test system audio before using Me + Them."
+        "Plainsong hasn't checked the meeting audio yet. Choose Check meeting audio before using Me + Them."
       : null,
     !effectiveLoopbackDevice && effectiveSystemAudioAvailable === false
-      ? "No native or virtual-loopback route was detected for Me + Them capture."
+      ? "Plainsong found no way to record the meeting audio for Me + Them."
       : null,
   ].filter((value): value is string => Boolean(value));
   const meetingNotesRoute = resolveMeetingNotesRoute({
@@ -367,9 +526,17 @@ export function buildSnapshot(
     localRuntimeReady: meetingNotesProbe
       ? meetingNotesProbe.localRuntimeReady
       : null,
+    localModelReady: meetingNotesProbe
+      ? meetingNotesProbe.localModelReady
+      : null,
+    localModelId: meetingNotesProbe ? meetingNotesProbe.localModelId : null,
     credentialPresent: meetingNotesProbe
       ? meetingNotesProbe.credentialPresent
       : null,
+    accountRoute: meetingNotesProbe?.accountRoute,
+    nativeMemoryReady: meetingNotesProbe?.nativeMemoryReady,
+    localExecutionReady: meetingNotesProbe?.localExecutionReady,
+    localExecutionMessage: meetingNotesProbe?.localExecutionMessage,
   });
   const meetingCaptureMode =
     effectiveSystemAudioAvailable === null
@@ -377,7 +544,7 @@ export function buildSnapshot(
       : fullCaptureReady
         ? "me_and_them"
         : "mic_only";
-  const productReadiness = buildProductReadinessSnapshot({
+  const productReadinessEvidence: ProductReadinessEvidence = {
     observedAt: sourceState.observedAt ?? Date.now(),
     loading: sourceState.loading ?? false,
     error: sourceState.error ?? null,
@@ -416,7 +583,8 @@ export function buildSnapshot(
         : effectiveSystemAudioAvailable === false
           ? "unavailable"
           : "unknown",
-  });
+  };
+  const productReadiness = buildProductReadinessSnapshot(productReadinessEvidence);
 
   return {
     settings,
@@ -441,6 +609,7 @@ export function buildSnapshot(
     fullCaptureBlockers,
     meetingNotesRoute,
     productReadiness,
+    productReadinessEvidence,
   };
 }
 
@@ -450,26 +619,142 @@ export function buildSnapshot(
  * `null` — "we did not get an answer" — because claiming a route is broken on a
  * failed probe is as dishonest as claiming it works.
  */
-async function probeMeetingNotesRoute(
+export async function probeMeetingNotesRoute(
   settings: Settings | null,
+  dependencies: Partial<{
+    hasProviderSecret: typeof hasProviderSecret;
+    getNativeTextModelStatus: typeof getNativeTextModelStatus;
+    getAppleLanguageModelAvailability: typeof getAppleLanguageModelAvailability;
+    getLocalTextRuntimeHealth: typeof getLocalTextRuntimeHealth;
+    getOllamaStatus: typeof getOllamaStatus;
+    listOllamaModels: typeof listOllamaModels;
+    listOllamaModelCatalog: typeof listOllamaModelCatalog;
+    getChatGptPlanStatus: typeof getChatGptPlanStatus;
+  }> = {},
 ): Promise<MeetingNotesRouteProbe> {
   const optedOut = readAiNotesOptOut();
   const provider = settings?.privacy?.meetingsAi?.provider?.trim() ?? "";
   if (!provider) {
-    return { optedOut, localRuntimeReady: null, credentialPresent: null };
+    return {
+      optedOut,
+      localRuntimeReady: null,
+      localModelReady: null,
+      localModelId: null,
+      credentialPresent: null,
+    };
+  }
+
+  if (provider === "native_text") {
+    try {
+      const status = await (dependencies.getNativeTextModelStatus ?? getNativeTextModelStatus)(settings?.privacy?.meetingsAi?.modelId ?? undefined);
+      const modelId = settings?.privacy?.meetingsAi?.modelId ?? status.modelId;
+      const health = status.runtimeHealth;
+      return { optedOut, localRuntimeReady: status.runtimePresent,
+        localModelReady: status.ready && modelId === status.modelId,
+        localModelId: modelId, credentialPresent: null,
+        nativeMemoryReady: status.memoryAvailableBytes === null ? undefined : status.canLoadNow,
+        localExecutionReady: !health || health.state === "busy" ? null : health.state === "available",
+        localExecutionMessage: health?.message ?? null };
+    } catch {
+      return { optedOut, localRuntimeReady: null, localModelReady: null,
+        localModelId: settings?.privacy?.meetingsAi?.modelId ?? null, credentialPresent: null };
+    }
+  }
+
+  if (provider === "apple_language_model") {
+    const status = await (dependencies.getAppleLanguageModelAvailability ?? getAppleLanguageModelAvailability)().catch(() => null);
+    return { optedOut, localRuntimeReady: status?.available ?? null, localModelReady: status?.available ?? null,
+      localModelId: "apple-on-device", credentialPresent: null,
+      localExecutionReady: status?.available ?? null, localExecutionMessage: status?.detail ?? null };
+  }
+
+  if (provider === CHATGPT_PLAN_PROVIDER) {
+    if (!settings?.privacy?.remoteProcessingEnabled) {
+      return {
+        optedOut,
+        localRuntimeReady: null,
+        localModelReady: null,
+        localModelId: null,
+        credentialPresent: null,
+        accountRoute: "check_account",
+      };
+    }
+    const status = await (
+      dependencies.getChatGptPlanStatus ?? getChatGptPlanStatus
+    )().catch(() => null);
+    const selectedModel = settings.privacy.meetingsAi.modelId?.trim() ?? "";
+    const active = status?.accounts.find((account) => account.active);
+    const accountRoute = !status?.loaded || !status.modelsReady
+      ? "check_account"
+      : !active?.connected || !active.planEnabled
+        ? "connect"
+        : !selectedModel || !status.models.some((model) => model.slug === selectedModel)
+          ? "choose_model"
+          : "ready";
+    return {
+      optedOut,
+      localRuntimeReady: null,
+      localModelReady: null,
+      localModelId: selectedModel || null,
+      credentialPresent: null,
+      accountRoute,
+    };
   }
 
   if (isRemoteAnalysisProvider(provider)) {
-    const credentialPresent = await hasProviderSecret(provider)
+    if (!settings?.privacy?.remoteProcessingEnabled) {
+      return {
+        optedOut,
+        localRuntimeReady: null,
+        localModelReady: null,
+        localModelId: null,
+        credentialPresent: null,
+      };
+    }
+    const credentialPresent = await (
+      dependencies.hasProviderSecret ?? hasProviderSecret
+    )(provider)
       .then((present) => (typeof present === "boolean" ? present : null))
       .catch(() => null);
-    return { optedOut, localRuntimeReady: null, credentialPresent };
+    return {
+      optedOut,
+      localRuntimeReady: null,
+      localModelReady: null,
+      localModelId: null,
+      credentialPresent,
+    };
   }
 
-  const localRuntimeReady = await getOllamaStatus()
-    .then((ready) => (typeof ready === "boolean" ? ready : null))
-    .catch(() => null);
-  return { optedOut, localRuntimeReady, credentialPresent: null };
+  if (isDictationOnlyAnalysisProvider(provider)) {
+    return {
+      optedOut,
+      localRuntimeReady: null,
+      localModelReady: null,
+      localModelId: settings?.privacy?.meetingsAi?.modelId ?? null,
+      credentialPresent: null,
+    };
+  }
+
+  const local = await probeOllamaModelReadiness(
+    settings?.privacy?.meetingsAi?.modelId,
+    {
+      getRuntimeStatus: dependencies.getOllamaStatus ?? getOllamaStatus,
+      listInstalledModels: dependencies.listOllamaModels ?? listOllamaModels,
+      listCatalog:
+        dependencies.listOllamaModelCatalog ?? listOllamaModelCatalog,
+      getRuntimeHealth: dependencies.getLocalTextRuntimeHealth ?? getLocalTextRuntimeHealth,
+      remoteProcessingEnabled: settings?.privacy?.remoteProcessingEnabled,
+    },
+  );
+  return {
+    optedOut,
+    localRuntimeReady: local.runtimeReady,
+    localModelReady: local.modelReady,
+    localModelId: local.modelId,
+    credentialPresent: null,
+    localExecutionReady: local.executionReady,
+    localExecutionMessage: local.executionMessage,
+  };
 }
 
 export function useSetupStatus() {
@@ -477,6 +762,7 @@ export function useSetupStatus() {
   const [providers, setProviders] = useState<AsrProviderInfo[]>([]);
   const [downloadedModels, setDownloadedModels] =
     useState<DownloadedModelIndex | null>(null);
+  const [routeDiagnostics, setRouteDiagnostics] = useState<RouteDiagnosticsMap>(() => new Map());
   const [modelInventoryError, setModelInventoryError] = useState<string | null>(null);
   const [permissions, setPermissions] = useState<PermissionDiagnostics | null>(null);
   const [systemAudioCapability, setSystemAudioCapability] =
@@ -501,10 +787,17 @@ export function useSetupStatus() {
   const [error, setError] = useState<string | null>(null);
   const [observedAt, setObservedAt] = useState(() => Date.now());
   const refreshSequenceRef = useRef(0);
+  const captureInputsCheckedRef = useRef(false);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ background = false }: { background?: boolean } = {}) => {
     const refreshSequence = ++refreshSequenceRef.current;
-    setLoading(true);
+    // Focus rechecks the same setup. Keep its checked display until the answer
+    // changes, rather than restarting spinners and resizing the capture card.
+    // Settings writes, explicit invalidations and engine loss still clear it.
+    if (!background || !captureInputsCheckedRef.current) {
+      captureInputsCheckedRef.current = false;
+      setLoading(true);
+    }
     setError(null);
 
     try {
@@ -536,24 +829,61 @@ export function useSetupStatus() {
       if (refreshSequence !== refreshSequenceRef.current) {
         return;
       }
-      // The AI-notes probe has to know which provider the lane names before it
-      // can ask the right question, so it runs after settings land rather than
-      // beside them. A probe that throws stays `null` — unknown, not unready.
-      const nextMeetingNotesProbe = await probeMeetingNotesRoute(nextSettings);
+      const selectedRoutes = [
+        resolveSharedSelection(nextSettings, "dictation"),
+        resolveSharedSelection(nextSettings, "meeting"),
+      ];
+      const nextRouteDiagnostics: RouteDiagnosticsMap = new Map();
+      await Promise.all(selectedRoutes.map(async ({ providerType, modelId }) => {
+        const provider = nextProviders.find(item => item.providerType === providerType);
+        if (!provider || !providerType || !modelId ||
+          !isDownloadableProvider(providerType) ||
+          (provider.runtimeStatus !== "missing_model" && provider.selectedModelId === modelId)) {
+          return;
+        }
+        const key = routeDiagnosticsKey(providerType, modelId);
+        if (nextRouteDiagnostics.has(key)) return;
+        // Reserve the exact route before awaiting, so shared selections probe once.
+        // A failed or mismatched response keeps this route blocked.
+        nextRouteDiagnostics.set(key, null);
+        try {
+          const diagnostics = await invoke<RouteDiagnostics>(
+            "get_asr_runtime_diagnostics", { providerType, modelId },
+          );
+          if (diagnostics.providerType === providerType && diagnostics.selectedModelId === modelId) {
+            nextRouteDiagnostics.set(key, diagnostics);
+          }
+        } catch {
+          // Keep the failed route's null result rather than reuse another model's status.
+        }
+      }));
       if (refreshSequence !== refreshSequenceRef.current) {
         return;
       }
       setSettings(nextSettings);
       setProviders(nextProviders);
+      setRouteDiagnostics(nextRouteDiagnostics);
       setDownloadedModels(nextDownloadedModelResult.index);
       setModelInventoryError(nextDownloadedModelResult.error);
       setPermissions(nextPermissions);
       setSystemAudioCapability(nextSystemAudioCapability);
+      // Capture readiness does not depend on the meeting-notes model. Publish
+      // the checked capture inputs before probing that optional lane.
+      if (!background) setMeetingNotesProbe(null);
+      setObservedAt(Date.now());
+      captureInputsCheckedRef.current = true;
+      setLoading(false);
+      const nextMeetingNotesProbe = await probeMeetingNotesRoute(nextSettings)
+        .catch(() => null);
+      if (refreshSequence !== refreshSequenceRef.current) {
+        return;
+      }
       setMeetingNotesProbe(nextMeetingNotesProbe);
     } catch (nextError) {
       if (refreshSequence !== refreshSequenceRef.current) {
         return;
       }
+      captureInputsCheckedRef.current = false;
       setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
       if (refreshSequence === refreshSequenceRef.current) {
@@ -621,9 +951,10 @@ export function useSetupStatus() {
         console.warn("Failed to subscribe to readiness invalidation:", nextError);
       });
 
-    void listen(SIDECAR_RUNTIME_EVENT, (event) => {
+    let runtimeRevision = 0;
+    const applyRuntimeStatus = (payload: unknown) => {
       if (disposed) return;
-      const runtime = parseSidecarRuntimeEvent(event.payload);
+      const runtime = parseSidecarRuntimeEvent(payload);
       if (!runtime) {
         return;
       }
@@ -639,11 +970,12 @@ export function useSetupStatus() {
           engineIncidentRef.current = Date.now();
         }
         refreshSequenceRef.current += 1;
+        captureInputsCheckedRef.current = false;
         setLoading(false);
         // Readiness is blocked either way; only the banner is suppressed, and
         // only for the incident the reader actually dismissed.
         if (dismissedIncidentRef.current !== engineIncidentRef.current) {
-          setEngineNotice(notice);
+          setEngineNotice({ ...notice });
         }
         setError(`${notice.title}. ${notice.message}`);
         setObservedAt(Date.now());
@@ -654,15 +986,28 @@ export function useSetupStatus() {
       dismissedIncidentRef.current = null;
       setEngineNotice(null);
       void refresh();
+    };
+    void listen(SIDECAR_RUNTIME_EVENT, (event) => {
+      ++runtimeRevision;
+      applyRuntimeStatus(event.payload);
     })
-      .then(retainUnlistener)
+      .then((unlisten) => {
+        retainUnlistener(unlisten);
+        if (disposed) return;
+        const revision = runtimeRevision;
+        void invoke("get_sidecar_runtime_status").then((payload) => {
+          if (disposed || runtimeRevision !== revision) return;
+          const runtime = parseSidecarRuntimeEvent(payload);
+          if (runtime?.ready || runtime?.reason) applyRuntimeStatus(payload);
+        }).catch(() => { /* Older bridges report lifecycle events without snapshots. */ });
+      })
       .catch((nextError) => {
         console.warn("Failed to subscribe to sidecar readiness:", nextError);
       });
 
     const handleWindowFocus = () => {
       if (!disposed) {
-        void refresh();
+        void refresh({ background: true });
       }
     };
     window.addEventListener("focus", handleWindowFocus);
@@ -711,9 +1056,11 @@ export function useSetupStatus() {
         downloadedModels,
         modelInventoryError,
         meetingNotesProbe,
+        routeDiagnostics,
       ),
     [
       downloadedModels,
+      routeDiagnostics,
       error,
       meetingNotesProbe,
       modelInventoryError,

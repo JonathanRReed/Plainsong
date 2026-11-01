@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
-import { invoke } from "@/lib/electron";
+import { getSettings, updateSettings } from "@/lib/backend/settings";
 import { applyThemeScheme, normalizeThemeScheme } from "@/lib/theme-schemes";
 
 type Theme = "light" | "dark" | "system";
@@ -55,23 +55,17 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const loadTheme = async () => {
       try {
-        const settings = await invoke<Record<string, unknown>>("get_settings");
+        const settings = await getSettings();
         const savedTheme = isTheme(settings.theme) ? settings.theme : "dark";
-        const ui = (settings.ui as Record<string, unknown> | undefined) ?? {};
+        const ui = settings.ui;
         const rawColorScheme = typeof ui.colorScheme === "string" ? ui.colorScheme : "default";
         const savedColorScheme = normalizeThemeScheme(rawColorScheme);
         setThemeState(savedTheme);
         cacheTheme(savedTheme);
         setColorSchemeState(savedColorScheme);
         if (savedColorScheme !== rawColorScheme) {
-          await invoke("save_settings", {
-            settings: {
-              ...settings,
-              ui: {
-                ...ui,
-                colorScheme: savedColorScheme,
-              },
-            },
+          await updateSettings((draft) => {
+            draft.ui.colorScheme = normalizeThemeScheme(typeof draft.ui.colorScheme === "string" ? draft.ui.colorScheme : "default");
           });
         }
       } catch {
@@ -122,12 +116,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     
     // Save to settings
     try {
-      const settings = await invoke<Record<string, unknown>>("get_settings");
-      await invoke("save_settings", {
-        settings: {
-          ...settings,
-          theme: newTheme,
-        },
+      await updateSettings((draft) => {
+        draft.theme = newTheme;
       });
     } catch {
       // Ignore save errors
@@ -140,16 +130,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     applyThemeScheme(normalized);
 
     try {
-      const settings = await invoke<Record<string, unknown>>("get_settings");
-      const ui = (settings.ui as Record<string, unknown> | undefined) ?? {};
-      await invoke("save_settings", {
-        settings: {
-          ...settings,
-          ui: {
-            ...ui,
-            colorScheme: normalized,
-          },
-        },
+      await updateSettings((draft) => {
+        draft.ui.colorScheme = normalized;
       });
     } catch {
       // Ignore save errors

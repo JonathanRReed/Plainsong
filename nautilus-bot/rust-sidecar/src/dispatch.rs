@@ -3,13 +3,176 @@
 //! `src/bin/sidecar.rs` reads one newline-delimited request off stdin and calls
 //! [`dispatch_command`]. This module is the whole renderer-facing surface of the
 //! sidecar: the arm list here and the allowlist in `electron/ipc-bridge.ts` are
-//! the same contract, checked by `scripts/verify-ipc-contract.mjs`.
+//! the same contract, checked by `scripts/verify-ipc-contract.ts`.
 //!
-//! It is also the seam a Tauri command layer would call directly, which is why
-//! it lives on its own instead of in the middle of `lib.rs`
-//! (`docs/tauri-migration-plan.md`).
 
 use super::*;
+use crate::models::TranscriptSegmentExpectation;
+
+/// How many bytes an export wrote, for the audit log. The log records the
+/// format and this size, never the path: an export is named after its meeting.
+fn exported_file_bytes(path: &str) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+fn deletable_recording_bundle(
+    db: &db::Database,
+    recording_id: &str,
+) -> Result<crate::recording_audio::RecordingAudioBundle, String> {
+    // Refuse while either half of the capture pipeline can still write
+    // transcript rows. Deleting during post-processing would let the
+    // background task recreate an orphan transcript after this returns.
+    if db
+        .has_pending_audio_compression(recording_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("Wait for audio compression cleanup before deleting this meeting.".into());
+    }
+    let recording = db
+        .get_recording(recording_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Recording not found".to_string())?;
+    match recording.status.as_str() {
+        "recording" => return Err("Stop the meeting before deleting it.".to_string()),
+        "processing" => {
+            return Err("Wait for meeting processing to finish before deleting it.".to_string())
+        }
+        _ => {}
+    }
+    if db
+        .load_open_recording_audio_operation(recording_id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        return Err(
+            "Wait for recording audio encryption to finish before deleting this meeting."
+                .to_string(),
+        );
+    }
+    db.load_recording_audio_bundle(recording_id)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_save_settings_request(
+    mut params: serde_json::Value,
+) -> Result<(settings::Settings, bool), String> {
+    let envelope = params.as_object_mut().ok_or("Expected settings object")?;
+    let preserve_saved_prompts = match envelope.remove("preserveSavedPrompts") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => value,
+        Some(_) => return Err("preserveSavedPrompts must be a boolean".to_string()),
+    };
+    let payload = envelope.remove("settings").unwrap_or(params);
+    let settings = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+    Ok((settings, preserve_saved_prompts))
+}
+
+fn parse_settings_update_request(
+    params: serde_json::Value,
+) -> Result<(settings_patch::SettingsUpdate, bool), String> {
+    if params.get("patch").is_some() {
+        let mut envelope = params
+            .as_object()
+            .ok_or("Expected settings object")?
+            .clone();
+        if envelope
+            .keys()
+            .any(|key| !matches!(key.as_str(), "patch" | "preserveSavedPrompts"))
+        {
+            return Err("Unexpected settings patch envelope field".into());
+        }
+        let preserve = match envelope.remove("preserveSavedPrompts") {
+            None => false,
+            Some(serde_json::Value::Bool(value)) => value,
+            Some(_) => return Err("preserveSavedPrompts must be a boolean".into()),
+        };
+        let patch =
+            settings_patch::SettingsPatch::parse(envelope.remove("patch").ok_or("Missing patch")?)?;
+        Ok((settings_patch::SettingsUpdate::Patch(patch), preserve))
+    } else {
+        let (settings, preserve) = parse_save_settings_request(params)?;
+        Ok((
+            settings_patch::SettingsUpdate::Replace(Box::new(settings)),
+            preserve,
+        ))
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetSavedPromptsRequest {
+    saved_prompts: Vec<settings::SavedPrompt>,
+}
+
+fn parse_set_saved_prompts_request(
+    params: serde_json::Value,
+) -> Result<Vec<settings::SavedPrompt>, String> {
+    serde_json::from_value::<SetSavedPromptsRequest>(params)
+        .map(|request| request.saved_prompts)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AsrRuntimeDiagnosticsRequest {
+    provider_type: asr::AsrProviderType,
+    #[serde(default, deserialize_with = "deserialize_diagnostic_model_id")]
+    model_id: Option<String>,
+}
+
+/// The background speech-model download, for a Models screen that opens
+/// after its `speech-model-download-notice` events already went by.
+fn speech_model_download_notice() -> Result<serde_json::Value, String> {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    let notice = asr::neural_engine::download_notice();
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    let notice = serde_json::json!({"state": "idle", "percent": 0, "totalBytes": 0});
+    serde_json::to_value(notice).map_err(|e| e.to_string())
+}
+
+fn parse_asr_runtime_diagnostics_request(
+    params: serde_json::Value,
+) -> Result<AsrRuntimeDiagnosticsRequest, String> {
+    let request: AsrRuntimeDiagnosticsRequest =
+        serde_json::from_value(params).map_err(|e| e.to_string())?;
+    if let Some(model_id) = request.model_id.as_deref() {
+        if !request
+            .provider_type
+            .model_options()
+            .iter()
+            .any(|option| option.id == model_id)
+        {
+            return Err("modelId is not available for this provider".to_string());
+        }
+    }
+    Ok(request)
+}
+
+fn deserialize_diagnostic_model_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let model_id = <String as serde::Deserialize>::deserialize(deserializer)?;
+    if model_id.trim().is_empty() || model_id.trim() != model_id {
+        return Err(serde::de::Error::custom(
+            "modelId must be a nonempty model identifier",
+        ));
+    }
+    Ok(Some(model_id))
+}
+
+const MAX_MEETING_FOLLOWUP_QUERY_BYTES: usize = 4_096;
+const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListMeetingFollowupsRequest {
+    query: Option<String>,
+    offset: Option<u64>,
+    limit: Option<u64>,
+    #[serde(default)]
+    include_completed: bool,
+}
 
 struct OllamaPullActiveGuard(Arc<AtomicBool>);
 
@@ -17,6 +180,98 @@ impl Drop for OllamaPullActiveGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
+}
+
+fn normalize_meeting_chat_citation(
+    citation: MeetingChatCitationRecord,
+) -> Option<MeetingChatCitationRecord> {
+    let text = citation.text.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let normalize_optional = |value: Option<String>| {
+        value.and_then(|value| (!value.trim().is_empty()).then(|| value.trim().to_string()))
+    };
+    Some(MeetingChatCitationRecord {
+        text,
+        source_kind: normalize_optional(citation.source_kind),
+        line_id: normalize_optional(citation.line_id),
+        segment_id: normalize_optional(citation.segment_id),
+        start_time: citation.start_time,
+        end_time: citation.end_time,
+        recording_id: normalize_optional(citation.recording_id),
+        certainty: citation.certainty,
+    })
+}
+
+/// What Settings shows about meaning search: the built-in models and whether
+/// each is on disk, how much of the library the selected index covers, and
+/// whether indexing or a download is running.
+async fn embedding_status(state: &AppState) -> Result<serde_json::Value, String> {
+    let (route, mode, selected_builtin, acceptances) = {
+        let sm = state.settings_manager.lock().await;
+        let transcription = &sm.settings().transcription;
+        (
+            crate::semantic_index::ActiveRoute::from_settings(transcription),
+            transcription.memory_search_mode.clone(),
+            llm::builtin_embeddings::model_or_default(&transcription.builtin_embedding_model).id,
+            transcription.builtin_embedding_terms_acceptances.clone(),
+        )
+    };
+    let (count, coverage) = {
+        let db = state.db.lock().await;
+        let count = db.embedding_count().map_err(|e| e.to_string())?;
+        let coverage = match route.as_ref() {
+            Some(route) => Some(
+                db.semantic_index_coverage(&route.key())
+                    .map_err(|e| e.to_string())?,
+            ),
+            None => None,
+        };
+        (count, coverage)
+    };
+    let ollama_available = if mode == crate::semantic_index::MODE_OLLAMA {
+        state.ollama_embedder.is_available().await
+    } else {
+        false
+    };
+    let root = llm::builtin_embeddings::models_root();
+    let models: Vec<serde_json::Value> = llm::builtin_embeddings::MODELS
+        .iter()
+        .map(|model| {
+            serde_json::json!({
+                "id": model.id,
+                "displayName": model.display_name,
+                "vendor": model.vendor,
+                "summary": model.summary,
+                "languages": model.languages,
+                "license": model.license,
+                "termsUrl": model.terms_url,
+                "usePolicyUrl": model.use_policy_url,
+                "requiresTermsAcceptance": model.requires_terms_acceptance,
+                "termsAccepted": llm::builtin_embeddings::terms_accepted(model, &acceptances),
+                "downloadBytes": model.download_bytes(),
+                "downloaded": root
+                    .as_ref()
+                    .is_some_and(|root| llm::builtin_embeddings::artifacts_installed(root, model)),
+                "isDefault": model.id == llm::builtin_embeddings::DEFAULT_MODEL_ID,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "qaHelperFootprints": llm::builtin_embeddings::helper_qa_footprints(),
+        "memorySearchMode": mode,
+        "embeddingCount": count,
+        "ollamaAvailable": ollama_available,
+        "builtInAvailable": llm::builtin_embeddings::runtime_compiled(),
+        "builtInModels": models,
+        "selectedBuiltInModel": selected_builtin,
+        "indexedRecordings": coverage.map(|(indexed, _)| indexed),
+        "totalRecordings": coverage.map(|(_, total)| total),
+        "indexing": crate::semantic_index::indexing_active(),
+        "downloading": llm::builtin_embeddings::download_active(),
+        "lastError": crate::semantic_index::last_error(),
+    }))
 }
 
 async fn publish_dictation_start_error_if_idle<E: crate::sidecar_handle::AppEmitter>(
@@ -48,17 +303,18 @@ pub async fn dispatch_command(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let _command_lease = if method == "restore_backup_default" {
+        None
+    } else {
+        Some(
+            state
+                .operation_coordinator
+                .try_acquire(operation_coordinator::OperationKind::Command)?,
+        )
+    };
     match method {
         // ── Dictation ──────────────────────────────────────────────────────────
         "start_dictation" => {
-            // The idle-time hands-free monitor and a real dictation session must never
-            // hold the microphone at once; stop it defensively before attempting to
-            // start (no-op if it wasn't running, e.g. hands-free is off or this start
-            // came from the hotkey/native-helper path instead of the monitor itself).
-            {
-                let mut audio = state.audio_capture.lock().await;
-                audio.stop_hands_free_monitor();
-            }
             let options: models::DictationStartOptions = serde_json::from_value(
                 params
                     .get("options")
@@ -66,12 +322,35 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Object(Default::default())),
             )
             .unwrap_or_default();
+            let hands_free_trigger = options.hands_free_trigger;
+            // The idle-time hands-free monitor and a real dictation session must never
+            // hold the microphone at once. A start the monitor itself signalled keeps
+            // its stream running for `start_dictation` to take over, so the user's
+            // words keep reaching the pre-roll; every other start stops it now (no-op
+            // if it wasn't running).
+            {
+                let mut audio = state.audio_capture.lock().await;
+                if hands_free_trigger {
+                    audio.hold_hands_free_monitor(true);
+                } else {
+                    audio.stop_hands_free_monitor();
+                }
+            }
             // The result is captured rather than `?`-propagated: a `?` here
             // returned before the reconcile below, so a failed start left
             // hands-free monitoring stopped and the user's next utterance was
             // never heard. The comment claimed reconciliation always ran; now
             // it actually does, on both the success and failure paths.
-            let start_result = start_dictation_for_sidecar(state.as_ref(), handle, options).await;
+            let start_result = start_dictation_for_sidecar(state, handle, options).await;
+            if hands_free_trigger {
+                // A start that failed before taking the stream over must not
+                // leave the still-running monitor deaf.
+                state
+                    .audio_capture
+                    .lock()
+                    .await
+                    .hold_hands_free_monitor(false);
+            }
 
             // If starting failed, the runtime state falls back to `Idle` inside
             // `start_dictation_for_sidecar`'s own error handling, so it's always safe to
@@ -80,7 +359,20 @@ pub async fn dispatch_command(
             reconcile_hands_free_monitor(state.as_ref(), handle).await;
 
             match start_result {
-                Ok(session_id) => Ok(serde_json::json!({ "sessionId": session_id })),
+                Ok((session_id, mut start_guard)) => {
+                    let tracker = state.dictation_session_tracker.lock().await;
+                    let runtime = state.dictation_runtime_state.lock().await;
+                    if !dictation_start_matches(
+                        &tracker,
+                        *runtime,
+                        session_id,
+                        DictationSessionState::Recording,
+                    ) {
+                        return Err("Dictation start was cancelled".to_string());
+                    }
+                    start_guard.disarm();
+                    Ok(serde_json::json!({ "sessionId": session_id }))
+                }
                 Err(error) => {
                     // Make the failure visible instead of leaving the HUD to
                     // time out on its own. A cancelled start has already
@@ -132,22 +424,24 @@ pub async fn dispatch_command(
             // aborts the stream or startup observes that it lost ownership
             // and aborts its own newly-created stream.
             let mut tracker = state.dictation_session_tracker.lock().await;
-            let active_session_id = tracker
-                .active_session_id
-                .ok_or_else(|| "No active dictation session to force-stop".to_string())?;
-            if let Some(expected) = expected_session_id {
-                if expected != active_session_id {
-                    return Err(format!(
-                        "Stale force-stop for dictation session {} ignored (active session is {})",
-                        expected, active_session_id
-                    ));
-                }
+            let active_session_id =
+                claim_dictation_cancellation(&mut tracker, expected_session_id)?;
+            if let Ok(mut results) = state.recent_dictation_results.lock() {
+                cancel_recent_dictation_result(&mut results, active_session_id);
             }
-            tracker.stopping_session_id = Some(active_session_id);
             drop(tracker);
+            // Cancelled is a recorded outcome: the stop path, if it is running,
+            // deletes its checkpoint when it notices; this covers a quit that
+            // ends the process first.
+            if let Ok(dir) = crate::dictation_checkpoint::dictation_checkpoint_directory() {
+                crate::dictation_checkpoint::discard_in_flight_checkpoint(&dir);
+            }
+            #[cfg(target_os = "macos")]
+            release_session_selection_owner(state.as_ref(), active_session_id).await;
             let mut audio = state.audio_capture.lock().await;
             audio.abort_dictation_for_session(active_session_id);
             drop(audio);
+            persist_finished_meeting_aside(state.as_ref(), active_session_id).await;
             let cleaned_current_session = reset_dictation_session_runtime_if_current(
                 &state.dictation_runtime_state,
                 &state.dictation_session_tracker,
@@ -161,6 +455,8 @@ pub async fn dispatch_command(
                     active_session_id
                 ));
             }
+            stop_dictation_live_preview_for_session(state.as_ref(), active_session_id).await;
+            state.dictation_model_release.notify();
             if let Ok(mut overlay) = state.dictation_overlay_state.lock() {
                 if overlay.session_id == Some(active_session_id) {
                     *overlay = DictationOverlayState::default();
@@ -312,6 +608,128 @@ pub async fn dispatch_command(
                 "reason": reason,
             }))
         }
+        "get_recording_aside_ranges" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let db = state.db.lock().await;
+            let recording = db
+                .get_recording(&recording_id)
+                .map_err(|e| e.to_string())?
+                .ok_or("Recording not found")?;
+            let ranges = db
+                .aside_spans(&recording_id)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|span| {
+                    let start = span.start_frame as f64 / f64::from(span.sample_rate);
+                    let end = span.end_frame.map_or(recording.duration as f64, |frame| {
+                        frame as f64 / f64::from(span.sample_rate)
+                    });
+                    serde_json::json!({"startTime":start,"endTime":end.max(start)})
+                })
+                .collect::<Vec<_>>();
+            Ok(serde_json::json!(ranges))
+        }
+        "get_recording_asides" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let db = state.db.lock().await;
+            serde_json::to_value(
+                db.asides_for_review(&recording_id)
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        }
+        "delete_recording_aside" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let aside_id: String =
+                serde_json::from_value(params["asideId"].clone()).map_err(|e| e.to_string())?;
+            state
+                .db
+                .lock()
+                .await
+                .delete_aside(&recording_id, &aside_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Null)
+        }
+        "export_recording_audio" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let (recording, spans, mic_only) = {
+                let db = state.db.lock().await;
+                let recording = db
+                    .get_recording(&recording_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("Recording not found")?;
+                let bundle = db
+                    .load_recording_audio_bundle(&recording_id)
+                    .map_err(|e| e.to_string())?;
+                let mic_only = bundle.mic.is_none() && bundle.system.is_none();
+                (
+                    recording,
+                    db.aside_spans(&recording_id).map_err(|e| e.to_string())?,
+                    mic_only,
+                )
+            };
+            let mut path = export::get_default_export_path(&recording, export::ExportFormat::Text)
+                .with_extension("wav");
+            let location_id = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .privacy
+                .export_location_id
+                .clone();
+            if let Some(location_id) = location_id {
+                let root = approved_locations::registry()
+                    .map_err(|e| e.to_string())?
+                    .resolve_filesystem(
+                        &location_id,
+                        approved_locations::ApprovedLocationPurpose::Export,
+                    )
+                    .map_err(|e| e.to_string())?;
+                path = root.join(path.file_name().ok_or("Audio export has no filename")?);
+            }
+            if let Some(parent) = path.parent() {
+                safe_fs::ensure_directory_without_links(parent).map_err(|e| e.to_string())?;
+            }
+            let path = PathBuf::from(
+                validate_export_target_path(state.as_ref(), &path.to_string_lossy()).await?,
+            );
+            let audio = resolve_recording_audio_for_runtime(
+                state.as_ref(),
+                &recording_id,
+                RuntimeAudioResolveMode::PlaybackPrimary,
+            )
+            .await?;
+            let destination = path.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let staged = audio
+                    .primary
+                    .with_file_name(format!(".aside-export-{}.wav", uuid::Uuid::new_v4()));
+                meeting_aside_audio::copy_wav(
+                    &audio.primary,
+                    &staged,
+                    if mic_only { &spans } else { &[] },
+                    false,
+                )?;
+                let owner = recording_audio::DurableTempFile::new(staged.clone());
+                if let Some(parent) = destination.parent() {
+                    safe_fs::ensure_directory_without_links(parent).map_err(|e| e.to_string())?;
+                }
+                safe_fs::atomic_replace_with(&destination, |file| {
+                    let mut source = std::fs::File::open(owner.path())?;
+                    std::io::copy(&mut source, file)?;
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            Ok(serde_json::json!({"exportPath": path}))
+        }
         "revalidate_recording_audio" => {
             let recording_id: String =
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
@@ -360,12 +778,248 @@ pub async fn dispatch_command(
             }
             Ok(value)
         }
+        "list_meeting_followups" => {
+            let request: ListMeetingFollowupsRequest =
+                serde_json::from_value(params).map_err(|error| error.to_string())?;
+            if request
+                .query
+                .as_ref()
+                .is_some_and(|query| query.len() > MAX_MEETING_FOLLOWUP_QUERY_BYTES)
+            {
+                return Err(format!(
+                    "Meeting follow-up query cannot exceed {MAX_MEETING_FOLLOWUP_QUERY_BYTES} bytes"
+                ));
+            }
+            let offset = request.offset.unwrap_or(0);
+            if offset > MAX_SAFE_JSON_INTEGER.saturating_sub(100) {
+                return Err("Meeting follow-up offset is outside the safe range".to_string());
+            }
+            let offset = usize::try_from(offset)
+                .map_err(|_| "Meeting follow-up offset is outside the safe range".to_string())?;
+            let limit = request.limit.unwrap_or(30).clamp(1, 100) as usize;
+            let db = state.db.lock().await;
+            let page = db
+                .list_meeting_followups(
+                    request.query.as_deref(),
+                    offset,
+                    limit,
+                    request.include_completed,
+                )
+                .map_err(|error| error.to_string())?;
+            serde_json::to_value(page).map_err(|error| error.to_string())
+        }
         "get_recording" => {
             let recording_id: String =
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
             let db = state.db.lock().await;
             let result = db.get_recording(&recording_id).map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "get_meeting_action_completion" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let db = state.db.lock().await;
+            let completed_tasks = db
+                .get_meeting_action_completion(&recording_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "completedTasks": completed_tasks }))
+        }
+        "edit_meeting_action" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let expected_items: Vec<String> =
+                serde_json::from_value(params["expectedItems"].clone())
+                    .map_err(|e| e.to_string())?;
+            let index: usize =
+                serde_json::from_value(params["index"].clone()).map_err(|e| e.to_string())?;
+            let replacement: String =
+                serde_json::from_value(params["replacement"].clone()).map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            let (recording, completed_tasks) = db
+                .edit_meeting_action(&recording_id, &expected_items, index, &replacement)
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({ "recording": recording, "completedTasks": completed_tasks }))
+        }
+        "add_meeting_action" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let expected_items: Vec<String> =
+                serde_json::from_value(params["expectedItems"].clone())
+                    .map_err(|e| e.to_string())?;
+            let replacement: String =
+                serde_json::from_value(params["replacement"].clone()).map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            let (recording, completed_tasks) = db
+                .add_meeting_action(&recording_id, &expected_items, &replacement)
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({ "recording": recording, "completedTasks": completed_tasks }))
+        }
+        "delete_meeting_action" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let expected_items: Vec<String> =
+                serde_json::from_value(params["expectedItems"].clone())
+                    .map_err(|e| e.to_string())?;
+            let index: usize =
+                serde_json::from_value(params["index"].clone()).map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            let (recording, completed_tasks) = db
+                .delete_meeting_action(&recording_id, &expected_items, index)
+                .map_err(|error| error.to_string())?;
+            Ok(serde_json::json!({ "recording": recording, "completedTasks": completed_tasks }))
+        }
+        "set_meeting_action_completed" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let task: String =
+                serde_json::from_value(params["task"].clone()).map_err(|e| e.to_string())?;
+            let completed: bool =
+                serde_json::from_value(params["completed"].clone()).map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            let completed_tasks = db
+                .set_meeting_action_completed(&recording_id, &task, completed)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "completedTasks": completed_tasks }))
+        }
+        "get_dictation_edit" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let db = state.db.lock().await;
+            let text = db
+                .get_dictation_edit(&recording_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "text": text }))
+        }
+        "list_dictation_drafts" => {
+            let db = state.db.lock().await;
+            let drafts = db.list_dictation_drafts().map_err(|e| e.to_string())?;
+            serde_json::to_value(drafts).map_err(|e| e.to_string())
+        }
+        "save_dictation_draft" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let text: Option<String> = serde_json::from_value(
+                params
+                    .get("text")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|e| e.to_string())?;
+            let expected_saved_text: Option<String> = serde_json::from_value(
+                params
+                    .get("expectedSavedText")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            db.save_dictation_draft(
+                &recording_id,
+                text.as_deref(),
+                expected_saved_text.as_deref(),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Null)
+        }
+        "clear_dictation_draft" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let expected_draft_text: String =
+                serde_json::from_value(params["expectedDraftText"].clone())
+                    .map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            let cleared = db
+                .clear_dictation_draft(&recording_id, &expected_draft_text)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "cleared": cleared }))
+        }
+        "stage_saved_dictation_result" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+
+            // Remember the idle generation before reading storage. A hotkey can
+            // start a new capture while the database lock is awaited, so the
+            // same generation must still be idle before this older result is
+            // promoted to the front of recovery memory.
+            let idle_generation = {
+                let tracker = state.dictation_session_tracker.lock().await;
+                let runtime = state.dictation_runtime_state.lock().await;
+                if tracker.active_session_id.is_some() || *runtime != DictationSessionState::Idle {
+                    return Err(
+                        "Cannot stage a saved dictation while dictation is active.".to_string()
+                    );
+                }
+                tracker.next_session_id
+            };
+
+            // All candidate text comes from native-owned persistence. A saved
+            // correction wins when present; otherwise use the original
+            // transcript stored with the dictation history row.
+            let text = {
+                let db = state.db.lock().await;
+                match db
+                    .get_dictation_edit(&recording_id)
+                    .map_err(|e| e.to_string())?
+                {
+                    Some(text) => text,
+                    None => {
+                        db.get_transcript(&recording_id)
+                            .map_err(|e| e.to_string())?
+                            .ok_or_else(|| {
+                                format!("Recording '{}' has no persisted transcript", recording_id)
+                            })?
+                            .full_text
+                    }
+                }
+            };
+            if text.trim().is_empty() {
+                return Err("Saved dictation text is blank.".to_string());
+            }
+
+            // Hold the tracker through the synchronous memory write. This
+            // closes the gap between the recheck and record_recent... because
+            // every new capture claims its session under this same lock.
+            let tracker = state.dictation_session_tracker.lock().await;
+            let runtime = state.dictation_runtime_state.lock().await;
+            if tracker.active_session_id.is_some()
+                || tracker.next_session_id != idle_generation
+                || *runtime != DictationSessionState::Idle
+            {
+                return Err("Cannot stage a saved dictation while dictation is active.".to_string());
+            }
+            record_recent_dictation_result(
+                state.as_ref(),
+                handle,
+                &text,
+                None,
+                None,
+                None,
+                DictationRecoveryState::Completed,
+            );
+            Ok(serde_json::json!({ "text": text }))
+        }
+        "save_dictation_edit" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let text: Option<String> = serde_json::from_value(
+                params
+                    .get("text")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|e| e.to_string())?;
+            let expected_text: Option<String> = serde_json::from_value(
+                params
+                    .get("expectedText")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|e| e.to_string())?;
+            let mut db = state.db.lock().await;
+            let saved = db
+                .save_dictation_edit(&recording_id, text.as_deref(), expected_text.as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "text": saved }))
         }
         "get_transcript" => {
             let recording_id: String =
@@ -377,41 +1031,28 @@ pub async fn dispatch_command(
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "delete_recording" => {
-            let _storage_guard = state.audio_storage_gate.lock().await;
+            let _publish_guard = crate::publishing::IO_GATE.lock().await;
             let recording_id: String =
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
-            let bundle = {
-                let db = state.db.lock().await;
-                // Refuse while either half of the capture pipeline can still write
-                // transcript rows. Deleting during post-processing would let the
-                // background task recreate an orphan transcript after this returns.
-                let recording = db
-                    .get_recording(&recording_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "Recording not found".to_string())?;
-                match recording.status.as_str() {
-                    "recording" => return Err("Stop the meeting before deleting it.".to_string()),
-                    "processing" => {
-                        return Err(
-                            "Wait for meeting processing to finish before deleting it.".to_string()
-                        )
-                    }
-                    _ => {}
-                }
-                if db
-                    .load_open_recording_audio_operation(&recording_id)
-                    .map_err(|error| error.to_string())?
-                    .is_some()
-                {
-                    return Err(
-                        "Wait for recording audio encryption to finish before deleting this meeting."
-                            .to_string(),
-                    );
-                }
-                db.load_recording_audio_bundle(&recording_id)
-                    .map_err(|error| error.to_string())?
-            };
 
+            if params
+                .get("deletePublishedFile")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                let receipts = {
+                    let db = state.db.lock().await;
+                    deletable_recording_bundle(&db, &recording_id)?;
+                    db.publish_receipts(&recording_id)
+                        .map_err(|e| e.to_string())?
+                };
+                tokio::task::spawn_blocking(move || crate::publishing::delete_published(receipts))
+                    .await
+                    .map_err(|_| "Couldn't finish removing the published file")?
+                    .map_err(|e| e.to_string())?;
+            }
+            let _storage_guard = state.audio_storage_gate.lock().await;
+            let bundle = deletable_recording_bundle(&*state.db.lock().await, &recording_id)?;
             let deletion = remove_owned_recording_audio(&bundle, "recording delete");
             if !deletion.failures.is_empty() {
                 return Err(format!(
@@ -423,6 +1064,11 @@ pub async fn dispatch_command(
             let mut db = state.db.lock().await;
             db.delete_recording(&recording_id)
                 .map_err(|error| error.to_string())?;
+            crate::dictation_session::forget_deleted_dictation_results(
+                state.as_ref(),
+                Some(handle),
+                std::slice::from_ref(&recording_id),
+            );
             // The rows are gone; the session's in-memory centroids for this
             // meeting have to go with them, or a deleted meeting would still
             // be describable in voice for as long as the app stayed open.
@@ -493,9 +1139,17 @@ pub async fn dispatch_command(
                 _ => {}
             }
 
-            let postprocessing_lease = state
-                .operation_coordinator
-                .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+            let postprocessing_lease = state.operation_coordinator.try_acquire_named(
+                operation_coordinator::OperationKind::PostProcess,
+                "meeting retranscription",
+            )?;
+            // Persisted completion can precede tail cleanup. Claim the whole
+            // pipeline before publishing another processing attempt.
+            let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::try_coordinated(
+                Arc::clone(&state.active_meeting_audio_postprocessing),
+                &recording_id,
+                postprocessing_lease,
+            )?;
 
             {
                 let mut db = state.db.lock().await;
@@ -518,11 +1172,6 @@ pub async fn dispatch_command(
                 }),
             );
 
-            let audio_postprocessing_guard = MeetingAudioPostprocessingGuard::coordinated(
-                Arc::clone(&state.active_meeting_audio_postprocessing),
-                &recording_id,
-                postprocessing_lease,
-            );
             tokio::spawn(run_meeting_transcription_pipeline(
                 Arc::clone(state),
                 handle.clone(),
@@ -551,6 +1200,77 @@ pub async fn dispatch_command(
             let messages = artifact.map(|a| a.chat_messages).unwrap_or_default();
             serde_json::to_value(messages).map_err(|e| e.to_string())
         }
+        "queue_meeting_note_recovery" => {
+            let draft: crate::models::MeetingNoteRecoveryDraft =
+                serde_json::from_value(params["draft"].clone()).map_err(|e| e.to_string())?;
+            state
+                .db
+                .lock()
+                .await
+                .queue_meeting_note_recovery(
+                    &draft.id,
+                    &draft.recording_id,
+                    &draft.base_notes,
+                    &draft.notes,
+                )
+                .map_err(|e| e.to_string())?;
+            handle.emit_event(
+                "meeting-note-recovery-changed",
+                serde_json::json!({"recordingId":draft.recording_id}),
+            );
+            Ok(serde_json::Value::Null)
+        }
+        "list_meeting_note_recovery" => serde_json::to_value(
+            state
+                .db
+                .lock()
+                .await
+                .list_meeting_note_recovery()
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string()),
+        "get_meeting_enhanced_note_draft" => {
+            let recording_id = params["recordingId"]
+                .as_str()
+                .ok_or("Missing recordingId")?;
+            serde_json::to_value(
+                state
+                    .db
+                    .lock()
+                    .await
+                    .get_meeting_enhanced_note_draft(recording_id)
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        }
+        "save_meeting_enhanced_note_draft" => {
+            let recording_id = params["recordingId"]
+                .as_str()
+                .ok_or("Missing recordingId")?;
+            let draft: crate::models::MeetingEnhancedNoteDraft =
+                serde_json::from_value(params["draft"].clone()).map_err(|e| e.to_string())?;
+            serde_json::to_value(
+                state
+                    .db
+                    .lock()
+                    .await
+                    .save_meeting_enhanced_note_draft(recording_id, &draft)
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        }
+        "delete_meeting_enhanced_note_draft" => {
+            let recording_id = params["recordingId"]
+                .as_str()
+                .ok_or("Missing recordingId")?;
+            state
+                .db
+                .lock()
+                .await
+                .delete_meeting_enhanced_note_draft(recording_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Null)
+        }
         "update_recording_notes" => {
             let recording_id: String =
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
@@ -558,15 +1278,24 @@ pub async fn dispatch_command(
                 .map_err(|e| e.to_string())?;
             let normalized = meeting_notes.trim().to_string();
             let mut db = state.db.lock().await;
-            db.update_recording_notes(
+            db.update_recording_notes_recovering_guarded(
                 &recording_id,
                 if normalized.is_empty() {
                     None
                 } else {
                     Some(normalized.as_str())
                 },
+                params["recoveryDraftId"].as_str(),
+                params["expectedMeetingNotes"].as_str(),
             )
             .map_err(|e| e.to_string())?;
+            drop(db);
+            if params["recoveryDraftId"].as_str().is_some() {
+                handle.emit_event(
+                    "meeting-note-recovery-changed",
+                    serde_json::json!({"recordingId":recording_id}),
+                );
+            }
             Ok(serde_json::Value::Null)
         }
         "update_recording_analysis" => {
@@ -701,21 +1430,7 @@ pub async fn dispatch_command(
                     citations: m
                         .citations
                         .into_iter()
-                        .filter_map(|c| {
-                            let text = c.text.trim().to_string();
-                            if text.is_empty() {
-                                return None;
-                            }
-                            Some(MeetingChatCitationRecord {
-                                text,
-                                start_time: c.start_time,
-                                end_time: c.end_time,
-                                recording_id: c.recording_id.and_then(|v| {
-                                    (!v.trim().is_empty()).then(|| v.trim().to_string())
-                                }),
-                                certainty: c.certainty,
-                            })
-                        })
+                        .filter_map(normalize_meeting_chat_citation)
                         .collect(),
                     created_at: m.created_at,
                 })
@@ -733,9 +1448,26 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["segmentIds"].clone()).map_err(|e| e.to_string())?;
             let new_text: String =
                 serde_json::from_value(params["newText"].clone()).map_err(|e| e.to_string())?;
+            let expected_value = params
+                .get("expectedSegments")
+                .ok_or("Transcript edit expectations are required")?;
+            if !expected_value.as_array().is_some_and(|segments| {
+                segments
+                    .iter()
+                    .all(|segment| segment.get("speakerId").is_some())
+            }) {
+                return Err("Invalid transcript edit expectations".to_string());
+            }
+            let expected_segments: Vec<TranscriptSegmentExpectation> =
+                serde_json::from_value(expected_value.clone()).map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
-            db.edit_transcript_speaker_turn(&recording_id, &segment_ids, &new_text)
-                .map_err(|e| e.to_string())?;
+            db.edit_transcript_speaker_turn(
+                &recording_id,
+                &segment_ids,
+                &new_text,
+                &expected_segments,
+            )
+            .map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
         }
         "delete_transcript_segments" => {
@@ -743,10 +1475,21 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
             let segment_ids: Vec<String> =
                 serde_json::from_value(params["segmentIds"].clone()).map_err(|e| e.to_string())?;
+            let expected_segments: Option<Vec<TranscriptSegmentExpectation>> =
+                match params.get("expectedSegments") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(value) => {
+                        Some(serde_json::from_value(value.clone()).map_err(|e| e.to_string())?)
+                    }
+                };
             let mut db = state.db.lock().await;
-            let removed = db
-                .delete_transcript_segments(&recording_id, &segment_ids)
-                .map_err(|e| e.to_string())?;
+            let removed = match expected_segments.as_deref() {
+                Some(expected) => {
+                    db.delete_transcript_segments_guarded(&recording_id, &segment_ids, expected)
+                }
+                None => db.delete_transcript_segments(&recording_id, &segment_ids),
+            }
+            .map_err(|e| e.to_string())?;
             Ok(serde_json::json!(removed))
         }
         "get_meeting_transcript_details" => {
@@ -773,6 +1516,15 @@ pub async fn dispatch_command(
             let data = audio.get_waveform_data(&recording_id).unwrap_or_default();
             serde_json::to_value(data).map_err(|e| e.to_string())
         }
+        "get_meeting_source_levels" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let audio = state.audio_capture.lock().await;
+            let levels = audio
+                .get_meeting_source_levels(&recording_id)
+                .unwrap_or_default();
+            serde_json::to_value(levels).map_err(|e| e.to_string())
+        }
         "get_recording_waveform" => {
             let recording_id: String =
                 serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
@@ -791,8 +1543,12 @@ pub async fn dispatch_command(
             if !has_audio {
                 return Ok(serde_json::json!([]));
             }
-            let resolved =
-                resolve_recording_audio_bundle_for_runtime(state.as_ref(), &recording_id).await?;
+            let resolved = resolve_recording_audio_for_runtime(
+                state.as_ref(),
+                &recording_id,
+                RuntimeAudioResolveMode::PlaybackPrimary,
+            )
+            .await?;
             let result = crate::audio::waveform::generate_waveform_from_file(
                 resolved.primary.to_string_lossy().as_ref(),
                 points.unwrap_or(400),
@@ -861,6 +1617,21 @@ pub async fn dispatch_command(
             let available = state.ollama_client.is_available().await;
             Ok(serde_json::json!(available))
         }
+        "get_local_text_runtime_health" => {
+            let local_gate_applies = match params.get("modelId") {
+                None => Some(true),
+                Some(value) => {
+                    let model_id = value.as_str().ok_or("modelId must be a string")?.trim();
+                    if model_id.is_empty() {
+                        return Err("modelId must not be empty".into());
+                    }
+                    state.ollama_client.local_gate_applicability(model_id).await
+                }
+            };
+            Ok(
+                serde_json::json!({ "runtimeHealth": llm::native_text::runtime_health(), "localGateApplies": local_gate_applies }),
+            )
+        }
         "list_ollama_models" => {
             let result = state
                 .ollama_client
@@ -925,6 +1696,15 @@ pub async fn dispatch_command(
                 run_with_remote_processing_gate(state.as_ref(), list_openai_models()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "get_chatgpt_plan_status" => {
+            let result = chatgpt_plan_status().await?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "list_chatgpt_plan_models" => {
+            let result =
+                run_with_remote_processing_gate(state.as_ref(), list_chatgpt_plan_models()).await?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
         "list_anthropic_models" => {
             let result =
                 run_with_remote_processing_gate(state.as_ref(), list_anthropic_models()).await?;
@@ -940,11 +1720,93 @@ pub async fn dispatch_command(
                 run_with_remote_processing_gate(state.as_ref(), list_deepseek_models()).await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
-        "get_embedding_status" => {
-            let db = state.db.lock().await;
-            let count = db.embedding_count().map_err(|e| e.to_string())?;
-            let ollama_available = state.ollama_embedder.is_available().await;
-            Ok(serde_json::json!({ "embeddingCount": count, "ollamaAvailable": ollama_available }))
+        "get_embedding_status" => embedding_status(state.as_ref()).await,
+        "download_embedding_model" => {
+            let model_id: String = serde_json::from_value(params["modelId"].clone())
+                .map_err(|_| "modelId must be a string".to_string())?;
+            let model = llm::builtin_embeddings::model(&model_id).ok_or("Unknown search model")?;
+            let root =
+                llm::builtin_embeddings::models_root().ok_or("Could not find the models folder")?;
+            let acceptances = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .transcription
+                .builtin_embedding_terms_acceptances
+                .clone();
+            let progress_handle = handle.clone();
+            let progress_name = format!("{}/{}", llm::builtin_embeddings::MODEL_DIR_NAME, model.id);
+            llm::builtin_embeddings::download(&root, model, &acceptances, move |percentage| {
+                progress_handle.emit_event(
+                    "model-download-progress",
+                    serde_json::json!({ "modelName": progress_name, "percentage": percentage }),
+                );
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            crate::semantic_index::request_index();
+            embedding_status(state.as_ref()).await
+        }
+        // The user clicked through the terms the renderer showed for this
+        // model. The sidecar stamps the time and refuses terms other than the
+        // ones this build names, so an acceptance always says what was shown.
+        "accept_embedding_model_terms" => {
+            let model_id: String = serde_json::from_value(params["modelId"].clone())
+                .map_err(|_| "modelId must be a string".to_string())?;
+            let terms_url: String = serde_json::from_value(params["termsUrl"].clone())
+                .map_err(|_| "termsUrl must be a string".to_string())?;
+            let model = llm::builtin_embeddings::model(&model_id).ok_or("Unknown search model")?;
+            if !model.requires_terms_acceptance {
+                return Err(format!("{} has no terms to accept.", model.display_name));
+            }
+            if terms_url != model.terms_url {
+                return Err(format!(
+                    "Those are not the terms {} comes under.",
+                    model.display_name
+                ));
+            }
+            state
+                .settings_manager
+                .lock()
+                .await
+                .record_embedding_terms_acceptance(model.id, model.terms_url)
+                .map_err(|error| error.to_string())?;
+            crate::semantic_index::request_index();
+            embedding_status(state.as_ref()).await
+        }
+        "cancel_embedding_model_download" => {
+            llm::builtin_embeddings::cancel_download();
+            Ok(serde_json::Value::Null)
+        }
+        "delete_embedding_model" => {
+            let model_id: String = serde_json::from_value(params["modelId"].clone())
+                .map_err(|_| "modelId must be a string".to_string())?;
+            let model = llm::builtin_embeddings::model(&model_id).ok_or("Unknown search model")?;
+            let root =
+                llm::builtin_embeddings::models_root().ok_or("Could not find the models folder")?;
+            if llm::builtin_embeddings::download_active() {
+                return Err(
+                    "Wait for the search model download to finish, or cancel it, first."
+                        .to_string(),
+                );
+            }
+            let _rebuild = crate::semantic_index::EMBEDDING_REBUILD
+                .acquire()
+                .await
+                .map_err(|error| error.to_string())?;
+            llm::builtin_embeddings::delete(&root, model)
+                .await
+                .map_err(|error| error.to_string())?;
+            state
+                .db
+                .lock()
+                .await
+                .delete_embeddings_with_model(&crate::semantic_index::index_key(
+                    crate::semantic_index::SemanticRoute::BuiltIn(model.id),
+                ))
+                .map_err(|error| error.to_string())?;
+            embedding_status(state.as_ref()).await
         }
         "search_transcripts" => {
             let query: String =
@@ -959,12 +1821,42 @@ pub async fn dispatch_command(
                 .map(|v| v as usize);
             let project_ids: Option<Vec<String>> =
                 serde_json::from_value(params["projectIds"].clone()).ok();
+            let source_type = match params.get("sourceType") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => {
+                    let source_type: String =
+                        serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+                    if !matches!(source_type.as_str(), "meeting" | "dictation") {
+                        return Err("sourceType must be 'meeting' or 'dictation'".to_string());
+                    }
+                    Some(source_type)
+                }
+            };
+            let recording_status = match params.get("recordingStatus") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(value) => {
+                    let recording_status: String =
+                        serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+                    if !matches!(
+                        recording_status.as_str(),
+                        "completed" | "recording" | "processing" | "error"
+                    ) {
+                        return Err(
+                            "recordingStatus must be 'completed', 'recording', 'processing', or 'error'"
+                                .to_string(),
+                        );
+                    }
+                    Some(recording_status)
+                }
+            };
             let db = state.db.lock().await;
             let result = db
-                .search_transcripts(
+                .search_transcripts_with_filters(
                     &trimmed,
                     limit.unwrap_or(20).min(200),
                     project_ids.as_deref(),
+                    source_type.as_deref(),
+                    recording_status.as_deref(),
                 )
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
@@ -998,7 +1890,7 @@ pub async fn dispatch_command(
                 emit_analysis_failure(handle, &recording_id, "ask", run_id.as_deref(), error);
             })?;
             let mut db = state.db.lock().await;
-            let _ = db.log_audit_event("analysis_completed", Some(serde_json::json!({ "recording_id": &recording_id, "query": &query, "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
+            let _ = db.log_audit_event("analysis_completed", Some(serde_json::json!({ "recording_id": &recording_id, "query_chars": query.chars().count(), "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "analyze_recordings" => {
@@ -1016,13 +1908,15 @@ pub async fn dispatch_command(
                 let mut segments = Vec::new();
                 let mut transcript_bytes = 0usize;
                 for recording_id in &recording_ids {
-                    let Some(transcript) = db
+                    let transcript = db
                         .get_transcript(recording_id)
                         .map_err(|error| error.to_string())?
-                    else {
-                        continue;
-                    };
-                    for segment in transcript.segments {
+                        .ok_or("Selected recording transcript is missing")?;
+                    if transcript.segments.is_empty() {
+                        return Err("Selected recording transcript contains no segments".into());
+                    }
+                    for segment in select_recording_ask_segments(recording_id, transcript.segments)
+                    {
                         transcript_bytes = transcript_bytes
                             .checked_add(segment.text.len())
                             .ok_or("Selected transcripts exceed analysis limits")?;
@@ -1030,13 +1924,7 @@ pub async fn dispatch_command(
                             segments.len() + 1,
                             transcript_bytes,
                         )?;
-                        segments.push(AnalysisContextSegment {
-                            recording_id: recording_id.clone(),
-                            segment_id: segment.id,
-                            text: segment.text,
-                            start_time: segment.start_time,
-                            end_time: segment.end_time,
-                        });
+                        segments.push(segment);
                     }
                 }
                 segments
@@ -1044,19 +1932,16 @@ pub async fn dispatch_command(
             if context_segments.is_empty() {
                 return Err("No transcript context found for selected recordings".to_string());
             }
-            let output = run_grounded_response_for_segments(
+            let result = run_grounded_ask_for_selected_segments(
                 state.as_ref(),
                 context_segments,
                 &query,
-                None,
                 model.as_deref(),
-                llm::CompletionPurpose::Ask,
-                None,
+                crate::analysis::StaleAskSources::Fail,
             )
             .await?;
-            let result = analysis_result_from_grounded(&query, output);
             let mut db = state.db.lock().await;
-            let _ = db.log_audit_event("analysis_multi_recording_completed", Some(serde_json::json!({ "recording_ids": &recording_ids, "query": &query, "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
+            let _ = db.log_audit_event("analysis_multi_recording_completed", Some(serde_json::json!({ "recording_ids": &recording_ids, "query_chars": query.chars().count(), "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "register_capture_admission" => {
@@ -1091,9 +1976,15 @@ pub async fn dispatch_command(
                 );
             }
 
-            // Runs the same pass the automatic lane runs, so a retry is the
-            // pass that failed rather than a second implementation of it.
-            run_meeting_analysis_pass(state.as_ref(), handle, &recording_id).await;
+            // Recover missing stages without replacing saved analysis. A
+            // retry that has to wait for memory keeps trying on its own.
+            run_meeting_analysis_until_written(
+                state,
+                handle,
+                &recording_id,
+                MeetingAnalysisMode::MissingOnly,
+            )
+            .await;
 
             let recording = {
                 let db = state.db.lock().await;
@@ -1104,6 +1995,29 @@ pub async fn dispatch_command(
                 Some(recording) => serde_json::to_value(recording).map_err(|e| e.to_string()),
                 None => Err(format!("Recording '{}' no longer exists.", recording_id)),
             }
+        }
+        "cancel_meeting_notes_wait" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            // Awaited before the notice is written, so a pass that was running
+            // cannot report progress or save notes after this reply.
+            let mut cancelled = analysis::cancel_memory_wait(&recording_id).await;
+            let mut db = state.db.lock().await;
+            if db
+                .get_recording(&recording_id)
+                .map_err(|error| error.to_string())?
+                .is_some_and(|recording| {
+                    recording.analysis_failure.as_deref() == Some(analysis::MEMORY_WAIT_NOTICE)
+                })
+            {
+                db.set_recording_analysis_failure(
+                    &recording_id,
+                    Some(llm::notes_queue::CANCELLED_NOTICE),
+                )
+                .map_err(|error| error.to_string())?;
+                cancelled = true;
+            }
+            Ok(serde_json::json!({ "cancelled": cancelled }))
         }
         "summarize_recording" => {
             let recording_id: String =
@@ -1140,6 +2054,11 @@ pub async fn dispatch_command(
             let model: Option<String> = serde_json::from_value(params["model"].clone())
                 .ok()
                 .flatten();
+            let persist = params
+                .get("persist")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let run_id = params.get("runId").and_then(serde_json::Value::as_str);
             let result = summarize_recording_grounded_internal(
                 state.as_ref(),
                 &recording_id,
@@ -1148,20 +2067,49 @@ pub async fn dispatch_command(
                     handle,
                     &recording_id,
                     "summary",
-                    None,
+                    run_id,
                 )),
             )
             .await
             .inspect_err(|error| {
-                emit_analysis_failure(handle, &recording_id, "summary", None, error);
+                emit_analysis_failure(handle, &recording_id, "summary", run_id, error);
             })?;
-            let recording = persist_grounded_summary(state.as_ref(), &recording_id, &result)
-                .await
-                .inspect_err(|error| {
-                    emit_analysis_failure(handle, &recording_id, "summary", None, error);
-                })?;
-            emit_analysis_ready(handle, &recording, "summary");
+            if persist {
+                let recording = persist_grounded_summary(state.as_ref(), &recording_id, &result)
+                    .await
+                    .inspect_err(|error| {
+                        emit_analysis_failure(handle, &recording_id, "summary", run_id, error);
+                    })?;
+                emit_analysis_ready(handle, &recording, "summary");
+            }
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "get_summary_regeneration_undo" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let undo_token = state
+                .db
+                .lock()
+                .await
+                .summary_regeneration_undo_token(&recording_id)
+                .map_err(|error| error.to_string())?;
+            Ok(match undo_token {
+                Some(undo_token) => {
+                    serde_json::json!({ "canUndo": true, "undoToken": undo_token })
+                }
+                None => serde_json::json!({ "canUndo": false }),
+            })
+        }
+        "undo_summary_regeneration" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let undo_token: String = serde_json::from_value(params["undoToken"].clone())
+                .map_err(|_| "undoToken is required".to_string())?;
+            let recording =
+                undo_summary_regeneration_with_current_input(state, &recording_id, &undo_token)
+                    .await?;
+            emit_analysis_ready(handle, &recording, "summary");
+            serde_json::to_value(recording).map_err(|error| error.to_string())
         }
         "extract_action_items" => {
             let recording_id: String =
@@ -1277,73 +2225,168 @@ pub async fn dispatch_command(
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "ask_memory" => {
+            // Covers the question's embedding as well as the answer, so
+            // background indexing yields the runtime for both.
+            let _foreground = crate::llm::local_model_load::foreground_work();
             let query: String =
                 serde_json::from_value(params["query"].clone()).map_err(|e| e.to_string())?;
-            let (memory_search_mode, embedding_model) = {
-                let sm = state.settings_manager.lock().await;
-                let settings = sm.settings();
-                (
-                    settings.transcription.memory_search_mode.clone(),
-                    settings.transcription.embedding_model.clone(),
-                )
+            // What to look for, when the question arrives wrapped in a
+            // follow-up thread or a meeting's summary. Searching the whole
+            // prompt cut the new question off the end of the 512-token query
+            // embedding and OR-ed every word of the thread into word search.
+            let search_query = match params.get("searchQuery") {
+                Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+                    value.trim().to_string()
+                }
+                _ => query.clone(),
             };
-            let mut context_segments: Vec<AnalysisContextSegment> = Vec::new();
-            let used_embeddings = if memory_search_mode == "ollama_embeddings" {
-                match state.ollama_embedder.embed(&embedding_model, &query).await {
-                    Ok(query_vector) => {
-                        let db = state.db.lock().await;
-                        match db.search_embeddings(&query_vector, 30) {
-                            Ok(hits) if !hits.is_empty() => {
-                                context_segments.extend(hits.into_iter().map(|hit| {
-                                    AnalysisContextSegment {
-                                        recording_id: hit.recording_id,
-                                        segment_id: hit.segment_id,
-                                        text: hit.text,
-                                        start_time: hit.start_time,
-                                        end_time: hit.end_time,
-                                    }
-                                }));
-                                true
-                            }
-                            _ => false,
+            let exclude_recording_id = match params.get("excludeRecordingId") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) => {
+                    let value = value.trim();
+                    (!value.is_empty()).then(|| value.to_string())
+                }
+                Some(_) => return Err("excludeRecordingId must be a string".to_string()),
+            };
+            let source_type = match params.get("sourceType") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) => {
+                    let value = value.trim().to_ascii_lowercase();
+                    match value.as_str() {
+                        "" => None,
+                        "meeting" | "dictation" => Some(value),
+                        _ => {
+                            return Err(
+                                "sourceType must be either 'meeting' or 'dictation'".to_string()
+                            )
                         }
                     }
-                    Err(_) => false,
                 }
-            } else {
-                false
+                Some(_) => return Err("sourceType must be a string".to_string()),
             };
-            if !used_embeddings {
+            let route = {
+                let sm = state.settings_manager.lock().await;
+                crate::semantic_index::ActiveRoute::from_settings(&sm.settings().transcription)
+            };
+            let mut semantic_windows: Vec<AnalysisContextSegment> = Vec::new();
+            // The current index, or an Ollama index from before windows
+            // (one raw-text vector per transcript row), which keeps answering
+            // until it is rebuilt.
+            let mut indexed_key: Option<(String, bool)> = None;
+            if let Some(route) = route.as_ref() {
+                let db = state.db.lock().await;
+                for (key, legacy) in std::iter::once((route.key(), false))
+                    .chain(route.legacy_key().map(|key| (key, true)))
+                {
+                    if db
+                        .has_embeddings_with_scope(
+                            &key,
+                            exclude_recording_id.as_deref(),
+                            source_type.as_deref(),
+                        )
+                        .map_err(|error| error.to_string())?
+                    {
+                        indexed_key = Some((key, legacy));
+                        break;
+                    }
+                }
+            }
+            if let (Some(route), Some((key, legacy))) = (route.as_ref(), indexed_key.as_ref()) {
+                let _search = crate::semantic_index::SearchInFlight::begin();
+                let limit = if *legacy {
+                    30
+                } else {
+                    crate::semantic_index::RANKED_CANDIDATES
+                };
+                let query_vector = crate::semantic_index::embed_texts(
+                    state.as_ref(),
+                    route,
+                    llm::builtin_embeddings::TextRole::Query,
+                    std::slice::from_ref(&search_query),
+                    *legacy,
+                    Duration::from_secs(20),
+                )
+                .await
+                .ok()
+                .and_then(|mut vectors| vectors.pop());
+                if let Some(query_vector) = query_vector {
+                    if let Ok(hits) = crate::semantic_search::search_embeddings_shared(
+                        state.db.as_ref(),
+                        &query_vector,
+                        limit,
+                        key,
+                        exclude_recording_id.as_deref(),
+                        source_type.as_deref(),
+                    )
+                    .await
+                    {
+                        semantic_windows.extend(hits.into_iter().map(|hit| {
+                            AnalysisContextSegment {
+                                recording_id: hit.recording_id,
+                                segment_id: hit.segment_id,
+                                text: hit.text,
+                                start_time: hit.start_time,
+                                end_time: hit.end_time,
+                            }
+                        }));
+                    }
+                }
+            }
+            // Word search runs too, and the two rankings are fused, so exact
+            // names and numbers still surface from indexed recordings and
+            // recordings the index does not cover yet are still found. Its
+            // hits are single transcript rows (often single words), so each
+            // is widened to the window holding it: the stored window for an
+            // indexed recording, so one passage found both ways counts once.
+            let word_windows = {
                 let db = state.db.lock().await;
                 let hits = db
-                    .search_transcripts(&query, 30, None)
+                    .search_transcripts_with_scope(
+                        &search_query,
+                        200,
+                        exclude_recording_id.as_deref(),
+                        source_type.as_deref(),
+                    )
                     .map_err(|error| error.to_string())?;
-                context_segments.extend(hits.into_iter().map(|hit| AnalysisContextSegment {
-                    recording_id: hit.recording_id,
-                    segment_id: hit.segment_id,
-                    text: hit.text,
-                    start_time: hit.start_time,
-                    end_time: hit.end_time,
-                }));
-            }
+                let current_key = indexed_key
+                    .as_ref()
+                    .filter(|(_, legacy)| !legacy)
+                    .map(|(key, _)| key.as_str());
+                crate::semantic_index::hits_to_windows(
+                    &db,
+                    &hits,
+                    crate::semantic_index::RANKED_CANDIDATES,
+                    current_key,
+                )
+                .map_err(|error| error.to_string())?
+            };
+            let context_segments = crate::semantic_index::fuse_rankings(
+                &semantic_windows,
+                &word_windows,
+                crate::semantic_index::SEMANTIC_HITS,
+                crate::semantic_index::KEPT_WORD_HITS,
+            );
             if context_segments.is_empty() {
+                if source_type.as_deref() == Some("meeting") && exclude_recording_id.is_some() {
+                    return Err(
+                        "No related transcripts from other meetings were found.".to_string()
+                    );
+                }
                 return Err(
-                    "No relevant transcripts found. Record some meetings first.".to_string()
+                    "Nothing in your recordings matched that question. Try other words, such as a name or topic that was said."
+                        .to_string()
                 );
             }
-            let output = run_grounded_response_for_segments(
+            let result = run_grounded_ask_for_selected_segments(
                 state.as_ref(),
                 context_segments,
                 &query,
                 None,
-                None,
-                llm::CompletionPurpose::Ask,
-                None,
+                crate::analysis::StaleAskSources::Drop,
             )
             .await?;
-            let result = analysis_result_from_grounded(&query, output);
             let mut db = state.db.lock().await;
-            let _ = db.log_audit_event("memory_query", Some(serde_json::json!({ "query": &query, "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
+            let _ = db.log_audit_event("memory_query", Some(serde_json::json!({ "query_chars": query.chars().count(), "model": &result.model, "citation_count": result.citations.len(), "grounded": result.grounded })), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "get_relationship_memory" => {
@@ -1379,85 +2422,156 @@ pub async fn dispatch_command(
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "reindex_embeddings" => {
-            let embedding_model = {
+            let _rebuild = crate::semantic_index::EMBEDDING_REBUILD
+                .try_acquire()
+                .map_err(|_| "Search indexing is already running.".to_string())?;
+            let route = {
                 let sm = state.settings_manager.lock().await;
-                sm.settings().transcription.embedding_model.clone()
+                let transcription = &sm.settings().transcription;
+                crate::semantic_index::ActiveRoute::from_settings(transcription).ok_or_else(
+                    || {
+                        if transcription.memory_search_mode == crate::semantic_index::MODE_BUILT_IN
+                        {
+                            format!(
+                                "Accept the terms for {} in Settings first.",
+                                llm::builtin_embeddings::model_or_default(
+                                    &transcription.builtin_embedding_model
+                                )
+                                .display_name
+                            )
+                        } else {
+                            "Choose meaning search in Settings first.".to_string()
+                        }
+                    },
+                )?
             };
-            if !state.ollama_embedder.is_available().await {
-                return Err("Ollama is not running. Start Ollama and try again.".to_string());
+            match &route {
+                crate::semantic_index::ActiveRoute::Ollama(_) => {
+                    if !state.ollama_embedder.is_available().await {
+                        return Err(
+                            "Ollama is not running. Start Ollama and try again.".to_string()
+                        );
+                    }
+                }
+                crate::semantic_index::ActiveRoute::BuiltIn(model) => {
+                    let root = llm::builtin_embeddings::models_root()
+                        .ok_or("Could not find the models folder")?;
+                    if !llm::builtin_embeddings::artifacts_installed(&root, model) {
+                        return Err(format!(
+                            "Download {} in Settings first.",
+                            model.display_name
+                        ));
+                    }
+                    // The built-in route rebuilds in the background worker,
+                    // with its pauses and battery rules; progress arrives as
+                    // `semantic-index-progress` events.
+                    state
+                        .db
+                        .lock()
+                        .await
+                        .delete_embeddings_with_model(&route.key())
+                        .map_err(|error| error.to_string())?;
+                    crate::semantic_index::request_rebuild();
+                    return Ok(serde_json::json!({
+                        "recordings": 0, "segments": 0, "errors": 0, "background": true
+                    }));
+                }
             }
-            let transcripts = {
+            let key = route.key();
+            let (sources, source_signature) = {
                 let db = state.db.lock().await;
-                db.get_recordings(None)
-                    .map_err(|e: anyhow::Error| e.to_string())?
-                    .into_iter()
-                    .filter_map(|rec| {
-                        db.get_transcript(&rec.id)
-                            .ok()
-                            .flatten()
-                            .map(|t| (rec.id, t))
-                    })
-                    .collect::<Vec<_>>()
+                let signature = db.begin_embedding_rebuild().map_err(|e| e.to_string())?;
+                let mut sources = Vec::new();
+                for recording in db.get_recordings(None).map_err(|e| e.to_string())? {
+                    if let Some((transcript, _)) = db
+                        .get_transcript_with_revision(&recording.id)
+                        .map_err(|e| e.to_string())?
+                    {
+                        let windows = crate::semantic_index::estimated_windows(
+                            &recording.id,
+                            &transcript.segments,
+                        );
+                        sources.push(windows);
+                    }
+                }
+                if !db
+                    .embedding_sources_unchanged(&signature)
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err("Meetings changed while preparing the index. The existing index was kept. Try again.".to_string());
+                }
+                (sources, signature)
             };
-            {
-                let db = state.db.lock().await;
-                db.delete_all_embeddings().map_err(|e| e.to_string())?;
-            }
-            let total_recordings = transcripts.len();
+            let run_id = uuid::Uuid::new_v4().to_string();
+            let total_recordings = sources.len();
             let mut total_segments = 0usize;
-            let mut errors = 0usize;
-            for (idx, (recording_id, transcript)) in transcripts.iter().enumerate() {
-                let texts: Vec<String> = transcript
-                    .segments
-                    .iter()
-                    .filter(|s| !s.text.trim().is_empty())
-                    .map(|s| s.text.clone())
-                    .collect();
-                if texts.is_empty() {
+            let errors = 0usize;
+            for (idx, windows) in sources.iter().enumerate() {
+                if windows.is_empty() {
                     continue;
                 }
-                match state
-                    .ollama_embedder
-                    .embed_batch(&embedding_model, &texts)
-                    .await
+                let texts: Vec<String> = windows.iter().map(|window| window.text.clone()).collect();
+                match crate::semantic_index::embed_texts(
+                    state.as_ref(),
+                    &route,
+                    llm::builtin_embeddings::TextRole::Document,
+                    &texts,
+                    false,
+                    Duration::from_secs(30),
+                )
+                .await
                 {
-                    Ok(embeddings) => {
+                    Ok(embeddings) if embeddings.len() == windows.len() => {
                         let db = state.db.lock().await;
-                        for (seg_idx, (segment, embedding)) in transcript
-                            .segments
-                            .iter()
-                            .filter(|s| !s.text.trim().is_empty())
-                            .zip(embeddings.iter())
-                            .enumerate()
-                        {
-                            let segment_id = if segment.id.is_empty() {
-                                format!("seg_{}", seg_idx)
-                            } else {
-                                segment.id.clone()
-                            };
-                            if db
-                                .save_embedding(
-                                    recording_id,
-                                    &segment_id,
-                                    &segment.text,
-                                    embedding,
-                                    &embedding_model,
-                                    segment.start_time,
-                                    segment.end_time,
-                                )
-                                .is_ok()
-                            {
-                                total_segments += 1;
-                            } else {
-                                errors += 1;
+                        for (window, embedding) in windows.iter().zip(embeddings.iter()) {
+                            if let Err(error) = db.stage_embedding(
+                                &run_id,
+                                &window.recording_id,
+                                &window.segment_id,
+                                &window.text,
+                                embedding,
+                                &key,
+                                window.start_time,
+                                window.end_time,
+                            ) {
+                                let _ = db.discard_embedding_rebuild(&run_id);
+                                return Err(format!("The search index was not changed: {error}"));
                             }
+                            total_segments += 1;
                         }
                     }
-                    Err(_) => {
-                        errors += 1;
+                    Ok(_) => {
+                        let db = state.db.lock().await;
+                        let _ = db.discard_embedding_rebuild(&run_id);
+                        return Err("The search index was not changed: the model returned the wrong number of vectors.".to_string());
+                    }
+                    Err(error) => {
+                        let db = state.db.lock().await;
+                        let _ = db.discard_embedding_rebuild(&run_id);
+                        return Err(format!("The search index was not changed: {error}"));
                     }
                 }
                 handle.emit_event("reindex-embeddings-progress", serde_json::json!({ "current": idx + 1, "total": total_recordings, "segments": total_segments }));
+            }
+            let route_unchanged = {
+                let sm = state.settings_manager.lock().await;
+                crate::semantic_index::ActiveRoute::from_settings(&sm.settings().transcription)
+                    .map(|current| current.key())
+                    == Some(key.clone())
+            };
+            let mut db = state.db.lock().await;
+            if !route_unchanged {
+                let _ = db.discard_embedding_rebuild(&run_id);
+                return Err(
+                    "The search model changed. The existing search index was kept. Try again."
+                        .to_string(),
+                );
+            }
+            if let Err(error) =
+                db.commit_embedding_rebuild(&run_id, &source_signature, total_segments)
+            {
+                let _ = db.discard_embedding_rebuild(&run_id);
+                return Err(format!("The search index was not changed: {error}"));
             }
             Ok(
                 serde_json::json!({ "recordings": total_recordings, "segments": total_segments, "errors": errors }),
@@ -1473,16 +2587,30 @@ pub async fn dispatch_command(
             let result = state.asr_manager.get_provider_inventory().await?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "get_speech_model_download_notice" => speech_model_download_notice(),
         "get_asr_runtime_diagnostics" => {
-            let provider_type: asr::AsrProviderType =
-                serde_json::from_value(params["providerType"].clone())
-                    .map_err(|e| e.to_string())?;
-            let result = state
-                .asr_manager
-                .get_runtime_diagnostics(provider_type)
-                .await;
-            serde_json::to_value(result).map_err(|e| e.to_string())
+            let request = parse_asr_runtime_diagnostics_request(params)?;
+            let result = match request.model_id.as_deref() {
+                Some(model_id) => {
+                    state
+                        .asr_manager
+                        .get_runtime_diagnostics_for_model(request.provider_type, model_id)
+                        .await
+                }
+                None => {
+                    state
+                        .asr_manager
+                        .get_runtime_diagnostics(request.provider_type)
+                        .await
+                }
+            };
+            let mut result = serde_json::to_value(result).map_err(|e| e.to_string())?;
+            if let Some(model_id) = request.model_id {
+                result["selectedModelId"] = serde_json::json!(model_id);
+            }
+            Ok(result)
         }
+
         "get_default_asr_provider" => {
             let result = state.asr_manager.get_default_provider().await;
             serde_json::to_value(result).map_err(|e| e.to_string())
@@ -1530,11 +2658,19 @@ pub async fn dispatch_command(
                     serde_json::json!([provider_type, progress]),
                 );
             });
-            state
+            let result = state
                 .asr_manager
                 .download_models(provider_type, model_id.as_deref(), cb)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await;
+            // Progress can reach 100 before provider readiness is invalidated.
+            // This signal follows the authoritative cache update, including failures.
+            handle.emit_event(
+                "readiness-invalidated",
+                serde_json::json!({
+                    "reason": "asr-download-finished", "providerType": provider_type
+                }),
+            );
+            result.map_err(|e| e.to_string())?;
             Ok(serde_json::Value::Null)
         }
         "list_asr_benchmarks" => {
@@ -1558,11 +2694,10 @@ pub async fn dispatch_command(
         }
         "benchmark_asr_providers_bytes" => {
             let audio_bytes = benchmark_audio_bytes_from_params(&params)?;
-            let temp_path = std::env::temp_dir()
-                .join(format!("nautilus-benchmark-{}.wav", uuid::Uuid::new_v4()));
-            std::fs::write(&temp_path, &audio_bytes).map_err(|e| e.to_string())?;
-            let results = state.asr_manager.benchmark_providers(&temp_path).await;
-            let _ = std::fs::remove_file(&temp_path);
+            let results = state
+                .asr_manager
+                .benchmark_providers_bytes(audio_bytes)
+                .await;
             persist_benchmark_results(state.as_ref(), &results).await;
             serde_json::to_value(results).map_err(|e| e.to_string())
         }
@@ -1571,21 +2706,30 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["providerType"].clone())
                     .map_err(|e| e.to_string())?;
             if !asr::AsrManager::is_provider_transcription_enabled(provider_type) {
-                let provider = state.asr_manager.get_provider(provider_type).await;
                 return Err(format!(
-                    "ASR provider '{}' is downloaded but not enabled for inference in this build",
-                    provider.name()
+                    "{} can't run in this version of Plainsong.",
+                    provider_type.speech_model_name(provider_type.default_model_id())
                 ));
             }
+            let mut settings_manager = state.settings_manager.lock().await;
+            let mut candidate = settings_manager.settings().clone();
+            let provider_key = asr_provider_to_settings_value(provider_type).to_string();
+            let selected_model = normalize_asr_model_id(
+                provider_type,
+                candidate
+                    .transcription
+                    .provider_model_ids
+                    .get(&provider_key)
+                    .map(String::as_str)
+                    .unwrap_or_else(|| provider_type.default_model_id()),
+            );
             let diagnostics = state
                 .asr_manager
-                .get_runtime_diagnostics(provider_type)
+                .get_runtime_diagnostics_for_model(provider_type, &selected_model)
                 .await;
-            let provider_available = state
-                .asr_manager
-                .get_provider(provider_type)
-                .await
-                .is_available();
+            let provider_available =
+                asr::AsrProviderFactory::create_with_model(provider_type, Some(&selected_model))
+                    .is_available();
             if !matches!(
                 diagnostics.runtime_status,
                 asr::manager::RuntimeStatus::Ready
@@ -1593,32 +2737,21 @@ pub async fn dispatch_command(
             {
                 let runtime_message = diagnostics
                     .runtime_message
-                    .unwrap_or_else(|| "Runtime is not ready for this provider.".to_string());
-                let setup_action = diagnostics.runtime_details.setup_action.unwrap_or_else(|| {
-                    "Open Settings -> ASR Models and complete the required runtime/model setup."
-                        .to_string()
-                });
+                    .unwrap_or_else(|| "It isn't set up yet.".to_string());
+                let setup_action = diagnostics
+                    .runtime_details
+                    .setup_action
+                    .unwrap_or_else(|| "Finish its setup in Settings > Models.".to_string());
                 return Err(format!(
-                    "ASR provider '{}' is not ready to use. {} {}",
-                    provider_type.display_name(),
+                    "{} isn't ready to use. {} {}",
+                    provider_type.speech_model_name(&selected_model),
                     runtime_message,
                     setup_action
                 ));
             }
-            state.asr_manager.set_default_provider(provider_type).await;
-            let mut settings_manager = state.settings_manager.lock().await;
-            let provider_key = asr_provider_to_settings_value(provider_type).to_string();
-            let selected_model = state.asr_manager.provider_model_id(provider_type).await;
-            settings_manager
-                .settings_mut()
-                .transcription
-                .default_provider = provider_key.clone();
-            settings_manager
-                .settings_mut()
-                .transcription
-                .selected_model_id = selected_model.clone();
-            settings_manager
-                .settings_mut()
+            candidate.transcription.default_provider = provider_key.clone();
+            candidate.transcription.selected_model_id = selected_model.clone();
+            candidate
                 .transcription
                 .provider_model_ids
                 .insert(provider_key.clone(), selected_model.clone());
@@ -1627,25 +2760,27 @@ pub async fn dispatch_command(
                 .transcription
                 .use_shared_asr_selection
             {
-                settings_manager
-                    .settings_mut()
-                    .transcription
-                    .dictation_provider = provider_key.clone();
-                settings_manager
-                    .settings_mut()
-                    .transcription
-                    .dictation_model_id = selected_model.clone();
-                settings_manager
-                    .settings_mut()
-                    .transcription
-                    .meeting_provider = provider_key;
-                settings_manager
-                    .settings_mut()
-                    .transcription
-                    .meeting_model_id = selected_model;
+                candidate.transcription.dictation_provider = provider_key.clone();
+                candidate.transcription.dictation_model_id = selected_model.clone();
+                candidate.transcription.meeting_provider = provider_key;
+                candidate.transcription.meeting_model_id = selected_model;
             }
-            normalize_contextual_asr_settings(&mut settings_manager.settings_mut().transcription);
-            settings_manager.save().map_err(|e| e.to_string())?;
+            normalize_contextual_asr_settings(&mut candidate.transcription);
+            settings_manager
+                .commit_candidate(candidate)
+                .map_err(|e| e.to_string())?;
+            state
+                .asr_manager
+                .set_provider_model_id(
+                    provider_type,
+                    settings_manager
+                        .settings()
+                        .transcription
+                        .selected_model_id
+                        .clone(),
+                )
+                .await;
+            state.asr_manager.set_default_provider(provider_type).await;
             Ok(serde_json::Value::Null)
         }
         "set_asr_provider_model" => {
@@ -1654,15 +2789,11 @@ pub async fn dispatch_command(
                     .map_err(|e| e.to_string())?;
             let model_id: String =
                 serde_json::from_value(params["modelId"].clone()).map_err(|e| e.to_string())?;
-            state
-                .asr_manager
-                .set_provider_model_id(provider_type, model_id)
-                .await;
-            let normalized_model_id = state.asr_manager.provider_model_id(provider_type).await;
+            let normalized_model_id = normalize_asr_model_id(provider_type, &model_id);
             let provider_key = asr_provider_to_settings_value(provider_type).to_string();
             let mut settings_manager = state.settings_manager.lock().await;
-            settings_manager
-                .settings_mut()
+            let mut candidate = settings_manager.settings().clone();
+            candidate
                 .transcription
                 .provider_model_ids
                 .insert(provider_key.clone(), normalized_model_id.clone());
@@ -1670,10 +2801,7 @@ pub async fn dispatch_command(
                 &settings_manager.settings().transcription.default_provider,
             ) {
                 if default_provider == provider_type {
-                    settings_manager
-                        .settings_mut()
-                        .transcription
-                        .selected_model_id = normalized_model_id.clone();
+                    candidate.transcription.selected_model_id = normalized_model_id.clone();
                 }
             }
             if settings_manager
@@ -1685,32 +2813,26 @@ pub async fn dispatch_command(
                     &settings_manager.settings().transcription.default_provider,
                 ) {
                     if default_provider == provider_type {
-                        settings_manager
-                            .settings_mut()
-                            .transcription
-                            .dictation_model_id = normalized_model_id.clone();
-                        settings_manager
-                            .settings_mut()
-                            .transcription
-                            .meeting_model_id = normalized_model_id.clone();
+                        candidate.transcription.dictation_model_id = normalized_model_id.clone();
+                        candidate.transcription.meeting_model_id = normalized_model_id.clone();
                     }
                 }
                 if settings_manager.settings().transcription.dictation_provider == provider_key {
-                    settings_manager
-                        .settings_mut()
-                        .transcription
-                        .dictation_model_id = normalized_model_id.clone();
+                    candidate.transcription.dictation_model_id = normalized_model_id.clone();
                 }
                 if settings_manager.settings().transcription.meeting_provider == provider_key {
-                    settings_manager
-                        .settings_mut()
-                        .transcription
-                        .meeting_model_id = normalized_model_id.clone();
+                    candidate.transcription.meeting_model_id = normalized_model_id.clone();
                 }
             }
-            normalize_contextual_asr_settings(&mut settings_manager.settings_mut().transcription);
-            let transcription = settings_manager.settings().transcription.clone();
-            settings_manager.save().map_err(|e| e.to_string())?;
+            normalize_contextual_asr_settings(&mut candidate.transcription);
+            settings_manager
+                .commit_candidate(candidate)
+                .map_err(|e| e.to_string())?;
+            let transcription = &settings_manager.settings().transcription;
+            state
+                .asr_manager
+                .set_provider_model_id(provider_type, normalized_model_id)
+                .await;
             state
                 .asr_manager
                 .set_dictation_mlx_enabled(transcription.dictation_mlx_enabled)
@@ -1833,6 +2955,7 @@ pub async fn dispatch_command(
                 let alias = aliases.get(&speaker_id);
                 let name = alias.and_then(|(n, _, _)| n.clone())
                     .or_else(|| default_source_speaker_name(&speaker_id).map(str::to_string))
+                    .or_else(|| export::subtitles::default_speaker_name(&speaker_id))
                     .or_else(|| Some(format!("Speaker {}", idx + 1)));
                 let color = alias.and_then(|(_, c, _)| c.clone()).unwrap_or_else(|| default_speaker_color(idx));
                 serde_json::json!({ "id": speaker_id, "name": name, "color": color, "sampleCount": sample_count })
@@ -1847,8 +2970,30 @@ pub async fn dispatch_command(
             let new_name: String =
                 serde_json::from_value(params["newName"].clone()).map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
+            // Renaming a speaker who was confirmed as a remembered voice is a
+            // correction of that confirmation: the sample it added describes
+            // someone else. Withdrawn before the rename, which clears the
+            // alias's voice link that older samples are matched through.
+            let withdrawn = if new_name.trim().is_empty() {
+                0
+            } else {
+                db.retract_cluster_voice_samples(
+                    &recording_id,
+                    &speaker_id,
+                    Some(new_name.as_str()),
+                    None,
+                )
+                .map_err(|e| e.to_string())?
+            };
             db.rename_speaker(&recording_id, &speaker_id, &new_name)
                 .map_err(|e| e.to_string())?;
+            drop(db);
+            if withdrawn > 0 {
+                handle.emit_event(
+                    "remembered-voices-changed",
+                    serde_json::json!({ "withdrawn": withdrawn }),
+                );
+            }
             Ok(serde_json::Value::Null)
         }
         // ── Voiceprints (opt-in, local only) ─────────────────────────────
@@ -1990,10 +3135,16 @@ pub async fn dispatch_command(
                                 .to_string(),
                         );
                     }
-                    db.add_speaker_profile_sample(
+                    // Whatever this speaker was confirmed as before is being
+                    // replaced; its sample goes, and re-confirming the same
+                    // voice leaves one sample rather than two.
+                    db.retract_cluster_voice_samples(&recording_id, &speaker_id, None, None)
+                        .map_err(|e| e.to_string())?;
+                    db.add_cluster_voice_sample(
                         &profile.id,
                         &signature.centroid,
-                        Some(&recording_id),
+                        &recording_id,
+                        &speaker_id,
                     )
                     .map_err(|e| e.to_string())?;
                     (profile.id, profile.display_name)
@@ -2005,13 +3156,15 @@ pub async fn dispatch_command(
                         .filter(|name| !name.is_empty())
                         .ok_or("A remembered voice needs a name.")?
                         .to_string();
+                    db.retract_cluster_voice_samples(&recording_id, &speaker_id, None, None)
+                        .map_err(|e| e.to_string())?;
                     let profile_id = db
-                        .remember_speaker_voice(
+                        .remember_cluster_voice(
                             &name,
                             &signature.embedding_model_id,
                             &signature.centroid,
-                            Some(&recording_id),
-                            None,
+                            &recording_id,
+                            &speaker_id,
                         )
                         .map_err(|e| e.to_string())?;
                     (profile_id, name)
@@ -2066,8 +3219,26 @@ pub async fn dispatch_command(
             diarization::voiceprints::voiceprint_write_allowed(remember_voices)
                 .map_err(str::to_string)?;
             let mut db = state.db.lock().await;
+            // "Not them" about a voice this speaker was confirmed as takes back
+            // the sample that confirmation added. Before the rejection, which
+            // clears the alias link older samples are matched through.
+            let withdrawn = db
+                .retract_cluster_voice_samples(
+                    &recording_id,
+                    &speaker_id,
+                    None,
+                    Some(profile_id.as_str()),
+                )
+                .map_err(|e| e.to_string())?;
             db.reject_cluster_voice_match(&recording_id, &speaker_id, &profile_id)
                 .map_err(|e| e.to_string())?;
+            drop(db);
+            if withdrawn > 0 {
+                handle.emit_event(
+                    "remembered-voices-changed",
+                    serde_json::json!({ "withdrawn": withdrawn }),
+                );
+            }
             Ok(serde_json::Value::Null)
         }
         "list_remembered_voices" => {
@@ -2136,12 +3307,43 @@ pub async fn dispatch_command(
             let models = list_diarization_models();
             serde_json::to_value(models).map_err(|e| e.to_string())
         }
+        "get_diarization_model_plan" => {
+            let selected = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .transcription
+                .diarization_model_id
+                .clone()
+                .unwrap_or_else(|| diarization::DEFAULT_EMBEDDING_MODEL_ID.to_string());
+            serde_json::to_value(diarization_model_plan(&selected)).map_err(|e| e.to_string())
+        }
         "is_diarization_model_available" => {
             let model_id: Option<String> = params
                 .get("modelId")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            Ok(serde_json::json!(is_diarization_model_available(model_id)))
+            if model_id.is_some() {
+                return Ok(serde_json::json!(is_diarization_model_available(model_id)));
+            }
+            // No id: "can Run speaker labels produce labels now?", answered
+            // with the same rule `run_diarization` applies -- the selected
+            // model, or the default as a reported fallback. Probing only the
+            // default would refuse a run whose selected model is installed.
+            let selected = state
+                .settings_manager
+                .lock()
+                .await
+                .settings()
+                .transcription
+                .diarization_model_id
+                .clone()
+                .unwrap_or_else(|| diarization::DEFAULT_EMBEDDING_MODEL_ID.to_string());
+            Ok(serde_json::json!(diarization::resolve_model_for_run(
+                &selected
+            )
+            .is_some()))
         }
         "run_diarization" => {
             let recording_id: String = serde_json::from_value(
@@ -2151,9 +3353,10 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Null),
             )
             .map_err(|e| e.to_string())?;
-            let postprocessing_lease = state
-                .operation_coordinator
-                .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+            let postprocessing_lease = state.operation_coordinator.try_acquire_named(
+                operation_coordinator::OperationKind::PostProcess,
+                "speaker labelling",
+            )?;
             let (
                 _audio_postprocessing_guard,
                 mut transcript,
@@ -2179,6 +3382,8 @@ pub async fn dispatch_command(
                     &recording_id,
                     postprocessing_lease,
                 );
+                db.set_meeting_audio_finalized(&recording_id, false)
+                    .map_err(|e| e.to_string())?;
                 (guard, transcript, revision, existing_aliases)
             };
             let resolved =
@@ -2199,29 +3404,73 @@ pub async fn dispatch_command(
             let resolved_model = diarization::resolve_model_for_run(&diarization_model_id)
                 .ok_or_else(|| {
                     format!(
-                        "{} is not downloaded, and neither is the default speaker model. Download one under Settings, Speaker separation model.",
-                        diarization::model_label(&diarization_model_id)
+                        "No speaker model is downloaded. Download the speaker model in {}, then label the speakers.",
+                        diarization::SPEAKER_MODEL_SETTINGS_PATH
                     )
                 })?;
             let resolved_diarizer = format!("plainsong:{}", resolved_model.model_id);
-            let diarization = diarization::run_diarization_with_model(
-                &resolved.primary,
-                &resolved_model.model_id,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+            let diarization = state
+                .operation_coordinator
+                .run_post_call(
+                    "speaker labelling",
+                    diarization::run_diarization_with_model(
+                        &resolved.primary,
+                        &resolved_model.model_id,
+                    ),
+                )
+                .await
+                .map_err(|error| {
+                    let detail = format!("{error:#}");
+                    tracing::warn!(
+                        "Speaker identification failed for {}: {}",
+                        recording_id,
+                        detail
+                    );
+                    crate::meeting_transcribe::manual_diarization_failure_message(&detail)
+                })?;
 
+            // Who spoke when before this run, to carry names to the same
+            // voices rather than to the same, possibly renumbered, ids.
+            let speakers_before: Vec<(f64, f64, Option<String>)> = transcript
+                .segments
+                .iter()
+                .map(|segment| {
+                    (
+                        segment.start_time,
+                        segment.end_time,
+                        segment.speaker_id.clone(),
+                    )
+                })
+                .collect();
             let engine = diarization::DiarizationEngine::with_model(&resolved_model.model_id);
-            engine.merge_with_transcript(&diarization, &mut transcript.segments);
+            if transcript.measured_word_timestamps {
+                engine.merge_with_measured_words(&diarization, &mut transcript.segments);
+            } else {
+                engine.merge_with_transcript(&diarization, &mut transcript.segments);
+            }
+            // Nothing found (audio shorter than the analysis window, or only
+            // silence): keep the speakers and names the meeting already has.
+            if diarization.speakers.is_empty() {
+                return Err(
+                    "Speaker identification found no speakers in this recording, so nothing was changed."
+                        .to_string(),
+                );
+            }
+            let same_voice = match_rerun_speakers(&speakers_before, &transcript.segments);
             let inferred_aliases = infer_speaker_aliases_from_segments(&transcript.segments);
             let alias_updates = diarization
                 .speakers
                 .iter()
                 .enumerate()
                 .map(|(index, speaker)| {
-                    let existing_name = existing_aliases
+                    // A name the user gave follows the voice it was given to;
+                    // a generic "Speaker N" is not carried, so it cannot
+                    // contradict the new numbering.
+                    let existing_name = same_voice
                         .get(&speaker.id)
-                        .and_then(|(name, _, _)| name.as_deref());
+                        .and_then(|old_id| existing_aliases.get(old_id))
+                        .and_then(|(name, _, _)| name.as_deref())
+                        .filter(|name| !is_generic_speaker_name(name));
                     let inferred_name = inferred_aliases.get(&speaker.id).map(String::as_str);
                     db::SpeakerAliasUpsert {
                         speaker_id: speaker.id.clone(),
@@ -2240,15 +3489,32 @@ pub async fn dispatch_command(
 
             let applied = {
                 let mut db = state.db.lock().await;
+                // Names were carried from a snapshot taken before diarization
+                // ran. A rename or voice confirmation made meanwhile would be
+                // overwritten, so stop and ask for another run instead.
+                if db
+                    .get_speaker_aliases(&recording_id)
+                    .map_err(|e| e.to_string())?
+                    != existing_aliases
+                {
+                    return Err(
+                        "Speaker names changed while speaker identification was running; nothing was changed. Run speaker identification again."
+                            .to_string(),
+                    );
+                }
                 // The explicit "identify speakers" action writes the same
                 // `diarizer` column as the automatic pass, so it now leaves the
                 // same audit record -- previously the column could change here
                 // with nothing in the log saying it had.
-                db.apply_diarization_enrichment(
+                // Names are written exactly as decided above: the old row
+                // for an id that now belongs to someone else must not keep
+                // its name, and a voice link moves with the name it backs.
+                db.apply_relabelled_diarization(
                     &recording_id,
                     transcript_revision,
                     &transcript.segments,
                     &alias_updates,
+                    &same_voice,
                     Some(&resolved_diarizer),
                     Some(serde_json::json!({
                         "recording_id": &recording_id,
@@ -2265,11 +3531,30 @@ pub async fn dispatch_command(
                         .to_string(),
                 );
             }
+            state
+                .db
+                .lock()
+                .await
+                .set_meeting_audio_finalized(&recording_id, true)
+                .map_err(|e| e.to_string())?;
 
             // Voiceprints. Read the switch here rather than inside the helper,
             // so "nothing is stored while it is off" is visible at the call
             // site. `cluster_centroids` is dropped with `diarization` either
             // way — it is `#[serde(skip)]` and never reaches the renderer.
+            // The re-run's speaker ids replace the old ones, so the voices
+            // held or stored for those go first, switch on or off.
+            if let Err(error) =
+                forget_superseded_cluster_voices(state.as_ref(), &recording_id).await
+            {
+                tracing::warn!(
+                    "Could not drop superseded voice signatures of {}: {}",
+                    recording_id,
+                    error
+                );
+            }
+            // Filed under the model that ran, which is the default when the
+            // picked one was not downloaded.
             let voice_settings = {
                 let sm = state.settings_manager.lock().await;
                 sm.settings().meetings.clone()
@@ -2278,7 +3563,7 @@ pub async fn dispatch_command(
                 if let Err(error) = store_and_match_cluster_voices(
                     state.as_ref(),
                     &recording_id,
-                    &diarization_model_id,
+                    &resolved_model.model_id,
                     &diarization.cluster_centroids,
                     voice_settings.auto_apply_confident_voices,
                 )
@@ -2302,7 +3587,7 @@ pub async fn dispatch_command(
             );
             if let Some(notice) = resolved_model.fallback_notice.as_deref() {
                 tracing::warn!(
-                    "Diarization for {} fell back to the default model: {}",
+                    "Diarization for {} ran another downloaded speaker model: {}",
                     recording_id,
                     notice
                 );
@@ -2330,24 +3615,6 @@ pub async fn dispatch_command(
             let progress_handle = handle.clone();
             let id_for_cb = id.clone();
             let manager = download::DownloadManager::new().map_err(|e| e.to_string())?;
-            #[cfg(feature = "diarization-speakrs")]
-            if id == download::SPEAKRS_MODEL_ID {
-                manager
-                    .download_speakrs_bundle(move |progress: download::DownloadProgress| {
-                        progress_handle.emit_event(
-                            "model-download-progress",
-                            serde_json::json!({
-                                "modelName": &id_for_cb,
-                                "percentage": progress.percentage,
-                                "bytesDownloaded": progress.bytes_downloaded,
-                                "totalBytes": progress.total_bytes,
-                            }),
-                        );
-                    })
-                    .await
-                    .map_err(|e| e.to_string())?;
-                return Ok(serde_json::Value::Null);
-            }
             manager
                 .download_diarization_model_by_id(
                     &id,
@@ -2383,6 +3650,39 @@ pub async fn dispatch_command(
             Ok(streaming_live_preview_status())
         }
         // ── Bundled cleanup model (S1-mini by Superwhisper) ────────────────
+        "get_native_text_model_status" => {
+            let root = crate::paths::data_dir()
+                .ok_or("Could not find data directory")?
+                .join("Plainsong")
+                .join("models");
+            let model_id = params.get("modelId").and_then(serde_json::Value::as_str);
+            Ok(llm::native_text::status(&root, model_id))
+        }
+        "download_native_text_model" => {
+            let root = crate::paths::data_dir()
+                .ok_or("Could not find data directory")?
+                .join("Plainsong")
+                .join("models");
+            let model_id = params.get("modelId").and_then(serde_json::Value::as_str);
+            let progress_handle = handle.clone();
+            let progress_model = model_id.map(str::to_owned);
+            llm::native_text::download(&root, model_id, move |percentage| progress_handle.emit_event("model-download-progress",
+                serde_json::json!({"modelName":llm::native_text::MODEL_DIR,"modelId":progress_model,"percentage":percentage}))).await.map_err(|error|error.to_string())?;
+            Ok(llm::native_text::status(&root, model_id))
+        }
+        "cancel_native_text_model_download" => {
+            llm::native_text::cancel_download();
+            Ok(serde_json::Value::Null)
+        }
+        "delete_native_text_model" => {
+            let root = crate::paths::data_dir()
+                .ok_or("Could not find data directory")?
+                .join("Plainsong")
+                .join("models");
+            let model_id = params.get("modelId").and_then(serde_json::Value::as_str);
+            llm::native_text::delete(&root, model_id).map_err(|error| error.to_string())?;
+            Ok(llm::native_text::status(&root, model_id))
+        }
         "get_bundled_cleanup_model_status" => Ok(bundled_cleanup_model_status()),
         "download_bundled_cleanup_model" => {
             let models_root = crate::paths::data_dir()
@@ -2593,6 +3893,23 @@ pub async fn dispatch_command(
                 }
             };
             let mut db = state.db.lock().await;
+            if db
+                .has_learned_global_dictation_correction(
+                    &candidate.spoken_form,
+                    &candidate.replacement,
+                )
+                .map_err(|e| e.to_string())?
+            {
+                return serde_json::to_value(models::QueueDictationCorrectionSuggestionResult {
+                    queued: false,
+                    action: None,
+                    reason: Some("This correction is already learned".into()),
+                    spoken_form: Some(candidate.spoken_form),
+                    replacement: Some(candidate.replacement),
+                    suggestion: None,
+                })
+                .map_err(|e| e.to_string());
+            }
             let (action, suggestion) = db
                 .upsert_dictation_correction_suggestion(
                     &request.original_text,
@@ -2618,19 +3935,25 @@ pub async fn dispatch_command(
         "approve_dictation_correction_suggestion" => {
             let suggestion_id: String = serde_json::from_value(params["suggestionId"].clone())
                 .map_err(|e| e.to_string())?;
-            let mut db = state.db.lock().await;
-            let suggestion = db
-                .get_dictation_correction_suggestion(&suggestion_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Correction suggestion '{}' not found", suggestion_id))?;
-            let result = apply_learned_correction_candidate(
-                &mut db,
-                crate::dictation_parity::LearnedCorrectionCandidate {
-                    spoken_form: suggestion.spoken_form.clone(),
-                    replacement: suggestion.replacement.clone(),
-                },
-            )?;
-            db.delete_dictation_correction_suggestion(&suggestion_id)
+            let expected_dictionary: models::CorrectionApprovalDictionarySnapshot =
+                serde_json::from_value(params["expectedDictionary"].clone())
+                    .map_err(|e| format!("Expected dictionary snapshot is required: {}", e))?;
+            let result = state
+                .db
+                .lock()
+                .await
+                .approve_dictation_correction_suggestion(&suggestion_id, &expected_dictionary)
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "undo_dictation_correction_approval" => {
+            let undo_token: String =
+                serde_json::from_value(params["undoToken"].clone()).map_err(|e| e.to_string())?;
+            let result = state
+                .db
+                .lock()
+                .await
+                .undo_dictation_correction_approval(&undo_token)
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
@@ -2754,6 +4077,101 @@ pub async fn dispatch_command(
         }
 
         // ── Settings ──────────────────────────────────────────────────────────
+        "get_note_publish_config" => {
+            let db = state.db.lock().await;
+            let config = db.publish_config().map_err(|e| e.to_string())?;
+            let location = config.location_id.as_deref().and_then(|id| {
+                approved_locations::registry()
+                    .ok()
+                    .map(|r| r.summary(id, approved_locations::ApprovedLocationPurpose::Notes))
+            });
+            Ok(serde_json::json!({"config":config,"location":location}))
+        }
+        "save_note_publish_config" => {
+            let mut config: crate::publishing::PublishConfig =
+                serde_json::from_value(params["config"].clone()).map_err(|e| e.to_string())?;
+            let template = state
+                .template_manager
+                .get_template(&config.template_id)
+                .ok_or("Choose a Markdown notes format")?;
+            if template.format != export::templates::ExportFormat::Markdown {
+                return Err("Choose a Markdown notes format".into());
+            }
+            let _guard = crate::publishing::IO_GATE.lock().await;
+            let registry = approved_locations::registry().map_err(|e| e.to_string())?;
+            let location = if let Some(id) = config.location_id.as_deref() {
+                let existing =
+                    registry.summary(id, approved_locations::ApprovedLocationPurpose::Notes);
+                if existing.approved {
+                    Some(existing)
+                } else {
+                    // Promote only a native-picker-approved export capability.
+                    // The renderer cannot supply a path or mint approval.
+                    match registry
+                        .resolve_filesystem(id, approved_locations::ApprovedLocationPurpose::Export)
+                    {
+                        Ok(root) => {
+                            let approved = registry
+                                .approve_filesystem(
+                                    approved_locations::ApprovedLocationPurpose::Notes,
+                                    &root,
+                                )
+                                .map_err(|_| "Couldn't approve the notes folder")?;
+                            config.location_id = Some(approved.id.clone());
+                            Some(approved)
+                        }
+                        Err(_) if !config.enabled => {
+                            config.location_id = None;
+                            None
+                        }
+                        Err(_) => return Err("Choose the notes folder again".into()),
+                    }
+                }
+            } else {
+                None
+            };
+            if config.enabled && location.is_none() {
+                return Err("Choose a notes folder".into());
+            }
+            let mut kept = {
+                let mut db = state.db.lock().await;
+                db.save_publish_config(&config).map_err(|e| e.to_string())?;
+                db.publish_receipt_locations().map_err(|e| e.to_string())?
+            };
+            kept.extend(config.location_id.clone());
+            // A folder that is neither chosen nor holding a published file
+            // keeps no write approval. Failing to prune is not a save error.
+            if let Err(error) = registry.retain_notes_locations(&kept) {
+                tracing::warn!("Could not prune unused notes folder approvals: {error}");
+            }
+            Ok(serde_json::json!({"config":config,"location":location}))
+        }
+        "get_note_publish_status" => {
+            let id = params["recordingId"]
+                .as_str()
+                .ok_or("Missing recording ID")?;
+            serde_json::to_value(
+                state
+                    .db
+                    .lock()
+                    .await
+                    .publish_status(id)
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())
+        }
+        "retry_note_publish" => {
+            let id = params["recordingId"]
+                .as_str()
+                .ok_or("Missing recording ID")?;
+            state
+                .db
+                .lock()
+                .await
+                .retry_publish(id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::Value::Null)
+        }
         "get_settings" => {
             let settings_manager = state.settings_manager.lock().await;
             let result = visible_settings_for_renderer(settings_manager.settings());
@@ -2765,12 +4183,21 @@ pub async fn dispatch_command(
                 .and_then(|value| value.as_str())
                 .ok_or("Native export-folder approval requires a path")?;
             let registry = approved_locations::registry().map_err(|error| error.to_string())?;
+            let for_notes = params
+                .get("forNotes")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let purpose = if for_notes {
+                approved_locations::ApprovedLocationPurpose::Notes
+            } else {
+                approved_locations::ApprovedLocationPurpose::Export
+            };
             let summary = registry
-                .approve_filesystem(
-                    approved_locations::ApprovedLocationPurpose::Export,
-                    Path::new(raw_path),
-                )
+                .approve_filesystem(purpose, Path::new(raw_path))
                 .map_err(|error| error.to_string())?;
+            if for_notes {
+                return serde_json::to_value(summary).map_err(|error| error.to_string());
+            }
             let mut settings_manager = state.settings_manager.lock().await;
             settings_manager.settings_mut().privacy.export_root = None;
             settings_manager.settings_mut().privacy.export_location_id = Some(summary.id.clone());
@@ -2840,10 +4267,71 @@ pub async fn dispatch_command(
             }))
         }
         "save_settings" => {
-            let settings: settings::Settings =
-                serde_json::from_value(params.get("settings").cloned().unwrap_or(params.clone()))
-                    .map_err(|e| e.to_string())?;
-            save_settings_for_sidecar(state.as_ref(), handle, settings).await
+            let (settings, preserve_saved_prompts) = parse_settings_update_request(params)?;
+            let saved =
+                save_settings_for_sidecar(state.as_ref(), handle, settings, preserve_saved_prompts)
+                    .await;
+            if saved.is_ok() {
+                crate::semantic_index::request_index();
+            }
+            saved
+        }
+        "set_dictation_external_correction_learning" => {
+            let enabled = params
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or("enabled must be a boolean")?;
+            set_dictation_external_correction_learning_for_sidecar(state.as_ref(), handle, enabled)
+                .await
+        }
+        // From the main process only (not on the renderer allowlist). Names
+        // are held in memory for the vocabulary step and never logged; the
+        // reply carries only how many were kept.
+        "set_dictation_contact_names" => {
+            let names: Vec<String> = params
+                .get("names")
+                .and_then(serde_json::Value::as_array)
+                .ok_or("names must be an array")?
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_string))
+                .collect();
+            let settings = state.settings_manager.lock().await;
+            let enabled = settings.settings().transcription.dictation_contact_names;
+            crate::dictation_vocabulary::set_contact_names(if enabled {
+                names
+            } else {
+                Vec::new()
+            });
+            Ok(serde_json::json!({
+                "count": crate::dictation_vocabulary::contact_name_count()
+            }))
+        }
+        "set_dictation_calendar_names" => {
+            let read_names = |key: &str| -> Result<Vec<String>, String> {
+                Ok(params
+                    .get(key)
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| format!("{key} must be an array"))?
+                    .iter()
+                    .take(crate::dictation_vocabulary::MAX_CONTACT_NAMES)
+                    .filter_map(|name| name.as_str().map(str::to_string))
+                    .collect())
+            };
+            let names = read_names("names")?;
+            let meeting_names = read_names("meetingNames")?;
+            let settings = state.settings_manager.lock().await;
+            if settings.settings().transcription.dictation_calendar_names
+                && !settings.settings().meetings.calendar_disconnected
+            {
+                crate::dictation_vocabulary::set_calendar_names(names, meeting_names);
+            } else {
+                crate::dictation_vocabulary::set_calendar_names(Vec::new(), Vec::new());
+            }
+            Ok(serde_json::json!({"count": crate::dictation_vocabulary::calendar_name_count()}))
+        }
+        "set_saved_prompts" => {
+            let prompts = parse_set_saved_prompts_request(params)?;
+            set_saved_prompts_for_sidecar(state.as_ref(), handle, prompts).await
         }
         "record_onboarding_state" => {
             let event = params
@@ -2873,7 +4361,58 @@ pub async fn dispatch_command(
             )
             .await
         }
+        "get_audio_storage_status" => {
+            crate::audio_compression::storage_status(state.as_ref()).await
+        }
         "run_storage_retention_maintenance" => {
+            if params.get("audioOnly").and_then(|v| v.as_bool()) == Some(true) {
+                if params.get("confirmed").and_then(|v| v.as_bool()) != Some(true) {
+                    return Err("Confirm meeting audio deletion first.".into());
+                }
+                let (transcript_only, confirmed_preset, confirmed_months) = {
+                    let manager = state.settings_manager.lock().await;
+                    let settings = &manager.settings().transcription;
+                    if params.get("preset").and_then(|v| v.as_str())
+                        != Some(settings.meeting_retention_preset.as_str())
+                        || params.get("storageMode").and_then(|v| v.as_str())
+                            != Some(settings.meeting_audio_storage_mode.as_str())
+                        || params.get("customMonths").and_then(|v| v.as_u64())
+                            != Some(u64::from(settings.meeting_retention_custom_months))
+                    {
+                        return Err(
+                            "Retention settings are still saving. Try again after they save."
+                                .into(),
+                        );
+                    }
+                    (
+                        settings.meeting_audio_storage_mode == "transcript_only",
+                        settings.meeting_retention_preset.clone(),
+                        settings.meeting_retention_custom_months,
+                    )
+                };
+                let (immediate_meetings, immediate_files) = if transcript_only {
+                    apply_meeting_transcript_only_storage_policy(
+                        state.as_ref(),
+                        Some(handle),
+                        "manual-audio-cleanup",
+                        None,
+                    )
+                    .await?
+                } else {
+                    (0, 0)
+                };
+                let (_, files, meetings) = enforce_meeting_retention_policy_inner(
+                    state.as_ref(),
+                    Some(handle),
+                    "manual-audio-cleanup",
+                    None,
+                    Some((&confirmed_preset, confirmed_months)),
+                )
+                .await?;
+                return Ok(
+                    serde_json::json!({"deletedAudioFiles":files + immediate_files,"audioPathsCleared":meetings + immediate_meetings}),
+                );
+            }
             let recording_id_filter = params
                 .get("recordingId")
                 .and_then(|value| value.as_str())
@@ -2937,7 +4476,7 @@ pub async fn dispatch_command(
         // ── Support bundle ──────────────────────────────────────────────────
         // Both arms are main-process only (see
         // `intentionallyUnreachableSidecarCommands` in
-        // scripts/verify-ipc-contract.mjs). `describe` is what the Settings
+        // scripts/verify-ipc-contract.ts). `describe` is what the Settings
         // screen shows before anything is written; `write` takes a path the
         // reader just chose in a native save dialog, which is why the renderer
         // may not name it.
@@ -3058,7 +4597,7 @@ pub async fn dispatch_command(
             }))
         }
         // Main-process only (see `intentionallyUnreachableSidecarCommands` in
-        // scripts/verify-ipc-contract.mjs): records what a `plainsong://` deep
+        // scripts/verify-ipc-contract.ts): records what a `plainsong://` deep
         // link asked for and what the app did about it, so the audit log shows
         // every external trigger next to the recordings it touched. The
         // payload is a fixed set of short enum-like strings chosen by
@@ -3143,12 +4682,18 @@ pub async fn dispatch_command(
                 Some(source_id) => db.get_recording(source_id).map_err(|e| e.to_string())?,
                 None => None,
             };
-            let details = enrich_dictation_history_details(
+            let mut details = enrich_dictation_history_details(
                 details,
                 history_text.as_ref(),
                 recording.as_ref(),
                 reprocessed_from.as_ref(),
             );
+            details.recognition_review_words = db
+                .get_dictation_recognition_review_words(&recording_id)
+                .map_err(|e| e.to_string())?;
+            if details.recognition_review_words.is_some() {
+                details.raw_transcript = history_text.as_ref().map(|text| text.raw_text.clone());
+            }
             let result = if dictation_history_details_is_empty(&details) {
                 None
             } else {
@@ -3402,9 +4947,9 @@ pub async fn dispatch_command(
                         details.push(w);
                     }
                     if !route_available {
-                        details.push("Mic-only meetings are available, but source-aware Me + Them capture still needs a system-audio route.".to_string());
+                        details.push("Mic-only meetings are available. Me + Them needs a way to record the meeting audio on this Mac.".to_string());
                     } else if !system_audio_verified {
-                        details.push("Mic-only meetings are available. Run Test system audio before relying on Me + Them capture; stream construction alone does not prove macOS permission or non-silent callbacks.".to_string());
+                        details.push("Mic-only meetings are available. Choose Check meeting audio before relying on Me + Them.".to_string());
                     }
                     let meeting_ready = permissions.microphone_ready;
                     let full_capture_ready = meeting_ready && system_audio_verified;
@@ -3437,7 +4982,7 @@ pub async fn dispatch_command(
                     SetupVerificationResult {
                         ok: false,
                         title: "Meeting verification".to_string(),
-                        summary: "No meeting-grade route is currently ready.".to_string(),
+                        summary: "No speech model for meetings is ready yet.".to_string(),
                         details,
                     }
                 }
@@ -3482,14 +5027,14 @@ pub async fn dispatch_command(
             }
             let result = SetupVerificationResult {
                 ok: system_audio_verified,
-                title: "System audio verification".to_string(),
+                title: "Meeting audio check".to_string(),
                 summary: if system_audio_verified {
-                    "System audio passed a non-silent verification test.".to_string()
+                    "Plainsong can hear all audio playing on this Mac.".to_string()
                 } else if system_audio.backend != audio::system_capture::SystemAudioBackend::None {
-                    "A system-audio route is detected, but permission and non-silent callbacks are not verified. Run Test system audio."
+                    "Plainsong hasn't confirmed it can hear the meeting audio yet. Choose Check meeting audio."
                         .to_string()
                 } else {
-                    "System audio capture is not ready yet.".to_string()
+                    "Plainsong can't record the meeting audio on this Mac yet.".to_string()
                 },
                 details,
             };
@@ -3561,7 +5106,14 @@ pub async fn dispatch_command(
                     .unwrap_or(serde_json::Value::Null),
             )
             .map_err(|e| e.to_string())?;
-            qa_smoke_test_cursor_insert_impl(state.as_ref(), text).await
+            let expected_bundle_id: Option<String> = serde_json::from_value(
+                params
+                    .get("expectedBundleId")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|e| e.to_string())?;
+            qa_smoke_test_cursor_insert_impl(state.as_ref(), text, expected_bundle_id).await
         }
         "capture_selected_text_for_playback" => {
             let admission_nonce: String = serde_json::from_value(
@@ -3592,7 +5144,48 @@ pub async fn dispatch_command(
         "transform_selected_text" => {
             let command_key: String =
                 serde_json::from_value(params["commandKey"].clone()).map_err(|e| e.to_string())?;
-            transform_selected_text_impl(state.as_ref(), &command_key).await
+            let admission_nonce: String = serde_json::from_value(
+                params
+                    .get("admissionNonce")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .map_err(|_| "Selected text transform requires an admission proof".to_string())?;
+            transform_selected_text_impl(state.as_ref(), &command_key, &admission_nonce).await
+        }
+        // "Recover last dictation": a checkpoint an earlier process left
+        // between stop and a recorded outcome (`dictation_checkpoint`).
+        "get_pending_dictation_recovery" => {
+            let dir = crate::dictation_checkpoint::dictation_checkpoint_directory()?;
+            serde_json::to_value(crate::dictation_checkpoint::pending_dictation_recovery(
+                &dir,
+                std::time::SystemTime::now(),
+            ))
+            .map_err(|e| e.to_string())
+        }
+        "recover_pending_dictation" => {
+            let recovered =
+                crate::dictation_checkpoint::recover_pending_dictation(state.as_ref()).await?;
+            serde_json::to_value(recovered).map_err(|e| e.to_string())
+        }
+        "discard_pending_dictation_recovery" => {
+            let dir = crate::dictation_checkpoint::dictation_checkpoint_directory()?;
+            crate::dictation_checkpoint::discard_dictation_recovery(&dir);
+            Ok(serde_json::Value::Null)
+        }
+        // For the quit guard's "Copy text and quit": the words recognized so
+        // far for one session, from the same recovery list the menu bar uses.
+        "get_dictation_session_text" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(|| "A dictation session id is required.".to_string())?;
+            let text = state
+                .recent_dictation_results
+                .lock()
+                .ok()
+                .and_then(|results| recent_dictation_text_for_session(&results, session_id));
+            Ok(serde_json::json!({ "text": text }))
         }
         "get_recent_dictation_results" => {
             let results = state
@@ -3637,6 +5230,25 @@ pub async fn dispatch_command(
                 .unwrap_or_default();
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
+        "dismiss_meeting_microphone_warning" => {
+            let recording_id: String =
+                serde_json::from_value(params["recordingId"].clone()).map_err(|e| e.to_string())?;
+            let mut overlay = state
+                .recording_overlay_state
+                .lock()
+                .map_err(|_| "Could not dismiss this warning".to_string())?;
+            if !dismiss_meeting_microphone_warning(&mut overlay, &recording_id) {
+                return Err(
+                    "This microphone warning belongs to another or ended meeting.".to_string(),
+                );
+            }
+            // Publish before stop can replace this snapshot with a terminal phase.
+            handle.emit_event(
+                "meeting-recording-state-changed",
+                serde_json::to_value(&*overlay).map_err(|e| e.to_string())?,
+            );
+            Ok(serde_json::Value::Null)
+        }
         "get_recording_overlay_state" => {
             let result = state
                 .recording_overlay_state
@@ -3644,6 +5256,22 @@ pub async fn dispatch_command(
                 .map(|s| s.clone())
                 .unwrap_or_default();
             serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        "hold_dictation_overlay_review" => {
+            let session_id = params
+                .get("sessionId")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|session_id| *session_id > 0)
+                .ok_or_else(|| "sessionId must be a positive integer".to_string())?;
+            let held = state
+                .dictation_overlay_state
+                .lock()
+                .map(|mut overlay| hold_dictation_overlay_review(&mut overlay, session_id))
+                .map_err(|_| "Could not access the dictation result".to_string())?;
+            if !held {
+                return Err("The dictation result is no longer available for review.".to_string());
+            }
+            Ok(serde_json::json!({ "held": true, "sessionId": session_id }))
         }
         "dismiss_dictation_overlay" => {
             // Dismissal hides the HUD; it does not stop capture. Reporting it
@@ -3657,6 +5285,7 @@ pub async fn dispatch_command(
                 s.message = None;
                 s.preview = None;
                 s.partial_text = None;
+                s.clear_warnings();
             }
             handle.emit_event(
                 "dictation-state-changed",
@@ -3679,6 +5308,17 @@ pub async fn dispatch_command(
         "has_provider_secret" => {
             let provider: String =
                 serde_json::from_value(params["provider"].clone()).map_err(|e| e.to_string())?;
+            if AnalysisProvider::from_settings_value(&provider).ok()
+                == Some(AnalysisProvider::ChatGptPlan)
+            {
+                let status = chatgpt_plan_status().await?;
+                return Ok(serde_json::json!(
+                    status.cloud_enabled
+                        && status.connected
+                        && status.plan_enabled
+                        && status.loaded
+                ));
+            }
             let normalized = normalize_provider_secret_name(&provider)?;
             let result = secrets::has_provider_secret(normalized).map_err(|e| e.to_string())?;
             Ok(serde_json::json!(result))
@@ -3697,31 +5337,6 @@ pub async fn dispatch_command(
                 serde_json::from_value(params["provider"].clone()).map_err(|e| e.to_string())?;
             let normalized = normalize_provider_secret_name(&provider)?;
             secrets::clear_provider_secret(normalized).map_err(|e| e.to_string())?;
-            Ok(serde_json::Value::Null)
-        }
-        // ── Plainsong Plus (not launched) ──────────────────────────────────
-        // Present in every build so the IPC contract is the same everywhere;
-        // only a `plainsong-plus` build answers anything but "not available".
-        "plus_get_status" => Ok(crate::plus::status().await),
-        "plus_activate" => {
-            #[cfg(feature = "plainsong-plus")]
-            {
-                let license_key: String = serde_json::from_value(params["licenseKey"].clone())
-                    .map_err(|e| e.to_string())?;
-                crate::plus::activate(&license_key)
-                    .await
-                    .map_err(|e| e.to_string())
-            }
-            #[cfg(not(feature = "plainsong-plus"))]
-            {
-                Err("This build does not include Plainsong Plus.".to_string())
-            }
-        }
-        "plus_sign_out" => {
-            #[cfg(feature = "plainsong-plus")]
-            {
-                crate::plus::sign_out().map_err(|e| e.to_string())?;
-            }
             Ok(serde_json::Value::Null)
         }
         "get_security_status" => {
@@ -3823,7 +5438,7 @@ pub async fn dispatch_command(
             )
             .map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
-            let _ = db.log_audit_event("recording_exported", Some(serde_json::json!({"recording_id": &recording_id, "format": &format, "export_path": &export_path})), "info");
+            let _ = db.log_audit_event("recording_exported", Some(serde_json::json!({"recording_id": &recording_id, "format": &format, "bytes": exported_file_bytes(&export_path)})), "info");
             Ok(serde_json::json!(export_path))
         }
         "export_recording_v2" => {
@@ -3871,7 +5486,12 @@ pub async fn dispatch_command(
             )
             .map_err(|e| e.to_string())?;
             let mut db = state.db.lock().await;
-            let _ = db.log_audit_event("recording_exported_v2", Some(serde_json::json!({"recording_id": &recording_id, "format": &format, "preview": preview_mode, "export_path": &result.export_path})), "info");
+            let bytes = match (&result.export_path, &result.content) {
+                (Some(path), _) => exported_file_bytes(path),
+                (None, Some(content)) => Some(content.len() as u64),
+                (None, None) => None,
+            };
+            let _ = db.log_audit_event("recording_exported_v2", Some(serde_json::json!({"recording_id": &recording_id, "format": &format, "preview": preview_mode, "bytes": bytes})), "info");
             serde_json::to_value(result).map_err(|e| e.to_string())
         }
         "export_with_template" => {
@@ -3935,10 +5555,18 @@ pub async fn dispatch_command(
                         let name = speaker_aliases
                             .get(&speaker_id)
                             .and_then(|(n, _, _)| n.clone())
-                            .unwrap_or_else(|| format!("Speaker {}", idx + 1));
+                            .filter(|name| !name.trim().is_empty())
+                            .or_else(|| export::subtitles::default_speaker_name(&speaker_id))
+                            .unwrap_or_else(|| {
+                                if speaker_id == "unknown" {
+                                    "Unknown".to_string()
+                                } else {
+                                    format!("Speaker {}", idx + 1)
+                                }
+                            });
                         export::templates::SpeakerInfo {
                             id: speaker_id,
-                            name,
+                            name: transcription::apply_redaction(&name, &redaction_level),
                             segments,
                         }
                     })
@@ -3950,13 +5578,15 @@ pub async fn dispatch_command(
             // missing analysis remains visibly missing in the rendered template.
             let (summary, action_items) = persisted_template_analysis(&recording, &redaction_level);
             let render_data = RenderData {
-                title: recording.title.clone(),
+                title: transcription::apply_redaction(&recording.title, &redaction_level),
                 date: recording.created_at.format("%Y-%m-%d %H:%M").to_string(),
                 duration_seconds: recording.duration as u64,
                 transcript: full_text,
                 speakers,
                 action_items,
                 summary,
+                source_limitations: export::meeting_source_limitations(&recording)
+                    .map(|text| transcription::apply_redaction(&text, &redaction_level)),
             };
             let rendered = state
                 .template_manager
@@ -3996,7 +5626,7 @@ pub async fn dispatch_command(
             };
             write_template_export(&export_path_buf, &bytes)?;
             let mut db = state.db.lock().await;
-            let _ = db.log_audit_event("recording_template_exported", Some(serde_json::json!({"recording_id": &recording_id, "template_id": &template_id, "target": &export_path})), "info");
+            let _ = db.log_audit_event("recording_template_exported", Some(serde_json::json!({"recording_id": &recording_id, "template_id": &template_id, "bytes": bytes.len()})), "info");
             serde_json::to_value(models::TemplateExportResponse {
                 template_id,
                 preview: false,
@@ -4171,15 +5801,19 @@ pub async fn dispatch_command(
             serde_json::to_value(info).map_err(|e| e.to_string())
         }
         "restore_backup_default" => {
-            let _operation_lease = state
+            let operation_lease = state
                 .operation_coordinator
-                .try_acquire(operation_coordinator::OperationKind::Restore)?;
+                .acquire_library_replacement(operation_coordinator::OperationKind::Restore)
+                .await?;
             let _storage_guard = state.audio_storage_gate.try_lock().map_err(|_| {
                 "Cannot restore while recording encryption or storage cleanup is active."
                     .to_string()
             })?;
             if state.audio_capture.lock().await.is_recording() {
                 return Err("Stop the active meeting before restoring a backup.".to_string());
+            }
+            if active_dictation_session_id(state.as_ref()).await.is_some() {
+                return Err("Finish the active dictation before restoring a backup.".to_string());
             }
             if state
                 .db
@@ -4198,18 +5832,133 @@ pub async fn dispatch_command(
             let data_dir = crate::paths::data_dir()
                 .ok_or("Could not find data directory")?
                 .join("Plainsong");
-            let outcome = {
+            let previous_settings = state.settings_manager.lock().await.settings().clone();
+            let mut database = state.db.lock().await;
+            let previous_publish_config = database.publish_config().map_err(|e| e.to_string())?;
+            let mut restore_attempt = operation_lease.into_restore_attempt()?;
+            let pending = {
                 let bm = state.backup_manager.lock().await;
-                bm.restore_backup(&backup_id, &data_dir)
+                match bm
+                    .restore_backup(&backup_id, &data_dir, &mut database)
                     .await
-                    .map_err(|e| e.to_string())?
+                {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        if backup::restore_error_requires_recovery(&error) {
+                            state
+                                .operation_coordinator
+                                .quarantine_after_restore_failure(error.to_string());
+                        }
+                        if backup::restore_error_rolled_back(&error) {
+                            match db::Database::open_at_path(&data_dir.join("plainsong.db"), None) {
+                                Ok(reopened) => {
+                                    *database = reopened;
+                                }
+                                Err(reopen_error) => {
+                                    state.operation_coordinator.quarantine_after_restore_failure(
+                                        format!("Original database could not reopen after restore failure: {reopen_error}"),
+                                    );
+                                }
+                            }
+                        }
+                        restore_attempt.resolve();
+                        return Err(error.to_string());
+                    }
+                }
             };
-            if outcome.restored_database {
-                reopen_database_after_restore(state.as_ref()).await?;
+            let outcome = pending.outcome();
+            let adoption = if outcome.restored_database {
+                match db::Database::open_at_path(&data_dir.join("plainsong.db"), None) {
+                    Ok(mut reopened) => {
+                        // A backup cannot re-enable publishing or replace the
+                        // folder the user most recently approved.
+                        let saved = reopened
+                            .save_publish_config(&previous_publish_config)
+                            .map_err(|error| {
+                                format!("Failed to preserve folder publishing settings: {error}")
+                            });
+                        *database = reopened;
+                        saved
+                    }
+                    Err(error) => Err(format!("Failed to reopen restored database: {error}")),
+                }
+            } else {
+                Ok(())
+            };
+            drop(database);
+            let acceptance = match adoption {
+                Ok(()) if outcome.restored_settings => {
+                    reload_settings_after_restore(state.as_ref(), handle).await
+                }
+                result => result,
+            };
+            if let Err(error) = acceptance {
+                let mut failures = vec![error];
+                let mut recovery_failed = false;
+                let mut database = state.db.lock().await;
+                if outcome.restored_database {
+                    if let Err(close_error) = database.close_for_restore() {
+                        let message =
+                            format!("Cannot close restored database for recovery: {close_error}");
+                        state
+                            .operation_coordinator
+                            .quarantine_after_restore_failure(message.clone());
+                        restore_attempt.resolve();
+                        return Err(message);
+                    }
+                }
+                if let Err(recovery_error) = pending.rollback().await {
+                    recovery_failed = true;
+                    failures.push(format!("File recovery incomplete: {recovery_error}"));
+                }
+                if outcome.restored_database && !recovery_failed {
+                    match db::Database::open_at_path(&data_dir.join("plainsong.db"), None) {
+                        Ok(reopened) => {
+                            *database = reopened;
+                        }
+                        Err(recovery_error) => {
+                            recovery_failed = true;
+                            failures.push(format!("Original database could not reopen after rollback: {recovery_error}"));
+                        }
+                    }
+                }
+                drop(database);
+                if outcome.restored_settings {
+                    *state.settings_manager.lock().await.settings_mut() = previous_settings.clone();
+                    if let Err(recovery_error) = apply_restored_settings_to_runtime(
+                        state.as_ref(),
+                        handle,
+                        previous_settings
+                            .transcription
+                            .meeting_custom_prompt
+                            .clone(),
+                        previous_settings,
+                    )
+                    .await
+                    {
+                        recovery_failed = true;
+                        failures.push(format!(
+                            "Runtime settings recovery incomplete: {recovery_error}"
+                        ));
+                    }
+                }
+                let message = failures.join("; ");
+                if recovery_failed {
+                    state
+                        .operation_coordinator
+                        .quarantine_after_restore_failure(message.clone());
+                }
+                restore_attempt.resolve();
+                return Err(message);
             }
-            if outcome.restored_settings {
-                reload_settings_after_restore(state.as_ref(), handle).await?;
+            if let Err(error) = pending.accept().await {
+                state
+                    .operation_coordinator
+                    .quarantine_after_restore_failure(error.to_string());
+                restore_attempt.resolve();
+                return Err(error.to_string());
             }
+            restore_attempt.resolve();
             Ok(serde_json::Value::Null)
         }
         "verify_backup_cloud_connection" => {
@@ -4276,6 +6025,27 @@ pub async fn dispatch_command(
         }
 
         _ => Err(format!("Unknown command: {}", method)),
+    }
+}
+
+#[cfg(test)]
+mod benchmark_dispatch_tests {
+    #[test]
+    fn bytes_benchmark_dispatches_owned_bytes_without_a_temp_file() {
+        const SOURCE: &str = include_str!("dispatch.rs");
+        let start = SOURCE
+            .find("\"benchmark_asr_providers_bytes\" => {")
+            .expect("bytes benchmark dispatch arm");
+        let end = SOURCE[start..]
+            .find("\"set_default_asr_provider\" => {")
+            .expect("next dispatch arm")
+            + start;
+        let body = &SOURCE[start..end];
+
+        assert!(body.contains("benchmark_providers_bytes(audio_bytes)"));
+        assert!(!body.contains("temp_dir"));
+        assert!(!body.contains("std::fs::write"));
+        assert!(!body.contains("remove_file"));
     }
 }
 
@@ -4367,5 +6137,206 @@ mod dictation_start_error_race_tests {
             release < audio,
             "force-stop must not wait for audio while holding tracker"
         );
+    }
+}
+
+#[cfg(test)]
+mod meeting_chat_citation_tests {
+    use super::normalize_meeting_chat_citation;
+    use crate::store::MeetingChatCitationRecord;
+
+    #[test]
+    fn normalization_preserves_written_note_identity() {
+        let normalized = normalize_meeting_chat_citation(MeetingChatCitationRecord {
+            text: "  Ship the revised brief  ".to_string(),
+            source_kind: Some(" meeting_note ".to_string()),
+            line_id: Some(" L7 ".to_string()),
+            segment_id: Some(" meeting-note:4 ".to_string()),
+            start_time: None,
+            end_time: None,
+            recording_id: Some(" recording-1 ".to_string()),
+            certainty: Some(1.0),
+        })
+        .expect("citation remains valid");
+
+        assert_eq!(normalized.text, "Ship the revised brief");
+        assert_eq!(normalized.source_kind.as_deref(), Some("meeting_note"));
+        assert_eq!(normalized.line_id.as_deref(), Some("L7"));
+        assert_eq!(normalized.segment_id.as_deref(), Some("meeting-note:4"));
+        assert_eq!(normalized.start_time, None);
+        assert_eq!(normalized.end_time, None);
+        assert_eq!(normalized.recording_id.as_deref(), Some("recording-1"));
+    }
+}
+
+#[cfg(test)]
+mod saved_prompt_write_parser_tests {
+    use super::*;
+
+    #[test]
+    fn nested_and_flat_legacy_requests_replace_library() {
+        let mut settings = settings::Settings::default();
+        settings.ai.saved_prompts = vec![settings::SavedPrompt {
+            id: "legacy".into(),
+            ..Default::default()
+        }];
+        let flat = serde_json::to_value(&settings).unwrap();
+        for payload in [flat.clone(), serde_json::json!({"settings": flat})] {
+            let (parsed, preserve) = parse_save_settings_request(payload).unwrap();
+            assert!(!preserve);
+            assert_eq!(parsed.ai.saved_prompts[0].id, "legacy");
+        }
+    }
+
+    #[test]
+    fn nested_and_flat_metadata_is_explicit_and_removed() {
+        let flat = serde_json::to_value(settings::Settings::default()).unwrap();
+        for preserve in [false, true] {
+            let mut flat_with_metadata = flat.clone();
+            flat_with_metadata["preserveSavedPrompts"] = preserve.into();
+            for payload in [
+                flat_with_metadata,
+                serde_json::json!({"settings": flat, "preserveSavedPrompts": preserve}),
+            ] {
+                let (parsed, actual) = parse_save_settings_request(payload).unwrap();
+                assert_eq!(actual, preserve);
+                assert!(serde_json::to_value(parsed)
+                    .unwrap()
+                    .get("preserveSavedPrompts")
+                    .is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_preservation_metadata_is_rejected() {
+        for metadata in [
+            serde_json::Value::Null,
+            serde_json::json!("true"),
+            serde_json::json!(1),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            for nested in [false, true] {
+                let mut payload = if nested {
+                    serde_json::json!({"settings": {}})
+                } else {
+                    serde_json::json!({})
+                };
+                payload["preserveSavedPrompts"] = metadata.clone();
+                assert!(parse_save_settings_request(payload).is_err());
+            }
+        }
+        assert!(parse_save_settings_request(serde_json::json!([])).is_err());
+        assert!(parse_save_settings_request(serde_json::json!({"settings": null})).is_err());
+    }
+
+    #[test]
+    fn setter_requires_a_list_and_rejects_unknown_metadata() {
+        assert!(
+            parse_set_saved_prompts_request(serde_json::json!({"savedPrompts": []}))
+                .unwrap()
+                .is_empty()
+        );
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"savedPrompts": null}),
+            serde_json::json!({"savedPrompts": {}}),
+            serde_json::json!({"savedPrompts": [1]}),
+            serde_json::json!({"savedPrompts": [], "preserveSavedPrompts": true}),
+        ] {
+            assert!(parse_set_saved_prompts_request(payload).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod asr_runtime_diagnostics_request_tests {
+    use super::*;
+
+    #[test]
+    fn exact_model_metadata_is_optional_but_strict_when_present() {
+        let legacy =
+            parse_asr_runtime_diagnostics_request(serde_json::json!({"providerType": "whisper"}))
+                .unwrap();
+        assert!(legacy.model_id.is_none());
+        let exact = parse_asr_runtime_diagnostics_request(
+            serde_json::json!({"providerType": "whisper", "modelId": "small.en"}),
+        )
+        .unwrap();
+        assert_eq!(exact.model_id.as_deref(), Some("small.en"));
+        for value in [
+            serde_json::json!("unknown-model"),
+            serde_json::Value::Null,
+            serde_json::json!(false),
+            serde_json::json!(42),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!(""),
+            serde_json::json!(" "),
+            serde_json::json!(" small.en "),
+        ] {
+            assert!(parse_asr_runtime_diagnostics_request(
+                serde_json::json!({"providerType": "whisper", "modelId": value}),
+            )
+            .is_err());
+        }
+        assert!(parse_asr_runtime_diagnostics_request(
+            serde_json::json!({"providerType": "whisper", "modelID": "small.en"}),
+        )
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod settings_patch_request_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn save_settings_patch_envelope_rejects_mixed_and_unknown_fields() {
+        for payload in [
+            json!({"settings": {}, "patch": []}),
+            json!({"patch": null}),
+            json!({"patch": [], "unexpected": true}),
+            json!({"patch": [], "preserveSavedPrompts": null}),
+        ] {
+            assert!(parse_settings_update_request(payload).is_err());
+        }
+        let (update, preserve) =
+            parse_settings_update_request(json!({"patch": [], "preserveSavedPrompts":true}))
+                .unwrap();
+        assert!(preserve);
+        assert!(matches!(update, settings_patch::SettingsUpdate::Patch(_)));
+    }
+
+    #[test]
+    fn save_settings_update_keeps_legacy_raw_and_enveloped_requests() {
+        for payload in [json!({}), json!({"settings": {}})] {
+            let (update, preserve) = parse_settings_update_request(payload).unwrap();
+            assert!(!preserve);
+            assert!(matches!(update, settings_patch::SettingsUpdate::Replace(_)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod note_publishing_deletion_tests {
+    use super::*;
+    #[test]
+    fn publishing_deletion_checks_capture_before_touching_the_published_file() {
+        let mut db = db::Database::new_in_memory_for_test().unwrap();
+        for (status, message) in [
+            ("recording", "Stop the meeting"),
+            ("processing", "Wait for meeting processing"),
+        ] {
+            let recording:models::Recording=serde_json::from_value(serde_json::json!({"id":status,"title":"Meeting","projectId":"default","duration":0,"createdAt":"2026-10-23T12:00:00Z","updatedAt":"2026-10-23T12:00:00Z","sourceType":"meeting","audioPath":"","status":status})).unwrap();
+            db.create_recording(&recording).unwrap();
+            assert!(deletable_recording_bundle(&db, status)
+                .err()
+                .unwrap()
+                .contains(message));
+        }
+        assert!(deletable_recording_bundle(&db, "missing").is_err());
     }
 }

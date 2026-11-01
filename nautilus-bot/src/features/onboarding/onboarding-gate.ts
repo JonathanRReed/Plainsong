@@ -64,8 +64,8 @@ export interface OnboardingGateDecision {
   /** What is missing right now, in the order the wizard addresses it. */
   unmet: OnboardingRequirementId[];
   /**
-   * Whether to write the durable record now because the app is demonstrably
-   * working but nothing on disk says setup ever happened.
+   * Whether a working install's legacy completion flag can become a durable
+   * completion record. Readiness alone does not establish completion.
    */
   adoptRecord: boolean;
   /** One plain sentence. Safe to log: it names state, never content. */
@@ -170,20 +170,16 @@ export function resolveOnboardingGate(
   const anythingRecorded = completed || deferred || input.legacyFlagComplete;
 
   if (!input.evidenceLoaded) {
+    // Fresh installs need setup regardless of permissions or installed models.
+    // Keep those checks running, but let the reader use the welcome step now.
+    if (!anythingRecorded) {
+      return decision("show", "This install has no setup record.");
+    }
     if (stopWaiting) {
-      // Readiness could not be established, so "is this Mac working" has no
-      // answer. An install that has never recorded anything is a first run
-      // whether or not the check succeeded; one that has is left alone rather
-      // than interrupted over a probe failure it cannot fix from a wizard.
-      return anythingRecorded
-        ? decision(
-            "skip",
-            "Setup state could not be checked, and this install has a setup record already.",
-          )
-        : decision(
-            "show",
-            "This install has no setup record, and setup state could not be checked.",
-          );
+      return decision(
+        "skip",
+        "Setup state could not be checked, and this install has a setup record already.",
+      );
     }
     // Someone who finished setup gets their workspace at once. Readiness keeps
     // loading behind it, and if it finds something broken the wizard opens
@@ -203,16 +199,20 @@ export function resolveOnboardingGate(
     if (completed) {
       return decision("skip", "Setup was completed, and dictation is ready on this Mac.");
     }
-    // Working, but nothing on disk says setup ever happened: a profile carrying
-    // the old renderer flag, or an install restored from a backup. Record it
-    // rather than staging a wizard over an app that already works.
+    if (deferred) {
+      return decision("skip", "Setup was deferred, and dictation is ready on this Mac.");
+    }
+    if (input.legacyFlagComplete) {
+      return decision(
+        "skip",
+        "Dictation is ready and this profile carries the old renderer flag, so the record was written to settings.",
+        [],
+        true,
+      );
+    }
     return decision(
-      "skip",
-      input.legacyFlagComplete
-        ? "Dictation is ready and this profile carries the old renderer flag, so the record was written to settings."
-        : "Dictation is ready on this Mac, so setup was recorded without running the wizard.",
-      [],
-      true,
+      "show",
+      "Dictation is ready, but setup has not been completed on this install.",
     );
   }
 

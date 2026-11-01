@@ -1,0 +1,67 @@
+[
+  {
+    "fixture": "conditional-beta",
+    "claims": [
+      "Priya will review the notes.",
+      "The beta will be shipped on the fourteenth if the memory gate passes."
+    ],
+    "lineIds": [
+      [
+        "L1"
+      ],
+      [
+        "L1"
+      ]
+    ],
+    "retained": 2,
+    "regressedResponse": "Priya will review the notes.",
+    "model": "qwen3-1.7b-q4_k_m"
+  },
+  {
+    "fixture": "workshop-schedule",
+    "claims": [
+      "The projector setup was explained but no equipment was committed to bring."
+    ],
+    "lineIds": [
+      [
+        "L5"
+      ]
+    ],
+    "retained": 0,
+    "regressedResponse": "The meeting confirmed the budget for the Cedar workshop as $900, not $1,900. The catering order was sent yesterday and there is nothing left to send. The room plan will be sent by Wednesday. A commitment was made to not increase the budget. The projector setup was explained but no equipment was committed to bring.",
+    "model": "qwen3-1.7b-q4_k_m"
+  },
+  {
+    "fixture": "b23-aside-normal",
+    "claims": [
+      "The memory gate status is pending."
+    ],
+    "lineIds": [
+      [
+        "L1"
+      ]
+    ],
+    "retained": 0,
+    "regressedResponse": "The memory gate status is pending.",
+    "model": "qwen3-1.7b-q4_k_m"
+  },
+  {
+    "fixture": "b23-aside-light",
+    "claims": [
+      "Priya will review the launch notes on Friday if the memory gate passes.",
+      "PRIA will review the launch notes on Friday if the memory gate passes."
+    ],
+    "lineIds": [
+      [
+        "L2"
+      ],
+      [
+        "L1",
+        "L2"
+      ]
+    ],
+    "retained": 1,
+    "regressedResponse": "Priya will review the launch notes on Friday if the memory gate passes. PRIA will review the launch notes on Friday if the memory gate passes.",
+    "model": "qwen3-4b-instruct-2507-q4_k_m"
+  }
+]

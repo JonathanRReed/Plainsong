@@ -1,4 +1,4 @@
-//! Apple Foundation Models (on-device) as a dictation-cleanup provider.
+//! Apple Foundation Models for cleanup and chunked, grounded meeting notes.
 //!
 //! macOS 26 ships a ~3B on-device language model behind the
 //! `FoundationModels` framework. It costs nothing to download, nothing to
@@ -70,6 +70,13 @@ pub const HELPER_TIMEOUT: Duration = Duration::from_millis(5_000);
 /// read, then fail with a message that names the bound.
 pub const HELPER_STDOUT_LIMIT: usize = 256 * 1024;
 
+/// Apple does not expose the system model's allocation size. Budget 4 GiB
+/// for a generation's possible system-model and runtime allocations, in
+/// addition to the shared 6 GiB reserve. This is a conservative policy
+/// allowance, not measured weight ownership. Reaping our helper does not
+/// promise that macOS unloads its resident model.
+const SYSTEM_RUNTIME_ALLOWANCE: u64 = 4 * 1024 * 1024 * 1024;
+
 /// Append `chunk` to `buffer` unless that would take it past `limit`.
 ///
 /// Split out from the read loop so the bound is a decision that can be tested
@@ -122,6 +129,8 @@ struct HelperRequest<'a> {
     prompt: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     maximum_response_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_kind: Option<&'a str>,
 }
 
 /// One line of helper output. `type` discriminates; unknown variants are a
@@ -144,6 +153,8 @@ pub enum HelperResponse {
         detail: Option<String>,
         #[serde(default)]
         operating_system_version: String,
+        #[serde(default)]
+        context_tokens: Option<usize>,
     },
     #[serde(rename = "completion")]
     Completion {
@@ -308,24 +319,147 @@ fn resolve_helper() -> Result<PathBuf, String> {
     ))
 }
 
-async fn run_helper(request: &HelperRequest<'_>, timeout: Duration) -> Result<String, String> {
-    let helper = resolve_helper()?;
-    let body = serde_json::to_vec(request)
-        .map_err(|error| format!("Could not encode the helper request: {error}"))?;
+#[derive(Debug)]
+enum HelperRunError {
+    Admission(String),
+    Transport(String),
+    /// A notes request stopped, or not started, for live speech.
+    YieldedToSpeech,
+}
 
-    let mut child = tokio::process::Command::new(&helper)
+impl HelperRunError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Admission(message) | Self::Transport(message) => message,
+            Self::YieldedToSpeech => super::native_text::SPEECH_YIELD_REFUSAL,
+        }
+    }
+
+    fn completion_error(self) -> super::transport::LlmError {
+        use super::transport::{ErrorKind, LlmError};
+        let (kind, message) = match self {
+            Self::Admission(message) => (ErrorKind::Policy, message),
+            Self::YieldedToSpeech => (
+                ErrorKind::Policy,
+                super::native_text::SPEECH_YIELD_REFUSAL.to_string(),
+            ),
+            Self::Transport(message) => {
+                let kind = if message.contains("did not answer in time") {
+                    ErrorKind::Timeout
+                } else {
+                    ErrorKind::Transport
+                };
+                (kind, message)
+            }
+        };
+        LlmError::new(super::Provider::AppleLanguageModel, kind, message)
+    }
+}
+
+async fn run_helper(
+    request: &HelperRequest<'_>,
+    timeout: Duration,
+) -> Result<String, HelperRunError> {
+    let helper = resolve_helper().map_err(HelperRunError::Transport)?;
+    // Meeting notes yield to live speech like the built-in text model's.
+    let stop = super::bundled_local::CancelFlag::new();
+    let background = if request.mode == "notes" && super::speech_priority::in_background_text() {
+        Some(
+            super::speech_priority::PRECEDENCE
+                .begin_background(SYSTEM_RUNTIME_ALLOWANCE, &stop)
+                .ok_or(HelperRunError::YieldedToSpeech)?,
+        )
+    } else {
+        None
+    };
+    let _foreground = super::local_model_load::foreground_work();
+    super::local_model_load::wait_for_background_gate(&super::native_runtime_gate::TEXT_RUNTIME)
+        .await;
+    let result = run_helper_until(
+        request,
+        timeout,
+        &helper,
+        || {
+            super::local_model_load::system_runtime(SYSTEM_RUNTIME_ALLOWANCE)
+                .map_err(|error| error.to_string())
+        },
+        background.is_some().then_some(&stop),
+    )
+    .await;
+    // Dropped only now, after the helper has been reaped.
+    match result {
+        Err(_) if background.as_ref().is_some_and(|request| request.yielded()) => {
+            Err(HelperRunError::YieldedToSpeech)
+        }
+        result => result,
+    }
+}
+
+#[cfg(test)]
+async fn run_helper_at(
+    request: &HelperRequest<'_>,
+    timeout: Duration,
+    helper: &Path,
+    admit: impl FnOnce() -> Result<super::local_model_load::LoadReservation<'static>, String>,
+) -> Result<String, HelperRunError> {
+    run_helper_until(request, timeout, helper, admit, None).await
+}
+
+async fn run_helper_until(
+    request: &HelperRequest<'_>,
+    timeout: Duration,
+    helper: &Path,
+    admit: impl FnOnce() -> Result<super::local_model_load::LoadReservation<'static>, String>,
+    stop: Option<&super::bundled_local::CancelFlag>,
+) -> Result<String, HelperRunError> {
+    let body = serde_json::to_vec(request).map_err(|error| {
+        HelperRunError::Transport(format!("Could not encode the helper request: {error}"))
+    })?;
+    // Probe only checks framework availability. Generation samples memory
+    // immediately before spawning and shares admission with other local work.
+    let reservation = if matches!(request.mode, "generate" | "notes") {
+        Some(admit().map_err(HelperRunError::Admission)?)
+    } else {
+        None
+    };
+
+    let child = tokio::process::Command::new(helper)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| {
-            format!(
+            HelperRunError::Transport(format!(
                 "Could not start the Apple on-device model helper at {}: {error}",
                 helper.display()
-            )
+            ))
         })?;
 
+    // Dropping the caller signals cancellation, while the detached owner keeps
+    // the child and admission lease until termination has been reaped.
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    let owner = tokio::spawn(run_child(
+        child,
+        body,
+        timeout,
+        reservation,
+        cancelled,
+        stop.cloned(),
+    ));
+    let outcome = owner.await.map_err(|error| {
+        HelperRunError::Transport(format!(
+            "The Apple on-device model helper task failed: {error}"
+        ))
+    })?;
+    drop(cancel);
+    outcome.map_err(HelperRunError::Transport)
+}
+
+async fn read_child(
+    child: &mut tokio::process::Child,
+    body: &[u8],
+) -> Result<(std::process::ExitStatus, Vec<u8>), String> {
     {
         use tokio::io::AsyncWriteExt;
         let mut stdin = child
@@ -333,7 +467,7 @@ async fn run_helper(request: &HelperRequest<'_>, timeout: Duration) -> Result<St
             .take()
             .ok_or_else(|| "The helper did not expose stdin.".to_string())?;
         stdin
-            .write_all(&body)
+            .write_all(body)
             .await
             .map_err(|error| format!("Could not send the request to the helper: {error}"))?;
         stdin
@@ -347,42 +481,67 @@ async fn run_helper(request: &HelperRequest<'_>, timeout: Duration) -> Result<St
         .take()
         .ok_or_else(|| "The helper did not expose stdout.".to_string())?;
 
-    // `let` (rather than matching the expression directly) ends the borrow of
-    // `child` at the end of this statement, so the kill below is free to take
-    // it back.
-    let outcome = tokio::time::timeout(timeout, async {
-        use tokio::io::AsyncReadExt;
-        let mut buffer: Vec<u8> = Vec::with_capacity(8 * 1024);
-        let mut chunk = [0u8; 8 * 1024];
-        loop {
-            let read = stdout
-                .read(&mut chunk)
-                .await
-                .map_err(|error| format!("Could not read the helper's answer: {error}"))?;
-            if read == 0 {
-                break;
-            }
-            push_bounded(&mut buffer, &chunk[..read], HELPER_STDOUT_LIMIT)?;
-        }
-        let status = child
-            .wait()
+    use tokio::io::AsyncReadExt;
+    let mut buffer: Vec<u8> = Vec::with_capacity(8 * 1024);
+    let mut chunk = [0u8; 8 * 1024];
+    loop {
+        let read = stdout
+            .read(&mut chunk)
             .await
-            .map_err(|error| format!("The Apple on-device model helper failed: {error}"))?;
-        Ok::<_, String>((status, buffer))
-    })
-    .await;
-
-    let (status, stdout_bytes) = match outcome {
-        Ok(Ok(value)) => value,
-        Ok(Err(message)) => {
-            // An over-long or unreadable stream: stop the helper now rather
-            // than leaving it writing into a pipe nobody is draining.
-            let _ = child.start_kill();
-            return Err(message);
+            .map_err(|error| format!("Could not read the helper's answer: {error}"))?;
+        if read == 0 {
+            break;
         }
-        Err(_) => {
-            // `kill_on_drop` fires as `child` goes out of scope.
-            return Err("The Apple on-device model did not answer in time.".to_string());
+        push_bounded(&mut buffer, &chunk[..read], HELPER_STDOUT_LIMIT)?;
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| format!("The Apple on-device model helper failed: {error}"))?;
+    Ok((status, buffer))
+}
+
+async fn stopped_for_speech(stop: Option<&super::bundled_local::CancelFlag>) {
+    let Some(stop) = stop else {
+        return std::future::pending().await;
+    };
+    while !stop.must_stop_now() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn run_child(
+    mut child: tokio::process::Child,
+    body: Vec<u8>,
+    timeout: Duration,
+    reservation: Option<super::local_model_load::LoadReservation<'static>>,
+    mut cancelled: tokio::sync::oneshot::Receiver<()>,
+    stop: Option<super::bundled_local::CancelFlag>,
+) -> Result<String, String> {
+    // Include stdin writes in the deadline too: a helper can stop reading.
+    let outcome = tokio::select! {
+        outcome = tokio::time::timeout(timeout, read_child(&mut child, &body)) => {
+            outcome.unwrap_or_else(|_| Err("The Apple on-device model did not answer in time.".to_string()))
+        },
+        _ = &mut cancelled => Err("The Apple on-device model request was cancelled.".to_string()),
+        _ = stopped_for_speech(stop.as_ref()) => {
+            Err(super::native_text::SPEECH_YIELD_REFUSAL.to_string())
+        }
+    };
+    let (status, stdout_bytes) = match outcome {
+        Ok(value) => value,
+        Err(message) => {
+            let _ = child.start_kill();
+            if let Err(error) = child.wait().await {
+                // Failure to confirm exit must not admit another local model.
+                // Keep the gate and allowance occupied for this sidecar's
+                // lifetime; dropping a helper never proves system weights left.
+                std::mem::forget(reservation);
+                let message = format!("{message} Could not confirm the helper stopped: {error}. Local processing remains paused.");
+                tracing::error!("{message}");
+                return Err(message);
+            }
+            return Err(message);
         }
     };
 
@@ -391,7 +550,8 @@ async fn run_helper(request: &HelperRequest<'_>, timeout: Duration) -> Result<St
             "The Apple on-device model helper exited with {status}."
         ));
     }
-    Ok(String::from_utf8_lossy(&stdout_bytes).into_owned())
+    String::from_utf8(stdout_bytes)
+        .map_err(|_| "The Apple on-device model helper returned invalid UTF-8.".to_string())
 }
 
 /// Ask the helper whether the on-device model can run here. Never prompts and
@@ -403,13 +563,14 @@ pub async fn probe() -> AppleModelAvailability {
         instructions: None,
         prompt: None,
         maximum_response_tokens: None,
+        response_kind: None,
     };
     match run_helper(&request, HELPER_TIMEOUT).await {
         Ok(stdout) => match parse_helper_output(&stdout) {
             Ok(response) => availability_from_response(response),
             Err(message) => AppleModelAvailability::unavailable("protocol_error", &message),
         },
-        Err(message) => AppleModelAvailability::unavailable("helper_unavailable", &message),
+        Err(error) => AppleModelAvailability::unavailable("helper_unavailable", error.message()),
     }
 }
 
@@ -417,16 +578,13 @@ pub async fn probe() -> AppleModelAvailability {
 #[derive(Debug, Clone, Default)]
 pub struct AppleLanguageModelClient;
 
-/// Dictation cleanup only, for the same reason as the bundled model: the
-/// meetings lane sends whole transcripts through a grounded map-reduce with a
-/// JSON schema, and a 4,096-token shared window cannot hold one chunk of that
-/// plus its answer. Refusing names the alternative rather than producing a
-/// truncated summary.
-pub fn supports_purpose(purpose: super::CompletionPurpose) -> bool {
-    matches!(purpose, super::CompletionPurpose::Generic)
+fn request_mode(purpose: super::CompletionPurpose) -> &'static str {
+    if purpose == super::CompletionPurpose::Generic {
+        "generate"
+    } else {
+        "notes"
+    }
 }
-
-pub const MEETINGS_LANE_REFUSAL: &str = "The Apple on-device model only cleans up dictation; its 4,096-token window is too small for meeting summaries. Choose Ollama or a cloud service for the meetings lane.";
 
 #[async_trait::async_trait]
 impl super::transport::CompletionTransport for AppleLanguageModelClient {
@@ -434,19 +592,43 @@ impl super::transport::CompletionTransport for AppleLanguageModelClient {
         super::Provider::AppleLanguageModel
     }
 
+    async fn model_context_metadata(
+        &self,
+        _model: &str,
+    ) -> Result<super::transport::ModelContextMetadata, super::transport::LlmError> {
+        let request = HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            mode: "probe",
+            instructions: None,
+            prompt: None,
+            maximum_response_tokens: None,
+            response_kind: None,
+        };
+        let output = run_helper(&request, HELPER_TIMEOUT)
+            .await
+            .map_err(HelperRunError::completion_error)?;
+        match parse_helper_output(&output) {
+            Ok(HelperResponse::Probe {
+                available: true,
+                context_tokens,
+                ..
+            }) => Ok(super::transport::ModelContextMetadata {
+                capacity_tokens: Some(context_tokens.unwrap_or(CONTEXT_WINDOW_TOKENS).min(16_384)),
+                ..Default::default()
+            }),
+            _ => Err(super::transport::LlmError::new(
+                super::Provider::AppleLanguageModel,
+                super::transport::ErrorKind::Configuration,
+                "Apple Intelligence is unavailable. Check its model in Settings.",
+            )),
+        }
+    }
+
     async fn complete(
         &self,
         request: &super::transport::CompletionRequest,
     ) -> Result<super::transport::CompletionResponse, super::transport::LlmError> {
         use super::transport::{ErrorKind, LlmError};
-
-        if !supports_purpose(request.purpose) {
-            return Err(LlmError::new(
-                super::Provider::AppleLanguageModel,
-                ErrorKind::Policy,
-                MEETINGS_LANE_REFUSAL,
-            ));
-        }
 
         let transcript = request.prompt.trim();
         if transcript.is_empty() {
@@ -456,7 +638,8 @@ impl super::transport::CompletionTransport for AppleLanguageModelClient {
                 "Nothing to clean up",
             ));
         }
-        if transcript.chars().count() > MAX_PROMPT_CHARS {
+        let notes = request_mode(request.purpose) == "notes";
+        if !notes && transcript.chars().count() > MAX_PROMPT_CHARS {
             return Err(LlmError::new(
                 super::Provider::AppleLanguageModel,
                 ErrorKind::ContextLimit,
@@ -468,29 +651,63 @@ impl super::transport::CompletionTransport for AppleLanguageModelClient {
         // on the dictation path it embeds the captured-context blob and the
         // custom-mode prompt, and `instructions` is the higher-trust channel.
         // What survives is the closed-set register clause.
-        let instructions = match request.options.dictation_style {
-            Some(control) => format!("{INSTRUCTIONS}{}", style_clause(control)),
-            None => INSTRUCTIONS.to_string(),
+        let instructions = if notes {
+            request.system_prompt.clone().unwrap_or_else(|| {
+                "Use only the supplied meeting sources. Return the requested JSON.".into()
+            })
+        } else {
+            match request.options.dictation_style {
+                Some(control) => format!("{INSTRUCTIONS}{}", style_clause(control)),
+                None => INSTRUCTIONS.to_string(),
+            }
         };
-
-        let timeout = request.options.timeout.min(HELPER_TIMEOUT);
+        let response_kind = if notes {
+            request
+                .options
+                .json_schema
+                .as_ref()
+                .and_then(|schema| schema.get("properties"))
+                .and_then(|properties| {
+                    ["evidence", "actionItems", "response"]
+                        .into_iter()
+                        .find(|key| properties.get(*key).is_some())
+                })
+        } else {
+            None
+        };
+        let timeout = if notes {
+            request.options.timeout.min(Duration::from_secs(60))
+        } else {
+            request.options.timeout.min(HELPER_TIMEOUT)
+        };
         let helper_request = HelperRequest {
             protocol_version: HELPER_PROTOCOL_VERSION,
-            mode: "generate",
+            mode: request_mode(request.purpose),
             instructions: Some(instructions.as_str()),
             prompt: Some(transcript),
-            maximum_response_tokens: Some(request.options.max_output_tokens.max(64)),
+            maximum_response_tokens: Some(
+                request
+                    .options
+                    .max_output_tokens
+                    .clamp(64, if notes { 1024 } else { 1800 }),
+            ),
+            response_kind,
         };
 
         let stdout = run_helper(&helper_request, timeout)
             .await
-            .map_err(|message| {
-                let kind = if message.contains("did not answer in time") {
-                    ErrorKind::Timeout
+            .map_err(|error| {
+                if notes && matches!(error, HelperRunError::YieldedToSpeech) {
+                    error.completion_error()
+                } else if notes && matches!(error, HelperRunError::Admission(_)) {
+                    LlmError::new(
+                        super::Provider::AppleLanguageModel,
+                        ErrorKind::Policy,
+                        super::native_text::MEMORY_REFUSAL,
+                    )
                 } else {
-                    ErrorKind::Transport
-                };
-                LlmError::new(super::Provider::AppleLanguageModel, kind, message)
+                    error.completion_error()
+                }
             })?;
 
         match parse_helper_output(&stdout).map_err(|message| {
@@ -528,6 +745,7 @@ impl super::transport::CompletionTransport for AppleLanguageModelClient {
 pub fn helper_error_kind(code: &str, retryable: bool) -> super::transport::ErrorKind {
     use super::transport::ErrorKind;
     match code {
+        "output_limit" => ErrorKind::OutputLimit,
         "context_window_exceeded" => ErrorKind::ContextLimit,
         "timeout" => ErrorKind::Timeout,
         "malformed_request" => ErrorKind::InvalidRequest,
@@ -541,6 +759,301 @@ pub fn helper_error_kind(code: &str, retryable: bool) -> super::transport::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_refusal_is_a_nonretryable_policy_error_and_keeps_its_reason() {
+        let reason = "Not enough verified memory headroom for native inference working buffers alongside other applications.";
+        let error = HelperRunError::Admission(reason.to_string()).completion_error();
+        assert_eq!(error.kind, super::super::transport::ErrorKind::Policy);
+        assert!(!error.kind.retryable());
+        assert_eq!(error.message, reason);
+    }
+
+    #[cfg(unix)]
+    struct HelperStub {
+        directory: PathBuf,
+        helper: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl HelperStub {
+        fn new(script: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let directory = std::env::temp_dir().join(format!(
+                "plainsong-apple-text-stub-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            let helper = directory.join("helper");
+            std::fs::write(
+                &helper,
+                format!("#!/bin/sh\nprintf '%s' \"$$\" > \"$0.pid\"\n{script}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self { directory, helper }
+        }
+
+        /// Returns as soon as the stub has written its pid; the bound only
+        /// turns a stub that never starts into a failure, so it is generous
+        /// for a loaded machine running the whole suite in parallel.
+        async fn pid(&self) -> i32 {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if let Ok(pid) = std::fs::read_to_string(self.helper.with_extension("pid")) {
+                        if let Ok(pid) = pid.parse() {
+                            return pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("stub must start")
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for HelperStub {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[cfg(unix)]
+    fn generation_request() -> HelperRequest<'static> {
+        HelperRequest {
+            protocol_version: HELPER_PROTOCOL_VERSION,
+            mode: "generate",
+            instructions: Some(INSTRUCTIONS),
+            prompt: Some("hello"),
+            maximum_response_tokens: Some(64),
+            response_kind: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn admission_fixture() -> (
+        &'static super::super::native_runtime_gate::RuntimeGate,
+        &'static std::sync::atomic::AtomicU64,
+    ) {
+        // The detached process owner needs a static lease. Each test gets its
+        // own tiny gate and counter, independent of the production singleton.
+        (
+            Box::leak(Box::new(
+                super::super::native_runtime_gate::RuntimeGate::new(),
+            )),
+            Box::leak(Box::new(std::sync::atomic::AtomicU64::new(0))),
+        )
+    }
+
+    #[cfg(unix)]
+    fn stub_admission(
+        gate: &'static super::super::native_runtime_gate::RuntimeGate,
+        counter: &'static std::sync::atomic::AtomicU64,
+        memory: Option<u64>,
+    ) -> Result<super::super::local_model_load::LoadReservation<'static>, String> {
+        super::super::local_model_load::system_runtime_with_memory(
+            SYSTEM_RUNTIME_ALLOWANCE,
+            gate,
+            counter,
+            || memory,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
+    fn assert_reaped(pid: i32) {
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "helper must be gone before admission releases"
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generation_refuses_unknown_or_low_memory_before_starting_a_helper() {
+        use std::sync::atomic::Ordering;
+        let stub = HelperStub::new("exit 0");
+        let (gate, counter) = admission_fixture();
+        for memory in [None, Some(10 * 1024 * 1024 * 1024 - 1)] {
+            let error = run_helper_at(&generation_request(), HELPER_TIMEOUT, &stub.helper, || {
+                stub_admission(gate, counter, memory)
+            })
+            .await
+            .unwrap_err();
+            assert!(matches!(&error, HelperRunError::Admission(_)));
+            assert!(error.message().contains("headroom"), "{error:?}");
+            assert!(!stub.helper.with_extension("pid").exists());
+            assert_eq!(counter.load(Ordering::Acquire), 0);
+            assert!(gate.acquire().is_ok());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_spawn_releases_the_unused_admission() {
+        use std::sync::atomic::Ordering;
+        let stub = HelperStub::new("exit 0");
+        let (gate, counter) = admission_fixture();
+        let error = run_helper_at(
+            &generation_request(),
+            HELPER_TIMEOUT,
+            &stub.directory.join("missing"),
+            || stub_admission(gate, counter, Some(10 * 1024 * 1024 * 1024)),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.message().contains("Could not start"), "{error:?}");
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+        assert!(gate.acquire().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn malformed_helper_bytes_are_refused_before_parsing_and_release_admission() {
+        use std::sync::atomic::Ordering;
+        let stub = HelperStub::new("cat >/dev/null\nprintf 'private name \\377'");
+        let (gate, counter) = admission_fixture();
+        let error = run_helper_at(&generation_request(), HELPER_TIMEOUT, &stub.helper, || {
+            stub_admission(gate, counter, Some(10 * 1024 * 1024 * 1024))
+        })
+        .await
+        .unwrap_err();
+        assert!(error.message().contains("UTF-8"), "{error:?}");
+        assert!(!error.message().contains("private name"));
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+        assert!(gate.acquire().is_ok());
+        assert_reaped(stub.pid().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admitted_stub_completion_releases_claim_and_probe_needs_no_claim() {
+        use std::sync::atomic::Ordering;
+        let stub = HelperStub::new("cat >/dev/null\nprintf '%s\\n' '{\"protocolVersion\":1,\"type\":\"completion\",\"text\":\"hello\"}'");
+        let (gate, counter) = admission_fixture();
+        let output = run_helper_at(&generation_request(), HELPER_TIMEOUT, &stub.helper, || {
+            stub_admission(gate, counter, Some(10 * 1024 * 1024 * 1024))
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            parse_helper_output(&output).unwrap(),
+            HelperResponse::Completion { .. }
+        ));
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+        assert!(gate.acquire().is_ok());
+        assert_reaped(stub.pid().await);
+
+        let mut probe = generation_request();
+        probe.mode = "probe";
+        run_helper_at(&probe, HELPER_TIMEOUT, &stub.helper, || {
+            panic!("probe must not acquire model admission")
+        })
+        .await
+        .unwrap();
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn speech_stops_a_notes_request_and_reaps_it_before_releasing_admission() {
+        use std::sync::atomic::Ordering;
+        let stub = std::sync::Arc::new(HelperStub::new("exec /bin/sleep 30"));
+        let (gate, counter) = admission_fixture();
+        let stop = super::super::bundled_local::CancelFlag::new();
+        let speech = stop.clone();
+        // Speech arrives once the helper is running. A fixed delay could
+        // stop a stub the loaded machine had not yet scheduled, which then
+        // never wrote its pid.
+        let started_stub = stub.clone();
+        let speaker = tokio::spawn(async move {
+            let pid = started_stub.pid().await;
+            speech.stop_now();
+            (pid, std::time::Instant::now())
+        });
+        // Far longer than the stop takes, so only the stop can end the run.
+        let timeout = Duration::from_secs(120);
+        let error = run_helper_until(
+            &generation_request(),
+            timeout,
+            &stub.helper,
+            || stub_admission(gate, counter, Some(10 * 1024 * 1024 * 1024)),
+            Some(&stop),
+        )
+        .await
+        .unwrap_err();
+        let (pid, stopped_at) = speaker.await.unwrap();
+        assert!(stopped_at.elapsed() < Duration::from_secs(20));
+        assert_eq!(
+            error.message(),
+            super::super::native_text::SPEECH_YIELD_REFUSAL
+        );
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+        assert!(gate.acquire().is_ok());
+        assert_reaped(pid);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_and_output_overflow_reap_the_stub_before_releasing_admission() {
+        use std::sync::atomic::Ordering;
+        // The overflow case gets a long timeout so a loaded test machine
+        // cannot make the timeout fire before the output limit does. The
+        // timeout case leaves the stub time to write its pid first.
+        for (script, timeout, expected) in [
+            ("exec /bin/sleep 30", Duration::from_secs(3), "did not answer in time"),
+            ("cat >/dev/null\nwhile :; do printf '0123456789012345678901234567890123456789012345678901234567890123456789'; done", Duration::from_secs(20), "wrote more than"),
+        ] {
+            let stub = HelperStub::new(script);
+            let (gate, counter) = admission_fixture();
+            let error = run_helper_at(&generation_request(), timeout, &stub.helper,
+                ||stub_admission(gate, counter, Some(10 * 1024 * 1024 * 1024))).await.unwrap_err();
+            assert!(error.message().contains(expected), "{error:?}");
+            assert_eq!(counter.load(Ordering::Acquire), 0);
+            assert!(gate.acquire().is_ok());
+            assert_reaped(stub.pid().await);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_caller_leaves_admission_with_the_owner_until_stub_reap() {
+        use std::sync::atomic::Ordering;
+        let stub = HelperStub::new("exec /bin/sleep 30");
+        let (gate, counter) = admission_fixture();
+        let helper = stub.helper.clone();
+        let caller = tokio::spawn(async move {
+            run_helper_at(&generation_request(), HELPER_TIMEOUT, &helper, || {
+                stub_admission(gate, counter, Some(10 * 1024 * 1024 * 1024))
+            })
+            .await
+        });
+        let pid = stub.pid().await;
+        assert_eq!(counter.load(Ordering::Acquire), SYSTEM_RUNTIME_ALLOWANCE);
+        assert!(gate.acquire().is_err());
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(permit) = gate.acquire() {
+                    assert_eq!(counter.load(Ordering::Acquire), 0);
+                    assert_reaped(pid);
+                    drop(permit);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled helper must be reaped promptly");
+    }
 
     #[test]
     fn probe_response_parses() {
@@ -623,6 +1136,20 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_response_is_a_nonretryable_output_limit() {
+        let response = parse_helper_line(r#"{"protocolVersion":1,"type":"error","code":"output_limit","message":"Unfinished text was not used.","retryable":false}"#).unwrap();
+        let HelperResponse::Error {
+            code, retryable, ..
+        } = response
+        else {
+            panic!("expected the helper error");
+        };
+        let kind = helper_error_kind(&code, retryable);
+        assert_eq!(kind, super::super::transport::ErrorKind::OutputLimit);
+        assert!(!kind.retryable());
+    }
+
+    #[test]
     fn error_response_parses_and_maps_to_a_transport_kind() {
         // Captured verbatim from the shipped helper.
         let response = parse_helper_line(
@@ -696,9 +1223,9 @@ mod tests {
     }
 
     #[test]
-    fn the_meetings_lane_is_refused() {
+    fn notes_and_maps_use_the_chunked_meetings_lane() {
         use super::super::CompletionPurpose;
-        assert!(supports_purpose(CompletionPurpose::Generic));
+        assert_eq!(request_mode(CompletionPurpose::Generic), "generate");
         for purpose in [
             CompletionPurpose::Summary,
             CompletionPurpose::ActionItems,
@@ -707,7 +1234,7 @@ mod tests {
             CompletionPurpose::Reduce,
             CompletionPurpose::Title,
         ] {
-            assert!(!supports_purpose(purpose), "{purpose:?}");
+            assert_eq!(request_mode(purpose), "notes", "{purpose:?}");
         }
     }
 
@@ -765,6 +1292,7 @@ mod tests {
             instructions: Some("clean it"),
             prompt: Some("um hello"),
             maximum_response_tokens: Some(128),
+            response_kind: None,
         };
         let encoded = serde_json::to_value(&request).expect("request encodes");
         assert_eq!(encoded["protocolVersion"], 1);
@@ -779,6 +1307,7 @@ mod tests {
             instructions: None,
             prompt: None,
             maximum_response_tokens: None,
+            response_kind: None,
         };
         let encoded = serde_json::to_value(&probe).expect("probe encodes");
         assert!(encoded.get("prompt").is_none());

@@ -25,8 +25,8 @@ function createTempRepo(scriptName: string) {
   copyFileSync(sourceScript, tempScript);
   mkdirSync(path.join(tempScriptsDir, "lib"), { recursive: true });
   copyFileSync(
-    path.resolve(process.cwd(), "scripts/lib/release-candidate-identity.mjs"),
-    path.join(tempScriptsDir, "lib/release-candidate-identity.mjs"),
+    path.resolve(process.cwd(), "scripts/lib/release-candidate-identity.ts"),
+    path.join(tempScriptsDir, "lib/release-candidate-identity.ts"),
   );
 
   writeFileSync(
@@ -46,9 +46,9 @@ function writeAppInfoPlist(appPath: string, version: string) {
   );
 }
 
-describe("verify-packaged-macos-update-metadata.mjs", () => {
+describe("verify-packaged-macos-update-metadata.ts", () => {
   it("writes JSON and Markdown artifacts and preserves the missing app-update.yml error when the packaged app is missing", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.ts");
     try {
       const outPath = path.join(tempRoot, "artifacts", "qa", "macos", "update-metadata.json");
       const markdownPath = path.join(tempRoot, "artifacts", "qa", "macos", "update-metadata.md");
@@ -56,7 +56,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
       const latestPath = path.join(tempRoot, "release", "latest-mac.yml");
 
       const result = spawnSync(
-        "node",
+        "bun",
         [
           tempScript,
           "--app",
@@ -100,7 +100,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
   });
 
   macIt("fails closed when the beta channel manifest is missing", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.ts");
     try {
       const appPath = path.join(tempRoot, "release", "mac-arm64", "Plainsong.app");
       const resourcesPath = path.join(appPath, "Contents", "Resources");
@@ -113,7 +113,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
 
       const outPath = path.join(tempRoot, "artifacts", "update.json");
       const result = spawnSync(
-        "node",
+        "bun",
         [tempScript, "--app", appPath, "--out", outPath],
         { encoding: "utf8" },
       );
@@ -131,7 +131,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
   });
 
   macIt("accepts a matching beta manifest, ZIP, blockmap, and package version", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.ts");
     try {
       const appPath = path.join(tempRoot, "release", "mac-arm64", "Plainsong.app");
       const resourcesPath = path.join(appPath, "Contents", "Resources");
@@ -161,7 +161,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
 
       const outPath = path.join(tempRoot, "artifacts", "update.json");
       const result = spawnSync(
-        "node",
+        "bun",
         [tempScript, "--app", appPath, "--out", outPath],
         { encoding: "utf8" },
       );
@@ -191,7 +191,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
   });
 
   macIt("uses the packaged app version as candidate truth and flags a stale workspace", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-packaged-macos-update-metadata.ts");
     try {
       writeFileSync(
         path.join(tempRoot, "package.json"),
@@ -225,7 +225,7 @@ describe("verify-packaged-macos-update-metadata.mjs", () => {
       const outPath = path.join(tempRoot, "artifacts", "update.json");
 
       const result = spawnSync(
-        "node",
+        "bun",
         [tempScript, "--app", appPath, "--out", outPath],
         { encoding: "utf8" },
       );

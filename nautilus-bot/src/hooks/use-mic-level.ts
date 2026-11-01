@@ -7,9 +7,10 @@
  * releases the device the moment the caller stops it or unmounts.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import { requestMicrophoneAccess } from "@/lib/electron";
 
 /** Why the microphone could not be opened, in terms the reader can act on. */
-export type MicErrorKind = "denied" | "no-device" | "busy" | "unavailable";
+export type MicErrorKind = "denied" | "no-device" | "busy" | "unavailable" | "timeout";
 
 /** The level (0..1) that counts as someone speaking rather than room noise. */
 export const MIC_HEARD_LEVEL = 0.35;
@@ -84,6 +85,8 @@ export function micErrorMessage(kind: MicErrorKind): string {
       return "Plainsong is not allowed to use the microphone. Turn it on in System Settings > Privacy & Security > Microphone, then try again.";
     case "no-device":
       return "No microphone found. Connect one or choose another microphone, then try again.";
+    case "timeout":
+      return "The microphone did not respond within 30 seconds. If a permission prompt is open, respond to it, then try again.";
     case "busy":
       return "The microphone is in use by another app. Quit that app or choose another microphone, then try again.";
     default:
@@ -158,8 +161,12 @@ export function useMicLevel() {
   // Bumped by every start and stop, so a getUserMedia that resolves after the
   // reader moved on releases its stream instead of reviving the meter.
   const generationRef = useRef(0);
+  const disposedRef = useRef(false);
+  const cancelStartupRef = useRef<(() => void) | null>(null);
 
   const release = useCallback(() => {
+    cancelStartupRef.current?.();
+    cancelStartupRef.current = null;
     if (frameRef.current !== null) {
       cancelAnimationFrame(frameRef.current);
       frameRef.current = null;
@@ -179,6 +186,7 @@ export function useMicLevel() {
 
   const start = useCallback(
     async (device?: MicDevicePreference | null) => {
+      if (disposedRef.current) return;
       generationRef.current += 1;
       const generation = generationRef.current;
       release();
@@ -187,93 +195,123 @@ export function useMicLevel() {
       setLevel(0);
       setHeard(false);
       setUsingSystemDefault(false);
-      try {
-        let deviceId = await resolveCaptureDeviceId(device);
-        let stream = await openCapture(deviceId);
-        if (generation !== generationRef.current) {
-          stopStream(stream);
-          return;
-        }
-        if (device?.deviceId && !deviceId) {
-          // On a first run the labels only appear once this open has been
-          // allowed, so look again before settling for the default.
-          deviceId = await resolveCaptureDeviceId(device);
-          if (deviceId) {
-            stopStream(stream);
-            stream = await openCapture(deviceId);
-            if (generation !== generationRef.current) {
-              stopStream(stream);
-              return;
-            }
-          }
-        }
-        setUsingSystemDefault(Boolean(device?.deviceId) && !deviceId);
-        streamRef.current = stream;
-        const context = new AudioContext();
-        contextRef.current = context;
-        const analyser = context.createAnalyser();
-        analyser.fftSize = 1024;
-        context.createMediaStreamSource(stream).connect(analyser);
-        const samples = new Float32Array(analyser.fftSize);
-
-        let smoothed = 0;
-        let shown = -1;
-        let heardMs = 0;
-        let latched = false;
-        let lastTime = performance.now();
-        const tick = (now: number) => {
-          analyser.getFloatTimeDomainData(samples);
-          const raw = levelFromSamples(samples);
-          smoothed = smoothLevel(smoothed, raw);
-          heardMs = accumulateHeardMs(heardMs, raw, now - lastTime);
-          lastTime = now;
-          // Only re-render when the meter would visibly change.
-          const rounded = Math.round(smoothed * 100);
-          if (rounded !== shown) {
-            shown = rounded;
-            setLevel(rounded / 100);
-          }
-          if (!latched && heardMs >= MIC_HEARD_AFTER_MS) {
-            latched = true;
-            setHeard(true);
-          }
-          frameRef.current = requestAnimationFrame(tick);
-        };
-        frameRef.current = requestAnimationFrame(tick);
-        // Unplugging a USB or Bluetooth mic ends the track without an error;
-        // left alone the meter would sit "live" on silence.
-        for (const track of stream.getTracks()) {
-          track.addEventListener("ended", () => {
-            if (generation !== generationRef.current) {
-              return;
-            }
-            generationRef.current += 1;
-            release();
-            setLevel(0);
-            setError("no-device");
-            setState("error");
-          });
-        }
-        setState("live");
-      } catch (caught) {
-        if (generation !== generationRef.current) {
-          return;
-        }
+      let finishStartup!: () => void;
+      const cancelled = new Promise<void>((resolve) => { finishStartup = resolve; });
+      const timer = window.setTimeout(() => {
+        if (generation !== generationRef.current) return;
+        generationRef.current += 1;
         release();
-        setError(classifyMicError(caught));
+        setError("timeout");
         setState("error");
-      }
+      }, 30_000);
+      const cancelStartup = () => {
+        window.clearTimeout(timer);
+        finishStartup();
+      };
+      cancelStartupRef.current = cancelStartup;
+      const open = async () => {
+        try {
+          const granted = window.electronAPI?.requestMicrophoneAccess
+            ? await requestMicrophoneAccess()
+            : true;
+          if (generation !== generationRef.current) return;
+          if (!granted) throw new DOMException("Microphone access denied", "NotAllowedError");
+          let deviceId = await resolveCaptureDeviceId(device);
+          if (generation !== generationRef.current) return;
+          let stream = await openCapture(deviceId);
+          if (generation !== generationRef.current) {
+            stopStream(stream);
+            return;
+          }
+          streamRef.current = stream;
+          if (device?.deviceId && !deviceId) {
+            // On a first run the labels only appear once this open has been
+            // allowed, so look again before settling for the default.
+            deviceId = await resolveCaptureDeviceId(device);
+            if (generation !== generationRef.current) return;
+            if (deviceId) {
+              stopStream(stream);
+              streamRef.current = null;
+              stream = await openCapture(deviceId);
+              if (generation !== generationRef.current) {
+                stopStream(stream);
+                return;
+              }
+            }
+          }
+          setUsingSystemDefault(Boolean(device?.deviceId) && !deviceId);
+          streamRef.current = stream;
+          const context = new AudioContext();
+          contextRef.current = context;
+          const analyser = context.createAnalyser();
+          analyser.fftSize = 1024;
+          context.createMediaStreamSource(stream).connect(analyser);
+          const samples = new Float32Array(analyser.fftSize);
+
+          let smoothed = 0;
+          let shown = -1;
+          let heardMs = 0;
+          let latched = false;
+          let lastTime = performance.now();
+          const tick = (now: number) => {
+            analyser.getFloatTimeDomainData(samples);
+            const raw = levelFromSamples(samples);
+            smoothed = smoothLevel(smoothed, raw);
+            heardMs = accumulateHeardMs(heardMs, raw, now - lastTime);
+            lastTime = now;
+            // Only re-render when the meter would visibly change.
+            const rounded = Math.round(smoothed * 100);
+            if (rounded !== shown) {
+              shown = rounded;
+              setLevel(rounded / 100);
+            }
+            if (!latched && heardMs >= MIC_HEARD_AFTER_MS) {
+              latched = true;
+              setHeard(true);
+            }
+            frameRef.current = requestAnimationFrame(tick);
+          };
+          frameRef.current = requestAnimationFrame(tick);
+          // Unplugging a USB or Bluetooth mic ends the track without an error;
+          // left alone the meter would sit "live" on silence.
+          for (const track of stream.getTracks()) {
+            track.addEventListener("ended", () => {
+              if (generation !== generationRef.current) {
+                return;
+              }
+              generationRef.current += 1;
+              release();
+              setLevel(0);
+              setError("no-device");
+              setState("error");
+            });
+          }
+          setState("live");
+        } catch (caught) {
+          if (generation !== generationRef.current) {
+            return;
+          }
+          release();
+          setError(classifyMicError(caught));
+          setState("error");
+        } finally {
+          cancelStartup();
+          if (cancelStartupRef.current === cancelStartup) cancelStartupRef.current = null;
+        }
+      };
+      await Promise.race([open(), cancelled]);
     },
     [release],
   );
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
       generationRef.current += 1;
       release();
-    },
-    [release],
-  );
+    };
+  }, [release]);
 
   const getStream = useCallback(() => streamRef.current, []);
 

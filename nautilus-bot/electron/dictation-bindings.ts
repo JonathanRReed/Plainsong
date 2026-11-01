@@ -23,7 +23,16 @@ export type DictationBindingTrigger =
 export type DictationBindingBehavior = "toggle" | "hold" | "inherit";
 
 export type DictationBindingAction =
-  | { kind: "dictation"; modeId: string | null; behavior: DictationBindingBehavior }
+  | {
+      kind: "dictation";
+      modeId: string | null;
+      behavior: DictationBindingBehavior;
+      /**
+       * Press Return after the text is confirmed in the same field. Off when
+       * absent; the sidecar decides per session whether it may actually send.
+       */
+      submitAfterInsert?: boolean;
+    }
   | { kind: "cycleMode" }
   | { kind: "cancel" };
 
@@ -50,7 +59,7 @@ export const ESCAPE_NATIVE_BINDING_ID = "escape";
 
 const DICTATION_BINDING_MOUSE_BUTTONS: readonly DictationBindingMouseButton[] = [3, 4, 5];
 
-const MODIFIER_TOKENS = new Set(["command", "control", "alt", "shift", "fn"]);
+const MODIFIER_TOKENS = new Set(["command", "control", "alt", "shift", "fn", "rightcommand", "rightoption"]);
 
 /**
  * Chords macOS itself owns, in the spelling `normalizeShortcutAccelerator`
@@ -68,15 +77,7 @@ const RESERVED_SHORTCUT_ACCELERATORS: ReadonlySet<string> = new Set([
   "command+m",
 ]);
 
-/**
- * The only modifier that may be a trigger on its own.
- *
- * The helper matches `.maskCommand` (either Cmd key) and arms after 150 ms
- * with nothing else pressed, so a lone Cmd would start dictation from an
- * ordinary pause mid-chord. Fn is the one modifier nothing else on macOS
- * treats as a hold, and the only one the trigger-type selector ever offered.
- */
-const LONE_MODIFIER_ALLOWED = "fn";
+const LONE_MODIFIERS_ALLOWED = new Set(["fn", "rightcommand", "rightoption"]);
 
 /**
  * Built-in mode presets, in the order their tiles appear on the Dictation
@@ -152,7 +153,7 @@ export function resolveDictationBindings(
 ): DictationBinding[] {
   const table = shortcuts?.dictationBindings;
   if (Array.isArray(table)) {
-    const valid = table.filter(isDictationBinding).map(normalizeDictationBindingBehavior);
+    const valid = table.filter(isDictationBinding).map(normalizeDictationBindingAction);
     if (table.length > 0) {
       return valid;
     }
@@ -196,16 +197,34 @@ function isDictationBinding(value: unknown): value is DictationBinding {
   return triggerOk && actionOk;
 }
 
-/** Apply the sidecar's default for a behavior it would have normalized. */
-function normalizeDictationBindingBehavior(binding: DictationBinding): DictationBinding {
+/**
+ * Apply the sidecar's defaults for fields it would have normalized: an
+ * unknown behavior inherits, and anything but `true` for `submitAfterInsert`
+ * means off, so a malformed value can never turn Return on.
+ */
+function normalizeDictationBindingAction(binding: DictationBinding): DictationBinding {
   if (binding.action.kind !== "dictation") {
     return binding;
   }
-  const behavior = binding.action.behavior as unknown;
-  if (behavior === "toggle" || behavior === "hold" || behavior === "inherit") {
+  const { submitAfterInsert, ...action } = binding.action;
+  const behavior = action.behavior as unknown;
+  const behaviorOk = behavior === "toggle" || behavior === "hold" || behavior === "inherit";
+  if (behaviorOk && (submitAfterInsert === undefined || submitAfterInsert === true)) {
     return binding;
   }
-  return { ...binding, action: { ...binding.action, behavior: "inherit" } };
+  return {
+    ...binding,
+    action: {
+      ...action,
+      behavior: behaviorOk ? action.behavior : "inherit",
+      ...(submitAfterInsert === true ? { submitAfterInsert: true } : {}),
+    },
+  };
+}
+
+/** Whether a session this binding starts should press Return after inserting. */
+export function dictationBindingSubmitsAfterInsert(binding?: DictationBinding): boolean {
+  return binding?.action.kind === "dictation" && binding.action.submitAfterInsert === true;
 }
 
 /**
@@ -260,6 +279,10 @@ function normalizeModifierToken(token: string): string | null {
     case "⇧":
     case "shift":
       return "shift";
+    case "rightcommand":
+      return "rightcommand";
+    case "rightoption":
+      return "rightoption";
     case "fn":
     case "function":
       return "fn";
@@ -278,6 +301,10 @@ function displayModifier(token: string): string {
       return "Alt";
     case "shift":
       return "Shift";
+    case "rightcommand":
+      return "RightCommand";
+    case "rightoption":
+      return "RightOption";
     case "fn":
       return "Fn";
     default:
@@ -394,11 +421,11 @@ export function validateDictationBindings(
       }
       const normalized = normalizeShortcutAccelerator(accelerator);
       if (isLoneModifierAccelerator(accelerator)) {
-        if (normalized !== LONE_MODIFIER_ALLOWED) {
+        if (!LONE_MODIFIERS_ALLOWED.has(normalized)) {
           issues.push({
             bindingId: binding.id,
             code: "unsupported_lone_modifier",
-            message: `${describeDictationBindingTrigger(binding.trigger)} cannot be a trigger on its own. Fn is the only modifier that can.`,
+            message: `${describeDictationBindingTrigger(binding.trigger)} cannot be a trigger on its own. Choose Fn, RightCommand, or RightOption.`,
           });
           continue;
         }

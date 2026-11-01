@@ -1,23 +1,27 @@
 /**
  * The reader's calendar choices that macOS does not store for us.
  *
- * These live in browser storage for the same reason
- * `src/lib/ai-notes-preference.ts` does: the settings schema is a
- * field-for-field mirror of `rust-sidecar/src/settings.rs` (see
- * `src/__tests__/settings-wire-contract.test.ts`), so a renderer-only
- * preference cannot be added there without the Rust half. macOS owns the
- * permission; these three keys own what Plainsong does with it.
+ * Whether the calendar is connected at all is a real setting
+ * (`meetings.calendarDisconnected`), because the main process enforces it: a
+ * disconnected calendar is not read, not just not shown. The hidden calendars
+ * and dismissed events stay in browser storage for the same reason
+ * `src/lib/ai-notes-preference.ts` does: they only shape what the renderer
+ * offers.
  *
- * All three are stored as the EXCEPTION rather than the state, so an
- * unreadable store (private mode, blocked site data) degrades to the ordinary
- * behaviour instead of to a mystery. Nothing here is a security boundary: a
- * reader who wants Plainsong to stop reading their calendar entirely turns it
- * off in System Settings, and the card says so.
+ * The storage-backed choices are stored as the EXCEPTION rather than the
+ * state, so an unreadable store (private mode, blocked site data) degrades to
+ * the ordinary behaviour instead of to a mystery.
  */
 
+import { getSettings, updateSettings } from "@/lib/backend";
 import { calendarEventDismissalKey } from "@/lib/calendar-events";
+import { resolveMeetingsSettings } from "@/lib/settings-sections";
 
-export const CALENDAR_DISCONNECTED_STORAGE_KEY = "plainsong_calendar_disconnected";
+/**
+ * Where Disconnect used to live before it became a setting. Read once to carry
+ * an earlier choice across, then cleared.
+ */
+export const LEGACY_CALENDAR_DISCONNECTED_STORAGE_KEY = "plainsong_calendar_disconnected";
 export const CALENDAR_IGNORED_STORAGE_KEY = "plainsong_calendar_ignored_ids";
 // Values are occurrence keys (identifier + start), not bare identifiers — see
 // `calendarEventDismissalKey`. The name says so, because the two are the same
@@ -68,15 +72,64 @@ function readIdList(key: string): string[] {
  * Whether the reader told Plainsong to stop using an already-granted calendar.
  *
  * Granting access and then being asked to "connect" again would be a second
- * question about a decision already made, so the default is connected and only
- * an explicit disconnect is recorded.
+ * question about a decision already made, so the default is connected. A
+ * disconnect saved by an older build in browser storage is moved into settings
+ * the first time this runs, so the main process starts enforcing it too.
+ *
+ * If settings cannot be read the answer falls back to that older record. The
+ * main process holds the saved setting itself and refuses calendar reads while
+ * it is set, so an unreadable answer here cannot turn reading back on.
  */
-export function readCalendarDisconnected(): boolean {
-  return readRaw(CALENDAR_DISCONNECTED_STORAGE_KEY) === "true";
+export async function loadCalendarDisconnected(): Promise<boolean> {
+  const legacy = readRaw(LEGACY_CALENDAR_DISCONNECTED_STORAGE_KEY) === "true";
+  let saved: boolean;
+  try {
+    saved = resolveMeetingsSettings(await getSettings()).calendarDisconnected;
+  } catch {
+    return legacy;
+  }
+  if (legacy && !saved) {
+    try {
+      await persistCalendarDisconnected(true);
+    } catch {
+      return true;
+    }
+    clearLegacyDisconnect();
+    return true;
+  }
+  if (legacy) clearLegacyDisconnect();
+  return saved;
 }
 
-export function writeCalendarDisconnected(disconnected: boolean): void {
-  writeRaw(CALENDAR_DISCONNECTED_STORAGE_KEY, disconnected ? "true" : null);
+async function persistCalendarDisconnected(disconnected: boolean): Promise<void> {
+  await updateSettings((draft) => {
+    draft.meetings = {
+      ...resolveMeetingsSettings(draft),
+      calendarDisconnected: disconnected,
+    };
+  });
+}
+
+function clearLegacyDisconnect(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(LEGACY_CALENDAR_DISCONNECTED_STORAGE_KEY);
+  } catch {
+    // Nothing to clear in a store that cannot be read.
+  }
+}
+
+/**
+ * Disconnect or reconnect the calendar. Saved in settings, which the main
+ * process reads: while disconnected it answers every calendar read without
+ * running the calendar helper, and every open view stops polling.
+ */
+export async function writeCalendarDisconnected(disconnected: boolean): Promise<void> {
+  await persistCalendarDisconnected(disconnected);
+  clearLegacyDisconnect();
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(CALENDAR_PREFERENCE_EVENT));
+  }
 }
 
 /** Calendars the reader does not want meeting suggestions from. */

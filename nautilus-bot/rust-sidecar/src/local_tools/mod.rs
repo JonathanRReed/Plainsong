@@ -43,7 +43,7 @@ pub const EXIT_NOT_FOUND: i32 = 4;
 /// What the CLI says when the switch is off. One sentence of cause, one of
 /// next action, and it names the setting so the user can find it.
 pub const GATE_REFUSAL_MESSAGE: &str = "Local tools are turned off in Plainsong. \
-Turn on \"Local tools\" in Plainsong > Settings > General to let this command read your meetings.";
+Turn on \"Allow the plainsong command and MCP server\" in Plainsong > Settings > Advanced to let this command read your meetings.";
 
 /// Whether the settings file grants local tools, read without touching it.
 #[derive(Debug, Clone, PartialEq, Eq)]

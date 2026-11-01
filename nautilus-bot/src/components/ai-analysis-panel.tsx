@@ -36,9 +36,22 @@ import {
   AlertCircle
 } from "lucide-react";
 import { formatTime } from "@/lib/format-locale";
+import { isCurrentWrittenNoteCitation, type CitationSource } from "@/lib/citation-source";
+import { stripTransportPrefix } from "@/lib/meeting-start-error";
+import { requestSettingsTab } from "@/lib/navigation";
+
+interface AnalysisCopyScope {
+  recordingId: string;
+  output: LlmAnalysisResult | ActionItem[] | null;
+  kind: "answer" | "tasks";
+  text: string;
+  sourceNotes: string | null | undefined;
+  warning: string | null;
+}
 
 interface AiAnalysisPanelProps {
   recordingId: string;
+  sourceNotes?: string | null;
   className?: string;
   title?: string;
   inputPlaceholder?: string;
@@ -104,8 +117,44 @@ const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
   }
 ];
 
+function hasUsableReference(citation: CitationSource, recordingId: string, notes?: string | null): boolean {
+  if (citation.sourceKind === "meeting_note") return isCurrentWrittenNoteCitation(citation, recordingId, notes);
+  return (citation.sourceKind == null || citation.sourceKind === "transcript") &&
+    citation.recordingId === recordingId &&
+    typeof citation.startTime === "number" && Number.isFinite(citation.startTime) && citation.startTime >= 0 &&
+    typeof citation.endTime === "number" && Number.isFinite(citation.endTime) && citation.endTime >= citation.startTime;
+}
+
+function CitationQuote({ citation, recordingId, notes }: {citation: CitationSource; recordingId: string; notes?: string | null}) {
+  const usable = hasUsableReference(citation, recordingId, notes);
+  const isNote = citation.sourceKind === "meeting_note";
+  const knownTranscript = citation.sourceKind === "transcript" || (citation.sourceKind == null &&
+    typeof citation.startTime === "number" && typeof citation.endTime === "number");
+  const label = isNote ? "Written note" : knownTranscript ? "Transcript" : citation.sourceKind == null ? "Source not recorded" : "Unknown source";
+  return (
+    <p className="text-xs text-muted-foreground italic">
+      <span className="not-italic font-medium">{label}{usable ? "" : " · Unverified reference"}</span>{" "}
+      &ldquo;{citation.text}&rdquo;
+      {knownTranscript && usable ? <span className="not-italic ml-1">({citation.startTime!.toFixed(1)}s - {citation.endTime!.toFixed(1)}s)</span> : null}
+    </p>
+  );
+}
+
+function analysisErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message
+    : typeof error === "string" ? error
+    : error && typeof error === "object" && "message" in error && typeof error.message === "string" ? error.message
+    : "Analysis failed";
+  return stripTransportPrefix(message) || "Analysis failed";
+}
+
+function needsProviderSetup(message: string): boolean {
+  return /connection refused|API key|missing provider secret|key not configured/i.test(message);
+}
+
 export function AiAnalysisPanel({
   recordingId,
+  sourceNotes,
   className,
   title = "AI Analysis",
   inputPlaceholder = "Ask a custom question about this transcript...",
@@ -118,7 +167,23 @@ export function AiAnalysisPanel({
   onChatMessagesChange,
 }: AiAnalysisPanelProps) {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [cancelStatus, setCancelStatus] = useState<string | null>(null);
+  const [copyPending, setCopyPending] = useState(false);
+  const copyPendingRef = useRef(false);
+  const [copyFeedback, setCopyFeedback] = useState<{ scope: AnalysisCopyScope; message: string; error: boolean } | null>(null);
+  const currentRecordingIdRef = useRef(recordingId);
+  currentRecordingIdRef.current = recordingId;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const [customQuery, setCustomQuery] = useState("");
+  const customQueryRevisionRef = useRef(0);
+  const changeCustomQuery = useCallback((value: string) => {
+    ++customQueryRevisionRef.current;
+    setCustomQuery(value);
+  }, []);
   const [lastResult, setLastResult] = useState<LlmAnalysisResult | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[] | null>(null);
   const [actionItemCitations, setActionItemCitations] = useState<Array<LlmCitation[]>>([]);
@@ -128,6 +193,7 @@ export function AiAnalysisPanel({
     useState<RecordingAnalysisProgressEvent | null>(null);
   const [showSetupGuide, setShowSetupGuide] = useState(false);
   const [lastQuery, setLastQuery] = useState("");
+  const [lastPromptLabel, setLastPromptLabel] = useState("");
   const [lastTemplateId, setLastTemplateId] = useState<string | null>(null);
   const [threadMessages, setThreadMessages] = useState<MeetingChatMessage[]>(
     chatMessages ?? []
@@ -136,6 +202,9 @@ export function AiAnalysisPanel({
   const activeAnalysisRunRef = useRef<{
     runId: string;
     target: "ask" | "actionItems";
+    promptLabel: string;
+    recordingId: string;
+    cancelRequested: boolean;
   } | null>(null);
 
   useEffect(() => {
@@ -144,12 +213,15 @@ export function AiAnalysisPanel({
 
   useEffect(() => {
     const activeRun = activeAnalysisRunRef.current;
-    if (activeRun) {
-      void cancelAnalysisRun(activeRun.runId);
-      activeAnalysisRunRef.current = null;
+    if (activeRun && !activeRun.cancelRequested) {
+      activeRun.cancelRequested = true;
+      void Promise.resolve(cancelAnalysisRun(activeRun.runId)).catch(() => undefined);
     }
+    activeAnalysisRunRef.current = null;
     requestGuard.setScope(recordingId);
     setIsAnalyzing(false);
+    setCancelStatus(null);
+    ++customQueryRevisionRef.current;
     setCustomQuery("");
     setLastResult(null);
     setActionItems(null);
@@ -160,6 +232,7 @@ export function AiAnalysisPanel({
     setAnalysisProgress(null);
     setShowSetupGuide(false);
     setLastQuery("");
+    setLastPromptLabel("");
     setLastTemplateId(null);
   }, [recordingId, requestGuard]);
 
@@ -173,7 +246,7 @@ export function AiAnalysisPanel({
     ) => {
       const activeRun = activeAnalysisRunRef.current;
       return Boolean(
-        activeRun &&
+        activeRun && !activeRun.cancelRequested &&
           payload.recordingId === recordingId &&
           payload.target === activeRun.target &&
           payload.runId === activeRun.runId
@@ -224,11 +297,13 @@ export function AiAnalysisPanel({
     return () => {
       const activeRun = activeAnalysisRunRef.current;
       activeAnalysisRunRef.current = null;
-      if (activeRun) {
-        void cancelAnalysisRun(activeRun.runId);
+      requestGuard.setScope(null);
+      if (activeRun && !activeRun.cancelRequested) {
+        activeRun.cancelRequested = true;
+        void Promise.resolve(cancelAnalysisRun(activeRun.runId)).catch(() => undefined);
       }
     };
-  }, []);
+  }, [requestGuard]);
 
   const appendThreadMessages = useCallback((messages: MeetingChatMessage[]) => {
     setThreadMessages((current) => {
@@ -279,16 +354,47 @@ export function AiAnalysisPanel({
       .join("\n");
   };
 
+  const canAcceptResult = (runId: string) => {
+    const active = activeAnalysisRunRef.current;
+    return mountedRef.current && active?.runId === runId && !active.cancelRequested
+      && active.recordingId === currentRecordingIdRef.current;
+  };
+  const handleCancelRequest = async (runId: string) => {
+    const active = activeAnalysisRunRef.current;
+    if (!active || active.runId !== runId || active.cancelRequested
+      || active.recordingId !== currentRecordingIdRef.current) return;
+    active.cancelRequested = true;
+    setCancelStatus("Cancelling request…");
+    setAnalysisProgress(null);
+    setError(null);
+    try {
+      await cancelAnalysisRun(runId);
+    } catch {
+      if (mountedRef.current && activeAnalysisRunRef.current === active
+        && active.recordingId === currentRecordingIdRef.current) {
+        setCancelStatus("Could not cancel immediately. Waiting for the request to finish.");
+      }
+    }
+  };
+
+  // Completed output keeps the prompt that produced it while another request
+  // runs or fails. Result actions must never use a pending prompt's metadata.
+  const setCompletedPrompt = (query: string, templateId: string | null, label: string) => {
+    setLastQuery(query);
+    setLastTemplateId(templateId);
+    setLastPromptLabel(label);
+  };
+
   const handleTemplateClick = async (template: AnalysisTemplate) => {
+    if (activeAnalysisRunRef.current || isAnalyzing) return;
     const requestToken = requestGuard.beginRequest(recordingId);
     const runId = crypto.randomUUID();
     const target = template.id === "actions" ? "actionItems" : "ask";
-    activeAnalysisRunRef.current = { runId, target };
+    activeAnalysisRunRef.current = { runId, target, promptLabel: template.name, recordingId, cancelRequested: false };
     setIsAnalyzing(true);
+    setCancelStatus(null);
     setError(null);
     setShowSetupGuide(false);
-    setLastQuery(template.query);
-    setLastTemplateId(template.id);
     const userMessage: MeetingChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -305,9 +411,11 @@ export function AiAnalysisPanel({
             persist: false,
             runId,
           });
-          if (!requestGuard.isCurrent(requestToken)) {
+          if (!requestGuard.isCurrent(requestToken) || !canAcceptResult(runId)) {
             return;
           }
+          setLastResult(null);
+          setCompletedPrompt(template.query, template.id, template.name);
           setActionItems(result.items);
           setActionItemCitations(result.items.map((item) => item.citations ?? []));
           setActionItemsGrounded(result.grounded !== false);
@@ -327,9 +435,11 @@ export function AiAnalysisPanel({
             persist: false,
             runId,
           });
-          if (!requestGuard.isCurrent(requestToken)) {
+          if (!requestGuard.isCurrent(requestToken) || !canAcceptResult(runId)) {
             return;
           }
+          setLastResult(null);
+          setCompletedPrompt(template.query, template.id, template.name);
           setActionItems(items);
           setActionItemCitations([]);
           setActionItemsGrounded(null);
@@ -345,7 +455,6 @@ export function AiAnalysisPanel({
             },
           ]);
         }
-        setLastResult(null);
       } else {
         const result = await analyzeRecording(
           recordingId,
@@ -353,9 +462,10 @@ export function AiAnalysisPanel({
           undefined,
           runId
         );
-        if (!requestGuard.isCurrent(requestToken)) {
+        if (!requestGuard.isCurrent(requestToken) || !canAcceptResult(runId)) {
           return;
         }
+        setCompletedPrompt(template.query, template.id, template.name);
         setLastResult(result);
         setActionItems(null);
         setActionItemCitations([]);
@@ -373,26 +483,17 @@ export function AiAnalysisPanel({
         ]);
       }
     } catch (err) {
-      if (!requestGuard.isCurrent(requestToken)) {
+      if (!requestGuard.isCurrent(requestToken) || !canAcceptResult(runId)) {
         return;
       }
-      const message = err instanceof Error ? err.message : "Analysis failed";
-      let helpfulError = message;
-      
-      if (message.includes("ollama") || message.includes("Ollama") || message.includes("connection refused") || message.includes("connect")) {
-        helpfulError = "Ollama is not running. Start Ollama locally, or configure a cloud provider in Settings.";
-        setShowSetupGuide(true);
-      } else if (message.includes("API key") || message.includes("secret") || message.includes("key not configured")) {
-        helpfulError = "API key not configured. Add your API key in Settings.";
-        setShowSetupGuide(true);
-      } else if (message.includes("not found") || message.includes("Transcript")) {
-        helpfulError = "Transcript not available. Wait for transcription to complete.";
-      }
-      
-      setError(helpfulError);
+      const message = analysisErrorMessage(err);
+      setShowSetupGuide(needsProviderSetup(message));
+      setError(message);
     } finally {
       if (requestGuard.isCurrent(requestToken)) {
         setIsAnalyzing(false);
+        setCancelStatus(null);
+        setAnalysisProgress(null);
         if (activeAnalysisRunRef.current?.runId === runId) {
           activeAnalysisRunRef.current = null;
         }
@@ -403,25 +504,27 @@ export function AiAnalysisPanel({
   const savedPromptChat = useSavedPromptChat({
     scope: "meeting",
     inputValue: customQuery,
-    onPickPrompt: setCustomQuery,
+    onPickPrompt: changeCustomQuery,
     label: "Saved prompts for this meeting",
   });
 
   const handleCustomQuery = async () => {
+    if (activeAnalysisRunRef.current || isAnalyzing) return;
     // A "/" query is the picker's, not a question. Sending it would ask the
     // meeting about the literal text "/dec".
     if (savedPromptChat.pickerOpen) return;
     if (!customQuery.trim()) return;
     const requestToken = requestGuard.beginRequest(recordingId);
     const runId = crypto.randomUUID();
-    activeAnalysisRunRef.current = { runId, target: "ask" };
+    const rawQuery = customQuery.trim();
+    activeAnalysisRunRef.current = { runId, target: "ask", promptLabel: rawQuery, recordingId, cancelRequested: false };
 
     setIsAnalyzing(true);
+    setCancelStatus(null);
     setError(null);
     setShowSetupGuide(false);
-    setLastQuery(customQuery);
-    setLastTemplateId(null);
-    const rawQuery = customQuery.trim();
+
+    const queryRevision = customQueryRevisionRef.current;
     const userMessage: MeetingChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -438,9 +541,10 @@ export function AiAnalysisPanel({
         undefined,
         runId
       );
-      if (!requestGuard.isCurrent(requestToken)) {
+      if (!requestGuard.isCurrent(requestToken) || !canAcceptResult(runId)) {
         return;
       }
+      setCompletedPrompt(rawQuery, null, rawQuery);
       setLastResult(result);
       setActionItems(null);
       setActionItemCitations([]);
@@ -456,28 +560,19 @@ export function AiAnalysisPanel({
           createdAt: new Date().toISOString(),
         },
       ]);
-      setCustomQuery("");
+      setCustomQuery((current) => customQueryRevisionRef.current === queryRevision ? "" : current);
     } catch (err) {
-      if (!requestGuard.isCurrent(requestToken)) {
+      if (!requestGuard.isCurrent(requestToken) || !canAcceptResult(runId)) {
         return;
       }
-      const message = err instanceof Error ? err.message : "Analysis failed";
-      let helpfulError = message;
-      
-      if (message.includes("ollama") || message.includes("Ollama") || message.includes("connection refused") || message.includes("connect")) {
-        helpfulError = "Ollama is not running. Start Ollama locally, or configure a cloud provider in Settings.";
-        setShowSetupGuide(true);
-      } else if (message.includes("API key") || message.includes("secret") || message.includes("key not configured")) {
-        helpfulError = "API key not configured. Add your API key in Settings.";
-        setShowSetupGuide(true);
-      } else if (message.includes("not found") || message.includes("Transcript")) {
-        helpfulError = "Transcript not available. Wait for transcription to complete.";
-      }
-      
-      setError(helpfulError);
+      const message = analysisErrorMessage(err);
+      setShowSetupGuide(needsProviderSetup(message));
+      setError(message);
     } finally {
       if (requestGuard.isCurrent(requestToken)) {
         setIsAnalyzing(false);
+        setCancelStatus(null);
+        setAnalysisProgress(null);
         if (activeAnalysisRunRef.current?.runId === runId) {
           activeAnalysisRunRef.current = null;
         }
@@ -500,39 +595,64 @@ export function AiAnalysisPanel({
     }
   };
 
-  const citationCoverage = (() => {
-    if (!lastResult) return null;
-    const citations = lastResult.citations ?? [];
-    if (citations.length === 0) {
-      return { ratio: 0, avgCertainty: 0 };
+  const hasIncompleteReferences = Boolean(lastResult && (lastResult.citations.length === 0 || lastResult.citations.some(citation => !hasUsableReference(citation, recordingId, sourceNotes))));
+  const answerReviewWarning = lastResult?.grounded === false
+    ? "Not fully grounded: one or more citations were invalid or did not support the answer."
+    : hasIncompleteReferences
+      ? "Some citations lack a current source reference. Review the answer against its sources."
+      : null;
+  const showUncertaintyBanner = answerReviewWarning !== null;
+  const tasksHaveIncompleteReferences = Boolean(actionItems?.some((_item, index) => {
+    const citations = actionItemCitations[index] ?? [];
+    return citations.length === 0 || citations.some(citation => !hasUsableReference(citation, recordingId, sourceNotes));
+  }));
+  const taskReviewWarning = actionItemsGrounded === false
+    ? "Not fully grounded: one or more follow-ups had invalid or unsupported transcript citations."
+    : tasksHaveIncompleteReferences
+      ? "Some task citations lack a current source reference. Review the tasks against the meeting before sharing."
+      : null;
+  const kind = lastResult ? "answer" : "tasks";
+  const output = lastResult ?? actionItems;
+  const text = lastResult ? lastResult.response : actionItems ? buildActionItemsThreadMessage(actionItems) : "";
+  const warning = lastResult ? answerReviewWarning : taskReviewWarning;
+  const copyScopeRef = useRef<AnalysisCopyScope>({ recordingId, output, kind, text, sourceNotes, warning });
+  const previousCopyScope = copyScopeRef.current;
+  if (previousCopyScope.recordingId !== recordingId || previousCopyScope.output !== output
+    || previousCopyScope.kind !== kind || previousCopyScope.text !== text
+    || previousCopyScope.sourceNotes !== sourceNotes || previousCopyScope.warning !== warning) {
+    copyScopeRef.current = { recordingId, output, kind, text, sourceNotes, warning };
+  }
+  const visibleCopyFeedback = copyFeedback?.scope === copyScopeRef.current ? copyFeedback : null;
+  const handleCopyOutput = async (requestedKind: AnalysisCopyScope["kind"]) => {
+    const scope = copyScopeRef.current;
+    if (copyPendingRef.current || scope.kind !== requestedKind || !scope.output || !scope.text.trim()) return;
+    const copiedText = scope.warning ? `${scope.warning}\n\n${scope.text}` : scope.text;
+    copyPendingRef.current = true;
+    setCopyPending(true);
+    setCopyFeedback({ scope, message: "Copying…", error: false });
+    try {
+      await navigator.clipboard.writeText(copiedText);
+      if (mountedRef.current && copyScopeRef.current === scope) {
+        setCopyFeedback({ scope, message: scope.kind === "tasks" ? "Tasks copied." : "Answer copied.", error: false });
+      }
+    } catch {
+      if (mountedRef.current && copyScopeRef.current === scope) {
+        setCopyFeedback({ scope, message: scope.kind === "tasks"
+          ? "Could not copy the tasks. Select them and copy them manually."
+          : "Could not copy the answer. Select it and copy it manually.", error: true });
+      }
+    } finally {
+      copyPendingRef.current = false;
+      if (mountedRef.current) setCopyPending(false);
     }
-    const mappedCount = citations.filter(
-      (citation) =>
-        typeof citation.startTime === "number" &&
-        typeof citation.endTime === "number" &&
-        typeof citation.recordingId === "string" &&
-        citation.recordingId.trim().length > 0
-    ).length;
-    const certaintyValues = citations
-      .map((citation) => citation.certainty)
-      .filter((value): value is number => typeof value === "number");
-    const avgCertainty =
-      certaintyValues.length > 0
-        ? certaintyValues.reduce((sum, value) => sum + value, 0) / certaintyValues.length
-        : 0;
-    return {
-      ratio: mappedCount / citations.length,
-      avgCertainty,
-    };
-  })();
-  const showUncertaintyBanner =
-    citationCoverage !== null &&
-    (lastResult?.grounded === false ||
-      citationCoverage.ratio < 0.8 ||
-      citationCoverage.avgCertainty < 0.75);
+  };
+  const displayedRun = activeAnalysisRunRef.current;
 
   return (
     <div className={cn("space-y-4", className)}>
+      <p role="status" aria-label="Answer status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {error ? "Answer failed. Try again." : isAnalyzing ? "Answering your question." : lastResult || actionItems ? "Answer ready." : ""}
+      </p>
       {savedPromptChat.manager}
       {/* Template Buttons */}
       <div className="grid grid-cols-2 gap-2">
@@ -561,15 +681,20 @@ export function AiAnalysisPanel({
           <Input
             placeholder={inputPlaceholder}
             value={customQuery}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustomQuery(e.target.value)}
+            {...savedPromptChat.inputProps}
+            aria-label="Question about this meeting"
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => changeCustomQuery(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
               // The picker takes the arrows, Enter and Escape while it is
               // open; anything it does not claim falls through to Send.
               savedPromptChat.onInputKeyDown(e);
               if (e.defaultPrevented) return;
-              if (e.key === "Enter") void handleCustomQuery();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void handleCustomQuery();
+              }
             }}
-            disabled={isAnalyzing}
           />
           <Button
             size="icon"
@@ -627,15 +752,7 @@ export function AiAnalysisPanel({
                     {message.citations.length > 0 && (
                       <div className="mt-2 space-y-1">
                         {message.citations.map((citation, idx) => (
-                          <p key={`${message.id}-${idx}`} className="text-[11px] text-muted-foreground italic">
-                            &ldquo;{citation.text}&rdquo;
-                            {typeof citation.startTime === "number" &&
-                            typeof citation.endTime === "number" ? (
-                              <span className="not-italic ml-1">
-                                ({citation.startTime.toFixed(1)}s - {citation.endTime.toFixed(1)}s)
-                              </span>
-                            ) : null}
-                          </p>
+                          <CitationQuote key={`${message.id}-${idx}`} citation={citation} recordingId={recordingId} notes={sourceNotes} />
                         ))}
                       </div>
                     )}
@@ -665,21 +782,45 @@ export function AiAnalysisPanel({
         </div>
       )}
 
+      {isAnalyzing && displayedRun && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm text-muted-foreground">
+            {displayedRun.cancelRequested ? "Cancelling" : "Answering"}: {displayedRun.promptLabel}
+          </p>
+          <Button type="button" variant="outline" size="sm" disabled={displayedRun.cancelRequested}
+            onClick={() => void handleCancelRequest(displayedRun.runId)}>
+            {displayedRun.cancelRequested ? "Cancelling…" : "Cancel request"}
+          </Button>
+        </div>
+      )}
+      {cancelStatus && <p role="status" className="text-sm text-muted-foreground">{cancelStatus}</p>}
+
       {/* Error Display */}
       {error && (
-        <div className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-2 text-sm text-destructive">
-          <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+        <div
+          role="alert"
+          className="p-3 bg-destructive/10 border border-destructive/20 rounded-lg flex items-start gap-2 text-sm text-destructive"
+        >
+          <AlertCircle className="h-4 w-4 mt-0.5 flex-shrink-0" aria-hidden="true" />
           <div className="flex-1">
             <p>{error}</p>
             {showSetupGuide && (
-              <div className="mt-3 p-3 bg-muted rounded-lg text-muted-foreground text-xs space-y-2">
-                <p className="font-medium text-foreground">Setup Options:</p>
-                <ul className="list-disc list-inside space-y-1">
-                  <li><strong>Ollama (Free, Local):</strong> Install from ollama.com, then run <code className="bg-muted-foreground/10 px-1 rounded">ollama serve</code></li>
-                  <li><strong>OpenAI:</strong> Get an API key from platform.openai.com</li>
-                  <li><strong>Anthropic:</strong> Get an API key from console.anthropic.com</li>
-                </ul>
-                <p className="pt-1">Go to <strong>Settings → AI & Keys</strong> to configure your preferred provider.</p>
+              // One way forward, in the app: the built-in model needs no
+              // terminal and no account, and Ollama or a cloud key are
+              // choices made in Search & AI.
+              <div className="mt-3 space-y-2 rounded-lg bg-muted p-3 text-xs text-muted-foreground">
+                <p>
+                  Choose who answers in Search &amp; AI. The built-in model runs on this Mac
+                  without an account; Ollama and cloud providers are optional.
+                </p>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => requestSettingsTab("ai")}
+                >
+                  Open Search &amp; AI
+                </Button>
               </div>
             )}
           </div>
@@ -692,19 +833,23 @@ export function AiAnalysisPanel({
           {/* One orb at a time: the progress card above carries it once a
               long transcript is analysed in parts. */}
           {analysisProgress ? null : <AiWaitOrb state="composing" />}
-          <p className="font-serif text-sm text-muted-foreground">{emptyStateLabel}</p>
+          <p className="font-serif text-sm text-muted-foreground">{displayedRun?.cancelRequested ? "Waiting for the request to finish." : emptyStateLabel}</p>
         </div>
       )}
 
       {lastResult && (
-        <Card>
+        <Card role="region" aria-label="Meeting answer">
           <CardHeader className="pb-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="flex items-center gap-2 font-serif text-base font-semibold">
                 <Sparkles className="h-4 w-4 text-gold-text" />
                 {title}
               </CardTitle>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="button" size="sm" variant="outline" disabled={copyPending || !lastResult.response.trim()}
+                  onClick={() => void handleCopyOutput("answer")}>
+                  {copyPending ? "Copying…" : "Copy answer"}
+                </Button>
                 <Badge variant="secondary" className="font-mono text-xs">
                   {lastResult.actualProvider
                     ? `${lastResult.actualProvider} · ${lastResult.model}`
@@ -717,6 +862,10 @@ export function AiAnalysisPanel({
             </div>
           </CardHeader>
           <CardContent>
+            <p className="mb-3 text-sm text-muted-foreground">Answered question: {lastPromptLabel}</p>
+            {visibleCopyFeedback && <p aria-label="Copy status" role={visibleCopyFeedback.error ? "alert" : "status"} className="mb-3 text-sm text-muted-foreground">
+              {visibleCopyFeedback.message}
+            </p>}
             <ScrollArea className="h-[200px]">
               <div className="text-sm leading-relaxed whitespace-pre-wrap">
                 {lastResult.response}
@@ -725,9 +874,7 @@ export function AiAnalysisPanel({
             
             {showUncertaintyBanner && (
               <div className="mt-4 p-2 rounded-md bg-rust/10 text-rust text-xs">
-                {lastResult.grounded === false
-                  ? "Not fully grounded: one or more citations were invalid or did not support the answer."
-                  : `Uncertainty: citation coverage is below threshold (coverage ${((citationCoverage?.ratio ?? 0) * 100).toFixed(0)}%, confidence ${((citationCoverage?.avgCertainty ?? 0) * 100).toFixed(0)}%).`}
+                {answerReviewWarning}
               </div>
             )}
 
@@ -735,23 +882,8 @@ export function AiAnalysisPanel({
               <div className="mt-4 pt-4 border-t">
                 <p className="rubric mb-2">CITATIONS</p>
                 <div className="space-y-1">
-                  {lastResult.citations.map((citation: { text: string; startTime?: number; endTime?: number; recordingId?: string; certainty?: number }, idx: number) => (
-                    <p key={idx} className="text-xs text-muted-foreground italic">
-                      &ldquo;{citation.text}&rdquo;
-                      {citation.recordingId ? (
-                        <span className="not-italic ml-1">[{citation.recordingId}]</span>
-                      ) : null}
-                      {typeof citation.startTime === "number" && typeof citation.endTime === "number" ? (
-                        <span className="not-italic ml-1">
-                          ({citation.startTime.toFixed(1)}s - {citation.endTime.toFixed(1)}s)
-                        </span>
-                      ) : null}
-                      {typeof citation.certainty === "number" ? (
-                        <span className="not-italic ml-1">
-                          certainty {(citation.certainty * 100).toFixed(0)}%
-                        </span>
-                      ) : null}
-                    </p>
+                  {lastResult.citations.map((citation, idx) => (
+                    <CitationQuote key={idx} citation={citation} recordingId={recordingId} notes={sourceNotes} />
                   ))}
                 </div>
               </div>
@@ -797,12 +929,21 @@ export function AiAnalysisPanel({
       {actionItems && actionItems.length > 0 && (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 font-serif text-base font-semibold">
-              <CheckSquare className="h-4 w-4 text-gold-text" />
-              Action Items
-            </CardTitle>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <CardTitle className="flex items-center gap-2 font-serif text-base font-semibold">
+                <CheckSquare className="h-4 w-4 text-gold-text" />
+                Action Items
+              </CardTitle>
+              <Button type="button" size="sm" variant="outline" disabled={copyPending}
+                onClick={() => void handleCopyOutput("tasks")}>
+                {copyPending ? "Copying…" : "Copy tasks"}
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
+            {visibleCopyFeedback && <p aria-label="Copy status" role={visibleCopyFeedback.error ? "alert" : "status"} className="mb-3 text-sm text-muted-foreground">
+              {visibleCopyFeedback.message}
+            </p>}
             <div className="space-y-2">
               {actionItems.map((item, idx) => (
                 <div key={idx} className="flex items-start gap-2 p-2 bg-muted/50 rounded-lg">
@@ -822,15 +963,7 @@ export function AiAnalysisPanel({
                     {actionItemCitations[idx]?.length ? (
                       <div className="mt-2 space-y-1">
                         {actionItemCitations[idx].map((citation, citationIndex) => (
-                          <p key={citationIndex} className="text-[11px] text-muted-foreground italic">
-                            &ldquo;{citation.text}&rdquo;
-                            {typeof citation.startTime === "number" &&
-                            typeof citation.endTime === "number" ? (
-                              <span className="not-italic ml-1">
-                                ({citation.startTime.toFixed(1)}s - {citation.endTime.toFixed(1)}s)
-                              </span>
-                            ) : null}
-                          </p>
+                          <CitationQuote key={citationIndex} citation={citation} recordingId={recordingId} notes={sourceNotes} />
                         ))}
                       </div>
                     ) : null}
@@ -839,9 +972,9 @@ export function AiAnalysisPanel({
               ))}
             </div>
 
-            {actionItemsGrounded === false && (
+            {taskReviewWarning && (
               <div className="mt-4 rounded-md bg-rust/10 p-2 text-xs text-rust">
-                Not fully grounded: one or more follow-ups had invalid or unsupported transcript citations.
+                {taskReviewWarning}
               </div>
             )}
 

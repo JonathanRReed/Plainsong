@@ -79,7 +79,15 @@ pub(crate) fn export_context_for_recording(
             (!name.is_empty()).then_some((speaker_id, name))
         })
         .collect();
-    export::ExportContext { speaker_names }
+    let completed_action_tasks = db
+        .get_meeting_action_completion(recording_id)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    export::ExportContext {
+        speaker_names,
+        completed_action_tasks,
+    }
 }
 
 pub(crate) fn write_template_export(path: &std::path::Path, contents: &[u8]) -> Result<(), String> {
@@ -185,7 +193,7 @@ pub(crate) fn nautilus_data_root() -> Result<PathBuf, String> {
 }
 
 /// One row per model file Plainsong pins a digest for: is it here, how big is
-/// it, and does it still carry a trusted integrity receipt.
+/// it, and what this sidecar run found when it hashed it, if it has yet.
 ///
 /// Deliberately reports the model directory name and the file name and nothing
 /// else -- the full path names the reader's account, and the support bundle
@@ -199,6 +207,10 @@ pub(crate) fn support_bundle_model_artifacts() -> Vec<serde_json::Value> {
     let mut artifacts = download::managed_model_integrity_artifacts(&models_root);
     artifacts.extend(asr::model_integrity_artifacts(&models_root));
     artifacts.extend(llm::bundled_local::model_integrity_artifacts(&models_root));
+    artifacts.extend(llm::native_text::model_integrity_artifacts(&models_root));
+    artifacts.extend(llm::builtin_embeddings::model_integrity_artifacts(
+        &models_root,
+    ));
 
     artifacts
         .into_iter()
@@ -209,8 +221,15 @@ pub(crate) fn support_bundle_model_artifacts() -> Vec<serde_json::Value> {
             } else {
                 0
             };
-            let trusted =
-                present && download::is_model_artifact_trusted(&path, Some(sha256.as_str()));
+            let integrity = if !present {
+                "missing"
+            } else if download::is_model_artifact_verified(&path, &sha256) {
+                "matched"
+            } else if !download::is_model_artifact_installed(&path, Some(sha256.as_str())) {
+                "failed"
+            } else {
+                "not checked this session"
+            };
             serde_json::json!({
                 "model": path
                     .parent()
@@ -223,7 +242,7 @@ pub(crate) fn support_bundle_model_artifacts() -> Vec<serde_json::Value> {
                     .unwrap_or_else(|| "unknown".to_string()),
                 "present": present,
                 "bytes": bytes,
-                "integrityReceiptTrusted": trusted,
+                "integrity": integrity,
             })
         })
         .collect()

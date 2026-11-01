@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCalendarCapturePrefill,
+  calendarJoinServiceLabel,
   calendarEventDismissalKey,
   calendarPermissionView,
   CALENDAR_PREFILL_TITLE_MAX_LENGTH,
@@ -33,6 +34,28 @@ function event(overrides: Partial<CalendarEventSummary> = {}): CalendarEventSumm
 }
 
 describe("selectNextCalendarEvent", () => {
+  it("orders repeated wall-clock times by their UTC offsets at the fall DST transition", () => {
+    const first = event({ id: "recurring", startsAt: "2026-11-01T01:45:00-05:00", endsAt: "2026-11-01T01:55:00-05:00" });
+    const second = event({ id: "recurring", startsAt: "2026-11-01T01:15:00-06:00", endsAt: "2026-11-01T01:45:00-06:00" });
+    const now = Date.parse("2026-11-01T01:50:00-05:00");
+    expect(selectNextCalendarEvent([second, first], { now })).toBe(first);
+    expect(selectNextCalendarEvent([second, first], {
+      now,
+      dismissedEventKeys: [calendarEventDismissalKey(first)],
+    })).toBe(second);
+  });
+
+  it("measures the spring DST gap as elapsed time", () => {
+    const upcoming = event({ startsAt: "2026-03-08T03:10:00-05:00", endsAt: "2026-03-08T03:40:00-05:00" });
+    const now = Date.parse("2026-03-08T01:55:00-06:00");
+    expect(selectNextCalendarEvent([upcoming], { now })).toBe(upcoming);
+    expect(describeCalendarLead(upcoming, now).text).toBe("starts in 15 min");
+  });
+
+  it("does not offer an untitled event", () => {
+    expect(selectNextCalendarEvent([event({ title: " \n\t " })], { now: NOW })).toBeNull();
+  });
+
   it("offers the soonest event inside the lookahead window", () => {
     const soon = event({ id: "soon", startsAt: new Date(NOW + 5 * 60_000).toISOString() });
     const later = event({ id: "later", startsAt: new Date(NOW + 20 * 60_000).toISOString() });
@@ -269,12 +292,10 @@ describe("calendarPermissionView", () => {
     expect(calendarPermissionView("restricted", true)).toBe("restricted");
   });
 
-  it("renders nothing when there is nothing honest to say", () => {
-    // Windows, a missing helper and an unparseable answer are all "quiet",
-    // not "denied": none of them is the reader's decision.
+  it("hides unsupported platforms and distinguishes failed checks", () => {
     expect(calendarPermissionView("unsupported_platform", true)).toBe("hidden");
-    expect(calendarPermissionView("helper_unavailable", true)).toBe("hidden");
-    expect(calendarPermissionView("unknown", true)).toBe("hidden");
+    expect(calendarPermissionView("helper_unavailable", true)).toBe("check_failed");
+    expect(calendarPermissionView("unknown", true)).toBe("check_failed");
   });
 
   it("goes quiet when a granted calendar has been switched off in settings", () => {
@@ -454,5 +475,24 @@ describe("calendar snapshot caching", () => {
     for (const state of ["not_determined", "denied", "restricted", "write_only", "unknown"] as const) {
       expect(calendarHelperArgsForSnapshot(state)).toEqual(["--probe"]);
     }
+  });
+});
+
+describe("calendar join consent service", () => {
+  it("names the validated Meet URL despite conflicting Zoom metadata", () => {
+    const prefill = buildCalendarCapturePrefill(event({ videoService: "zoom", conferenceUrl: "https://meet.google.com/abc-defg-hij" }));
+    expect(calendarJoinServiceLabel(prefill?.conferenceUrl)).toBe("Google Meet");
+  });
+
+  it("does not offer join consent for an invalid URL", () => {
+    expect(calendarJoinServiceLabel("https://zoom.us.evil.example/j/123?pwd=secret")).toBeNull();
+    expect(calendarJoinServiceLabel(undefined)).toBeNull();
+  });
+
+  it.each([
+    ["https://company.zoom.us/j/123?pwd=secret", "Zoom"],
+    ["https://teams.microsoft.com/l/meetup-join/meeting?token=secret", "Microsoft Teams"],
+  ])("returns only a service name for %s", (url, label) => {
+    expect(calendarJoinServiceLabel(url)).toBe(label);
   });
 });

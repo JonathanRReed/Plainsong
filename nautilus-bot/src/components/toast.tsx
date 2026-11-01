@@ -30,7 +30,6 @@ interface Toast {
     id: string;
     message: string;
     variant: ToastVariant;
-    createdAt: number;
 }
 
 interface ToastContextValue {
@@ -44,10 +43,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
     const toast = useCallback((message: string, variant: ToastVariant = "info") => {
         const id = crypto.randomUUID();
-        setToasts((prev) => [...prev, { id, message, variant, createdAt: Date.now() }]);
-        setTimeout(() => {
-            setToasts((prev) => prev.filter((t) => t.id !== id));
-        }, TOAST_DURATION_MS);
+        setToasts((prev) => [...prev, { id, message, variant }]);
     }, []);
 
     const dismiss = useCallback((id: string) => {
@@ -77,8 +73,6 @@ function ToastContainer({
     toasts: Toast[];
     onDismiss(id: string): void;
 }) {
-    if (toasts.length === 0) return null;
-
     return (
         <div
             aria-live="polite"
@@ -123,27 +117,42 @@ function ToastItem({
     const Icon = style.icon;
     const progressRef = useRef<HTMLDivElement>(null);
 
+    const [hovered, setHovered] = useState(false);
+    const [focused, setFocused] = useState(false);
+    const remainingRef = useRef(TOAST_DURATION_MS);
+    const expires = t.variant === "success";
+
     useEffect(() => {
         const bar = progressRef.current;
-        if (!bar) return;
-        const elapsed = Date.now() - t.createdAt;
-        const remaining = Math.max(0, TOAST_DURATION_MS - elapsed);
-        bar.style.transition = "none";
-        bar.style.width = `${(remaining / TOAST_DURATION_MS) * 100}%`;
-        if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-            return;
+        if (bar) {
+            bar.style.transition = "none";
+            bar.style.width = `${(remainingRef.current / TOAST_DURATION_MS) * 100}%`;
         }
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                bar.style.transition = `width ${remaining}ms linear`;
+        if (!expires || hovered || focused) return;
+        const started = Date.now();
+        const timer = window.setTimeout(() => onDismiss(t.id), remainingRef.current);
+        const frame = requestAnimationFrame(() => {
+            if (bar && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+                bar.style.transition = `width ${remainingRef.current}ms linear`;
                 bar.style.width = "0%";
-            });
+            }
         });
-    }, [t.createdAt]);
+        return () => {
+            window.clearTimeout(timer);
+            cancelAnimationFrame(frame);
+            remainingRef.current = Math.max(0, remainingRef.current - (Date.now() - started));
+        };
+    }, [expires, hovered, focused, onDismiss, t.id]);
 
     return (
         <div
-            role="status"
+            role={t.variant === "error" ? "alert" : "status"}
+            onMouseEnter={() => setHovered(true)}
+            onMouseLeave={() => setHovered(false)}
+            onFocusCapture={() => setFocused(true)}
+            onBlurCapture={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
+            }}
             className={cn(
                 "group relative overflow-hidden rounded-md border border-l-[3px] bg-card shadow-[0_14px_38px_hsl(34_26%_4%/0.18)]",
                 "animate-in slide-in-from-right-4 fade-in duration-300 ease-out",
@@ -162,10 +171,10 @@ function ToastItem({
                     <X className="h-4 w-4" />
                 </button>
             </div>
-            <div
+            {expires ? <div
                 ref={progressRef}
                 className={cn("absolute bottom-0 left-0 h-0.5", style.bar)}
-            />
+            /> : null}
         </div>
     );
 }

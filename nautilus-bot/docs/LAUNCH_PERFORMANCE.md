@@ -18,7 +18,7 @@ interactive threshold. A warm run must name a profile previously primed by the
 same candidate:
 
 ```sh
-node scripts/capture-packaged-macos-launch-performance.mjs \
+bun scripts/capture-packaged-macos-launch-performance.ts \
   --profile-condition warm \
   --profile-root /private/tmp/plainsong-launch-profile
 ```

@@ -134,7 +134,7 @@ describe("main-process signature gate", () => {
   });
 
   it("pins the release team the packaged trust gate also checks", () => {
-    // docs/APPLE_DEVELOPER_SETUP.md and scripts/verify-macos-release-trust.mjs
+    // docs/APPLE_DEVELOPER_SETUP.md and scripts/verify-macos-release-trust.ts
     // check the packaged artifact against the same value.
     const docs = readFileSync(
       path.resolve(process.cwd(), "docs/APPLE_DEVELOPER_SETUP.md"),

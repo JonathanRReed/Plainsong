@@ -103,9 +103,14 @@ describe("calendar access is never requested without a user gesture", () => {
 
   it("polls with the read that cannot prompt", () => {
     const hook = read("src/hooks/use-calendar-events.ts");
-    const effectStart = hook.indexOf("useEffect(() => {\n    if (!enabled) return;");
+    const effectStart = hook.indexOf(
+      "useEffect(() => {\n    if (!enabled || disconnectedSetting !== false) return;",
+    );
     expect(effectStart).toBeGreaterThan(-1);
-    const effectBody = hook.slice(effectStart, hook.indexOf("}, [enabled]);", effectStart));
+    const effectBody = hook.slice(
+      effectStart,
+      hook.indexOf("}, [enabled, disconnectedSetting]);", effectStart),
+    );
 
     expect(effectBody).toContain("getCalendarSnapshot");
     expect(effectBody).not.toContain("requestCalendarAccess");
@@ -113,12 +118,29 @@ describe("calendar access is never requested without a user gesture", () => {
   });
 
   it("reaches `connect` only from a click handler", () => {
-    const cue = read("src/components/meetings/calendar-meeting-cue.tsx");
-    const invocations = [...cue.matchAll(/calendar\.connect\(\)/g)];
+    // The Connect card is shared by the Meetings header and Settings, so it
+    // is the one place that may invoke `connect`.
+    const offenders = sourceFiles("src").filter(
+      (file) =>
+        (/\.connect\(\)/.test(read(file)) || /calendar\.connect\(/.test(read(file))) &&
+        file !== path.join("src", "components", "meetings", "calendar-access-card.tsx") &&
+        file !== path.join("src", "components", "settings", "name-sources-setting.tsx"),
+    );
+    expect(offenders, "unexpected callers of calendar.connect()").toEqual([]);
+
+    const spelling = read("src/components/settings/name-sources-setting.tsx");
+    expect(spelling).toContain("onCheckedChange={(enabled) => void changeCalendar(enabled)}");
+    expect(spelling.indexOf("calendar.connect({ reconnect: true })")).toBeLessThan(
+      spelling.indexOf("writeCalendarDisconnected(false)"),
+    );
+    const effect = spelling.slice(spelling.indexOf("useEffect("));
+    expect(effect).not.toContain("calendar.connect(");
+    const card = read("src/components/meetings/calendar-access-card.tsx");
+    const invocations = [...card.matchAll(/calendar\.connect\(\)/g)];
     expect(invocations).toHaveLength(1);
 
     const index = invocations[0].index ?? 0;
-    const preceding = cue.slice(Math.max(0, index - 200), index);
+    const preceding = card.slice(Math.max(0, index - 200), index);
     expect(preceding).toContain("onClick");
   });
 

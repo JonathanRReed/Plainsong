@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <!-- The speech helper reads 16 kHz samples the sidecar writes to its stdin
+       and runs Parakeet through Core ML on the Neural Engine. It does not
+       capture audio, open the network, send Apple Events or need a JIT, so it
+       carries no entitlement at all. The packaged-helper gate asserts this
+       dictionary stays empty. -->
+  <dict/>
+</plist>

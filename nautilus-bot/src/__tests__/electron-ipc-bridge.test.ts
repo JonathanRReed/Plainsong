@@ -17,7 +17,29 @@ import {
   observeCaptureAdmissionForWindow,
 } from "../../electron/capture-admission";
 
+vi.mock("electron/main", () => ({
+  ipcMain: { handle: vi.fn() },
+}));
+
 describe("privileged storage command admission", () => {
+  it("rejects path-based ASR benchmarks while admitting audio bytes", () => {
+    expect(isRendererCommandAllowed("benchmark_asr_providers")).toBe(false);
+    expect(isRendererCommandAllowed("benchmark_asr_providers_bytes")).toBe(true);
+  });
+  it("allows explicit correction consent with the ordinary settings timeout", () => {
+    expect(isRendererCommandAllowed("set_dictation_external_correction_learning")).toBe(true);
+    expect(getCommandTimeoutMs("set_dictation_external_correction_learning")).toBe(getCommandTimeoutMs("save_settings"));
+  });
+  it("allows dedicated saved-prompt writes with the ordinary settings timeout", () => {
+    expect(isRendererCommandAllowed("set_saved_prompts")).toBe(true);
+    expect(getCommandTimeoutMs("set_saved_prompts")).toBe(getCommandTimeoutMs("save_settings"));
+  });
+  it("never exposes instance pressure injection to the renderer", () => {
+    for (const command of ["qa_pressure", "simulate_memory_pressure", "set_memory_pressure", "PLAINSONG_QA_PRESSURE_FILE"]) {
+      expect(isRendererCommandAllowed(command)).toBe(false);
+    }
+  });
+
   it("does not expose the system-wide insertion smoke test to the renderer", () => {
     expect(isRendererCommandAllowed("smoke_test_cursor_insert")).toBe(false);
     expect(isRendererCommandAllowed("qa_smoke_test_cursor_insert")).toBe(false);
@@ -59,6 +81,17 @@ describe("privileged storage command admission", () => {
       remoteName: "gdrive",
       folder: "PlainsongBackups",
     });
+  });
+
+  it.each([
+    { name: "null bytes", folder: "Backups\u0000/secret" },
+    { name: "Windows drive prefixes", folder: "C:Backups" },
+  ])("rejects $name in cloud backup folders", ({ folder }) => {
+    for (const provider of ["i_cloud", "google_drive"]) {
+      expect(() =>
+        parseCloudLocationRequest({ provider, remoteName: "gdrive", folder }),
+      ).toThrow("safe relative path");
+    }
   });
 });
 
@@ -152,6 +185,61 @@ describe("meeting capture admission", () => {
 });
 
 describe("buildSidecarEnv", () => {
+  it("passes ephemeral credentials only in explicit QA mode", () => {
+    for (const qaMode of [undefined, "0", "true"]) {
+      expect(buildSidecarEnv({
+        PLAINSONG_QA_MODE: qaMode,
+        PLAINSONG_QA_EPHEMERAL_SECRETS: "1",
+      }).PLAINSONG_QA_EPHEMERAL_SECRETS).toBeUndefined();
+    }
+    expect(buildSidecarEnv({
+      PLAINSONG_QA_MODE: "1",
+      PLAINSONG_QA_EPHEMERAL_SECRETS: "1",
+    }).PLAINSONG_QA_EPHEMERAL_SECRETS).toBe("1");
+  });
+
+  it("passes the instance pressure file only in explicit QA mode", () => {
+    for (const qaMode of [undefined, "0", "true"]) {
+      expect(buildSidecarEnv({
+        PLAINSONG_QA_MODE: qaMode,
+        PLAINSONG_QA_PRESSURE_FILE: "/tmp/owned-qa/pressure",
+      }).PLAINSONG_QA_PRESSURE_FILE).toBeUndefined();
+    }
+    expect(buildSidecarEnv({
+      PLAINSONG_QA_MODE: "1",
+      PLAINSONG_QA_PRESSURE_FILE: "/tmp/owned-qa/pressure",
+    }).PLAINSONG_QA_PRESSURE_FILE).toBe("/tmp/owned-qa/pressure");
+  });
+
+  it("lets only QA mode make the sidecar plan for a smaller Mac", () => {
+    expect(buildSidecarEnv({
+      PLAINSONG_SIMULATE_PHYSICAL_MEMORY_GB: "8",
+    }).PLAINSONG_SIMULATE_PHYSICAL_MEMORY_GB).toBeUndefined();
+    expect(buildSidecarEnv({
+      PLAINSONG_QA_MODE: "1",
+      PLAINSONG_SIMULATE_PHYSICAL_MEMORY_GB: "8",
+    }).PLAINSONG_SIMULATE_PHYSICAL_MEMORY_GB).toBe("8");
+  });
+
+  it("lets only QA mode simulate the memory other apps leave free", () => {
+    const outsideQa = buildSidecarEnv({
+      PLAINSONG_SIMULATE_PHYSICAL_MEMORY_GB: "8",
+      PLAINSONG_SIMULATE_AVAILABLE_GB: "2.5",
+      PLAINSONG_SIMULATE_AVAILABLE_BASELINE_BYTES: "1",
+    });
+    expect(outsideQa.PLAINSONG_SIMULATE_AVAILABLE_GB).toBeUndefined();
+    expect(outsideQa.PLAINSONG_SIMULATE_AVAILABLE_BASELINE_BYTES).toBeUndefined();
+    const qa = buildSidecarEnv({
+      PLAINSONG_QA_MODE: "1",
+      PLAINSONG_SIMULATE_PHYSICAL_MEMORY_GB: "8",
+      PLAINSONG_SIMULATE_AVAILABLE_GB: "2.5",
+      PLAINSONG_SIMULATE_AVAILABLE_BASELINE_BYTES: "1",
+    });
+    expect(qa.PLAINSONG_SIMULATE_AVAILABLE_GB).toBe("2.5");
+    // The baseline is the sidecar's own, passed only to its helpers.
+    expect(qa.PLAINSONG_SIMULATE_AVAILABLE_BASELINE_BYTES).toBeUndefined();
+  });
+
   it("passes only runtime variables needed by the sidecar", () => {
     const env = buildSidecarEnv({
       HOME: "/Users/test",
@@ -247,8 +335,27 @@ describe("getCommandTimeoutMs", () => {
       getCommandTimeoutMs("summarize_recording_grounded"),
     );
     expect(getCommandTimeoutMs("summarize_recording_grounded")).toBeGreaterThan(
-      getCommandTimeoutMs("download_asr_models"),
+      getCommandTimeoutMs("save_settings"),
     );
+  });
+
+  it("lets every model download outlast a slow connection", () => {
+    // The sidecar stops a stalled transfer on its own; the bridge only has to
+    // outlast a large download on a slow link. The 1.1 GB cleanup model at
+    // 2 Mbit/s is ~75 min.
+    for (const command of [
+      "download_asr_models",
+      "download_bundled_cleanup_model",
+      "download_diarization_model",
+      "download_embedding_model",
+      "download_live_preview_engine_model",
+      "download_native_text_model",
+      "download_silero_vad_model",
+      "download_whisper_model",
+      "install_ollama_model",
+    ]) {
+      expect(getCommandTimeoutMs(command), command).toBeGreaterThanOrEqual(2 * 60 * 60_000);
+    }
   });
 
   it("treats meeting briefs as event-scoped analysis work", () => {
@@ -262,6 +369,44 @@ describe("getCommandTimeoutMs", () => {
 });
 
 describe("sidecar fault recovery policy", () => {
+  it("does not reject a healthy start while the capture operation remains live", async () => {
+    vi.useFakeTimers();
+    try {
+      const attempt = vi.fn(() => new Promise<string>(resolve => {
+        setTimeout(() => resolve("recording-active"), 20);
+      }));
+      const recover = vi.fn().mockResolvedValue(undefined);
+      let settled = false;
+      const result = retryOnceAfterMicrophonePreparationTimeout("start_recording", attempt, recover, 5)
+        .then(value => { settled = true; return value; });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(result).resolves.toBe("recording-active");
+      expect(recover).not.toHaveBeenCalled();
+      expect(attempt).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("awaits the retry result after recovery instead of leaving a live capture behind a timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const attempt = vi.fn<() => Promise<string>>()
+        .mockRejectedValueOnce(new Error("Timed out waiting for microphone stream preparation"))
+        .mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve("recording-recovered"), 20)));
+      const recover = vi.fn().mockResolvedValue(undefined);
+      const result = retryOnceAfterMicrophonePreparationTimeout("start_recording", attempt, recover, 5);
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(result).resolves.toBe("recording-recovered");
+      expect(recover).toHaveBeenCalledOnce();
+      expect(attempt).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not apply the microphone recovery budget to model downloads", async () => {
     const attempt = vi.fn(
       () => new Promise<string>((resolve) => setTimeout(() => resolve("downloaded"), 20)),

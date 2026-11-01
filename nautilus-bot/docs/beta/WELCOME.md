@@ -10,13 +10,15 @@ pillars: fast system-wide Dictation and local-first Meeting capture.
 - at least 8 GB memory, with 16 GB recommended for larger local models
 - several gigabytes of free space if you test meeting-grade models
 
-Native system-audio capture is enabled on macOS 14.7 or later. On macOS 13 and
-macOS 14.0 through 14.6, mic-only Meetings work without extra software, while
-Me + Them capture needs a configured virtual loopback device such as BlackHole.
+On macOS 14.7 or later, Me + Them records your microphone and the meeting audio
+playing on the Mac with no extra software, with or without headphones. On macOS
+13 and macOS 14.0 through 14.6, mic-only Meetings work without extra software,
+while Me + Them needs an audio routing app such as BlackHole that you set up
+yourself.
 
 ## Install
 
-1. Download the DMG and `SHA256SUMS.txt` from the private invitation.
+1. Download the DMG and `SHA256SUMS` from the private invitation.
 2. Verify the DMG checksum with `shasum -a 256 /path/to/Plainsong*.dmg`.
 3. Open the DMG and drag Plainsong into `/Applications`.
 4. Open the installed copy from `/Applications`, not from the DMG.

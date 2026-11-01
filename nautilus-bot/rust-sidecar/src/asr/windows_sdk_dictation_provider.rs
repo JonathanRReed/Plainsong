@@ -70,7 +70,9 @@ impl AsrProvider for WindowsSdkDictationProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 
@@ -95,7 +97,9 @@ impl AsrProvider for WindowsSdkDictationProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 

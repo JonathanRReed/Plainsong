@@ -34,12 +34,16 @@ bun run build:renderer && bun run electron:compile   # production build sanity
 
 CI must be green. Clippy is run with `-D warnings`, so warnings are errors.
 
-### Maintainer pre-publication checklist
+### Maintainer post-launch checklist
 
-- [ ] Add and enable a ruleset for `main` that requires pull requests, requires
-  the `verify-web`, `verify-build`, and `verify-rust` checks, and blocks force
-  pushes and branch deletion. Until that ruleset is active, CI is advisory and
-  a green check is not an enforced merge condition.
+Jonathan deferred `main` branch protection until after launch on October 30,
+2026. It is not a pre-publication gate. Review release PRs and require passing
+source CI as release procedure even while GitHub does not enforce it.
+
+- [ ] After launch, add and enable a ruleset for `main` that requires pull
+  requests, requires the `verify-web`, `verify-build`, and `verify-rust` checks,
+  and blocks force pushes and branch deletion. Until then, CI is advisory in
+  repository settings.
 
 ## Guidelines
 

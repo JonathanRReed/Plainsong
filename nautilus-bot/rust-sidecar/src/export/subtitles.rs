@@ -31,8 +31,9 @@ pub enum SubtitleFormat {
 }
 
 /// Display name for a speaker id, matching what the transcript viewer shows:
-/// the alias when one was set, `Me`/`Them` for the two capture sides, and the
-/// raw id otherwise. Nothing is invented for an unknown id.
+/// the alias when one was set, `Me`/`Them` for the two capture sides,
+/// `Speaker N` for the diarizer's `SN` ids, and the raw id otherwise. Nothing
+/// is invented for an unknown id.
 pub fn speaker_label(speaker_id: &str, speaker_names: &HashMap<String, String>) -> Option<String> {
     let id = speaker_id.trim();
     if id.is_empty() {
@@ -45,11 +46,26 @@ pub fn speaker_label(speaker_id: &str, speaker_names: &HashMap<String, String>) 
     {
         return Some(name.to_string());
     }
-    Some(match id.to_ascii_lowercase().as_str() {
-        "me" => "Me".to_string(),
-        "them" => "Them".to_string(),
-        _ => id.to_string(),
-    })
+    Some(default_speaker_name(id).unwrap_or_else(|| id.to_string()))
+}
+
+/// The name a speaker carries before anyone renames it: `Me`/`Them` for the
+/// two capture sides and `Speaker N` for the diarizer's `SN` ids. The number
+/// comes from the id itself, so it does not shift when another speaker's
+/// turns are deleted, and `S10` is never shown as `Speaker 2`.
+pub fn default_speaker_name(speaker_id: &str) -> Option<String> {
+    let id = speaker_id.trim();
+    match id.to_ascii_lowercase().as_str() {
+        "me" => return Some("Me".to_string()),
+        "them" => return Some("Them".to_string()),
+        _ => {}
+    }
+    let number = id.strip_prefix('S')?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number: u32 = number.parse().ok()?;
+    (number > 0).then(|| format!("Speaker {number}"))
 }
 
 struct Unit {

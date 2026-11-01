@@ -1,0 +1,4439 @@
+{
+  "schema": "plainsong-meeting-notes-fixtures-v1",
+  "description": "Fictional multi-speaker meeting transcripts for scoring on-device meeting-notes models. An expected item is retained when the generated notes contain at least one anyOf string and every allOf string (case-insensitive substring).",
+  "meetings": [
+    {
+      "id": "standup-3min",
+      "title": "Product team standup",
+      "durationSeconds": 182.4,
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.3,
+          "speaker": "Priya",
+          "text": "Okay, morning everyone. Let's keep this quick, we've got the design review at ten."
+        },
+        {
+          "start": 5.6,
+          "end": 7.9,
+          "speaker": "Tomas",
+          "text": "Sure. Uh, I can go first."
+        },
+        {
+          "start": 8.2,
+          "end": 9.4,
+          "speaker": "Priya",
+          "text": "Go ahead, Tomas."
+        },
+        {
+          "start": 9.7,
+          "end": 16.9,
+          "speaker": "Tomas",
+          "text": "So yesterday I finished the export fix. The CSV export was dropping rows past 500, and that's merged now."
+        },
+        {
+          "start": 17.2,
+          "end": 20.7,
+          "speaker": "Ingrid",
+          "text": "Nice. Was that the bug from the Halvorsen account?"
+        },
+        {
+          "start": 21.0,
+          "end": 29.4,
+          "speaker": "Tomas",
+          "text": "Yeah, that one. Today I'm on the sync timeout. It's set to 30 seconds and we're seeing failures on, um, slower connections."
+        },
+        {
+          "start": 29.7,
+          "end": 32.7,
+          "speaker": "Priya",
+          "text": "What do you want to raise it to?"
+        },
+        {
+          "start": 33.0,
+          "end": 36.1,
+          "speaker": "Tomas",
+          "text": "I'd say 90 seconds. Retries stay at three."
+        },
+        {
+          "start": 36.4,
+          "end": 40.2,
+          "speaker": "Marisol",
+          "text": "Is 90 too long? Like, the spinner just sits there."
+        },
+        {
+          "start": 40.5,
+          "end": 45.5,
+          "speaker": "Tomas",
+          "text": "We show progress after ten seconds now, so it's not a dead screen."
+        },
+        {
+          "start": 45.8,
+          "end": 51.9,
+          "speaker": "Priya",
+          "text": "Okay, let's do it. We raise the sync timeout to 90 seconds. Decision made, nobody argue."
+        },
+        {
+          "start": 52.2,
+          "end": 53.7,
+          "speaker": "Marisol",
+          "text": "No argument from me."
+        },
+        {
+          "start": 54.0,
+          "end": 54.4,
+          "speaker": "Priya",
+          "text": "Ingrid?"
+        },
+        {
+          "start": 54.7,
+          "end": 60.8,
+          "speaker": "Ingrid",
+          "text": "So I, uh, I finished the onboarding mockups. There are 12 screens now, down from 17."
+        },
+        {
+          "start": 61.1,
+          "end": 62.6,
+          "speaker": "Priya",
+          "text": "That's a big cut."
+        },
+        {
+          "start": 62.9,
+          "end": 72.9,
+          "speaker": "Ingrid",
+          "text": "It is. We merged the bank connection steps into one. I need feedback by Thursday, March 6th, so I can hand off to engineering on Friday."
+        },
+        {
+          "start": 73.2,
+          "end": 75.4,
+          "speaker": "Priya",
+          "text": "I'll review the onboarding mockups today."
+        },
+        {
+          "start": 75.7,
+          "end": 80.7,
+          "speaker": "Ingrid",
+          "text": "Thanks. And Marisol, I need you to check the empty states on those."
+        },
+        {
+          "start": 81.0,
+          "end": 84.8,
+          "speaker": "Marisol",
+          "text": "Sure, I'll add the empty states to the test plan."
+        },
+        {
+          "start": 85.1,
+          "end": 86.3,
+          "speaker": "Priya",
+          "text": "Marisol, your update?"
+        },
+        {
+          "start": 86.6,
+          "end": 94.6,
+          "speaker": "Marisol",
+          "text": "Yeah. So the regression run last night was 214 tests, four failures. Three are flaky, um, the date picker ones again."
+        },
+        {
+          "start": 94.9,
+          "end": 96.8,
+          "speaker": "Tomas",
+          "text": "The date picker, of course."
+        },
+        {
+          "start": 97.1,
+          "end": 102.8,
+          "speaker": "Marisol",
+          "text": "And one is real. Refunds over $1,000 show the wrong tax line on the receipt."
+        },
+        {
+          "start": 103.1,
+          "end": 106.2,
+          "speaker": "Priya",
+          "text": "Wait, on the receipt or in the ledger?"
+        },
+        {
+          "start": 106.5,
+          "end": 109.2,
+          "speaker": "Marisol",
+          "text": "Just the receipt. The ledger is right."
+        },
+        {
+          "start": 109.5,
+          "end": 111.4,
+          "speaker": "Priya",
+          "text": "Is that a release blocker?"
+        },
+        {
+          "start": 111.7,
+          "end": 115.5,
+          "speaker": "Marisol",
+          "text": "I think so, yeah. It's customer facing and it's money."
+        },
+        {
+          "start": 115.8,
+          "end": 121.1,
+          "speaker": "Priya",
+          "text": "Agreed. So we hold the 4.2 release until the refund tax bug is fixed."
+        },
+        {
+          "start": 121.4,
+          "end": 126.8,
+          "speaker": "Tomas",
+          "text": "I can take the refund bug after the timeout change. Should be done tomorrow."
+        },
+        {
+          "start": 127.1,
+          "end": 130.9,
+          "speaker": "Priya",
+          "text": "Great. Tomas fixes the refund tax line, Marisol retests it."
+        },
+        {
+          "start": 131.2,
+          "end": 133.9,
+          "speaker": "Marisol",
+          "text": "And I'll rerun the full suite after."
+        },
+        {
+          "start": 134.2,
+          "end": 139.1,
+          "speaker": "Priya",
+          "text": "Perfect. If that's clean we ship 4.2 on March 11th instead of today."
+        },
+        {
+          "start": 139.4,
+          "end": 141.3,
+          "speaker": "Ingrid",
+          "text": "Do support know it's moving?"
+        },
+        {
+          "start": 141.6,
+          "end": 144.7,
+          "speaker": "Priya",
+          "text": "Not yet. I'll tell them right after this."
+        },
+        {
+          "start": 145.0,
+          "end": 151.5,
+          "speaker": "Ingrid",
+          "text": "Okay. And Priya, do you want the mockups in Figma or should I walk you through them?"
+        },
+        {
+          "start": 151.8,
+          "end": 156.8,
+          "speaker": "Priya",
+          "text": "Figma's fine, I'll leave comments. If anything's confusing, I'll grab you after lunch."
+        },
+        {
+          "start": 157.1,
+          "end": 168.1,
+          "speaker": "Tomas",
+          "text": "Oh, one more thing from me. The Android build is failing on the staging pipeline. I think it's a certificate issue. I'll ping infra, it's not blocking anything yet."
+        },
+        {
+          "start": 168.4,
+          "end": 173.4,
+          "speaker": "Marisol",
+          "text": "Is that why my test devices didn't get the new build this morning?"
+        },
+        {
+          "start": 173.7,
+          "end": 177.9,
+          "speaker": "Tomas",
+          "text": "Probably, yeah. Sorry. I'll post in the channel when it's fixed."
+        },
+        {
+          "start": 178.2,
+          "end": 182.4,
+          "speaker": "Priya",
+          "text": "Okay. Anything else? No? Great, see you all at the review."
+        }
+      ],
+      "expected": {
+        "names": [
+          {
+            "label": "Tomas (engineer)",
+            "anyOf": [
+              "Tomas"
+            ]
+          },
+          {
+            "label": "Ingrid (designer)",
+            "anyOf": [
+              "Ingrid"
+            ]
+          },
+          {
+            "label": "Marisol (QA)",
+            "anyOf": [
+              "Marisol"
+            ]
+          }
+        ],
+        "numbers": [
+          {
+            "label": "sync timeout 90 seconds",
+            "anyOf": [
+              "90 seconds",
+              "90 s",
+              "90-second",
+              "ninety seconds"
+            ],
+            "allOf": [
+              "timeout"
+            ]
+          },
+          {
+            "label": "onboarding cut to 12 screens",
+            "anyOf": [
+              "12",
+              "twelve"
+            ],
+            "allOf": [
+              "screen"
+            ]
+          },
+          {
+            "label": "regression run of 214 tests",
+            "anyOf": [
+              "214"
+            ],
+            "allOf": [
+              "test"
+            ]
+          },
+          {
+            "label": "refunds over $1,000 affected",
+            "anyOf": [
+              "$1,000",
+              "1,000",
+              "1000",
+              "$1000",
+              "$1k",
+              "1k"
+            ]
+          }
+        ],
+        "dates": [
+          {
+            "label": "mockup feedback due March 6",
+            "anyOf": [
+              "March 6",
+              "Mar 6",
+              "6 March",
+              "March 6th"
+            ]
+          },
+          {
+            "label": "4.2 release moved to March 11",
+            "anyOf": [
+              "March 11",
+              "Mar 11",
+              "11 March",
+              "March 11th"
+            ]
+          }
+        ],
+        "decisions": [
+          {
+            "label": "raise sync timeout to 90 seconds",
+            "anyOf": [
+              "90"
+            ],
+            "allOf": [
+              "timeout"
+            ]
+          },
+          {
+            "label": "hold 4.2 release until refund tax bug is fixed",
+            "anyOf": [
+              "4.2"
+            ],
+            "allOf": [
+              "refund"
+            ]
+          }
+        ],
+        "actions": [
+          {
+            "label": "Tomas fixes the refund tax bug",
+            "anyOf": [
+              "refund"
+            ],
+            "allOf": [
+              "Tomas"
+            ]
+          },
+          {
+            "label": "Priya reviews the onboarding mockups",
+            "anyOf": [
+              "mockup",
+              "onboarding"
+            ],
+            "allOf": [
+              "Priya"
+            ]
+          },
+          {
+            "label": "Marisol adds empty states to the test plan",
+            "anyOf": [
+              "empty state"
+            ],
+            "allOf": [
+              "Marisol"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "customer-call-10min",
+      "title": "Kestrel Freight expansion and renewal call",
+      "durationSeconds": 604.8,
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 5.1,
+          "speaker": "Nadia",
+          "text": "Hi Graham, hi Lucia. Thanks for making time. Can you hear me okay?"
+        },
+        {
+          "start": 5.4,
+          "end": 9.8,
+          "speaker": "Graham",
+          "text": "Yeah, we've got you. Lucia's here with me in the room."
+        },
+        {
+          "start": 10.1,
+          "end": 10.9,
+          "speaker": "Lucia",
+          "text": "Hi Nadia."
+        },
+        {
+          "start": 11.2,
+          "end": 17.9,
+          "speaker": "Nadia",
+          "text": "Great. I've got Owen with me, he's our solutions engineer at Brightwater, he'll cover the technical side."
+        },
+        {
+          "start": 18.2,
+          "end": 22.1,
+          "speaker": "Owen",
+          "text": "Hey everyone. Good to finally put faces to the emails."
+        },
+        {
+          "start": 22.4,
+          "end": 35.5,
+          "speaker": "Nadia",
+          "text": "So, um, the plan for today. We wanted to go over the expansion, the pricing, and the renewal timeline, and then Owen has a couple of things on single sign-on and data residency."
+        },
+        {
+          "start": 35.8,
+          "end": 36.6,
+          "speaker": "Graham",
+          "text": "Sounds good."
+        },
+        {
+          "start": 36.9,
+          "end": 45.2,
+          "speaker": "Nadia",
+          "text": "So, just to recap where we are. Kestrel Freight is on 180 seats today, and your renewal date is April 1st."
+        },
+        {
+          "start": 45.5,
+          "end": 46.6,
+          "speaker": "Lucia",
+          "text": "Correct. April 1st."
+        },
+        {
+          "start": 46.9,
+          "end": 55.6,
+          "speaker": "Nadia",
+          "text": "And Graham, you mentioned last time you wanted to bring the dispatch teams in the Memphis and Tulsa yards onto the platform."
+        },
+        {
+          "start": 55.9,
+          "end": 61.1,
+          "speaker": "Graham",
+          "text": "Right. That's, uh, about sixty more people. So we'd go to 240 seats."
+        },
+        {
+          "start": 61.4,
+          "end": 66.1,
+          "speaker": "Nadia",
+          "text": "240. Okay, great. And that's dispatchers only, or the yard supervisors too?"
+        },
+        {
+          "start": 66.4,
+          "end": 70.4,
+          "speaker": "Graham",
+          "text": "Both. The supervisors are maybe a dozen of the sixty."
+        },
+        {
+          "start": 70.7,
+          "end": 87.3,
+          "speaker": "Nadia",
+          "text": "Got it. So, pricing. On the current contract you're at $42 per seat per month. For the expansion, we can bring the whole account down to $38 per seat per month if you sign for 240 seats on a two year term."
+        },
+        {
+          "start": 87.6,
+          "end": 90.7,
+          "speaker": "Lucia",
+          "text": "Two years is longer than we usually do."
+        },
+        {
+          "start": 91.0,
+          "end": 95.4,
+          "speaker": "Nadia",
+          "text": "I understand. The one year price would be $40 per seat."
+        },
+        {
+          "start": 95.7,
+          "end": 98.8,
+          "speaker": "Lucia",
+          "text": "Okay. And what's the annual total at 38?"
+        },
+        {
+          "start": 99.1,
+          "end": 104.3,
+          "speaker": "Nadia",
+          "text": "At 240 seats and $38 a seat, it comes to $109,440 a year."
+        },
+        {
+          "start": 104.6,
+          "end": 110.9,
+          "speaker": "Lucia",
+          "text": "One oh nine, okay. Let me write that down. And is that billed annually or quarterly?"
+        },
+        {
+          "start": 111.2,
+          "end": 116.3,
+          "speaker": "Nadia",
+          "text": "Annually by default. We can do quarterly, but then it's the $40 rate."
+        },
+        {
+          "start": 116.6,
+          "end": 123.3,
+          "speaker": "Lucia",
+          "text": "Annual is fine. And the discount we talked about in January, the 15 percent on onboarding services?"
+        },
+        {
+          "start": 123.6,
+          "end": 137.1,
+          "speaker": "Nadia",
+          "text": "Right. So I want to be really clear about that one. That 15 percent discount on the services package is valid through the end of March. We are not extending the discount past March."
+        },
+        {
+          "start": 137.4,
+          "end": 140.5,
+          "speaker": "Lucia",
+          "text": "Even if procurement takes longer on our end?"
+        },
+        {
+          "start": 140.8,
+          "end": 151.1,
+          "speaker": "Nadia",
+          "text": "I'm afraid so. It's tied to our quarter, and I don't have room to move it. I'd rather tell you now than surprise you in April."
+        },
+        {
+          "start": 151.4,
+          "end": 153.4,
+          "speaker": "Lucia",
+          "text": "Okay. I appreciate that, honestly."
+        },
+        {
+          "start": 153.7,
+          "end": 156.8,
+          "speaker": "Graham",
+          "text": "What's in the services package again? Remind me."
+        },
+        {
+          "start": 157.1,
+          "end": 164.6,
+          "speaker": "Nadia",
+          "text": "It's the onboarding bundle. Data migration from your old dispatch system, two admin training sessions, and the dispatcher workshops."
+        },
+        {
+          "start": 164.9,
+          "end": 170.9,
+          "speaker": "Owen",
+          "text": "And the workshops are on site, so for Memphis and Tulsa we'd fly someone out."
+        },
+        {
+          "start": 171.2,
+          "end": 176.7,
+          "speaker": "Graham",
+          "text": "That'd be useful. Those teams are, uh, they're not the most tech friendly crowd."
+        },
+        {
+          "start": 177.0,
+          "end": 184.5,
+          "speaker": "Owen",
+          "text": "We hear that a lot. Usually after the first workshop people stop calling the old system \"the real one.\""
+        },
+        {
+          "start": 184.8,
+          "end": 186.0,
+          "speaker": "Graham",
+          "text": "Ha. We'll see."
+        },
+        {
+          "start": 186.3,
+          "end": 193.0,
+          "speaker": "Lucia",
+          "text": "How long is the data migration? Our old system has, I think, eleven years of load history."
+        },
+        {
+          "start": 193.3,
+          "end": 202.4,
+          "speaker": "Owen",
+          "text": "Eleven years is fine. Most of the time is mapping the fields, not moving the data. Usually about two weeks end to end."
+        },
+        {
+          "start": 202.7,
+          "end": 203.1,
+          "speaker": "Lucia",
+          "text": "Okay."
+        },
+        {
+          "start": 203.4,
+          "end": 214.4,
+          "speaker": "Nadia",
+          "text": "So, timeline. If legal signs by Friday, we start onboarding on March 3rd. That gives the yards about four weeks before the renewal kicks in on April 1st."
+        },
+        {
+          "start": 214.7,
+          "end": 217.5,
+          "speaker": "Lucia",
+          "text": "And if legal doesn't sign by Friday?"
+        },
+        {
+          "start": 217.8,
+          "end": 227.7,
+          "speaker": "Nadia",
+          "text": "Then we'd start, um, probably the week after, but I can't promise March 3rd. Our onboarding team books up pretty fast this time of year."
+        },
+        {
+          "start": 228.0,
+          "end": 234.3,
+          "speaker": "Lucia",
+          "text": "Okay. Our legal team has the MSA now. The sticking point is the data processing addendum."
+        },
+        {
+          "start": 234.6,
+          "end": 237.8,
+          "speaker": "Owen",
+          "text": "That's actually a good segue into my part."
+        },
+        {
+          "start": 238.1,
+          "end": 244.8,
+          "speaker": "Owen",
+          "text": "So on the technical side, two things. SSO and data residency. For SSO, you're on Okta, right?"
+        },
+        {
+          "start": 245.1,
+          "end": 249.8,
+          "speaker": "Graham",
+          "text": "We are. Well, mostly. The Tulsa yard still has some local accounts."
+        },
+        {
+          "start": 250.1,
+          "end": 264.3,
+          "speaker": "Owen",
+          "text": "That's fine, we can run both during the transition. We support SAML through Okta. Setup usually takes about an hour once your IT team has the metadata. I'll send you our SSO setup guide by Wednesday."
+        },
+        {
+          "start": 264.6,
+          "end": 269.8,
+          "speaker": "Graham",
+          "text": "Perfect. Send it to me and I'll forward it to our IT folks."
+        },
+        {
+          "start": 270.1,
+          "end": 277.6,
+          "speaker": "Owen",
+          "text": "On data residency, all of your data stays in our US East region. We don't replicate outside the US."
+        },
+        {
+          "start": 277.9,
+          "end": 282.6,
+          "speaker": "Lucia",
+          "text": "That's the exact wording legal wanted. Can you put that in writing?"
+        },
+        {
+          "start": 282.9,
+          "end": 289.2,
+          "speaker": "Owen",
+          "text": "Yes, it's in the DPA already, section four. I'll highlight it when I send the guide."
+        },
+        {
+          "start": 289.5,
+          "end": 291.9,
+          "speaker": "Lucia",
+          "text": "Okay. That might actually unblock them."
+        },
+        {
+          "start": 292.2,
+          "end": 297.4,
+          "speaker": "Graham",
+          "text": "What about uptime? Last year we had that, uh, that outage in November."
+        },
+        {
+          "start": 297.7,
+          "end": 307.1,
+          "speaker": "Owen",
+          "text": "Yeah. I remember that one. Our SLA is 99.9 percent monthly uptime, and for November we were under that, so we credited the month."
+        },
+        {
+          "start": 307.4,
+          "end": 309.8,
+          "speaker": "Graham",
+          "text": "Right, we did get the credit."
+        },
+        {
+          "start": 310.1,
+          "end": 317.6,
+          "speaker": "Nadia",
+          "text": "And since then we've added a second region for failover. So the same failure today wouldn't take you down."
+        },
+        {
+          "start": 317.9,
+          "end": 321.5,
+          "speaker": "Graham",
+          "text": "Okay, good. That was a bad Tuesday for us."
+        },
+        {
+          "start": 321.8,
+          "end": 328.5,
+          "speaker": "Graham",
+          "text": "While I have you, there's one thing the dispatchers keep asking about. Route optimization. Is that coming?"
+        },
+        {
+          "start": 328.8,
+          "end": 340.2,
+          "speaker": "Nadia",
+          "text": "So, um, I want to be careful here. It's on our roadmap, but I can't commit to a date, and I don't want you to buy based on it."
+        },
+        {
+          "start": 340.5,
+          "end": 341.3,
+          "speaker": "Graham",
+          "text": "Fair enough."
+        },
+        {
+          "start": 341.6,
+          "end": 351.5,
+          "speaker": "Owen",
+          "text": "What I can say is the routing API is in a private preview. If you want, I can see if Kestrel can join the preview."
+        },
+        {
+          "start": 351.8,
+          "end": 354.6,
+          "speaker": "Graham",
+          "text": "Yeah, we'd be interested. No promises needed."
+        },
+        {
+          "start": 354.9,
+          "end": 358.8,
+          "speaker": "Owen",
+          "text": "Okay. I'll ask the product team, no commitment either way."
+        },
+        {
+          "start": 359.1,
+          "end": 364.3,
+          "speaker": "Lucia",
+          "text": "One more on pricing. If we add seats mid term, what's the price?"
+        },
+        {
+          "start": 364.6,
+          "end": 368.1,
+          "speaker": "Nadia",
+          "text": "Same per seat price, $38, prorated to the renewal."
+        },
+        {
+          "start": 368.4,
+          "end": 371.2,
+          "speaker": "Lucia",
+          "text": "And if we go down in seats?"
+        },
+        {
+          "start": 371.5,
+          "end": 377.0,
+          "speaker": "Nadia",
+          "text": "We, uh, we don't do mid term reductions. You can reduce at the renewal."
+        },
+        {
+          "start": 377.3,
+          "end": 379.3,
+          "speaker": "Lucia",
+          "text": "Okay. That's standard, I figured."
+        },
+        {
+          "start": 379.6,
+          "end": 388.3,
+          "speaker": "Graham",
+          "text": "Can we get admin access for more people? Right now only two of us have it, and I'm the bottleneck for everything."
+        },
+        {
+          "start": 388.6,
+          "end": 391.3,
+          "speaker": "Owen",
+          "text": "Sure. How many admins do you want?"
+        },
+        {
+          "start": 391.6,
+          "end": 395.2,
+          "speaker": "Graham",
+          "text": "Probably five. One per yard, plus me and Lucia."
+        },
+        {
+          "start": 395.5,
+          "end": 400.6,
+          "speaker": "Owen",
+          "text": "That's fine, no extra cost. Just send me the list with their emails."
+        },
+        {
+          "start": 400.9,
+          "end": 403.7,
+          "speaker": "Graham",
+          "text": "I'll send the admin list by Monday."
+        },
+        {
+          "start": 404.0,
+          "end": 410.7,
+          "speaker": "Lucia",
+          "text": "Oh, and reporting. Our CFO wants a monthly usage report. Is that something we can pull ourselves?"
+        },
+        {
+          "start": 411.0,
+          "end": 421.3,
+          "speaker": "Owen",
+          "text": "Yes. There's a usage dashboard in the admin console, and you can schedule it as a PDF to go out on the first of every month."
+        },
+        {
+          "start": 421.6,
+          "end": 423.6,
+          "speaker": "Lucia",
+          "text": "Great. That's one less spreadsheet."
+        },
+        {
+          "start": 423.9,
+          "end": 436.1,
+          "speaker": "Graham",
+          "text": "On the training sessions, can those be recorded? We have a lot of turnover on the night shift, and I don't want to book a new session every time someone starts."
+        },
+        {
+          "start": 436.4,
+          "end": 445.5,
+          "speaker": "Owen",
+          "text": "Yes, we record them, and you'd keep the recordings. We also have short videos in the help center, they're about five minutes each."
+        },
+        {
+          "start": 445.8,
+          "end": 450.5,
+          "speaker": "Graham",
+          "text": "Good. The night shift will actually watch five minutes. An hour, no."
+        },
+        {
+          "start": 450.8,
+          "end": 456.4,
+          "speaker": "Lucia",
+          "text": "Who would our day to day contact be after onboarding? Is that you, Nadia?"
+        },
+        {
+          "start": 456.7,
+          "end": 468.9,
+          "speaker": "Nadia",
+          "text": "For commercial things, yes, me. For anything technical, you'd have a named customer success manager. Right now that would be Priyanka on our team, she covers most of our logistics customers."
+        },
+        {
+          "start": 469.2,
+          "end": 472.4,
+          "speaker": "Lucia",
+          "text": "Okay. Can we meet her before we sign?"
+        },
+        {
+          "start": 472.7,
+          "end": 477.4,
+          "speaker": "Nadia",
+          "text": "Absolutely. I'll set up a short intro call with her next week."
+        },
+        {
+          "start": 477.7,
+          "end": 485.6,
+          "speaker": "Graham",
+          "text": "And for the Memphis yard, the internet there is, um, not great. Does the app work on a slow connection?"
+        },
+        {
+          "start": 485.9,
+          "end": 498.6,
+          "speaker": "Owen",
+          "text": "It works, it's just slower to load the map views. The dispatch board itself is pretty light. If you want, I can run a quick test from their network before the workshop."
+        },
+        {
+          "start": 498.9,
+          "end": 503.6,
+          "speaker": "Graham",
+          "text": "That'd be great, actually. I'll get you a contact at the yard."
+        },
+        {
+          "start": 503.9,
+          "end": 510.2,
+          "speaker": "Lucia",
+          "text": "And invoices. Right now they go to Graham, and they really should go to accounts payable."
+        },
+        {
+          "start": 510.5,
+          "end": 516.8,
+          "speaker": "Nadia",
+          "text": "Easy fix. Send me the AP email and I'll change it on the new order form."
+        },
+        {
+          "start": 517.1,
+          "end": 519.9,
+          "speaker": "Lucia",
+          "text": "I'll send it over with the redlines."
+        },
+        {
+          "start": 520.2,
+          "end": 527.7,
+          "speaker": "Graham",
+          "text": "Sorry, one more. If we, uh, if we ever wanted to leave, how do we get our data out?"
+        },
+        {
+          "start": 528.0,
+          "end": 535.1,
+          "speaker": "Owen",
+          "text": "Full export at any time, CSV or through the API. It's in the contract, no fee for it."
+        },
+        {
+          "start": 535.4,
+          "end": 539.4,
+          "speaker": "Graham",
+          "text": "Okay. Not planning to, just, you know, I get asked."
+        },
+        {
+          "start": 539.7,
+          "end": 546.0,
+          "speaker": "Nadia",
+          "text": "Okay, so let me recap what I've got, just so we're all on the same page."
+        },
+        {
+          "start": 546.3,
+          "end": 555.4,
+          "speaker": "Nadia",
+          "text": "I'll send a revised order form with 240 seats at $38 on a two year term, today if possible, tomorrow at the latest."
+        },
+        {
+          "start": 555.7,
+          "end": 556.5,
+          "speaker": "Lucia",
+          "text": "Tomorrow's fine."
+        },
+        {
+          "start": 556.8,
+          "end": 561.9,
+          "speaker": "Nadia",
+          "text": "Owen sends the SSO setup guide by Wednesday, with the residency section highlighted."
+        },
+        {
+          "start": 562.2,
+          "end": 562.6,
+          "speaker": "Owen",
+          "text": "Yep."
+        },
+        {
+          "start": 562.9,
+          "end": 568.4,
+          "speaker": "Nadia",
+          "text": "Lucia, you'll take the DPA language back to legal and send us their redlines."
+        },
+        {
+          "start": 568.7,
+          "end": 573.9,
+          "speaker": "Lucia",
+          "text": "Yes, I'll send the redlines as soon as I get them. Hopefully Thursday."
+        },
+        {
+          "start": 574.2,
+          "end": 582.1,
+          "speaker": "Nadia",
+          "text": "Graham sends the admin list by Monday. And the plan is, if legal signs by Friday, onboarding starts March 3rd."
+        },
+        {
+          "start": 582.4,
+          "end": 583.9,
+          "speaker": "Graham",
+          "text": "That works for us."
+        },
+        {
+          "start": 584.2,
+          "end": 592.9,
+          "speaker": "Nadia",
+          "text": "And just to repeat it, so nobody's surprised later, the 15 percent services discount ends in March. We are not extending it."
+        },
+        {
+          "start": 593.2,
+          "end": 596.4,
+          "speaker": "Lucia",
+          "text": "Understood. I'll make sure legal knows that too."
+        },
+        {
+          "start": 596.7,
+          "end": 599.1,
+          "speaker": "Nadia",
+          "text": "Great. Anything else from your side?"
+        },
+        {
+          "start": 599.4,
+          "end": 602.9,
+          "speaker": "Graham",
+          "text": "No, I think that's it. Thanks, both of you."
+        },
+        {
+          "start": 603.2,
+          "end": 604.8,
+          "speaker": "Owen",
+          "text": "Thanks everyone. Talk soon."
+        }
+      ],
+      "expected": {
+        "names": [
+          {
+            "label": "Nadia (account executive)",
+            "anyOf": [
+              "Nadia"
+            ]
+          },
+          {
+            "label": "Owen (solutions engineer)",
+            "anyOf": [
+              "Owen"
+            ]
+          },
+          {
+            "label": "Graham (Kestrel Freight operations)",
+            "anyOf": [
+              "Graham"
+            ]
+          },
+          {
+            "label": "Lucia (Kestrel Freight procurement)",
+            "anyOf": [
+              "Lucia"
+            ]
+          },
+          {
+            "label": "customer Kestrel Freight",
+            "anyOf": [
+              "Kestrel"
+            ]
+          }
+        ],
+        "numbers": [
+          {
+            "label": "price $38 per seat per month",
+            "anyOf": [
+              "$38",
+              "38 dollars",
+              "38 per seat",
+              "38/seat"
+            ]
+          },
+          {
+            "label": "expansion to 240 seats",
+            "anyOf": [
+              "240"
+            ],
+            "allOf": [
+              "seat"
+            ]
+          },
+          {
+            "label": "annual total $109,440",
+            "anyOf": [
+              "109,440",
+              "109440",
+              "$109,440",
+              "109.4"
+            ]
+          },
+          {
+            "label": "15 percent services discount",
+            "anyOf": [
+              "15 percent",
+              "15%",
+              "fifteen percent"
+            ],
+            "allOf": [
+              "discount"
+            ]
+          },
+          {
+            "label": "99.9 percent uptime SLA",
+            "anyOf": [
+              "99.9"
+            ]
+          }
+        ],
+        "dates": [
+          {
+            "label": "renewal April 1",
+            "anyOf": [
+              "April 1",
+              "Apr 1",
+              "1 April",
+              "April 1st"
+            ]
+          },
+          {
+            "label": "onboarding start March 3 if legal signs",
+            "anyOf": [
+              "March 3",
+              "Mar 3",
+              "3 March",
+              "March 3rd"
+            ]
+          },
+          {
+            "label": "legal signature needed by Friday",
+            "anyOf": [
+              "Friday"
+            ],
+            "allOf": [
+              "legal"
+            ]
+          }
+        ],
+        "decisions": [
+          {
+            "label": "15 percent discount is not extended past March",
+            "anyOf": [
+              "not extending",
+              "not extend",
+              "won't extend",
+              "will not extend",
+              "not be extended",
+              "no extension",
+              "ends in March",
+              "expires"
+            ],
+            "allOf": [
+              "March"
+            ]
+          },
+          {
+            "label": "conditional: if legal signs by Friday, onboarding starts March 3",
+            "anyOf": [
+              "March 3",
+              "Mar 3",
+              "3 March"
+            ],
+            "allOf": [
+              "Friday"
+            ]
+          },
+          {
+            "label": "account expands to 240 seats on a two-year term",
+            "anyOf": [
+              "two year",
+              "two-year",
+              "2-year",
+              "2 year"
+            ],
+            "allOf": [
+              "240"
+            ]
+          }
+        ],
+        "actions": [
+          {
+            "label": "Nadia sends revised order form",
+            "anyOf": [
+              "order form"
+            ],
+            "allOf": [
+              "Nadia"
+            ]
+          },
+          {
+            "label": "Owen sends SSO setup guide by Wednesday",
+            "anyOf": [
+              "SSO",
+              "single sign-on"
+            ],
+            "allOf": [
+              "Owen"
+            ]
+          },
+          {
+            "label": "Lucia sends legal redlines on the DPA",
+            "anyOf": [
+              "redline"
+            ],
+            "allOf": [
+              "Lucia"
+            ]
+          },
+          {
+            "label": "Graham sends admin list by Monday",
+            "anyOf": [
+              "admin"
+            ],
+            "allOf": [
+              "Graham"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "hiring-sync-8min",
+      "title": "Weekly hiring sync",
+      "durationSeconds": 487.2,
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 8.4,
+          "speaker": "Renata",
+          "text": "Okay, let's get going, I've got a hard stop at two thirty. Felix, do you want to start with the pipeline?"
+        },
+        {
+          "start": 8.7,
+          "end": 17.1,
+          "speaker": "Felix",
+          "text": "Sure. So for the senior backend role, we have eight, no, sorry, 18 applicants who passed the resume screen this week."
+        },
+        {
+          "start": 17.4,
+          "end": 20.2,
+          "speaker": "Imani",
+          "text": "Eighteen? That's way up from last month."
+        },
+        {
+          "start": 20.5,
+          "end": 28.0,
+          "speaker": "Felix",
+          "text": "Yeah, the new posting is working. Putting the salary range in the listing helped a lot, people self select."
+        },
+        {
+          "start": 28.3,
+          "end": 31.9,
+          "speaker": "Renata",
+          "text": "How many of those have done the phone screen?"
+        },
+        {
+          "start": 32.2,
+          "end": 39.0,
+          "speaker": "Felix",
+          "text": "Seven so far. Four moved on to the technical interview, and two are scheduled for next week."
+        },
+        {
+          "start": 39.3,
+          "end": 47.3,
+          "speaker": "Imani",
+          "text": "I did two of the technical interviews. One was, um, really strong. The other one struggled with the concurrency question."
+        },
+        {
+          "start": 47.6,
+          "end": 48.8,
+          "speaker": "Renata",
+          "text": "The queue question?"
+        },
+        {
+          "start": 49.1,
+          "end": 56.3,
+          "speaker": "Imani",
+          "text": "Yeah, the queue one. Which, honestly, maybe the question is too hard for a forty five minute slot."
+        },
+        {
+          "start": 56.6,
+          "end": 60.6,
+          "speaker": "Renata",
+          "text": "Let's talk about that at the end. Felix, keep going."
+        },
+        {
+          "start": 60.9,
+          "end": 68.9,
+          "speaker": "Felix",
+          "text": "So the big one is Joon Park. He finished the onsite on Monday and the panel feedback is all in."
+        },
+        {
+          "start": 69.2,
+          "end": 69.6,
+          "speaker": "Renata",
+          "text": "And?"
+        },
+        {
+          "start": 69.9,
+          "end": 73.0,
+          "speaker": "Felix",
+          "text": "Four out of four yes. Two strong yes."
+        },
+        {
+          "start": 73.3,
+          "end": 84.5,
+          "speaker": "Imani",
+          "text": "I was one of the strong yeses. His system design round was the best I've seen this year. He actually asked about our failure modes before drawing anything."
+        },
+        {
+          "start": 84.8,
+          "end": 91.2,
+          "speaker": "Renata",
+          "text": "Okay. That matches what I heard from Dmitri. So, are we ready to make an offer?"
+        },
+        {
+          "start": 91.5,
+          "end": 98.3,
+          "speaker": "Felix",
+          "text": "I think we should, and quickly. He told me he has another offer that expires next week."
+        },
+        {
+          "start": 98.6,
+          "end": 99.8,
+          "speaker": "Renata",
+          "text": "What's he asking?"
+        },
+        {
+          "start": 100.1,
+          "end": 103.7,
+          "speaker": "Felix",
+          "text": "He's currently at 160 base. He's asking for 175."
+        },
+        {
+          "start": 104.0,
+          "end": 106.0,
+          "speaker": "Imani",
+          "text": "Where's our band for senior?"
+        },
+        {
+          "start": 106.3,
+          "end": 110.3,
+          "speaker": "Felix",
+          "text": "The band tops out at 180. Midpoint is about 168."
+        },
+        {
+          "start": 110.6,
+          "end": 119.4,
+          "speaker": "Renata",
+          "text": "I'd like to come in at $172,000 base. That's above midpoint, and it leaves room for a raise at the first review."
+        },
+        {
+          "start": 119.7,
+          "end": 123.6,
+          "speaker": "Felix",
+          "text": "He might push back. Can we add a signing bonus?"
+        },
+        {
+          "start": 123.9,
+          "end": 126.3,
+          "speaker": "Renata",
+          "text": "How much would close the gap?"
+        },
+        {
+          "start": 126.6,
+          "end": 132.2,
+          "speaker": "Felix",
+          "text": "I'd say $10,000 signing. That gets his first year above what he asked for."
+        },
+        {
+          "start": 132.5,
+          "end": 140.5,
+          "speaker": "Renata",
+          "text": "Okay. I'm fine with that. So the decision is, we offer Joon Park $172,000 base plus a $10,000 signing bonus."
+        },
+        {
+          "start": 140.8,
+          "end": 141.2,
+          "speaker": "Imani",
+          "text": "Agreed."
+        },
+        {
+          "start": 141.5,
+          "end": 149.1,
+          "speaker": "Felix",
+          "text": "And for the start date, he asked for May 5th. He wants to give his current team three weeks."
+        },
+        {
+          "start": 149.4,
+          "end": 154.6,
+          "speaker": "Renata",
+          "text": "May 5th is good. That's actually ideal, it's right after the planning cycle."
+        },
+        {
+          "start": 154.9,
+          "end": 162.9,
+          "speaker": "Felix",
+          "text": "Great. I'll send the offer letter by Thursday, April 17th. I need the signing bonus approved before I can send."
+        },
+        {
+          "start": 163.2,
+          "end": 168.4,
+          "speaker": "Renata",
+          "text": "I'll get the bonus approved by finance by Wednesday. I'll message Carla today."
+        },
+        {
+          "start": 168.7,
+          "end": 175.8,
+          "speaker": "Felix",
+          "text": "Thanks, Renata. One question on Joon. Do we offer remote or hybrid? He lives about an hour away."
+        },
+        {
+          "start": 176.1,
+          "end": 186.9,
+          "speaker": "Renata",
+          "text": "Hybrid, two days in the office. That's the same as the rest of the team. If he pushes on it, we can talk, but let's start there."
+        },
+        {
+          "start": 187.2,
+          "end": 193.2,
+          "speaker": "Imani",
+          "text": "He mentioned at the onsite that two days is fine. He actually likes the office."
+        },
+        {
+          "start": 193.5,
+          "end": 196.3,
+          "speaker": "Felix",
+          "text": "Okay, I'll write it up as hybrid."
+        },
+        {
+          "start": 196.6,
+          "end": 204.6,
+          "speaker": "Imani",
+          "text": "Who's going to be his onboarding buddy? I can do it, but I'm on call the week of the fifth."
+        },
+        {
+          "start": 204.9,
+          "end": 208.5,
+          "speaker": "Renata",
+          "text": "Let's ask Dmitri. Imani, you do the second week."
+        },
+        {
+          "start": 208.8,
+          "end": 210.0,
+          "speaker": "Imani",
+          "text": "Works for me."
+        },
+        {
+          "start": 210.3,
+          "end": 214.7,
+          "speaker": "Renata",
+          "text": "Okay. What about the other senior candidates? The ones behind Joon."
+        },
+        {
+          "start": 215.0,
+          "end": 224.1,
+          "speaker": "Felix",
+          "text": "So we have three candidates who passed the technical interview and are ready for onsites. Hannah Brooks, Teo Alvarez, and, um, Samir Haddad."
+        },
+        {
+          "start": 224.4,
+          "end": 227.2,
+          "speaker": "Imani",
+          "text": "Samir's the one from the payments company?"
+        },
+        {
+          "start": 227.5,
+          "end": 227.9,
+          "speaker": "Felix",
+          "text": "Yeah."
+        },
+        {
+          "start": 228.2,
+          "end": 232.2,
+          "speaker": "Renata",
+          "text": "Do we still want three more onsites if Joon accepts?"
+        },
+        {
+          "start": 232.5,
+          "end": 238.9,
+          "speaker": "Felix",
+          "text": "I'd say yes. We have two senior backend openings, not one. Joon fills one of them."
+        },
+        {
+          "start": 239.2,
+          "end": 244.0,
+          "speaker": "Renata",
+          "text": "Right, I forgot we got the second one approved. Okay, then yes."
+        },
+        {
+          "start": 244.3,
+          "end": 250.3,
+          "speaker": "Felix",
+          "text": "Imani, can you schedule the onsites? The panel needs at least one person from platform."
+        },
+        {
+          "start": 250.6,
+          "end": 256.6,
+          "speaker": "Imani",
+          "text": "Yeah. I'll schedule all three onsites for next week. I'll pull in Ravi from platform."
+        },
+        {
+          "start": 256.9,
+          "end": 264.1,
+          "speaker": "Renata",
+          "text": "Good. Make sure each panel has someone who hasn't interviewed for us before. We need more trained interviewers."
+        },
+        {
+          "start": 264.4,
+          "end": 269.1,
+          "speaker": "Imani",
+          "text": "Okay, I'll pair a new interviewer with a regular on each panel."
+        },
+        {
+          "start": 269.4,
+          "end": 271.4,
+          "speaker": "Renata",
+          "text": "Okay, the designer role. Felix?"
+        },
+        {
+          "start": 271.7,
+          "end": 278.1,
+          "speaker": "Felix",
+          "text": "So, for product designer, the pipeline is smaller. Nine applicants total, and one finalist, Sofia Mendez."
+        },
+        {
+          "start": 278.4,
+          "end": 283.2,
+          "speaker": "Imani",
+          "text": "I liked her portfolio a lot. The logistics dashboard case study especially."
+        },
+        {
+          "start": 283.5,
+          "end": 291.9,
+          "speaker": "Renata",
+          "text": "Me too. But I want to see how she handles critique. Can we do a portfolio review with the design team?"
+        },
+        {
+          "start": 292.2,
+          "end": 300.2,
+          "speaker": "Felix",
+          "text": "Yes. I can set up a final portfolio review on April 22nd. That's the earliest the design team is free."
+        },
+        {
+          "start": 300.5,
+          "end": 305.3,
+          "speaker": "Renata",
+          "text": "April 22nd. Okay, let's do that. Is she okay waiting that long?"
+        },
+        {
+          "start": 305.6,
+          "end": 312.8,
+          "speaker": "Felix",
+          "text": "She said she's not in a rush. She's currently at an agency and her contract runs through June."
+        },
+        {
+          "start": 313.1,
+          "end": 321.0,
+          "speaker": "Imani",
+          "text": "Also, for Sofia, can someone from engineering sit in on the portfolio review? Designers here work really closely with us."
+        },
+        {
+          "start": 321.3,
+          "end": 324.1,
+          "speaker": "Renata",
+          "text": "Good idea. You go, if you're free."
+        },
+        {
+          "start": 324.4,
+          "end": 325.6,
+          "speaker": "Imani",
+          "text": "I'll make time."
+        },
+        {
+          "start": 325.9,
+          "end": 331.9,
+          "speaker": "Renata",
+          "text": "Good. So, the junior role. I know we talked about opening a junior backend position."
+        },
+        {
+          "start": 332.2,
+          "end": 338.2,
+          "speaker": "Imani",
+          "text": "I'd really like one. We have so much small stuff that a junior could own."
+        },
+        {
+          "start": 338.5,
+          "end": 350.1,
+          "speaker": "Renata",
+          "text": "I hear you. But I talked to finance this morning, and we are not opening the junior role this quarter. Maybe next quarter, if the two senior hires land."
+        },
+        {
+          "start": 350.4,
+          "end": 354.0,
+          "speaker": "Imani",
+          "text": "Okay. That's, um, that's disappointing, but I get it."
+        },
+        {
+          "start": 354.3,
+          "end": 358.3,
+          "speaker": "Felix",
+          "text": "Should I tell the two internal referrals? They've been asking."
+        },
+        {
+          "start": 358.6,
+          "end": 363.8,
+          "speaker": "Renata",
+          "text": "Yes, please let them know it's paused, not cancelled. And keep their resumes."
+        },
+        {
+          "start": 364.1,
+          "end": 367.6,
+          "speaker": "Felix",
+          "text": "Will do. I'll email both of them this week."
+        },
+        {
+          "start": 367.9,
+          "end": 371.9,
+          "speaker": "Renata",
+          "text": "Now, Imani, the concurrency question. You said it's too hard?"
+        },
+        {
+          "start": 372.2,
+          "end": 383.4,
+          "speaker": "Imani",
+          "text": "I think it's the wrong question. It tests whether you've seen that exact problem before. Joon had, so he crushed it, but I don't think it predicts much."
+        },
+        {
+          "start": 383.7,
+          "end": 391.7,
+          "speaker": "Felix",
+          "text": "Candidates mention it in the feedback survey too. Three of the last five said it felt like a trick question."
+        },
+        {
+          "start": 392.0,
+          "end": 394.8,
+          "speaker": "Renata",
+          "text": "Okay. What would you replace it with?"
+        },
+        {
+          "start": 395.1,
+          "end": 405.1,
+          "speaker": "Imani",
+          "text": "Something closer to our actual work. Like, debugging a slow endpoint with real logs. We could use a sanitized version of the incident from February."
+        },
+        {
+          "start": 405.4,
+          "end": 408.6,
+          "speaker": "Renata",
+          "text": "I like that. Can you write it up?"
+        },
+        {
+          "start": 408.9,
+          "end": 414.8,
+          "speaker": "Imani",
+          "text": "Yeah. I'll draft a replacement interview question and send it to you by April 25th."
+        },
+        {
+          "start": 415.1,
+          "end": 421.5,
+          "speaker": "Renata",
+          "text": "Okay, and then we test it on two internal people before we use it with candidates."
+        },
+        {
+          "start": 421.8,
+          "end": 422.2,
+          "speaker": "Imani",
+          "text": "Sure."
+        },
+        {
+          "start": 422.5,
+          "end": 430.5,
+          "speaker": "Felix",
+          "text": "Quick thing on time to hire. We're averaging 34 days from first screen to offer. The goal is under 30."
+        },
+        {
+          "start": 430.8,
+          "end": 432.4,
+          "speaker": "Renata",
+          "text": "Where's the time going?"
+        },
+        {
+          "start": 432.7,
+          "end": 437.1,
+          "speaker": "Felix",
+          "text": "Mostly scheduling the onsites. Panels take about ten days to book."
+        },
+        {
+          "start": 437.4,
+          "end": 442.2,
+          "speaker": "Imani",
+          "text": "That's on us. Engineers decline the invites and don't suggest another slot."
+        },
+        {
+          "start": 442.5,
+          "end": 449.3,
+          "speaker": "Renata",
+          "text": "Okay. I'll bring that up at the engineering all hands. Interview slots are part of the job."
+        },
+        {
+          "start": 449.6,
+          "end": 452.4,
+          "speaker": "Felix",
+          "text": "Thank you. That would help a lot."
+        },
+        {
+          "start": 452.7,
+          "end": 453.9,
+          "speaker": "Renata",
+          "text": "Anything else? Felix?"
+        },
+        {
+          "start": 454.2,
+          "end": 461.0,
+          "speaker": "Felix",
+          "text": "Just one reminder. The referral bonus went up to $3,000 this quarter, so please tell your teams."
+        },
+        {
+          "start": 461.3,
+          "end": 464.8,
+          "speaker": "Imani",
+          "text": "Oh, nice. I'll put it in the team channel."
+        },
+        {
+          "start": 465.1,
+          "end": 481.9,
+          "speaker": "Renata",
+          "text": "Okay. So, to sum up. Felix sends the Joon Park offer by April 17th once I get the bonus approved. Imani schedules three onsites and drafts the new question. Sofia's portfolio review is on April 22nd. And no junior role this quarter."
+        },
+        {
+          "start": 482.2,
+          "end": 483.0,
+          "speaker": "Felix",
+          "text": "Got it."
+        },
+        {
+          "start": 483.3,
+          "end": 484.1,
+          "speaker": "Imani",
+          "text": "Sounds good."
+        },
+        {
+          "start": 484.4,
+          "end": 487.2,
+          "speaker": "Renata",
+          "text": "Great, thanks both. See you next week."
+        }
+      ],
+      "expected": {
+        "names": [
+          {
+            "label": "Joon Park (senior backend candidate)",
+            "anyOf": [
+              "Joon",
+              "Park"
+            ]
+          },
+          {
+            "label": "Sofia Mendez (designer finalist)",
+            "anyOf": [
+              "Sofia",
+              "Mendez"
+            ]
+          },
+          {
+            "label": "Felix (recruiter)",
+            "anyOf": [
+              "Felix"
+            ]
+          },
+          {
+            "label": "Imani (engineering)",
+            "anyOf": [
+              "Imani"
+            ]
+          },
+          {
+            "label": "Renata (hiring manager)",
+            "anyOf": [
+              "Renata"
+            ]
+          }
+        ],
+        "numbers": [
+          {
+            "label": "18 applicants passed screen (corrected from eight)",
+            "anyOf": [
+              "18",
+              "eighteen"
+            ],
+            "allOf": [
+              "applicant"
+            ]
+          },
+          {
+            "label": "base salary offer $172,000",
+            "anyOf": [
+              "172,000",
+              "172000",
+              "$172,000",
+              "$172k",
+              "172k",
+              "172K"
+            ]
+          },
+          {
+            "label": "signing bonus $10,000",
+            "anyOf": [
+              "10,000",
+              "10000",
+              "$10,000",
+              "$10k",
+              "10k",
+              "10K"
+            ],
+            "allOf": [
+              "signing"
+            ]
+          },
+          {
+            "label": "three onsites to schedule",
+            "anyOf": [
+              "three",
+              "3 onsite",
+              "3 candidates"
+            ],
+            "allOf": [
+              "onsite"
+            ]
+          },
+          {
+            "label": "time to hire 34 days",
+            "anyOf": [
+              "34"
+            ],
+            "allOf": [
+              "day"
+            ]
+          },
+          {
+            "label": "referral bonus $3,000",
+            "anyOf": [
+              "3,000",
+              "3000",
+              "$3,000",
+              "$3k",
+              "3k",
+              "3K"
+            ],
+            "allOf": [
+              "referral"
+            ]
+          }
+        ],
+        "dates": [
+          {
+            "label": "Joon start date May 5",
+            "anyOf": [
+              "May 5",
+              "5 May",
+              "May 5th"
+            ]
+          },
+          {
+            "label": "offer letter by April 17",
+            "anyOf": [
+              "April 17",
+              "Apr 17",
+              "17 April",
+              "April 17th"
+            ]
+          },
+          {
+            "label": "Sofia portfolio review April 22",
+            "anyOf": [
+              "April 22",
+              "Apr 22",
+              "22 April",
+              "April 22nd"
+            ]
+          }
+        ],
+        "decisions": [
+          {
+            "label": "offer Joon Park $172,000 base plus signing bonus",
+            "anyOf": [
+              "172"
+            ],
+            "allOf": [
+              "Joon"
+            ]
+          },
+          {
+            "label": "not opening the junior role this quarter",
+            "anyOf": [
+              "not opening",
+              "not open",
+              "won't open",
+              "no junior",
+              "paused",
+              "pause",
+              "deferred",
+              "on hold"
+            ],
+            "allOf": [
+              "junior"
+            ]
+          },
+          {
+            "label": "hold three more onsites for second senior opening",
+            "anyOf": [
+              "three",
+              "3"
+            ],
+            "allOf": [
+              "onsite"
+            ]
+          }
+        ],
+        "actions": [
+          {
+            "label": "Felix sends offer letter to Joon by April 17",
+            "anyOf": [
+              "April 17",
+              "Apr 17",
+              "17 April"
+            ],
+            "allOf": [
+              "Felix",
+              "offer"
+            ]
+          },
+          {
+            "label": "Renata gets signing bonus approved by Wednesday",
+            "anyOf": [
+              "bonus"
+            ],
+            "allOf": [
+              "Renata"
+            ]
+          },
+          {
+            "label": "Imani schedules three onsites next week",
+            "anyOf": [
+              "onsite"
+            ],
+            "allOf": [
+              "Imani"
+            ]
+          },
+          {
+            "label": "Imani drafts replacement interview question by April 25",
+            "anyOf": [
+              "April 25",
+              "Apr 25",
+              "25 April"
+            ],
+            "allOf": [
+              "Imani",
+              "question"
+            ]
+          },
+          {
+            "label": "Felix emails internal referrals that junior role is paused",
+            "anyOf": [
+              "referral"
+            ],
+            "allOf": [
+              "Felix"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "planning-30min",
+      "title": "Q3 quarterly planning",
+      "durationSeconds": 1812.6,
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 3.5,
+          "speaker": "Helen",
+          "text": "Okay, I think everyone's here. Tobias, are you on?"
+        },
+        {
+          "start": 3.8,
+          "end": 7.3,
+          "speaker": "Tobias",
+          "text": "Yeah, I'm here. Sorry, my camera's being weird today."
+        },
+        {
+          "start": 7.6,
+          "end": 12.3,
+          "speaker": "Helen",
+          "text": "No problem. So, um, this is the Q3 planning session for Cairn."
+        },
+        {
+          "start": 12.6,
+          "end": 19.5,
+          "speaker": "Helen",
+          "text": "We have six things on the agenda. Roadmap, budget, hiring, the launch date, the support backlog, and risks."
+        },
+        {
+          "start": 19.8,
+          "end": 35.4,
+          "speaker": "Helen",
+          "text": "I want to give each about five minutes, so let's be disciplined. If something needs a longer conversation, we park it and I'll set up a separate meeting. I'd rather finish the whole agenda than go deep on one item."
+        },
+        {
+          "start": 35.7,
+          "end": 36.8,
+          "speaker": "Arjun",
+          "text": "Famous last words."
+        },
+        {
+          "start": 37.1,
+          "end": 42.2,
+          "speaker": "Helen",
+          "text": "I know, I know. Okay, roadmap first. Arjun, do you want to start?"
+        },
+        {
+          "start": 42.5,
+          "end": 46.4,
+          "speaker": "Arjun",
+          "text": "Sure. So the big item for Q3 is offline mode."
+        },
+        {
+          "start": 46.7,
+          "end": 64.9,
+          "speaker": "Arjun",
+          "text": "Field technicians keep losing work when they drop signal, and it's the number one complaint in the app reviews. We have technicians in basements, in rural areas, in hospitals with no reception at all, and right now the app just, um, it just gives up on them."
+        },
+        {
+          "start": 65.2,
+          "end": 69.5,
+          "speaker": "Beatriz",
+          "text": "It's the number one complaint in support too. By a lot."
+        },
+        {
+          "start": 69.8,
+          "end": 77.2,
+          "speaker": "Arjun",
+          "text": "Right. So my proposal is that we put 40 percent of engineering capacity on offline mode for the quarter."
+        },
+        {
+          "start": 77.5,
+          "end": 79.8,
+          "speaker": "Maya",
+          "text": "Forty percent of the whole team?"
+        },
+        {
+          "start": 80.1,
+          "end": 85.6,
+          "speaker": "Arjun",
+          "text": "Of the whole team, yeah. That's roughly, uh, nine of our twenty two engineers."
+        },
+        {
+          "start": 85.9,
+          "end": 88.2,
+          "speaker": "Helen",
+          "text": "And what does that push out?"
+        },
+        {
+          "start": 88.5,
+          "end": 97.4,
+          "speaker": "Arjun",
+          "text": "Mostly the Gantt view. The scheduling team wanted it, but honestly it's a big build. It's at least a quarter on its own."
+        },
+        {
+          "start": 97.7,
+          "end": 104.7,
+          "speaker": "Tobias",
+          "text": "Sales has been asking about the Gantt view, though. A couple of the enterprise prospects brought it up."
+        },
+        {
+          "start": 105.0,
+          "end": 110.8,
+          "speaker": "Arjun",
+          "text": "I know. But we can't do both well. We'd end up with two half-finished things."
+        },
+        {
+          "start": 111.1,
+          "end": 111.9,
+          "speaker": "Kofi",
+          "text": "Which prospects?"
+        },
+        {
+          "start": 112.2,
+          "end": 115.7,
+          "speaker": "Tobias",
+          "text": "Hollis Utilities and, uh, the county one. Brennan County."
+        },
+        {
+          "start": 116.0,
+          "end": 119.1,
+          "speaker": "Helen",
+          "text": "Did either of them make it a requirement?"
+        },
+        {
+          "start": 119.4,
+          "end": 122.5,
+          "speaker": "Tobias",
+          "text": "Brennan said nice to have. Hollis didn't say."
+        },
+        {
+          "start": 122.8,
+          "end": 131.8,
+          "speaker": "Helen",
+          "text": "Okay. Then I'm going to make the call. We are not building the Gantt view this quarter. Offline mode gets the 40 percent."
+        },
+        {
+          "start": 132.1,
+          "end": 135.9,
+          "speaker": "Tobias",
+          "text": "Okay. I'll let sales know so they stop promising it."
+        },
+        {
+          "start": 136.2,
+          "end": 140.1,
+          "speaker": "Helen",
+          "text": "Please do. And it's not dead, it's just not Q3."
+        },
+        {
+          "start": 140.4,
+          "end": 142.4,
+          "speaker": "Helen",
+          "text": "Kofi, Beatriz, anything on roadmap?"
+        },
+        {
+          "start": 142.7,
+          "end": 148.9,
+          "speaker": "Kofi",
+          "text": "Just, um, does offline mode change the hiring plan? Like, do we need a mobile specialist?"
+        },
+        {
+          "start": 149.2,
+          "end": 152.3,
+          "speaker": "Arjun",
+          "text": "Maybe. Let's hold that for the hiring section."
+        },
+        {
+          "start": 152.6,
+          "end": 157.2,
+          "speaker": "Beatriz",
+          "text": "From support, the other thing is the, uh, the recurring jobs bug."
+        },
+        {
+          "start": 157.5,
+          "end": 162.2,
+          "speaker": "Beatriz",
+          "text": "Customers who set up weekly jobs see duplicates after the clocks change."
+        },
+        {
+          "start": 162.5,
+          "end": 167.9,
+          "speaker": "Arjun",
+          "text": "That's on the list. It's small. We'll fix it in the next maintenance release."
+        },
+        {
+          "start": 168.2,
+          "end": 172.5,
+          "speaker": "Beatriz",
+          "text": "Okay, good. Because it comes back every spring and every fall."
+        },
+        {
+          "start": 172.8,
+          "end": 178.3,
+          "speaker": "Helen",
+          "text": "And the 3.0 launch, just so everyone has the baseline, is currently June 2nd."
+        },
+        {
+          "start": 178.6,
+          "end": 182.8,
+          "speaker": "Helen",
+          "text": "We'll come back to whether that holds in the launch section."
+        },
+        {
+          "start": 183.1,
+          "end": 187.0,
+          "speaker": "Arjun",
+          "text": "Yeah, I have, uh, I have thoughts on that one."
+        },
+        {
+          "start": 187.3,
+          "end": 192.0,
+          "speaker": "Helen",
+          "text": "Later. Arjun, can you get me a written spec for offline mode?"
+        },
+        {
+          "start": 192.3,
+          "end": 196.5,
+          "speaker": "Arjun",
+          "text": "Yes. I'll have the offline mode spec done by May 9th."
+        },
+        {
+          "start": 196.8,
+          "end": 198.0,
+          "speaker": "Helen",
+          "text": "May 9th. Great."
+        },
+        {
+          "start": 198.3,
+          "end": 207.6,
+          "speaker": "Maya",
+          "text": "Can the spec include a rough cost? Like, if it needs new sync infrastructure, I want to see that before the budget is locked."
+        },
+        {
+          "start": 207.9,
+          "end": 210.6,
+          "speaker": "Arjun",
+          "text": "Sure. I'll add an infrastructure estimate section."
+        },
+        {
+          "start": 210.9,
+          "end": 216.4,
+          "speaker": "Tobias",
+          "text": "And a one paragraph summary I can actually use in marketing would be nice."
+        },
+        {
+          "start": 216.7,
+          "end": 219.4,
+          "speaker": "Arjun",
+          "text": "Ha. Okay, a paragraph for Tobias. Noted."
+        },
+        {
+          "start": 219.7,
+          "end": 226.3,
+          "speaker": "Maya",
+          "text": "Does offline mode change our storage costs on the device side? Like, do customers need bigger phones?"
+        },
+        {
+          "start": 226.6,
+          "end": 233.2,
+          "speaker": "Arjun",
+          "text": "No. We cache the next three days of jobs. It's small. A few megabytes for most technicians."
+        },
+        {
+          "start": 233.5,
+          "end": 235.1,
+          "speaker": "Maya",
+          "text": "Okay. That's fine then."
+        },
+        {
+          "start": 235.4,
+          "end": 241.2,
+          "speaker": "Helen",
+          "text": "What about the tablet app? Does offline mode ship on tablets at the same time?"
+        },
+        {
+          "start": 241.5,
+          "end": 247.7,
+          "speaker": "Arjun",
+          "text": "Phones first. Tablets about a month later. It's the same code, but the layouts need work."
+        },
+        {
+          "start": 248.0,
+          "end": 251.1,
+          "speaker": "Beatriz",
+          "text": "Most of the complaints are from phones anyway."
+        },
+        {
+          "start": 251.4,
+          "end": 253.4,
+          "speaker": "Helen",
+          "text": "Okay. Phones first is fine."
+        },
+        {
+          "start": 253.7,
+          "end": 260.6,
+          "speaker": "Kofi",
+          "text": "Is there anything on the roadmap for the admin console? I keep hearing from our own ops team."
+        },
+        {
+          "start": 260.9,
+          "end": 265.2,
+          "speaker": "Arjun",
+          "text": "Small stuff. Bulk user import is in. Custom roles are not."
+        },
+        {
+          "start": 265.5,
+          "end": 269.0,
+          "speaker": "Helen",
+          "text": "That's fine for now. Anything else on the roadmap?"
+        },
+        {
+          "start": 269.3,
+          "end": 277.9,
+          "speaker": "Tobias",
+          "text": "Just a note that the customer advisory board meets in, um, two weeks. I'd like to show them the offline mode designs."
+        },
+        {
+          "start": 278.2,
+          "end": 281.3,
+          "speaker": "Helen",
+          "text": "Good idea, if the designs are ready. Arjun?"
+        },
+        {
+          "start": 281.6,
+          "end": 283.5,
+          "speaker": "Arjun",
+          "text": "They'll be rough, but yes."
+        },
+        {
+          "start": 283.8,
+          "end": 293.1,
+          "speaker": "Helen",
+          "text": "One more roadmap question, Arjun. How are we handling conflicts in offline mode? Like, what does the technician actually see when something didn't sync?"
+        },
+        {
+          "start": 293.4,
+          "end": 305.1,
+          "speaker": "Arjun",
+          "text": "So the plan is a small banner on the job card. It says the job has changes waiting to upload, and it shows the time of the last successful sync."
+        },
+        {
+          "start": 305.4,
+          "end": 314.7,
+          "speaker": "Arjun",
+          "text": "If there's a conflict, the dispatcher picks which version wins, not the technician. Technicians are in the field, they shouldn't be resolving merge problems."
+        },
+        {
+          "start": 315.0,
+          "end": 322.4,
+          "speaker": "Beatriz",
+          "text": "Can the dispatcher see both versions side by side? That's going to be the first thing they ask for."
+        },
+        {
+          "start": 322.7,
+          "end": 328.9,
+          "speaker": "Arjun",
+          "text": "That's the plan, yeah. Side by side, with the differences highlighted. It's in the designs already."
+        },
+        {
+          "start": 329.2,
+          "end": 334.6,
+          "speaker": "Tobias",
+          "text": "And photos? Technicians attach a lot of photos to jobs. Do those wait too?"
+        },
+        {
+          "start": 334.9,
+          "end": 346.2,
+          "speaker": "Arjun",
+          "text": "Photos queue up and upload when the signal comes back. We compress them on the phone first, so it's not, uh, it's not going to eat anyone's data plan."
+        },
+        {
+          "start": 346.5,
+          "end": 352.3,
+          "speaker": "Maya",
+          "text": "Who pays for the extra storage if every technician uploads a hundred photos a day?"
+        },
+        {
+          "start": 352.6,
+          "end": 358.1,
+          "speaker": "Arjun",
+          "text": "We already store those photos today. Offline doesn't change the volume, just the timing."
+        },
+        {
+          "start": 358.4,
+          "end": 360.3,
+          "speaker": "Maya",
+          "text": "Okay. Then I don't care."
+        },
+        {
+          "start": 360.6,
+          "end": 367.6,
+          "speaker": "Kofi",
+          "text": "Is there a way to tell a technician they're offline before they start a job? Like, a warning?"
+        },
+        {
+          "start": 367.9,
+          "end": 378.4,
+          "speaker": "Arjun",
+          "text": "There's an indicator in the header. A grey cloud when you're offline. We tested a pop-up and people hated it, they just tapped it away without reading."
+        },
+        {
+          "start": 378.7,
+          "end": 379.8,
+          "speaker": "Helen",
+          "text": "Good. No pop-ups."
+        },
+        {
+          "start": 380.1,
+          "end": 393.7,
+          "speaker": "Beatriz",
+          "text": "From the support side, I'd love a way to see a technician's sync queue from the admin console. When a customer calls and says their work vanished, we have no way to check right now."
+        },
+        {
+          "start": 394.0,
+          "end": 405.7,
+          "speaker": "Arjun",
+          "text": "That's a good one. It's not in the spec yet. I'll add a read-only sync queue view for support, and we can decide later whether it makes the first release."
+        },
+        {
+          "start": 406.0,
+          "end": 411.8,
+          "speaker": "Kofi",
+          "text": "Will technicians need training for any of this, or is it supposed to just work?"
+        },
+        {
+          "start": 412.1,
+          "end": 422.2,
+          "speaker": "Arjun",
+          "text": "It should just work. The only new thing they see is the cloud icon, and maybe the banner. If they need training, we designed it wrong."
+        },
+        {
+          "start": 422.5,
+          "end": 430.7,
+          "speaker": "Tobias",
+          "text": "For the advisory board, can we show a short video instead of static screens? It lands much better with that group."
+        },
+        {
+          "start": 431.0,
+          "end": 436.4,
+          "speaker": "Arjun",
+          "text": "If the prototype is stable enough, sure. I'll record something rough on my phone."
+        },
+        {
+          "start": 436.7,
+          "end": 441.0,
+          "speaker": "Helen",
+          "text": "Okay. Let's keep moving, we're already a little over on roadmap."
+        },
+        {
+          "start": 441.3,
+          "end": 444.0,
+          "speaker": "Helen",
+          "text": "Okay. Let's move on to budget. Maya."
+        },
+        {
+          "start": 444.3,
+          "end": 450.5,
+          "speaker": "Maya",
+          "text": "Okay. So, the headline. The total Q3 operating budget is $1.2 million. That's flat with Q2."
+        },
+        {
+          "start": 450.8,
+          "end": 453.1,
+          "speaker": "Helen",
+          "text": "Flat even with the offline work?"
+        },
+        {
+          "start": 453.4,
+          "end": 467.0,
+          "speaker": "Maya",
+          "text": "Flat. Which means something has to give somewhere else. I went through every line last week, and there are really only three places where the numbers moved enough to matter, so I'll walk through those."
+        },
+        {
+          "start": 467.3,
+          "end": 473.2,
+          "speaker": "Maya",
+          "text": "The biggest change is cloud. Our cloud spend is up 22 percent quarter over quarter."
+        },
+        {
+          "start": 473.5,
+          "end": 479.3,
+          "speaker": "Arjun",
+          "text": "That's mostly the new search cluster. And, um, logs. We keep way too many logs."
+        },
+        {
+          "start": 479.6,
+          "end": 483.9,
+          "speaker": "Maya",
+          "text": "Whatever it is, I need it to stop growing that fast."
+        },
+        {
+          "start": 484.2,
+          "end": 489.6,
+          "speaker": "Arjun",
+          "text": "We can cut log retention from ninety days to thirty. That alone is meaningful."
+        },
+        {
+          "start": 489.9,
+          "end": 491.5,
+          "speaker": "Maya",
+          "text": "Good. Please do that."
+        },
+        {
+          "start": 491.8,
+          "end": 496.4,
+          "speaker": "Arjun",
+          "text": "Okay. I'll check with Beatriz first, support sometimes needs the old logs."
+        },
+        {
+          "start": 496.7,
+          "end": 501.4,
+          "speaker": "Beatriz",
+          "text": "Thirty days is fine for us. We almost never go further back."
+        },
+        {
+          "start": 501.7,
+          "end": 504.8,
+          "speaker": "Maya",
+          "text": "Second, marketing. Tobias, your Q3 line is $310,000."
+        },
+        {
+          "start": 505.1,
+          "end": 508.2,
+          "speaker": "Tobias",
+          "text": "That's, uh, that's less than I asked for."
+        },
+        {
+          "start": 508.5,
+          "end": 511.2,
+          "speaker": "Maya",
+          "text": "It is. You asked for three sixty."
+        },
+        {
+          "start": 511.5,
+          "end": 518.9,
+          "speaker": "Tobias",
+          "text": "Right. Okay. Most of it is the launch anyway. If the launch date moves, the spend moves with it."
+        },
+        {
+          "start": 519.2,
+          "end": 523.9,
+          "speaker": "Maya",
+          "text": "Understood. We can shift it inside the quarter, just not grow it."
+        },
+        {
+          "start": 524.2,
+          "end": 528.4,
+          "speaker": "Tobias",
+          "text": "Okay. Can I at least keep the trade show in September?"
+        },
+        {
+          "start": 528.7,
+          "end": 533.0,
+          "speaker": "Maya",
+          "text": "The trade show is in the 310. You decide what goes."
+        },
+        {
+          "start": 533.3,
+          "end": 535.2,
+          "speaker": "Tobias",
+          "text": "Fine. I'll make it work."
+        },
+        {
+          "start": 535.5,
+          "end": 539.8,
+          "speaker": "Maya",
+          "text": "Third, contractors. We've got three engineering contractors on the integrations work."
+        },
+        {
+          "start": 540.1,
+          "end": 544.4,
+          "speaker": "Maya",
+          "text": "I'm proposing we cut engineering contractor spend by $80,000 this quarter."
+        },
+        {
+          "start": 544.7,
+          "end": 547.0,
+          "speaker": "Arjun",
+          "text": "That's basically two of the three."
+        },
+        {
+          "start": 547.3,
+          "end": 547.7,
+          "speaker": "Maya",
+          "text": "Yes."
+        },
+        {
+          "start": 548.0,
+          "end": 556.5,
+          "speaker": "Arjun",
+          "text": "I can live with that if the integrations work slips to Q4. The Salesforce connector is the only one that's really urgent."
+        },
+        {
+          "start": 556.8,
+          "end": 561.5,
+          "speaker": "Tobias",
+          "text": "The Salesforce one is the one sales cares about, so that's fine."
+        },
+        {
+          "start": 561.8,
+          "end": 568.8,
+          "speaker": "Helen",
+          "text": "Okay. Decision: we cut engineering contractor spend by $80,000, and the integrations other than Salesforce move to Q4."
+        },
+        {
+          "start": 569.1,
+          "end": 573.4,
+          "speaker": "Kofi",
+          "text": "Does that affect support contractors? Because Beatriz is going to ask."
+        },
+        {
+          "start": 573.7,
+          "end": 576.0,
+          "speaker": "Beatriz",
+          "text": "I am absolutely going to ask."
+        },
+        {
+          "start": 576.3,
+          "end": 582.1,
+          "speaker": "Maya",
+          "text": "No. This is engineering contractors only. Support is a separate line, we'll get to that."
+        },
+        {
+          "start": 582.4,
+          "end": 583.2,
+          "speaker": "Beatriz",
+          "text": "Okay, good."
+        },
+        {
+          "start": 583.5,
+          "end": 587.4,
+          "speaker": "Helen",
+          "text": "Maya, what about extra engineers? I know Arjun wants more."
+        },
+        {
+          "start": 587.7,
+          "end": 589.2,
+          "speaker": "Arjun",
+          "text": "I always want more."
+        },
+        {
+          "start": 589.5,
+          "end": 598.1,
+          "speaker": "Maya",
+          "text": "So here's where I land. If ARR passes $9 million by the end of June, we hire two more engineers in Q3."
+        },
+        {
+          "start": 598.4,
+          "end": 602.3,
+          "speaker": "Maya",
+          "text": "If it doesn't, we wait until Q4 and look again."
+        },
+        {
+          "start": 602.6,
+          "end": 604.1,
+          "speaker": "Helen",
+          "text": "Where are we now?"
+        },
+        {
+          "start": 604.4,
+          "end": 605.6,
+          "speaker": "Maya",
+          "text": "About $8.6 million."
+        },
+        {
+          "start": 605.9,
+          "end": 610.6,
+          "speaker": "Tobias",
+          "text": "So we need roughly $400,000 in new ARR in about seven weeks."
+        },
+        {
+          "start": 610.9,
+          "end": 614.0,
+          "speaker": "Maya",
+          "text": "Roughly, yes. It's doable but it's not certain."
+        },
+        {
+          "start": 614.3,
+          "end": 621.2,
+          "speaker": "Arjun",
+          "text": "And if we hit it, can I start interviewing before July? Otherwise the hires land in, like, October."
+        },
+        {
+          "start": 621.5,
+          "end": 626.6,
+          "speaker": "Maya",
+          "text": "You can start interviewing. You can't make offers until we cross the line."
+        },
+        {
+          "start": 626.9,
+          "end": 627.3,
+          "speaker": "Arjun",
+          "text": "Fair."
+        },
+        {
+          "start": 627.6,
+          "end": 635.0,
+          "speaker": "Helen",
+          "text": "Okay. So that's the rule. Two more engineers only if ARR passes $9 million by the end of June."
+        },
+        {
+          "start": 635.3,
+          "end": 640.7,
+          "speaker": "Maya",
+          "text": "I'll send the revised budget sheet with all of this by Friday, May 16th."
+        },
+        {
+          "start": 641.0,
+          "end": 641.8,
+          "speaker": "Helen",
+          "text": "Thanks, Maya."
+        },
+        {
+          "start": 642.1,
+          "end": 647.9,
+          "speaker": "Kofi",
+          "text": "Can the sheet show headcount cost separately? It helps me when I put offers together."
+        },
+        {
+          "start": 648.2,
+          "end": 651.7,
+          "speaker": "Maya",
+          "text": "Yes, I'll break out headcount on its own tab."
+        },
+        {
+          "start": 652.0,
+          "end": 652.8,
+          "speaker": "Helen",
+          "text": "And travel?"
+        },
+        {
+          "start": 653.1,
+          "end": 657.7,
+          "speaker": "Maya",
+          "text": "Travel is flat. Same as Q2. Please don't make me regret that."
+        },
+        {
+          "start": 658.0,
+          "end": 658.8,
+          "speaker": "Tobias",
+          "text": "No promises."
+        },
+        {
+          "start": 659.1,
+          "end": 668.8,
+          "speaker": "Helen",
+          "text": "Maya, one more question on budget. What does the reserve look like? If something goes wrong in Q3, how much room do we actually have?"
+        },
+        {
+          "start": 669.1,
+          "end": 675.3,
+          "speaker": "Maya",
+          "text": "We hold a contingency inside the 1.2. It's small. I'd rather not touch it before August."
+        },
+        {
+          "start": 675.6,
+          "end": 681.9,
+          "speaker": "Arjun",
+          "text": "Does the contingency cover the maps thing? I know we're coming to that at the end."
+        },
+        {
+          "start": 682.2,
+          "end": 685.3,
+          "speaker": "Maya",
+          "text": "Let's hold that for risks. Short answer, partly."
+        },
+        {
+          "start": 685.6,
+          "end": 691.8,
+          "speaker": "Kofi",
+          "text": "And tools. We're paying for two applicant tracking systems right now because the migration never finished."
+        },
+        {
+          "start": 692.1,
+          "end": 696.3,
+          "speaker": "Maya",
+          "text": "Oh, I didn't know that. How much is the old one?"
+        },
+        {
+          "start": 696.6,
+          "end": 700.5,
+          "speaker": "Kofi",
+          "text": "A few hundred a month. Not huge, but it's silly."
+        },
+        {
+          "start": 700.8,
+          "end": 703.9,
+          "speaker": "Maya",
+          "text": "Cancel it once the migration is done. Please."
+        },
+        {
+          "start": 704.2,
+          "end": 706.6,
+          "speaker": "Kofi",
+          "text": "I'll finish the migration this month."
+        },
+        {
+          "start": 706.9,
+          "end": 714.6,
+          "speaker": "Beatriz",
+          "text": "Same for support. We have a chat tool nobody uses anymore. I'll check when it renews and turn it off."
+        },
+        {
+          "start": 714.9,
+          "end": 720.8,
+          "speaker": "Maya",
+          "text": "Thank you. Honestly, this is how the budget stays flat. It's all the small things."
+        },
+        {
+          "start": 721.1,
+          "end": 727.3,
+          "speaker": "Tobias",
+          "text": "Can I ask about the website rebuild? It was in the Q2 plan and it slipped."
+        },
+        {
+          "start": 727.6,
+          "end": 733.0,
+          "speaker": "Maya",
+          "text": "It's not in Q3. If marketing wants it, it comes out of the 310."
+        },
+        {
+          "start": 733.3,
+          "end": 737.6,
+          "speaker": "Tobias",
+          "text": "Okay. Then it waits. The launch matters more than the website."
+        },
+        {
+          "start": 737.9,
+          "end": 739.8,
+          "speaker": "Helen",
+          "text": "Agreed. The website rebuild waits."
+        },
+        {
+          "start": 740.1,
+          "end": 753.3,
+          "speaker": "Arjun",
+          "text": "On cloud, I want to be honest that the log change won't fix everything. The search cluster is oversized for what we use, and resizing it means a maintenance window, probably a Saturday night."
+        },
+        {
+          "start": 753.6,
+          "end": 755.6,
+          "speaker": "Maya",
+          "text": "How much does resizing save?"
+        },
+        {
+          "start": 755.9,
+          "end": 766.0,
+          "speaker": "Arjun",
+          "text": "I don't have a number yet. I'll put it in the offline spec next to the infrastructure estimate, since it's the same people looking at it."
+        },
+        {
+          "start": 766.3,
+          "end": 771.3,
+          "speaker": "Maya",
+          "text": "Fine. As long as I see it before the budget sheet goes out."
+        },
+        {
+          "start": 771.6,
+          "end": 774.3,
+          "speaker": "Helen",
+          "text": "Okay. Good. Let's move to hiring. Kofi."
+        },
+        {
+          "start": 774.6,
+          "end": 778.1,
+          "speaker": "Kofi",
+          "text": "Okay. So we have seven open roles right now."
+        },
+        {
+          "start": 778.4,
+          "end": 794.8,
+          "speaker": "Kofi",
+          "text": "Three engineers, two support specialists, one product designer, and one product manager. The engineering roles have been open the longest, and the pipeline for those is, uh, thin, honestly. We get a lot of applicants but very few with the right background."
+        },
+        {
+          "start": 795.1,
+          "end": 800.1,
+          "speaker": "Helen",
+          "text": "And the designer role, is that the backfill for, uh, the design lead?"
+        },
+        {
+          "start": 800.4,
+          "end": 806.2,
+          "speaker": "Kofi",
+          "text": "No, the design lead is filled. That's the good news. Lena Okafor accepted on Monday."
+        },
+        {
+          "start": 806.5,
+          "end": 808.1,
+          "speaker": "Kofi",
+          "text": "She starts June 9th."
+        },
+        {
+          "start": 808.4,
+          "end": 809.5,
+          "speaker": "Tobias",
+          "text": "Oh, that's great."
+        },
+        {
+          "start": 809.8,
+          "end": 813.7,
+          "speaker": "Arjun",
+          "text": "Nice. Finally. We've been without a design lead since January."
+        },
+        {
+          "start": 814.0,
+          "end": 818.7,
+          "speaker": "Kofi",
+          "text": "The designer role is a separate mid-level role, it reports to Lena."
+        },
+        {
+          "start": 819.0,
+          "end": 822.1,
+          "speaker": "Helen",
+          "text": "Got it. How is time to fill looking?"
+        },
+        {
+          "start": 822.4,
+          "end": 827.4,
+          "speaker": "Kofi",
+          "text": "The average is 45 days right now. Engineering is longer, more like sixty."
+        },
+        {
+          "start": 827.7,
+          "end": 834.4,
+          "speaker": "Arjun",
+          "text": "For the offline work, I'd really like one of the three engineers to have mobile sync experience."
+        },
+        {
+          "start": 834.7,
+          "end": 839.7,
+          "speaker": "Kofi",
+          "text": "I can rewrite the job description. Is that a must-have or a nice-to-have?"
+        },
+        {
+          "start": 840.0,
+          "end": 843.9,
+          "speaker": "Arjun",
+          "text": "Must-have for one of them. Nice-to-have for the other two."
+        },
+        {
+          "start": 844.2,
+          "end": 851.2,
+          "speaker": "Kofi",
+          "text": "Okay. That will make the one role slower, just so you know. There aren't many of those people."
+        },
+        {
+          "start": 851.5,
+          "end": 855.0,
+          "speaker": "Arjun",
+          "text": "I know. I'd rather wait for the right person."
+        },
+        {
+          "start": 855.3,
+          "end": 861.5,
+          "speaker": "Beatriz",
+          "text": "The two support roles are the ones I really need. We are, um, we're drowning, honestly."
+        },
+        {
+          "start": 861.8,
+          "end": 867.2,
+          "speaker": "Kofi",
+          "text": "I know. Those listings aren't posted yet because we were waiting on the budget."
+        },
+        {
+          "start": 867.5,
+          "end": 871.4,
+          "speaker": "Maya",
+          "text": "Support headcount is in the budget. You can post them."
+        },
+        {
+          "start": 871.7,
+          "end": 875.6,
+          "speaker": "Kofi",
+          "text": "Great. Then I'll post both support listings by May 12th."
+        },
+        {
+          "start": 875.9,
+          "end": 877.1,
+          "speaker": "Helen",
+          "text": "May 12th. Good."
+        },
+        {
+          "start": 877.4,
+          "end": 884.7,
+          "speaker": "Beatriz",
+          "text": "Can the listings mention the shift times? Last time half the candidates didn't realize it was West Coast hours."
+        },
+        {
+          "start": 885.0,
+          "end": 888.5,
+          "speaker": "Kofi",
+          "text": "Yes. I'll put the hours in the first line."
+        },
+        {
+          "start": 888.8,
+          "end": 893.5,
+          "speaker": "Helen",
+          "text": "What about the PM role? Do we actually need it in Q3?"
+        },
+        {
+          "start": 893.8,
+          "end": 900.0,
+          "speaker": "Tobias",
+          "text": "I'd argue yes. Someone has to own the mobile app, and right now that's, um, nobody."
+        },
+        {
+          "start": 900.3,
+          "end": 908.9,
+          "speaker": "Arjun",
+          "text": "I'd argue we could wait. Offline mode has a clear spec, it doesn't need a new PM in the middle of it."
+        },
+        {
+          "start": 909.2,
+          "end": 911.1,
+          "speaker": "Helen",
+          "text": "I can see both sides."
+        },
+        {
+          "start": 911.4,
+          "end": 918.0,
+          "speaker": "Helen",
+          "text": "Let's keep the PM role open but not prioritize it. Kofi, recruit for engineering and support first."
+        },
+        {
+          "start": 918.3,
+          "end": 922.6,
+          "speaker": "Kofi",
+          "text": "Understood. Engineering and support first, then the PM, then the designer."
+        },
+        {
+          "start": 922.9,
+          "end": 925.2,
+          "speaker": "Maya",
+          "text": "Does the designer wait for Lena?"
+        },
+        {
+          "start": 925.5,
+          "end": 929.4,
+          "speaker": "Kofi",
+          "text": "I think it should. She should pick her own hire."
+        },
+        {
+          "start": 929.7,
+          "end": 934.0,
+          "speaker": "Helen",
+          "text": "Agreed. We don't start the designer search until Lena is in."
+        },
+        {
+          "start": 934.3,
+          "end": 940.5,
+          "speaker": "Kofi",
+          "text": "One more thing on hiring. The referral bonus is going up to $3,000 starting this quarter."
+        },
+        {
+          "start": 940.8,
+          "end": 944.7,
+          "speaker": "Arjun",
+          "text": "That'll help. Most of our good engineers came from referrals."
+        },
+        {
+          "start": 945.0,
+          "end": 949.6,
+          "speaker": "Kofi",
+          "text": "And the interview panels. I need engineers to actually accept the invites."
+        },
+        {
+          "start": 949.9,
+          "end": 952.6,
+          "speaker": "Arjun",
+          "text": "I'll say something at standup. Fair point."
+        },
+        {
+          "start": 952.9,
+          "end": 962.6,
+          "speaker": "Maya",
+          "text": "Kofi, what's the offer approval process going to be? Last quarter offers sat with me for a week, and I know that was on me."
+        },
+        {
+          "start": 962.9,
+          "end": 969.9,
+          "speaker": "Kofi",
+          "text": "I'd like a two day turnaround. If finance hasn't replied in two days, I follow up with Helen."
+        },
+        {
+          "start": 970.2,
+          "end": 974.1,
+          "speaker": "Helen",
+          "text": "That's fine with me. Maya, does that work for you?"
+        },
+        {
+          "start": 974.4,
+          "end": 978.7,
+          "speaker": "Maya",
+          "text": "Yes. I'll block time on Tuesdays and Thursdays just for offers."
+        },
+        {
+          "start": 979.0,
+          "end": 986.8,
+          "speaker": "Arjun",
+          "text": "And can we use the same take-home exercise for all three engineering roles? It saves a lot of interviewer time."
+        },
+        {
+          "start": 987.1,
+          "end": 992.5,
+          "speaker": "Kofi",
+          "text": "For two of them, yes. The mobile sync role should have its own exercise."
+        },
+        {
+          "start": 992.8,
+          "end": 997.1,
+          "speaker": "Arjun",
+          "text": "Okay. I'll ask one of the mobile engineers to write it."
+        },
+        {
+          "start": 997.4,
+          "end": 1004.4,
+          "speaker": "Beatriz",
+          "text": "For support interviews, I want a writing exercise. Half the job is writing clear replies to upset customers."
+        },
+        {
+          "start": 1004.7,
+          "end": 1009.3,
+          "speaker": "Kofi",
+          "text": "That's a good idea. A short reply to a real, anonymized ticket?"
+        },
+        {
+          "start": 1009.6,
+          "end": 1012.3,
+          "speaker": "Beatriz",
+          "text": "Exactly. Twenty minutes, no more than that."
+        },
+        {
+          "start": 1012.6,
+          "end": 1019.2,
+          "speaker": "Tobias",
+          "text": "Can marketing help with the employer brand side? The careers page is, um, pretty bad right now."
+        },
+        {
+          "start": 1019.5,
+          "end": 1022.6,
+          "speaker": "Kofi",
+          "text": "Yes, please. Anything is better than what's there."
+        },
+        {
+          "start": 1022.9,
+          "end": 1028.0,
+          "speaker": "Tobias",
+          "text": "I'll have someone on my team refresh the careers page copy. Nothing fancy."
+        },
+        {
+          "start": 1028.3,
+          "end": 1038.4,
+          "speaker": "Helen",
+          "text": "Kofi, how are we doing on interview feedback? Last quarter some candidates waited two weeks to hear back, and one of them wrote about it publicly."
+        },
+        {
+          "start": 1038.7,
+          "end": 1050.0,
+          "speaker": "Kofi",
+          "text": "I remember. The new rule is feedback in the system within one business day of the interview, and I chase anyone who misses it. It's been better this month."
+        },
+        {
+          "start": 1050.3,
+          "end": 1054.9,
+          "speaker": "Arjun",
+          "text": "My team is the worst offender, I know. I'll remind them again."
+        },
+        {
+          "start": 1055.2,
+          "end": 1056.8,
+          "speaker": "Helen",
+          "text": "Anything else on hiring?"
+        },
+        {
+          "start": 1057.1,
+          "end": 1058.2,
+          "speaker": "Kofi",
+          "text": "No, that's it."
+        },
+        {
+          "start": 1058.5,
+          "end": 1062.0,
+          "speaker": "Helen",
+          "text": "Okay. The launch. Arjun, you said you had thoughts."
+        },
+        {
+          "start": 1062.3,
+          "end": 1065.8,
+          "speaker": "Arjun",
+          "text": "Yeah. So, um, I don't think June 2nd holds."
+        },
+        {
+          "start": 1066.1,
+          "end": 1073.1,
+          "speaker": "Arjun",
+          "text": "We found two sync bugs in the offline prototype last week, and one of them can lose data."
+        },
+        {
+          "start": 1073.4,
+          "end": 1074.6,
+          "speaker": "Beatriz",
+          "text": "Lose data how?"
+        },
+        {
+          "start": 1074.9,
+          "end": 1082.3,
+          "speaker": "Arjun",
+          "text": "If two technicians edit the same job while they're both offline, the second sync overwrites the first one. Silently."
+        },
+        {
+          "start": 1082.6,
+          "end": 1083.7,
+          "speaker": "Beatriz",
+          "text": "Oh. That's bad."
+        },
+        {
+          "start": 1084.0,
+          "end": 1100.7,
+          "speaker": "Arjun",
+          "text": "It's bad. We have a fix designed, but it needs about two weeks of testing. The fix itself is not complicated, it's the testing that takes time, because we have to simulate a lot of devices going on and offline in different orders."
+        },
+        {
+          "start": 1101.0,
+          "end": 1107.6,
+          "speaker": "Tobias",
+          "text": "Two weeks is going to hurt. The press briefings are booked for the week of June 2nd."
+        },
+        {
+          "start": 1107.9,
+          "end": 1109.5,
+          "speaker": "Helen",
+          "text": "Can we move them?"
+        },
+        {
+          "start": 1109.8,
+          "end": 1116.8,
+          "speaker": "Tobias",
+          "text": "Probably. Two of the three are flexible. I'd rather move them than launch with a data loss bug."
+        },
+        {
+          "start": 1117.1,
+          "end": 1119.0,
+          "speaker": "Helen",
+          "text": "Agreed. Nobody wants that headline."
+        },
+        {
+          "start": 1119.3,
+          "end": 1121.7,
+          "speaker": "Helen",
+          "text": "So what date are you proposing?"
+        },
+        {
+          "start": 1122.0,
+          "end": 1128.2,
+          "speaker": "Arjun",
+          "text": "June 16th. That gives us the two weeks of testing plus a few days of buffer."
+        },
+        {
+          "start": 1128.5,
+          "end": 1131.2,
+          "speaker": "Helen",
+          "text": "Okay. Does anyone object to June 16th?"
+        },
+        {
+          "start": 1131.5,
+          "end": 1137.7,
+          "speaker": "Maya",
+          "text": "Not from finance. Some marketing spend shifts into the second half of June, but that's fine."
+        },
+        {
+          "start": 1138.0,
+          "end": 1143.8,
+          "speaker": "Kofi",
+          "text": "Lena starts on the ninth, so she'd be around for launch week. That's probably good."
+        },
+        {
+          "start": 1144.1,
+          "end": 1150.0,
+          "speaker": "Helen",
+          "text": "Okay. Then that's the decision. The 3.0 launch moves from June 2nd to June 16th."
+        },
+        {
+          "start": 1150.3,
+          "end": 1155.3,
+          "speaker": "Tobias",
+          "text": "Okay. I'll update the launch announcement and the press plan by May 23rd."
+        },
+        {
+          "start": 1155.6,
+          "end": 1157.2,
+          "speaker": "Helen",
+          "text": "Thanks. And the beta?"
+        },
+        {
+          "start": 1157.5,
+          "end": 1162.1,
+          "speaker": "Arjun",
+          "text": "The beta still starts May 27th, with 50 customers. That doesn't change."
+        },
+        {
+          "start": 1162.4,
+          "end": 1164.0,
+          "speaker": "Beatriz",
+          "text": "Who picks the 50?"
+        },
+        {
+          "start": 1164.3,
+          "end": 1168.9,
+          "speaker": "Arjun",
+          "text": "Tobias and I were going to pick from the customer advisory board."
+        },
+        {
+          "start": 1169.2,
+          "end": 1176.2,
+          "speaker": "Beatriz",
+          "text": "Can I add a few? I know which customers file the most offline complaints. They'd be great testers."
+        },
+        {
+          "start": 1176.5,
+          "end": 1178.5,
+          "speaker": "Arjun",
+          "text": "Yes, please. Send me names."
+        },
+        {
+          "start": 1178.8,
+          "end": 1183.0,
+          "speaker": "Beatriz",
+          "text": "I'll send you ten names by the end of the week."
+        },
+        {
+          "start": 1183.3,
+          "end": 1187.6,
+          "speaker": "Tobias",
+          "text": "Make sure they're customers who'll actually give feedback, not just complain."
+        },
+        {
+          "start": 1187.9,
+          "end": 1190.2,
+          "speaker": "Beatriz",
+          "text": "Those are the same people, honestly."
+        },
+        {
+          "start": 1190.5,
+          "end": 1194.0,
+          "speaker": "Helen",
+          "text": "Do the beta customers get the data loss fix?"
+        },
+        {
+          "start": 1194.3,
+          "end": 1202.1,
+          "speaker": "Arjun",
+          "text": "Yes, the beta build has the fix. That's partly why we need the beta, to see it under real conditions."
+        },
+        {
+          "start": 1202.4,
+          "end": 1205.5,
+          "speaker": "Helen",
+          "text": "And if the beta finds something else serious?"
+        },
+        {
+          "start": 1205.8,
+          "end": 1213.2,
+          "speaker": "Arjun",
+          "text": "Then I'll tell you within a day, and we talk about the date again. But I don't expect it."
+        },
+        {
+          "start": 1213.5,
+          "end": 1218.9,
+          "speaker": "Helen",
+          "text": "Okay. Tobias, the press plan should say June 16th everywhere, including the website banner."
+        },
+        {
+          "start": 1219.2,
+          "end": 1223.1,
+          "speaker": "Tobias",
+          "text": "Yes. The banner currently says \"early June.\" I'll change it."
+        },
+        {
+          "start": 1223.4,
+          "end": 1226.9,
+          "speaker": "Maya",
+          "text": "And the launch event budget, does that move too?"
+        },
+        {
+          "start": 1227.2,
+          "end": 1233.8,
+          "speaker": "Tobias",
+          "text": "The venue is booked for the 16th already, oddly enough. We had it as a backup date."
+        },
+        {
+          "start": 1234.1,
+          "end": 1236.8,
+          "speaker": "Helen",
+          "text": "Lucky. Okay. Anything else on the launch?"
+        },
+        {
+          "start": 1237.1,
+          "end": 1241.0,
+          "speaker": "Kofi",
+          "text": "Is there a launch party? Asking for the whole office."
+        },
+        {
+          "start": 1241.3,
+          "end": 1244.8,
+          "speaker": "Helen",
+          "text": "There will be cake. That's all I'll commit to."
+        },
+        {
+          "start": 1245.1,
+          "end": 1249.8,
+          "speaker": "Arjun",
+          "text": "One more launch thing, sorry. Release notes. Who writes them this time?"
+        },
+        {
+          "start": 1250.1,
+          "end": 1256.7,
+          "speaker": "Tobias",
+          "text": "Marketing writes the announcement, but the release notes should come from engineering. You know what actually changed."
+        },
+        {
+          "start": 1257.0,
+          "end": 1262.8,
+          "speaker": "Arjun",
+          "text": "Okay. I'll have one of the leads draft them, and Tobias can edit for tone."
+        },
+        {
+          "start": 1263.1,
+          "end": 1271.3,
+          "speaker": "Beatriz",
+          "text": "Support needs the release notes at least a week ahead. We have to update the help center before customers start asking."
+        },
+        {
+          "start": 1271.6,
+          "end": 1274.7,
+          "speaker": "Arjun",
+          "text": "A week ahead of the 16th. Okay, noted."
+        },
+        {
+          "start": 1275.0,
+          "end": 1278.5,
+          "speaker": "Helen",
+          "text": "And training for the support team on offline mode?"
+        },
+        {
+          "start": 1278.8,
+          "end": 1285.4,
+          "speaker": "Beatriz",
+          "text": "We'd want a session during the beta, so we're learning alongside the beta customers, not after launch."
+        },
+        {
+          "start": 1285.7,
+          "end": 1289.2,
+          "speaker": "Arjun",
+          "text": "I can run that. An hour, with the prototype."
+        },
+        {
+          "start": 1289.5,
+          "end": 1293.7,
+          "speaker": "Kofi",
+          "text": "Can the temps join that session? If they're starting around then."
+        },
+        {
+          "start": 1294.0,
+          "end": 1300.6,
+          "speaker": "Beatriz",
+          "text": "Wait, what temps? Oh, right, we haven't got there yet. Yes, if they're on board by then."
+        },
+        {
+          "start": 1300.9,
+          "end": 1304.4,
+          "speaker": "Maya",
+          "text": "What's the rollback plan if the launch goes badly?"
+        },
+        {
+          "start": 1304.7,
+          "end": 1314.0,
+          "speaker": "Arjun",
+          "text": "Offline mode ships behind a flag. If something breaks, we turn it off for everyone and the app works the way it does today."
+        },
+        {
+          "start": 1314.3,
+          "end": 1317.1,
+          "speaker": "Maya",
+          "text": "Good. That's what I wanted to hear."
+        },
+        {
+          "start": 1317.4,
+          "end": 1329.0,
+          "speaker": "Tobias",
+          "text": "For the announcement itself, I want one customer quote about offline mode. Ideally someone from the beta who's actually used it in a basement or out in a rural area."
+        },
+        {
+          "start": 1329.3,
+          "end": 1336.7,
+          "speaker": "Beatriz",
+          "text": "I have a few customers in mind, the water utility people especially. Their technicians are underground half the day."
+        },
+        {
+          "start": 1337.0,
+          "end": 1342.4,
+          "speaker": "Tobias",
+          "text": "Perfect. Introduce me once the beta starts and they've had a week with it."
+        },
+        {
+          "start": 1342.7,
+          "end": 1349.0,
+          "speaker": "Helen",
+          "text": "Just make sure we get written approval for any quote. Legal will ask, they always do."
+        },
+        {
+          "start": 1349.3,
+          "end": 1350.8,
+          "speaker": "Helen",
+          "text": "Okay. Support backlog. Beatriz."
+        },
+        {
+          "start": 1351.1,
+          "end": 1357.3,
+          "speaker": "Beatriz",
+          "text": "Okay. So, the backlog is at 1,340 open tickets. That's up from about 900 in February."
+        },
+        {
+          "start": 1357.6,
+          "end": 1358.0,
+          "speaker": "Helen",
+          "text": "Wow."
+        },
+        {
+          "start": 1358.3,
+          "end": 1363.7,
+          "speaker": "Beatriz",
+          "text": "Yeah. The median first response time is 14 hours. Our target is four hours."
+        },
+        {
+          "start": 1364.0,
+          "end": 1364.8,
+          "speaker": "Kofi",
+          "text": "Fourteen hours?"
+        },
+        {
+          "start": 1365.1,
+          "end": 1377.9,
+          "speaker": "Beatriz",
+          "text": "Fourteen. On weekends it's worse. The team is doing their best, but it's the same five people, and they're tired. I've had two people ask me about transferring to other teams this month."
+        },
+        {
+          "start": 1378.2,
+          "end": 1388.7,
+          "speaker": "Beatriz",
+          "text": "And about a third of the backlog is duplicates of the same three bugs. The sync one, the recurring jobs one, and the login loop on Android."
+        },
+        {
+          "start": 1389.0,
+          "end": 1394.1,
+          "speaker": "Arjun",
+          "text": "The login loop is fixed in the next build. It goes out Thursday."
+        },
+        {
+          "start": 1394.4,
+          "end": 1399.0,
+          "speaker": "Beatriz",
+          "text": "Great. Then that's maybe 150 tickets I can close with one macro."
+        },
+        {
+          "start": 1399.3,
+          "end": 1401.3,
+          "speaker": "Helen",
+          "text": "What else do you need?"
+        },
+        {
+          "start": 1401.6,
+          "end": 1410.1,
+          "speaker": "Beatriz",
+          "text": "Two things. Short term, two temporary support agents for six weeks through the agency. Long term, the two hires Kofi is posting."
+        },
+        {
+          "start": 1410.4,
+          "end": 1412.8,
+          "speaker": "Maya",
+          "text": "What does the temp option cost?"
+        },
+        {
+          "start": 1413.1,
+          "end": 1417.3,
+          "speaker": "Beatriz",
+          "text": "About $24,000 total for both of them, for the six weeks."
+        },
+        {
+          "start": 1417.6,
+          "end": 1420.3,
+          "speaker": "Maya",
+          "text": "That fits. It's within the support line."
+        },
+        {
+          "start": 1420.6,
+          "end": 1425.3,
+          "speaker": "Helen",
+          "text": "Okay. Decision: we bring on two temporary support agents for six weeks."
+        },
+        {
+          "start": 1425.6,
+          "end": 1426.8,
+          "speaker": "Beatriz",
+          "text": "Thank you. Really."
+        },
+        {
+          "start": 1427.1,
+          "end": 1433.7,
+          "speaker": "Arjun",
+          "text": "And from engineering, I'll put two engineers on a bug rotation, rotating weekly, just for support escalations."
+        },
+        {
+          "start": 1434.0,
+          "end": 1438.2,
+          "speaker": "Beatriz",
+          "text": "That would help a lot. Right now escalations sit for days."
+        },
+        {
+          "start": 1438.5,
+          "end": 1442.4,
+          "speaker": "Arjun",
+          "text": "Does that come out of the offline mode 40 percent?"
+        },
+        {
+          "start": 1442.7,
+          "end": 1448.2,
+          "speaker": "Helen",
+          "text": "No. Keep offline mode at 40. The rotation comes out of the other 60."
+        },
+        {
+          "start": 1448.5,
+          "end": 1449.6,
+          "speaker": "Arjun",
+          "text": "Okay. That works."
+        },
+        {
+          "start": 1449.9,
+          "end": 1456.5,
+          "speaker": "Helen",
+          "text": "Beatriz, I want to see whether this is working. Can you send a backlog report every week?"
+        },
+        {
+          "start": 1456.8,
+          "end": 1461.5,
+          "speaker": "Beatriz",
+          "text": "Yes. I'll send a weekly backlog report every Monday, starting May 19th."
+        },
+        {
+          "start": 1461.8,
+          "end": 1464.1,
+          "speaker": "Helen",
+          "text": "Good. What should the report show?"
+        },
+        {
+          "start": 1464.4,
+          "end": 1468.7,
+          "speaker": "Beatriz",
+          "text": "Open tickets, median first response, and the top five ticket categories."
+        },
+        {
+          "start": 1469.0,
+          "end": 1474.4,
+          "speaker": "Maya",
+          "text": "Can it show the temp agents separately? So we know if they're worth renewing."
+        },
+        {
+          "start": 1474.7,
+          "end": 1477.5,
+          "speaker": "Beatriz",
+          "text": "Sure, I'll split it by agent type."
+        },
+        {
+          "start": 1477.8,
+          "end": 1481.6,
+          "speaker": "Kofi",
+          "text": "Do the temps need laptops? IT takes like two weeks."
+        },
+        {
+          "start": 1481.9,
+          "end": 1484.7,
+          "speaker": "Beatriz",
+          "text": "Oh. Yes. Kofi, can you start that?"
+        },
+        {
+          "start": 1485.0,
+          "end": 1487.3,
+          "speaker": "Kofi",
+          "text": "I'll flag it to IT today."
+        },
+        {
+          "start": 1487.6,
+          "end": 1493.4,
+          "speaker": "Tobias",
+          "text": "Is there anything we should say to customers? Like a status note about response times?"
+        },
+        {
+          "start": 1493.7,
+          "end": 1497.6,
+          "speaker": "Beatriz",
+          "text": "I'd rather not announce it. I'd rather just get faster."
+        },
+        {
+          "start": 1497.9,
+          "end": 1500.6,
+          "speaker": "Helen",
+          "text": "Agreed. No announcement. Let's fix it quietly."
+        },
+        {
+          "start": 1500.9,
+          "end": 1508.3,
+          "speaker": "Beatriz",
+          "text": "And can we stop sending the satisfaction survey for a few weeks? Right now it's just collecting angry replies."
+        },
+        {
+          "start": 1508.6,
+          "end": 1513.3,
+          "speaker": "Helen",
+          "text": "Hmm. I'd rather keep it. It's useful data even when it's angry."
+        },
+        {
+          "start": 1513.6,
+          "end": 1514.3,
+          "speaker": "Beatriz",
+          "text": "Okay. Fair."
+        },
+        {
+          "start": 1514.6,
+          "end": 1522.0,
+          "speaker": "Arjun",
+          "text": "Beatriz, are the duplicate tickets tagged? If they're tagged, I can tell the rotation engineers which bug matters most."
+        },
+        {
+          "start": 1522.3,
+          "end": 1529.3,
+          "speaker": "Beatriz",
+          "text": "Mostly. The Android ones are tagged well. The sync ones are messy, people describe them twenty different ways."
+        },
+        {
+          "start": 1529.6,
+          "end": 1536.2,
+          "speaker": "Arjun",
+          "text": "Could we add a sync problem option to the in-app help form? Then customers would tag themselves."
+        },
+        {
+          "start": 1536.5,
+          "end": 1540.4,
+          "speaker": "Beatriz",
+          "text": "Yes. That would save us a lot of triage time."
+        },
+        {
+          "start": 1540.7,
+          "end": 1544.6,
+          "speaker": "Arjun",
+          "text": "It's small. I'll get it into the build after Thursday's."
+        },
+        {
+          "start": 1544.9,
+          "end": 1549.9,
+          "speaker": "Tobias",
+          "text": "What about the help center? Do we have articles for the top bugs?"
+        },
+        {
+          "start": 1550.2,
+          "end": 1558.4,
+          "speaker": "Beatriz",
+          "text": "For two of the three. The recurring jobs one doesn't have an article because we kept thinking it would be fixed."
+        },
+        {
+          "start": 1558.7,
+          "end": 1562.6,
+          "speaker": "Helen",
+          "text": "Write it anyway. Even if it's fixed in a month."
+        },
+        {
+          "start": 1562.9,
+          "end": 1564.0,
+          "speaker": "Beatriz",
+          "text": "Okay. Will do."
+        },
+        {
+          "start": 1564.3,
+          "end": 1567.4,
+          "speaker": "Kofi",
+          "text": "And weekend coverage? You said weekends are worse."
+        },
+        {
+          "start": 1567.7,
+          "end": 1574.7,
+          "speaker": "Beatriz",
+          "text": "Right now it's one person on Saturdays and nobody on Sundays. The temps would let us cover Sundays."
+        },
+        {
+          "start": 1575.0,
+          "end": 1577.7,
+          "speaker": "Maya",
+          "text": "Is Sunday coverage part of the $24,000?"
+        },
+        {
+          "start": 1578.0,
+          "end": 1580.0,
+          "speaker": "Beatriz",
+          "text": "Yes, it's included in that."
+        },
+        {
+          "start": 1580.3,
+          "end": 1589.2,
+          "speaker": "Helen",
+          "text": "Beatriz, what happens when the six weeks are up? I don't want the backlog to come straight back the week the temps leave."
+        },
+        {
+          "start": 1589.5,
+          "end": 1602.3,
+          "speaker": "Beatriz",
+          "text": "The plan is that by then the two permanent hires are trained, and the duplicate tickets are gone because the bugs are fixed. If either of those slips, I'll come back and ask."
+        },
+        {
+          "start": 1602.6,
+          "end": 1608.5,
+          "speaker": "Maya",
+          "text": "Ask early if you do. Extending through the agency takes about two weeks of notice."
+        },
+        {
+          "start": 1608.8,
+          "end": 1610.3,
+          "speaker": "Helen",
+          "text": "Anything else on support?"
+        },
+        {
+          "start": 1610.6,
+          "end": 1611.8,
+          "speaker": "Beatriz",
+          "text": "No. Thanks, everyone."
+        },
+        {
+          "start": 1612.1,
+          "end": 1617.1,
+          "speaker": "Helen",
+          "text": "Okay, last section, risks. We have about five minutes, so let's go fast."
+        },
+        {
+          "start": 1617.4,
+          "end": 1625.2,
+          "speaker": "Arjun",
+          "text": "The big one is maps. Northgate Maps told us their API price is going up 30 percent on July 1st."
+        },
+        {
+          "start": 1625.5,
+          "end": 1630.9,
+          "speaker": "Maya",
+          "text": "Thirty percent? On what we pay now, that's, um, about $54,000 more a year."
+        },
+        {
+          "start": 1631.2,
+          "end": 1632.8,
+          "speaker": "Helen",
+          "text": "Do we have alternatives?"
+        },
+        {
+          "start": 1633.1,
+          "end": 1653.7,
+          "speaker": "Arjun",
+          "text": "Tessera Geo is the one I'd look at. Their routing is decent and they have an offline tiles option, which actually fits offline mode really well. Switching is not trivial though. We'd have to redo the map layer in both apps, which is probably three or four weeks of work for one engineer."
+        },
+        {
+          "start": 1654.0,
+          "end": 1655.9,
+          "speaker": "Tobias",
+          "text": "Is switching visible to customers?"
+        },
+        {
+          "start": 1656.2,
+          "end": 1660.5,
+          "speaker": "Arjun",
+          "text": "A little. The map style changes. The data's about the same."
+        },
+        {
+          "start": 1660.8,
+          "end": 1667.8,
+          "speaker": "Helen",
+          "text": "Okay. Decision: we start evaluating Tessera Geo as a replacement for Northgate. We're not committing to switch yet."
+        },
+        {
+          "start": 1668.1,
+          "end": 1672.0,
+          "speaker": "Arjun",
+          "text": "I'll get a quote from Tessera Geo by June 13th."
+        },
+        {
+          "start": 1672.3,
+          "end": 1676.9,
+          "speaker": "Maya",
+          "text": "Ask them for a two year price lock. That's the whole point."
+        },
+        {
+          "start": 1677.2,
+          "end": 1678.0,
+          "speaker": "Arjun",
+          "text": "Will do."
+        },
+        {
+          "start": 1678.3,
+          "end": 1686.5,
+          "speaker": "Beatriz",
+          "text": "Second risk: the SOC 2 audit. It's on August 18th, and two of the big prospects are waiting on the report."
+        },
+        {
+          "start": 1686.8,
+          "end": 1689.9,
+          "speaker": "Tobias",
+          "text": "Three, actually. The hospital network asked again yesterday."
+        },
+        {
+          "start": 1690.2,
+          "end": 1692.9,
+          "speaker": "Beatriz",
+          "text": "Okay, three. I own the evidence collection."
+        },
+        {
+          "start": 1693.2,
+          "end": 1697.5,
+          "speaker": "Beatriz",
+          "text": "I'll have the SOC 2 evidence package ready by July 25th."
+        },
+        {
+          "start": 1697.8,
+          "end": 1699.3,
+          "speaker": "Helen",
+          "text": "Do you need help?"
+        },
+        {
+          "start": 1699.6,
+          "end": 1705.1,
+          "speaker": "Beatriz",
+          "text": "I'll need about a day from each team lead. I'll send the requests out."
+        },
+        {
+          "start": 1705.4,
+          "end": 1711.6,
+          "speaker": "Kofi",
+          "text": "Third risk, maybe. Lena starts June 9th, a week before launch. That's a rough first week."
+        },
+        {
+          "start": 1711.9,
+          "end": 1716.9,
+          "speaker": "Helen",
+          "text": "Fair. Tobias, can you make sure she's not thrown straight into launch assets?"
+        },
+        {
+          "start": 1717.2,
+          "end": 1719.2,
+          "speaker": "Tobias",
+          "text": "Yeah. I'll protect her calendar."
+        },
+        {
+          "start": 1719.5,
+          "end": 1725.7,
+          "speaker": "Maya",
+          "text": "And one from me. If we miss the ARR target, Arjun's team is stretched all quarter."
+        },
+        {
+          "start": 1726.0,
+          "end": 1731.0,
+          "speaker": "Arjun",
+          "text": "I know. That's why we cut scope at the start of this meeting."
+        },
+        {
+          "start": 1731.3,
+          "end": 1741.0,
+          "speaker": "Arjun",
+          "text": "There's also a smaller one. Our Android build tooling is two versions behind, and the app store will require the new one by the fall."
+        },
+        {
+          "start": 1741.3,
+          "end": 1743.3,
+          "speaker": "Helen",
+          "text": "Is that a Q3 problem?"
+        },
+        {
+          "start": 1743.6,
+          "end": 1751.3,
+          "speaker": "Arjun",
+          "text": "It's a Q3 problem if we leave it. It's about a week of work. I'll fit it into the rotation."
+        },
+        {
+          "start": 1751.6,
+          "end": 1757.9,
+          "speaker": "Tobias",
+          "text": "And the hospital network wants a security questionnaire before the SOC 2 report is even done."
+        },
+        {
+          "start": 1758.2,
+          "end": 1763.6,
+          "speaker": "Beatriz",
+          "text": "Send it to me. I've already answered most of those questions for the audit."
+        },
+        {
+          "start": 1763.9,
+          "end": 1772.4,
+          "speaker": "Maya",
+          "text": "On maps, can we pass any of the increase on to customers? Some of our contracts have a clause for third-party costs."
+        },
+        {
+          "start": 1772.7,
+          "end": 1780.5,
+          "speaker": "Tobias",
+          "text": "I'd really rather not. We're about to launch, and a price change in the same month sends the wrong message."
+        },
+        {
+          "start": 1780.8,
+          "end": 1785.9,
+          "speaker": "Helen",
+          "text": "Agreed. Let's see what the Tessera Geo quote looks like first, then decide."
+        },
+        {
+          "start": 1786.2,
+          "end": 1792.4,
+          "speaker": "Helen",
+          "text": "Okay. Last thing. I'm going to schedule a risk review for June 30th, after the launch."
+        },
+        {
+          "start": 1792.7,
+          "end": 1796.9,
+          "speaker": "Helen",
+          "text": "We'll check on maps, the SOC 2 work, and the backlog."
+        },
+        {
+          "start": 1797.2,
+          "end": 1799.2,
+          "speaker": "Maya",
+          "text": "June 30th works for me."
+        },
+        {
+          "start": 1799.5,
+          "end": 1801.0,
+          "speaker": "Beatriz",
+          "text": "Works for me too."
+        },
+        {
+          "start": 1801.3,
+          "end": 1812.6,
+          "speaker": "Helen",
+          "text": "Good. That's time. Thanks, everyone. I know a few of these were hard calls, especially in the first half, so I appreciate everyone being straightforward about it. Great session."
+        }
+      ],
+      "expected": {
+        "names": [
+          {
+            "label": "Helen (chair)",
+            "anyOf": [
+              "Helen"
+            ]
+          },
+          {
+            "label": "Arjun (engineering lead)",
+            "anyOf": [
+              "Arjun"
+            ]
+          },
+          {
+            "label": "Maya (finance)",
+            "anyOf": [
+              "Maya"
+            ]
+          },
+          {
+            "label": "Kofi (recruiting)",
+            "anyOf": [
+              "Kofi"
+            ]
+          },
+          {
+            "label": "Beatriz (support lead)",
+            "anyOf": [
+              "Beatriz"
+            ]
+          },
+          {
+            "label": "Tobias (marketing)",
+            "anyOf": [
+              "Tobias"
+            ]
+          },
+          {
+            "label": "Lena Okafor (new design lead)",
+            "anyOf": [
+              "Lena",
+              "Okafor"
+            ]
+          },
+          {
+            "label": "vendor Tessera Geo",
+            "anyOf": [
+              "Tessera"
+            ]
+          }
+        ],
+        "numbers": [
+          {
+            "label": "40 percent of engineering capacity on offline mode",
+            "anyOf": [
+              "40 percent",
+              "40%",
+              "forty percent"
+            ],
+            "allOf": [
+              "offline"
+            ]
+          },
+          {
+            "label": "Q3 operating budget $1.2 million",
+            "anyOf": [
+              "$1.2 million",
+              "1.2 million",
+              "$1.2M",
+              "1.2M",
+              "1,200,000",
+              "$1.2m"
+            ]
+          },
+          {
+            "label": "cloud spend up 22 percent",
+            "anyOf": [
+              "22 percent",
+              "22%",
+              "twenty-two percent",
+              "twenty two percent"
+            ],
+            "allOf": [
+              "cloud"
+            ]
+          },
+          {
+            "label": "marketing budget $310,000",
+            "anyOf": [
+              "310,000",
+              "310000",
+              "$310,000",
+              "$310k",
+              "310k",
+              "310K"
+            ]
+          },
+          {
+            "label": "engineering contractor cut $80,000",
+            "anyOf": [
+              "80,000",
+              "80000",
+              "$80,000",
+              "$80k",
+              "80k",
+              "80K"
+            ],
+            "allOf": [
+              "contractor"
+            ]
+          },
+          {
+            "label": "ARR threshold $9 million",
+            "anyOf": [
+              "$9 million",
+              "9 million",
+              "$9M",
+              "9M",
+              "$9m"
+            ],
+            "allOf": [
+              "ARR"
+            ]
+          },
+          {
+            "label": "seven open roles",
+            "anyOf": [
+              "seven",
+              "7 open",
+              "7 roles"
+            ],
+            "allOf": [
+              "role"
+            ]
+          },
+          {
+            "label": "time to fill 45 days",
+            "anyOf": [
+              "45",
+              "forty-five",
+              "forty five"
+            ],
+            "allOf": [
+              "day"
+            ]
+          },
+          {
+            "label": "beta with 50 customers",
+            "anyOf": [
+              "50",
+              "fifty"
+            ],
+            "allOf": [
+              "beta"
+            ]
+          },
+          {
+            "label": "backlog 1,340 open tickets",
+            "anyOf": [
+              "1,340",
+              "1340"
+            ]
+          },
+          {
+            "label": "median first response 14 hours",
+            "anyOf": [
+              "14",
+              "fourteen"
+            ],
+            "allOf": [
+              "hour"
+            ]
+          },
+          {
+            "label": "temporary agents cost $24,000",
+            "anyOf": [
+              "24,000",
+              "24000",
+              "$24,000",
+              "$24k",
+              "24k",
+              "24K"
+            ],
+            "allOf": [
+              "temp"
+            ]
+          },
+          {
+            "label": "Northgate Maps price increase 30 percent",
+            "anyOf": [
+              "30 percent",
+              "30%",
+              "thirty percent"
+            ],
+            "allOf": [
+              "Northgate"
+            ]
+          }
+        ],
+        "dates": [
+          {
+            "label": "3.0 launch June 16 (revised from June 2)",
+            "anyOf": [
+              "June 16",
+              "Jun 16",
+              "16 June",
+              "June 16th"
+            ],
+            "allOf": [
+              "launch"
+            ]
+          },
+          {
+            "label": "beta starts May 27",
+            "anyOf": [
+              "May 27",
+              "27 May",
+              "May 27th"
+            ],
+            "allOf": [
+              "beta"
+            ]
+          },
+          {
+            "label": "Lena Okafor starts June 9",
+            "anyOf": [
+              "June 9",
+              "Jun 9",
+              "9 June",
+              "June 9th"
+            ]
+          },
+          {
+            "label": "Northgate price increase July 1",
+            "anyOf": [
+              "July 1",
+              "Jul 1",
+              "1 July",
+              "July 1st"
+            ]
+          },
+          {
+            "label": "SOC 2 audit August 18",
+            "anyOf": [
+              "August 18",
+              "Aug 18",
+              "18 August",
+              "August 18th"
+            ]
+          },
+          {
+            "label": "risk review June 30",
+            "anyOf": [
+              "June 30",
+              "Jun 30",
+              "30 June",
+              "June 30th"
+            ]
+          }
+        ],
+        "decisions": [
+          {
+            "label": "not building the Gantt view this quarter",
+            "anyOf": [
+              "not building",
+              "not build",
+              "won't build",
+              "will not build",
+              "no Gantt",
+              "dropped",
+              "deferred",
+              "defer",
+              "postponed",
+              "out of Q3",
+              "not Q3",
+              "is out"
+            ],
+            "allOf": [
+              "Gantt"
+            ]
+          },
+          {
+            "label": "offline mode gets 40 percent of engineering capacity",
+            "anyOf": [
+              "40"
+            ],
+            "allOf": [
+              "offline"
+            ]
+          },
+          {
+            "label": "cut engineering contractor spend by $80,000; non-Salesforce integrations move to Q4",
+            "anyOf": [
+              "80"
+            ],
+            "allOf": [
+              "contractor"
+            ]
+          },
+          {
+            "label": "conditional: hire two more engineers only if ARR passes $9 million by end of June",
+            "anyOf": [
+              "9 million",
+              "$9M",
+              "9M",
+              "$9m"
+            ],
+            "allOf": [
+              "engineer"
+            ]
+          },
+          {
+            "label": "launch moves from June 2 to June 16 (revised)",
+            "anyOf": [
+              "June 16",
+              "Jun 16",
+              "16 June"
+            ],
+            "allOf": [
+              "launch"
+            ]
+          },
+          {
+            "label": "bring on two temporary support agents for six weeks",
+            "anyOf": [
+              "six weeks",
+              "6 weeks",
+              "6-week",
+              "six-week"
+            ],
+            "allOf": [
+              "support"
+            ]
+          },
+          {
+            "label": "evaluate Tessera Geo as replacement, not committing to switch",
+            "anyOf": [
+              "evaluat"
+            ],
+            "allOf": [
+              "Tessera"
+            ]
+          }
+        ],
+        "actions": [
+          {
+            "label": "Arjun writes offline mode spec by May 9",
+            "anyOf": [
+              "May 9",
+              "9 May",
+              "May 9th"
+            ],
+            "allOf": [
+              "Arjun",
+              "spec"
+            ]
+          },
+          {
+            "label": "Maya sends revised budget sheet by May 16",
+            "anyOf": [
+              "May 16",
+              "16 May",
+              "May 16th"
+            ],
+            "allOf": [
+              "Maya",
+              "budget"
+            ]
+          },
+          {
+            "label": "Kofi posts support listings by May 12",
+            "anyOf": [
+              "May 12",
+              "12 May",
+              "May 12th"
+            ],
+            "allOf": [
+              "Kofi",
+              "listing"
+            ]
+          },
+          {
+            "label": "Tobias updates launch announcement and press plan by May 23",
+            "anyOf": [
+              "May 23",
+              "23 May",
+              "May 23rd"
+            ],
+            "allOf": [
+              "Tobias",
+              "press"
+            ]
+          },
+          {
+            "label": "Beatriz sends weekly backlog report starting May 19",
+            "anyOf": [
+              "May 19",
+              "19 May",
+              "May 19th"
+            ],
+            "allOf": [
+              "Beatriz",
+              "report"
+            ]
+          },
+          {
+            "label": "Arjun gets Tessera Geo quote by June 13",
+            "anyOf": [
+              "June 13",
+              "Jun 13",
+              "13 June",
+              "June 13th"
+            ],
+            "allOf": [
+              "Arjun",
+              "Tessera"
+            ]
+          },
+          {
+            "label": "Beatriz has SOC 2 evidence package ready by July 25",
+            "anyOf": [
+              "July 25",
+              "Jul 25",
+              "25 July",
+              "July 25th"
+            ],
+            "allOf": [
+              "Beatriz",
+              "SOC"
+            ]
+          },
+          {
+            "label": "Helen schedules risk review for June 30",
+            "anyOf": [
+              "June 30",
+              "Jun 30",
+              "30 June",
+              "June 30th"
+            ],
+            "allOf": [
+              "Helen",
+              "risk"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

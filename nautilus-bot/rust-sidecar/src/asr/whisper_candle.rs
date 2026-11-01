@@ -81,26 +81,43 @@ fn select_best_device() -> candle_core::Device {
 
 #[cfg(feature = "asr-canary")]
 fn load_runtime(model_dir: &Path) -> Result<WhisperCandleRuntime> {
+    let _model_load = crate::llm::local_model_load::guard(&[model_dir])?;
     use candle_core::DType;
     use candle_nn::VarBuilder;
     use candle_transformers::models::whisper::{model::Whisper, Config};
     use tokenizers::Tokenizer;
 
+    let pin = |file_name: &str| -> Result<(PathBuf, &'static str)> {
+        WHISPER_CANDLE_REQUIRED_FILES
+            .iter()
+            .find(|(name, _)| *name == file_name)
+            .map(|(name, sha256)| (model_dir.join(name), *sha256))
+            .ok_or_else(|| anyhow::anyhow!("Missing integrity pin for {file_name}"))
+    };
+    let verified_bytes = |file_name: &str| -> Result<Vec<u8>> {
+        let (path, sha256) = pin(file_name)?;
+        crate::download::read_verified_model_bytes(&path, sha256)
+    };
+
     let device = select_best_device();
-    let cfg_text = std::fs::read_to_string(model_dir.join("config.json"))
-        .context("Failed to read Whisper Candle config.json")?;
-    let config: Config =
-        serde_json::from_str(&cfg_text).context("Failed to parse Whisper Candle config.json")?;
+    let config: Config = serde_json::from_slice(&verified_bytes("config.json")?)
+        .context("Failed to parse Whisper Candle config.json")?;
     let n_mels = config.num_mel_bins;
 
-    let weights_path = model_dir.join("model.safetensors");
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)
-            .context("Failed to load Whisper Candle weights")?
-    };
-    let model = Whisper::load(&vb, config).context("Failed to initialise Whisper Candle model")?;
+    // Candle maps the weights by path; the verified descriptor's path names
+    // the hashed file, and `load` fails if it changes before every tensor is
+    // copied out of the mapping.
+    let (weights_path, weights_sha256) = pin("model.safetensors")?;
+    let weights = crate::download::open_verified_model_artifact(&weights_path, weights_sha256)?;
+    let model = weights.load(|path| {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[path], DType::F32, &device)
+                .context("Failed to load Whisper Candle weights")?
+        };
+        Whisper::load(&vb, config).context("Failed to initialise Whisper Candle model")
+    })?;
 
-    let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
+    let tokenizer = Tokenizer::from_bytes(verified_bytes("tokenizer.json")?)
         .map_err(|e| anyhow::anyhow!("Failed to load Whisper Candle tokenizer: {}", e))?;
 
     Ok(WhisperCandleRuntime {
@@ -115,7 +132,11 @@ fn load_runtime(model_dir: &Path) -> Result<WhisperCandleRuntime> {
 #[cfg(feature = "asr-canary")]
 fn runtime_cache() -> &'static Mutex<Option<WhisperCandleRuntime>> {
     static CACHE: OnceLock<Mutex<Option<WhisperCandleRuntime>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    static REGISTRATION: OnceLock<std::sync::Arc<crate::model_residency::IdleModel>> =
+        OnceLock::new();
+    crate::model_residency::watch_cache(&REGISTRATION, 4 * 1024 * 1024 * 1024, cache);
+    cache
 }
 
 #[cfg(feature = "asr-canary")]
@@ -163,7 +184,7 @@ impl WhisperCandleProvider {
         WHISPER_CANDLE_REQUIRED_FILES
             .iter()
             .all(|(file_name, sha256)| {
-                crate::download::is_model_artifact_trusted(
+                crate::download::is_model_artifact_installed(
                     &self.model_dir.join(file_name),
                     Some(sha256),
                 )
@@ -215,87 +236,110 @@ pub(super) fn run_whisper_candle_inference_on_samples(
             .map(|runtime| runtime.model_dir_key != model_dir_key)
             .unwrap_or(true);
         if should_reload {
-            *cache = Some(load_runtime(model_dir)?);
+            *cache = Some(load_runtime(model_dir).map_err(crate::download::mismatch_first)?);
         }
 
         let runtime = cache
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Whisper Candle runtime cache unavailable"))?;
+        let _working = crate::llm::local_model_load::working_buffers(&[model_dir])?;
 
-        let n_frames = w::N_FRAMES;
-        let mel_extractor = MelSpectrogram::new(512, 160, 400, runtime.n_mels, 16000);
-        let spec = mel_extractor.compute_whisper_normalized(&samples);
+        decode_whisper_windows(&samples, |samples| {
+            let n_frames = w::N_FRAMES;
+            let mel_extractor = MelSpectrogram::new(400, 160, 400, runtime.n_mels, 16000);
+            let spec = mel_extractor.compute_whisper_normalized(samples);
 
-        let mel_flat: Vec<f32> = (0..runtime.n_mels)
-            .flat_map(|m| {
-                let row = if m < spec.len() { &spec[m] } else { &[][..] };
-                (0..n_frames).map(move |t| if t < row.len() { row[t] } else { 0.0 })
-            })
-            .collect();
+            let mel_flat: Vec<f32> = (0..runtime.n_mels)
+                .flat_map(|m| {
+                    let row = if m < spec.len() { &spec[m] } else { &[][..] };
+                    (0..n_frames).map(move |t| if t < row.len() { row[t] } else { 0.0 })
+                })
+                .collect();
 
-        let mel_tensor = Tensor::from_vec(mel_flat, (1, runtime.n_mels, n_frames), &runtime.device)
-            .context("Failed to build mel tensor")?;
+            let mel_tensor =
+                Tensor::from_vec(mel_flat, (1, runtime.n_mels, n_frames), &runtime.device)
+                    .context("Failed to build mel tensor")?;
 
-        let audio_features = runtime
-            .model
-            .encoder
-            .forward(&mel_tensor, true)
-            .context("Whisper Candle encoder failed")?;
-
-        let sot = runtime.tokenizer.token_to_id(w::SOT_TOKEN).unwrap_or(50258);
-        let eot = runtime.tokenizer.token_to_id(w::EOT_TOKEN).unwrap_or(50257);
-        let transcribe = runtime
-            .tokenizer
-            .token_to_id(w::TRANSCRIBE_TOKEN)
-            .unwrap_or(50360);
-        let no_ts = runtime
-            .tokenizer
-            .token_to_id(w::NO_TIMESTAMPS_TOKEN)
-            .unwrap_or(50364);
-        let lang_en = runtime.tokenizer.token_to_id("<|en|>").unwrap_or(50259);
-
-        let mut tokens: Vec<u32> = vec![sot, lang_en, transcribe, no_ts];
-        let max_new_tokens = max_new_tokens_for_audio(samples.len());
-
-        for _ in 0..max_new_tokens {
-            let token_tensor = Tensor::new(tokens.as_slice(), &runtime.device)
-                .context("Failed to create token tensor")?
-                .unsqueeze(0)
-                .context("unsqueeze failed")?;
-
-            let decoder_out = runtime
+            let audio_features = runtime
                 .model
-                .decoder
-                .forward(&token_tensor, &audio_features, tokens.len() == 4)
-                .context("Whisper Candle decoder step failed")?;
+                .encoder
+                .forward(&mel_tensor, true)
+                .context("Whisper Candle encoder failed")?;
 
-            let logits = runtime
-                .model
-                .decoder
-                .final_linear(&decoder_out)
-                .context("final_linear failed")?;
+            let sot = runtime.tokenizer.token_to_id(w::SOT_TOKEN).unwrap_or(50258);
+            let eot = runtime.tokenizer.token_to_id(w::EOT_TOKEN).unwrap_or(50257);
+            let transcribe = runtime
+                .tokenizer
+                .token_to_id(w::TRANSCRIBE_TOKEN)
+                .unwrap_or(50360);
+            let no_ts = runtime
+                .tokenizer
+                .token_to_id(w::NO_TIMESTAMPS_TOKEN)
+                .unwrap_or(50364);
+            let lang_en = runtime.tokenizer.token_to_id("<|en|>").unwrap_or(50259);
 
-            let last_logits = logits.i((0, tokens.len() - 1))?;
-            let next_token = last_logits
-                .argmax(0)
-                .context("argmax failed")?
-                .to_scalar::<u32>()
-                .context("scalar failed")?;
+            let mut tokens: Vec<u32> = vec![sot, lang_en, transcribe, no_ts];
+            let max_new_tokens = max_new_tokens_for_audio(samples.len());
 
-            if next_token == eot {
-                break;
+            for _ in 0..max_new_tokens {
+                let token_tensor = Tensor::new(tokens.as_slice(), &runtime.device)
+                    .context("Failed to create token tensor")?
+                    .unsqueeze(0)
+                    .context("unsqueeze failed")?;
+
+                let decoder_out = runtime
+                    .model
+                    .decoder
+                    .forward(&token_tensor, &audio_features, tokens.len() == 4)
+                    .context("Whisper Candle decoder step failed")?;
+
+                let logits = runtime
+                    .model
+                    .decoder
+                    .final_linear(&decoder_out)
+                    .context("final_linear failed")?;
+
+                let last_logits = logits.i((0, tokens.len() - 1))?;
+                let next_token = last_logits
+                    .argmax(0)
+                    .context("argmax failed")?
+                    .to_scalar::<u32>()
+                    .context("scalar failed")?;
+
+                if next_token == eot {
+                    break;
+                }
+                tokens.push(next_token);
             }
-            tokens.push(next_token);
-        }
 
-        let output_ids: Vec<u32> = tokens[4..].to_vec();
-        let text = runtime
-            .tokenizer
-            .decode(&output_ids, true)
-            .map_err(|e| anyhow::anyhow!("Tokenizer decode failed: {}", e))?;
+            let output_ids: Vec<u32> = tokens[4..].to_vec();
+            let text = runtime
+                .tokenizer
+                .decode(&output_ids, true)
+                .map_err(|e| anyhow::anyhow!("Tokenizer decode failed: {}", e))?;
 
-        Ok(text.trim().to_string())
+            Ok(text.trim().to_string())
+        })
     }
+}
+
+#[cfg(feature = "asr-canary")]
+fn decode_whisper_windows(
+    samples: &[f32],
+    mut decode: impl FnMut(&[f32]) -> Result<String>,
+) -> Result<String> {
+    let mut text = Vec::new();
+    for window in samples.chunks(30 * 16_000) {
+        if window.iter().all(|sample| *sample == 0.0) {
+            continue;
+        }
+        let decoded = decode(window)?;
+        let decoded = decoded.trim();
+        if !decoded.is_empty() {
+            text.push(decoded.to_string());
+        }
+    }
+    Ok(text.join(" "))
 }
 
 #[cfg(feature = "asr-canary")]
@@ -310,7 +354,7 @@ pub(super) fn prewarm_runtime(model_dir: &Path) -> Result<()> {
     {
         return Ok(());
     }
-    *cache = Some(load_runtime(model_dir)?);
+    *cache = Some(load_runtime(model_dir).map_err(crate::download::mismatch_first)?);
     Ok(())
 }
 
@@ -369,7 +413,7 @@ impl AsrProvider for WhisperCandleProvider {
         }
         if !self.has_trusted_required_files() {
             anyhow::bail!(
-                "Whisper Candle model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+                "Whisper Candle model files failed their integrity check. Download the model again in Settings > Models."
             );
         }
         let model_dir = self.model_dir.clone();
@@ -407,7 +451,7 @@ impl AsrProvider for WhisperCandleProvider {
         }
         if !self.has_trusted_required_files() {
             return Err(anyhow::anyhow!(
-                "Whisper Candle model files have not passed Plainsong integrity verification. Re-download the model from Settings."
+                "Whisper Candle model files failed their integrity check. Download the model again in Settings > Models."
             ));
         }
 
@@ -439,19 +483,22 @@ impl AsrProvider for WhisperCandleProvider {
         };
 
         let text = if let Some(samples) = use_trimmed {
-            // Write trimmed audio to temp file
-            let temp_path = std::env::temp_dir().join(format!(
-                "whisper_candle_trimmed_{}.wav",
-                uuid::Uuid::new_v4()
-            ));
-            {
+            tokio::task::spawn_blocking(move || {
+                let temp_path = std::env::temp_dir().join(format!(
+                    "whisper_candle_trimmed_{}.wav",
+                    uuid::Uuid::new_v4()
+                ));
+                // The worker owns cleanup until inference finishes, even if
+                // the caller cancels its future while this task is running.
+                let (file, _temp_guard) =
+                    crate::recording_audio::create_secure_temporary_audio(&temp_path)?;
                 let spec = hound::WavSpec {
                     channels: 1,
                     sample_rate: 16000,
                     bits_per_sample: 16,
                     sample_format: hound::SampleFormat::Int,
                 };
-                let mut writer = hound::WavWriter::create(&temp_path, spec)
+                let mut writer = hound::WavWriter::new(file, spec)
                     .context("Failed to create temp WAV for Whisper Candle")?;
                 for sample in &samples {
                     let int_sample = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
@@ -460,15 +507,10 @@ impl AsrProvider for WhisperCandleProvider {
                         .context("Failed to write sample")?;
                 }
                 writer.finalize().context("Failed to finalize temp WAV")?;
-            }
-            let temp_path_for_cleanup = temp_path.clone();
-            let result = tokio::task::spawn_blocking(move || {
                 run_whisper_candle_inference_from_file(&model_dir, &temp_path)
             })
             .await
-            .context("Whisper Candle inference task panicked");
-            let _ = std::fs::remove_file(&temp_path_for_cleanup);
-            result??
+            .context("Whisper Candle inference task panicked")??
         } else {
             let audio_path_owned = audio_path.to_path_buf();
             tokio::task::spawn_blocking(move || {
@@ -501,18 +543,19 @@ impl AsrProvider for WhisperCandleProvider {
             optimization_applied: false,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 
     async fn transcribe_bytes(&self, audio_data: &[u8]) -> Result<TranscriptionResult> {
         let temp_path =
             std::env::temp_dir().join(format!("whisper_candle_{}.wav", uuid::Uuid::new_v4()));
-        std::fs::write(&temp_path, audio_data)
-            .context("failed to write temp wav for Whisper Candle")?;
-        let result = self.transcribe(&temp_path).await;
-        let _ = std::fs::remove_file(&temp_path);
-        result
+        let _temp_guard =
+            crate::recording_audio::write_secure_temporary_audio(&temp_path, audio_data)
+                .context("failed to write temp wav for Whisper Candle")?;
+        self.transcribe(&temp_path).await
     }
 
     fn download_status(&self) -> DownloadStatus {
@@ -577,5 +620,80 @@ mod integrity_tests {
                 .chars()
                 .all(|character| character.is_ascii_hexdigit()));
         }
+    }
+}
+
+#[cfg(all(test, feature = "asr-canary"))]
+mod full_audio_window_tests {
+    use super::decode_whisper_windows;
+
+    #[test]
+    fn decodes_every_sample_in_order_including_the_tail() {
+        let samples: Vec<_> = (0..(36 * 16_000)).map(|i| i as f32).collect();
+        let mut decoded_samples = Vec::new();
+        let mut windows = 0;
+        let result = decode_whisper_windows(&samples, |window| {
+            assert!(window.len() <= 30 * 16_000);
+            decoded_samples.extend_from_slice(window);
+            windows += 1;
+            Ok(if windows == 1 {
+                "Production cost"
+            } else {
+                "must not exceed 12.50 euros."
+            }
+            .to_string())
+        })
+        .unwrap();
+        assert_eq!(windows, 2);
+        assert_eq!(decoded_samples, samples);
+        assert_eq!(result, "Production cost must not exceed 12.50 euros.");
+    }
+
+    #[test]
+    fn short_and_exact_window_audio_are_decoded_once() {
+        for count in [1, 16_000, 30 * 16_000] {
+            let samples = vec![0.1; count];
+            let mut calls = 0;
+            assert_eq!(
+                decode_whisper_windows(&samples, |window| {
+                    calls += 1;
+                    assert_eq!(window.len(), count);
+                    Ok(" existing text ".to_string())
+                })
+                .unwrap(),
+                "existing text"
+            );
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn digital_silence_and_empty_input_do_not_run_the_decoder() {
+        for count in [0, 16_000, 36 * 16_000] {
+            let result = decode_whisper_windows(&vec![0.0; count], |_| {
+                panic!("digital silence must not produce a transcript")
+            })
+            .unwrap();
+            assert!(result.is_empty());
+        }
+    }
+
+    #[test]
+    fn later_window_failure_does_not_return_a_partial_transcript() {
+        let samples = vec![0.1; 31 * 16_000];
+        let mut calls = 0;
+        let result = decode_whisper_windows(&samples, |_| {
+            calls += 1;
+            if calls == 1 {
+                Ok("partial text".to_string())
+            } else {
+                Err(anyhow::anyhow!("second window failed"))
+            }
+        });
+        assert_eq!(calls, 2);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("second window failed"));
     }
 }

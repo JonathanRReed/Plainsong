@@ -51,6 +51,17 @@ pub fn dictation_category_prompt_fragment(category: DictationAppCategory) -> Opt
     }
 }
 
+/// Explicit styles take precedence over default email/message tone. Keep
+/// destination safeguards for prompts and technical text.
+pub fn dictation_custom_style_category_fragment(
+    category: DictationAppCategory,
+) -> Option<&'static str> {
+    match category {
+        DictationAppCategory::Email | DictationAppCategory::Messaging => None,
+        _ => dictation_category_prompt_fragment(category),
+    }
+}
+
 /// Punctuation configuration
 #[derive(Debug, Clone)]
 pub struct PunctuationConfig {
@@ -176,50 +187,97 @@ impl IntelligentPunctuator {
         if let Ok(re) = RegexBuilder::new(r"([a-z])\.([A-Z])").build() {
             result = re.replace_all(&result, "$1. $2").to_string();
         }
-        result = result.replace("  ", " ");
+        result = collapse_horizontal_spaces_outside_quotes(&result);
 
         result
     }
 
     /// Detect question patterns and add question marks
     fn detect_questions(&self, text: &str) -> String {
-        let question_words = vec![
-            "what", "when", "where", "who", "whom", "whose", "why", "how", "which", "whether",
-            "can", "could", "would", "should", "will", "shall", "may", "might", "is", "are", "was",
-            "were", "do", "does", "did", "have", "has", "had", "am",
-        ];
-
+        let is_auxiliary = |word: &str| {
+            [
+                "is", "are", "was", "were", "do", "does", "did", "have", "has", "had", "can",
+                "could", "would", "should", "will", "shall", "may", "might", "am",
+            ]
+            .contains(&word)
+        };
+        // A period within a decimal or host is not a sentence boundary.
+        let end_pos = text.char_indices().find_map(|(index, ch)| {
+            let ends_sentence = matches!(ch, '.' | '!' | '?')
+                && text[index + ch.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace);
+            ends_sentence.then_some(index)
+        });
+        let first_sentence = &text[..end_pos.unwrap_or(text.len())];
+        let lowercase = first_sentence.to_lowercase();
+        let mut words = lowercase.split_whitespace();
+        let first = words.next().unwrap_or_default();
+        let second = words.next();
+        // Pronouns and demonstratives can stand alone as subjects. Definite
+        // and possessive determiners need a following noun, and never count
+        // after "do"/"have", which also open commands ("Do the dishes",
+        // "Have your team review it"). "a" is omitted for the same reason.
+        let subject_follows = second.is_some_and(|word| {
+            [
+                "you", "we", "i", "it", "they", "he", "she", "there", "this", "that", "these",
+                "those",
+            ]
+            .contains(&word)
+                || (matches!(word, "your" | "our" | "my" | "the")
+                    && !matches!(first, "do" | "have")
+                    && words.next().is_some())
+        });
+        let wh_word = matches!(
+            first,
+            "what" | "when" | "where" | "who" | "whom" | "whose" | "why" | "how" | "which"
+        );
+        let tokens: Vec<_> = lowercase.split_whitespace().collect();
+        let is_subject_verb = |word: &str| {
+            (word.len() > 3 && word.ends_with("ed"))
+                || [
+                    "broke", "came", "went", "left", "said", "fell", "won", "lost", "works",
+                    "knows", "happens", "calls", "costs", "matters", "means", "needs", "wants",
+                    "makes", "takes", "gives", "seems", "remains", "changes", "helps",
+                ]
+                .contains(&word)
+        };
+        let subject_question =
+            matches!(first, "who" | "what") && second.is_some_and(is_subject_verb);
+        let phrase_word = |word: &str| {
+            word.chars().all(char::is_alphabetic)
+                && ![
+                    "a", "an", "the", "i", "you", "we", "they", "he", "she", "it", "this", "that",
+                ]
+                .contains(&word)
+                && !is_auxiliary(word)
+                && !is_subject_verb(word)
+        };
+        let phrase_question = matches!(first, "what" | "which" | "whose" | "how")
+            && (2..=4).any(|aux| {
+                tokens.get(aux).is_some_and(|word| is_auxiliary(word))
+                    && tokens.get(aux + 1).is_some()
+                    && tokens[1..aux].iter().all(|word| phrase_word(word))
+            });
+        let which_subject = first == "which"
+            && second.is_some_and(phrase_word)
+            && tokens.get(2).is_some_and(|word| is_subject_verb(word));
+        let strong_question = (is_auxiliary(first) && subject_follows)
+            || (wh_word && second.is_none_or(is_auxiliary))
+            || subject_question
+            || phrase_question
+            || which_subject;
         let mut result = text.to_string();
-
-        // Check for question patterns at start. Whole-word matches only:
-        // "Whatever"/"Islands"/"Cannot" must not count as question starters
-        // just because they begin with "what"/"is"/"can".
-        let lowercase = result.to_lowercase();
-        for word in question_words {
-            let is_bare_question_word =
-                lowercase.trim_end().trim_end_matches(['.', '!', '?']) == word;
-            if lowercase.starts_with(&format!("{} ", word)) || is_bare_question_word {
-                // Rewrite the terminator of the first sentence only, and
-                // only where it truly ends a sentence (followed by
-                // whitespace or end-of-text) so a '.' inside "3.14" or
-                // "linear.app" is never turned into '?'.
-                let end_pos = result.char_indices().find_map(|(index, ch)| {
-                    let ends_sentence = matches!(ch, '.' | '!')
-                        && result[index + ch.len_utf8()..]
-                            .chars()
-                            .next()
-                            .is_none_or(char::is_whitespace);
-                    ends_sentence.then_some(index)
-                });
-                if let Some(end_pos) = end_pos {
-                    result.replace_range(end_pos..end_pos + 1, "?");
-                } else {
-                    result.push('?');
+        if strong_question {
+            match end_pos {
+                Some(index) if text.as_bytes()[index] == b'.' => {
+                    result.replace_range(index..index + 1, "?");
                 }
-                break;
+                None => result.push('?'),
+                _ => {}
             }
         }
-
         result
     }
 
@@ -231,7 +289,7 @@ impl IntelligentPunctuator {
         let mut capitalize_next = true;
         let mut boundary_pending = false;
 
-        for c in text.chars() {
+        for (index, c) in text.char_indices() {
             if boundary_pending {
                 boundary_pending = false;
                 if c.is_whitespace() {
@@ -239,11 +297,15 @@ impl IntelligentPunctuator {
                 }
             }
             if capitalize_next && c.is_ascii_lowercase() {
-                result.push(c.to_ascii_uppercase());
+                if word_is_mixed_case(&text[index..]) {
+                    result.push(c);
+                } else {
+                    result.push(c.to_ascii_uppercase());
+                }
                 capitalize_next = false;
             } else {
                 result.push(c);
-                if c == '.' || c == '!' || c == '?' {
+                if c == '!' || c == '?' || (c == '.' && !ends_with_abbreviation(&result)) {
                     boundary_pending = true;
                 } else if c.is_alphanumeric() {
                     capitalize_next = false;
@@ -256,60 +318,122 @@ impl IntelligentPunctuator {
 
     /// Add commas for natural pauses and lists
     fn add_commas(&self, text: &str) -> String {
-        let mut result = text.to_string();
+        let mut result = Self::comma_before_joined_clauses(text);
 
-        // Add comma before coordinating conjunctions in middle of sentence
-        let conjunctions = vec![" and ", " but ", " or ", " yet ", " so ", " for ", " nor "];
-
-        for conj in conjunctions {
-            // Only add comma if there's no comma before and it looks like a compound sentence
-            if result.contains(conj) && !result.contains(&format!(",{}", conj)) {
-                // Simple heuristic: if there's a verb before the conjunction, it's likely compound
-                if let Some(pos) = result.find(conj) {
-                    let before = &result[..pos];
-                    // Check if previous words suggest a compound sentence
-                    if before.contains("ed ")
-                        || before.contains("ing ")
-                        || before.contains(" is ")
-                        || before.contains(" was ")
-                        || before.contains(" are ")
-                        || before.contains(" were ")
-                    {
-                        result.insert(pos, ',');
-                    }
-                }
-            }
-        }
-
-        // Add comma after introductory phrases
-        let intro_words = vec![
-            "well",
-            "so",
-            "now",
-            "then",
-            "however",
-            "therefore",
-            "anyway",
-        ];
+        // A comma after an introductory word, only where it cannot change
+        // the meaning: the word opens the sentence and a personal pronoun
+        // follows ("So I think" -> "So, I think"). Before anything else the
+        // word may be part of the clause: "Well water is contaminated", "So
+        // many people came", "Now that we are done", "Then the board
+        // decides". "However" is left out: "However you want" is not
+        // "However, you want".
+        let intro_words = ["well", "so", "now", "then", "therefore", "anyway"];
         for word in intro_words {
             let pattern = format!("{} ", self.capitalize_word(word));
             if let Some(pos) = result.find(&pattern) {
                 let after_pos = pos + pattern.len();
-                // Check if there's no comma after
-                if after_pos < result.len() && !result[after_pos..].starts_with(',') {
-                    // Check if next word isn't already the main verb
-                    let rest = &result[after_pos..];
-                    if !rest.starts_with("I ")
-                        && !rest.starts_with("you ")
-                        && !rest.starts_with("we ")
-                    {
-                        result.insert(after_pos - 1, ',');
-                    }
+                let opens_sentence = result[..pos]
+                    .trim_end()
+                    .chars()
+                    .next_back()
+                    .is_none_or(|ch| matches!(ch, '.' | '!' | '?' | '\n'));
+                let next_word = result[after_pos..]
+                    .split(|ch: char| ch.is_whitespace())
+                    .next()
+                    .unwrap_or_default();
+                let pronoun_follows =
+                    matches!(next_word, "I" | "we" | "you" | "they" | "he" | "she" | "it")
+                        && result[after_pos + next_word.len()..].starts_with(' ');
+                // Set phrases read wrong with a comma: "So it goes", "Now you
+                // see it".
+                let third_word = result[after_pos + next_word.len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches(|ch: char| !ch.is_alphanumeric())
+                    .to_lowercase();
+                let idiom = matches!(
+                    (word, next_word, third_word.as_str()),
+                    ("so", "it", "goes" | "seems")
+                        | ("so", "they", "say")
+                        | ("so", "he" | "she", "says")
+                        | ("now", "you", "see")
+                );
+                if opens_sentence && pronoun_follows && !idiom {
+                    result.insert(after_pos - 1, ',');
                 }
             }
         }
 
         result
+    }
+
+    /// A comma before "and"/"but"/"or"/"so" only where it joins two
+    /// independent clauses: a subject pronoun and at least one more word
+    /// follow, and the clause before has three or more words including a
+    /// clear verb (an auxiliary, a contraction, or a subject pronoun with a
+    /// word after it). "The project manager and I agreed" has no verb before
+    /// "and", so it stays. Nothing is added after "if", "unless", "when" and
+    /// similar words in the same sentence: "unless QA signs off and we have
+    /// the docs" is one joint condition, and a comma would split it. The old
+    /// rule keyed on any earlier "-ed"/"-ing" word and produced "look good,
+    /// so far" and "I waited, for you".
+    fn comma_before_joined_clauses(text: &str) -> String {
+        let words: Vec<&str> = text.split(' ').collect();
+        let mut output = String::with_capacity(text.len() + 8);
+        let mut clause_words = 0usize;
+        let mut clause_has_verb = false;
+        let mut sentence_has_condition = false;
+        for (index, word) in words.iter().enumerate() {
+            let is_conjunction = matches!(*word, "and" | "but" | "or" | "so");
+            let subject_follows = words.get(index + 1).is_some_and(|next| {
+                matches!(
+                    *next,
+                    "I" | "i" | "we" | "you" | "they" | "he" | "she" | "it"
+                )
+            }) && words
+                .get(index + 2)
+                .is_some_and(|after| after.starts_with(|ch: char| ch.is_alphabetic()));
+            if index > 0 {
+                if is_conjunction
+                    && subject_follows
+                    && clause_words >= 3
+                    && clause_has_verb
+                    && !sentence_has_condition
+                    && output.ends_with(|ch: char| ch.is_alphanumeric())
+                {
+                    output.push(',');
+                }
+                output.push(' ');
+            }
+            output.push_str(word);
+            let core = word
+                .trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '\'' && ch != '\u{2019}')
+                .to_lowercase()
+                .replace('\u{2019}', "'");
+            if opens_condition(&core, words.get(index + 1).copied()) {
+                sentence_has_condition = true;
+            }
+            if word_is_verb_cue(&core)
+                || (is_subject_pronoun(&core)
+                    && word.ends_with(|ch: char| ch.is_alphanumeric())
+                    && words
+                        .get(index + 1)
+                        .is_some_and(|next| next.starts_with(|ch: char| ch.is_alphabetic())))
+            {
+                clause_has_verb = true;
+            }
+            if word.ends_with([',', '.', ';', ':', '!', '?']) {
+                clause_words = 0;
+                clause_has_verb = false;
+            } else if !word.is_empty() {
+                clause_words += 1;
+            }
+            if word.ends_with(['.', '!', '?']) {
+                sentence_has_condition = false;
+            }
+        }
+        output
     }
 
     /// Format numbers with proper separators
@@ -491,10 +615,15 @@ fn replace_spoken_token(input: &str, phrase: &str, replacement: &str) -> String 
             .chars()
             .next_back()
             .is_none_or(char::is_whitespace);
-        let boundary_after = input[found.end()..]
-            .chars()
-            .next()
-            .is_none_or(char::is_whitespace);
+        let after = &input[found.end()..];
+        let boundary_after = after.chars().next().is_none_or(|ch| {
+            ch.is_whitespace()
+                || (",.;:!?)]}".contains(ch)
+                    && after[ch.len_utf8()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| !next.is_alphanumeric()))
+        });
         if !(boundary_before && boundary_after) {
             continue;
         }
@@ -502,11 +631,88 @@ fn replace_spoken_token(input: &str, phrase: &str, replacement: &str) -> String 
             continue;
         }
         output.push_str(&input[last_end..found.start()]);
+        if matches!(replacement, "." | "," | "!" | "?" | ":" | ";") {
+            // Attach a spoken punctuation mark without rewriting punctuation
+            // or whitespace that was already present in the transcript.
+            while output.ends_with([' ', '\t']) {
+                output.pop();
+            }
+        }
         output.push_str(replacement);
         last_end = found.end();
     }
     output.push_str(&input[last_end..]);
     output
+}
+
+fn render_spoken_quote(content: &str) -> String {
+    let content = content.trim();
+    if content.len() >= 2
+        && ((content.starts_with('"') && content.ends_with('"'))
+            || (content.starts_with('“') && content.ends_with('”')))
+    {
+        content.to_string()
+    } else {
+        format!("\"{content}\"")
+    }
+}
+
+fn normalize_spoken_quotes(text: &str) -> String {
+    let Ok(explicit) = RegexBuilder::new(r"\bopen\s+quote\s+(.+?)\s+(?:close|end)\s+quote\b")
+        .case_insensitive(true)
+        .build()
+    else {
+        return text.to_string();
+    };
+    let output = explicit
+        .replace_all(text, |caps: &regex::Captures<'_>| {
+            render_spoken_quote(&caps[1])
+        })
+        .to_string();
+    let Ok(paired) = RegexBuilder::new(r"\bquote\s+(.+?)\s+quote\b")
+        .case_insensitive(true)
+        .build()
+    else {
+        return output;
+    };
+    // Bare "quote" is also a verb and a noun. Only interpret paired markers
+    // after a clear introducer, or at the start, with a closing boundary.
+    let output = paired
+        .replace_all(&output, |caps: &regex::Captures<'_>| {
+            let found = caps.get(0).expect("whole match");
+            let before = output[..found.start()].trim_end();
+            let previous = before
+                .split_whitespace()
+                .next_back()
+                .map(normalize_guard_word);
+            let introduced = previous.as_deref().is_none_or(|word| {
+                matches!(
+                    word,
+                    "say"
+                        | "says"
+                        | "said"
+                        | "exactly"
+                        | "text"
+                        | "label"
+                        | "called"
+                        | "reads"
+                        | "write"
+                        | "is"
+                )
+            });
+            let after = output[found.end()..].trim_start();
+            let closed = after.is_empty() || after.starts_with(|ch: char| ",.;:!?)]}".contains(ch));
+            if introduced && closed {
+                render_spoken_quote(&caps[1])
+            } else {
+                found.as_str().to_string()
+            }
+        })
+        .to_string();
+    // Explicit single markers may span separate captures. Ordinary unpaired
+    // "quote" remains a word rather than becoming an unmatched delimiter.
+    let output = replace_spoken_token(&output, "open quote", "\"");
+    replace_spoken_token(&output, "close quote", "\"")
 }
 
 fn normalize_spoken_punctuation(text: &str) -> String {
@@ -516,9 +722,6 @@ fn normalize_spoken_punctuation(text: &str) -> String {
         ("close parenthesis", ")"),
         ("open paren", "("),
         ("close paren", ")"),
-        ("open quote", "\""),
-        ("close quote", "\""),
-        ("quote", "\""),
         ("at sign", "@"),
         ("forward slash", "/"),
         ("slash", "/"),
@@ -532,11 +735,10 @@ fn normalize_spoken_punctuation(text: &str) -> String {
         ("semicolon", ";"),
     ];
 
-    replacements
-        .iter()
-        .fold(text.to_string(), |current, (phrase, replacement)| {
-            replace_spoken_token(&current, phrase, replacement)
-        })
+    replacements.iter().fold(
+        normalize_spoken_quotes(text),
+        |current, (phrase, replacement)| replace_spoken_token(&current, phrase, replacement),
+    )
 }
 
 /// Collapses `word..` into `word.` while leaving ellipses and relative paths
@@ -570,7 +772,7 @@ fn collapse_duplicated_sentence_period(text: &str) -> String {
         // of a path segment (`../`, `..\`) or a range (`1..5`).
         let is_doubled_sentence_period = run_len == 2
             && previous.is_some_and(|c| c.is_alphanumeric())
-            && !matches!(next, Some('/') | Some('\\'))
+            && !matches!(next, Some('/') | Some('\\') | Some('='))
             && !next.is_some_and(|c| c.is_alphanumeric());
 
         if is_doubled_sentence_period {
@@ -586,11 +788,25 @@ fn collapse_duplicated_sentence_period(text: &str) -> String {
     output
 }
 
+fn collapse_horizontal_spaces_outside_quotes(text: &str) -> String {
+    let Ok(re) = RegexBuilder::new(r#""(?:\\.|[^"\\])*"|[ \t]{2,}"#).build() else {
+        return text.to_string();
+    };
+    re.replace_all(text, |caps: &regex::Captures<'_>| {
+        let matched = caps.get(0).expect("whole match").as_str();
+        if matched.starts_with('"') {
+            matched.to_string()
+        } else {
+            " ".to_string()
+        }
+    })
+    .to_string()
+}
+
 fn normalize_spacing_around_punctuation(text: &str) -> String {
     let mut output = text.replace("\r\n", "\n");
     let replacements = [
         (" ,", ","),
-        (" .", "."),
         (" !", "!"),
         (" ?", "?"),
         (" :", ":"),
@@ -602,6 +818,10 @@ fn normalize_spacing_around_punctuation(text: &str) -> String {
     for (needle, replacement) in replacements {
         output = output.replace(needle, replacement);
     }
+    // A leading dot can belong to ../src, .env or a decimal, not a sentence.
+    if let Ok(dot) = RegexBuilder::new(r" \.($|[ \t\r\n,!?;:)\]}])").build() {
+        output = dot.replace_all(&output, ".$1").to_string();
+    }
 
     // `..` is deliberately NOT in the table above. A blanket collapse turned
     // `cd ../src` into `cd ./src` and ate the middle dot of an ellipsis, and it
@@ -611,10 +831,7 @@ fn normalize_spacing_around_punctuation(text: &str) -> String {
     // (`../`, `./`).
     output = collapse_duplicated_sentence_period(&output);
 
-    let Ok(space_re) = RegexBuilder::new(r"[ \t]{2,}").build() else {
-        return output;
-    };
-    let output = space_re.replace_all(&output, " ").to_string();
+    let output = collapse_horizontal_spaces_outside_quotes(&output);
     output
         .replace("\n\n\n", "\n\n")
         .replace(" \n", "\n")
@@ -637,10 +854,7 @@ fn compact_structural_symbol_spacing(text: &str) -> String {
     }
 
     let regex_replacements = [
-        (r#""\s+([A-Za-z0-9])"#, r#""$1"#),
-        (r#"([A-Za-z0-9.,!?])\s+""#, r#"$1""#),
         (r"([A-Za-z0-9])\(", r"$1 ("),
-        (r"([A-Za-z0-9])\s*/\s*([A-Za-z0-9])", r"$1/$2"),
         (r"(?m)^-\s*([A-Za-z0-9])", r"- $1"),
         (r"(?m)\n-\s*([A-Za-z0-9])", "\n- $1"),
     ];
@@ -650,6 +864,33 @@ fn compact_structural_symbol_spacing(text: &str) -> String {
             continue;
         };
         output = re.replace_all(&output, replacement).to_string();
+    }
+
+    compact_path_spacing(&output)
+}
+
+fn compact_path_spacing(text: &str) -> String {
+    let mut output = text.to_string();
+    if let Ok(slash) = RegexBuilder::new(r"([A-Za-z0-9._-]+)\s*/\s*([A-Za-z0-9])").build() {
+        output = slash
+            .replace_all(&output, |caps: &regex::Captures<'_>| {
+                let was_separate = caps.get(0).expect("whole match").as_str()[caps[1].len()..]
+                    .starts_with(char::is_whitespace);
+                let separator = if was_separate
+                    && matches!(
+                        caps[1].to_ascii_lowercase().as_str(),
+                        "the" | "a" | "an" | "this" | "that"
+                    ) {
+                    " /"
+                } else {
+                    "/"
+                };
+                format!("{}{}{}", &caps[1], separator, &caps[2])
+            })
+            .to_string();
+    }
+    if let Ok(root_path) = RegexBuilder::new(r"/\s+([A-Za-z0-9])").build() {
+        output = root_path.replace_all(&output, "/$1").to_string();
     }
 
     output
@@ -695,13 +936,129 @@ fn capitalize_standalone_i(text: &str) -> String {
         .collect()
 }
 
+/// True when `text` ends with an abbreviation and its period ("9 a.m.",
+/// "Dr.", "e.g."). The word after it is not capitalized: "at 9 a.m.
+/// tomorrow" is one sentence. A speaker who ended the sentence there gets
+/// the recognizer's own capital on the next word.
+fn ends_with_abbreviation(text: &str) -> bool {
+    let token = text
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches(|ch: char| !ch.is_alphanumeric());
+    let Some(core) = token.strip_suffix('.') else {
+        return false;
+    };
+    matches!(
+        core.to_lowercase().as_str(),
+        "a.m"
+            | "p.m"
+            | "e.g"
+            | "i.e"
+            | "etc"
+            | "vs"
+            | "mr"
+            | "mrs"
+            | "ms"
+            | "dr"
+            | "prof"
+            | "approx"
+    )
+}
+
+fn is_subject_pronoun(word: &str) -> bool {
+    matches!(word, "i" | "we" | "you" | "they" | "he" | "she" | "it")
+}
+
+/// Auxiliaries and contractions that show a clause has a finite verb.
+fn word_is_verb_cue(word: &str) -> bool {
+    matches!(
+        word,
+        "is" | "was"
+            | "are"
+            | "were"
+            | "am"
+            | "be"
+            | "been"
+            | "has"
+            | "have"
+            | "had"
+            | "do"
+            | "does"
+            | "did"
+            | "will"
+            | "would"
+            | "can"
+            | "could"
+            | "should"
+            | "shall"
+            | "may"
+            | "might"
+            | "must"
+            | "it's"
+            | "that's"
+            | "he's"
+            | "she's"
+            | "there's"
+            | "here's"
+            | "what's"
+            | "let's"
+    ) || ["n't", "'re", "'ve", "'ll", "'d", "'m"]
+        .iter()
+        .any(|suffix| word.ends_with(suffix))
+}
+
+/// Words that open a condition or a time clause. "As long as" and "as soon
+/// as" are recognized from their second word.
+fn opens_condition(word: &str, next: Option<&str>) -> bool {
+    matches!(
+        word,
+        "if" | "unless"
+            | "when"
+            | "whenever"
+            | "whether"
+            | "because"
+            | "until"
+            | "till"
+            | "while"
+            | "before"
+            | "after"
+            | "once"
+            | "since"
+            | "provided"
+            | "assuming"
+    ) || (word == "as"
+        && next.is_some_and(|next| {
+            matches!(
+                next.trim_matches(|ch: char| !ch.is_alphanumeric())
+                    .to_lowercase()
+                    .as_str(),
+                "long" | "soon"
+            )
+        }))
+}
+
+/// A word written with a capital after its first letter ("eBay", "iPhone",
+/// "macOS", "gRPC") is a name whose spelling must not change, even at the
+/// start of a sentence or line. `text` starts at the word's first letter.
+fn word_is_mixed_case(text: &str) -> bool {
+    text.chars()
+        .take_while(|ch| ch.is_alphanumeric())
+        .skip(1)
+        .any(char::is_uppercase)
+}
+
 fn capitalize_after_line_breaks(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut capitalize_next = true;
 
-    for ch in text.chars() {
+    for (index, ch) in text.char_indices() {
         if capitalize_next && ch.is_ascii_lowercase() {
-            output.push(ch.to_ascii_uppercase());
+            if word_is_mixed_case(&text[index..]) {
+                output.push(ch);
+            } else {
+                output.push(ch.to_ascii_uppercase());
+            }
             capitalize_next = false;
         } else {
             output.push(ch);
@@ -717,11 +1074,17 @@ fn capitalize_after_line_breaks(text: &str) -> String {
 }
 
 fn capitalize_after_bullet_markers(text: &str) -> String {
-    let Ok(re) = RegexBuilder::new(r"(?m)(^|\n)-\s+([a-z])").build() else {
+    let Ok(re) = RegexBuilder::new(r"(?m)(^|\n)-\s+([a-z])(\w*)").build() else {
         return text.to_string();
     };
     re.replace_all(text, |captures: &regex::Captures<'_>| {
-        format!("{}- {}", &captures[1], captures[2].to_ascii_uppercase())
+        let word = format!("{}{}", &captures[2], &captures[3]);
+        let first = if word_is_mixed_case(&word) {
+            captures[2].to_string()
+        } else {
+            captures[2].to_ascii_uppercase()
+        };
+        format!("{}- {}{}", &captures[1], first, &captures[3])
     })
     .to_string()
 }
@@ -761,11 +1124,15 @@ fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<Dict
         return Some(DictationAppCategory::Email);
     }
 
+    // Document editors count as notes: a numbered list or a new paragraph is
+    // the expected shape there, as in Word.
     let notes_bundle_ids = [
-        "com.apple.notes",    // Notes
-        "notion.id",          // Notion
-        "com.microsoft.word", // Word
-        "md.obsidian",        // Obsidian
+        "com.apple.notes",       // Notes
+        "notion.id",             // Notion
+        "com.microsoft.word",    // Word
+        "md.obsidian",           // Obsidian
+        "com.apple.textedit",    // TextEdit
+        "com.apple.iwork.pages", // Pages
     ];
     if notes_bundle_ids
         .iter()
@@ -802,6 +1169,12 @@ fn resolve_dictation_app_category_from_bundle_id(bundle_id: &str) -> Option<Dict
         "com.googlecode.iterm2",         // iTerm2
         "com.mitchellh.ghostty",         // Ghostty
         "dev.warp.warp-stable",          // Warp
+        "net.kovidgoyal.kitty",          // kitty
+        "org.alacritty",                 // Alacritty
+        "com.github.wez.wezterm",        // WezTerm
+        "co.zeit.hyper",                 // Hyper
+        "org.tabby",                     // Tabby
+        "com.raphaelamorim.rio",         // Rio
     ];
     if code_editor_bundle_ids
         .iter()
@@ -853,9 +1226,20 @@ fn resolve_dictation_app_category_from_name(app_name: &str) -> DictationAppCateg
         return DictationAppCategory::Email;
     }
 
-    if ["google docs", "docs", "notion", "word", "notes", "obsidian"]
-        .iter()
-        .any(|candidate| name_has_word(app_name, candidate))
+    if [
+        "google docs",
+        "docs",
+        "notion",
+        "word",
+        "notes",
+        "obsidian",
+        "textedit",
+    ]
+    .iter()
+    .any(|candidate| name_has_word(app_name, candidate))
+        // "pages" is also a word in browser hosts ("*.pages.dev"), so only
+        // the app name itself counts.
+        || app_name == "pages"
     {
         return DictationAppCategory::Notes;
     }
@@ -884,6 +1268,9 @@ fn resolve_dictation_app_category_from_name(app_name: &str) -> DictationAppCateg
         "intellij",
         "webstorm",
         "ghostty",
+        "kitty",
+        "alacritty",
+        "wezterm",
         "zed",
         "warp",
         "windsurf",
@@ -976,6 +1363,8 @@ fn normalize_for_app_style(
         DictationAppCategory::Email => {
             if mode_preset == "messages" {
                 trim_chatty_terminal_period(trimmed)
+            } else if super::layout::final_line_takes_no_period(trimmed) {
+                trimmed.to_string()
             } else {
                 ensure_terminal_punctuation(trimmed, '.')
             }
@@ -985,6 +1374,8 @@ fn normalize_for_app_style(
             let merged = merge_inline_conjunction_sentences(trimmed);
             if mode_preset == "messages" {
                 trim_chatty_terminal_period(&merged)
+            } else if super::layout::final_line_takes_no_period(&merged) {
+                merged
             } else {
                 ensure_terminal_punctuation(&merged, '.')
             }
@@ -995,6 +1386,42 @@ fn normalize_for_app_style(
         DictationAppCategory::AiChat
         | DictationAppCategory::CodeEditor
         | DictationAppCategory::Other => trimmed.to_string(),
+    }
+}
+
+/// Spoken identifier punctuation: "config underscore v3.yaml" is
+/// `config_v3.yaml` and "settings dot json" is `settings.json`. Outside code
+/// editors an underscore joins only when one side already looks like code (a
+/// digit or an inner dot), so "to underscore this point" stays prose.
+fn join_spoken_identifiers(text: &str, code_destination: bool) -> String {
+    static UNDERSCORE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)\b([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)\s+underscore\s+([a-z0-9][a-z0-9_.]*[a-z0-9]|[a-z0-9])\b",
+        )
+        .expect("underscore pattern")
+    });
+    static EXTENSION: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)\b([a-z0-9][a-z0-9_-]*)\s+dot\s+(json|yaml|yml|toml|ts|tsx|js|jsx|mjs|rs|py|md|txt|html|css|sh|env|lock|sql|csv)\b")
+            .expect("extension pattern")
+    });
+    let looks_like_code =
+        |word: &str| word.contains(|ch: char| ch.is_ascii_digit() || ch == '.' || ch == '_');
+    let mut joined = EXTENSION.replace_all(text, "$1.$2").to_string();
+    loop {
+        let next = UNDERSCORE
+            .replace_all(&joined, |captures: &regex::Captures<'_>| {
+                let (left, right) = (&captures[1], &captures[2]);
+                if code_destination || looks_like_code(left) || looks_like_code(right) {
+                    format!("{left}_{right}")
+                } else {
+                    captures[0].to_string()
+                }
+            })
+            .to_string();
+        if next == joined {
+            return joined;
+        }
+        joined = next;
     }
 }
 
@@ -1021,16 +1448,86 @@ pub fn smart_format_dictation_text_with_category(
     mode_preset: &str,
     app_style: DictationAppCategory,
 ) -> String {
+    smart_format_dictation_text_with_layout(text, mode_preset, app_style, false)
+}
+
+/// Same as `smart_format_dictation_text_with_category`, plus line-break
+/// layout when `structured_layout` is set: numbered lists for clear spoken
+/// enumerations, spoken "new paragraph"/"new line" at sentence boundaries,
+/// topic-shift paragraphs, and an email greeting and sign-off on their own
+/// lines (see `text::layout`). Callers set it only when the user kept
+/// destination-aware formatting on and the focused field is not single-line;
+/// even then full layout applies only to email, notes and worklog
+/// destinations, and chat and unknown apps get only an explicit list.
+pub fn smart_format_dictation_text_with_layout(
+    text: &str,
+    mode_preset: &str,
+    app_style: DictationAppCategory,
+    structured_layout: bool,
+) -> String {
+    smart_format_dictation_text_for_language(
+        text,
+        mode_preset,
+        app_style,
+        structured_layout,
+        super::language::english_rules_apply(None, text),
+    )
+}
+
+/// Same as `smart_format_dictation_text_with_layout`, with the dictation's
+/// English-rules decision (`text::language::english_rules_apply`) made by
+/// the caller on the recognizer's text, so dictionary replacements and
+/// snippet expansions added since cannot change it.
+pub fn smart_format_dictation_text_for_language(
+    text: &str,
+    mode_preset: &str,
+    app_style: DictationAppCategory,
+    structured_layout: bool,
+    english_rules: bool,
+) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
-    let normalized = normalize_spoken_punctuation(trimmed);
-    let normalized = capitalize_standalone_i(&normalized);
+    let code_flags = if app_style == DictationAppCategory::CodeEditor {
+        RegexBuilder::new(r"\bdash\s+dash\s+([A-Za-z][A-Za-z0-9_-]*)\b")
+            .case_insensitive(true)
+            .build()
+            .map(|flags| flags.replace_all(trimmed, "--$1").to_string())
+            .unwrap_or_else(|_| trimmed.to_string())
+    } else {
+        trimmed.to_string()
+    };
+    let code_flags =
+        join_spoken_identifiers(&code_flags, app_style == DictationAppCategory::CodeEditor);
+    let normalized = normalize_spoken_punctuation(&code_flags);
+    // The speaker said "period", "comma" and the like, so a spoken "new
+    // paragraph" in the same dictation is a command too (see
+    // `layout::convert_spoken_breaks`).
+    let clause_marks = |text: &str| text.matches(['.', ',', ';', ':', '?', '!']).count();
+    let dictated_punctuation = clause_marks(&normalized) > clause_marks(&code_flags);
+    if app_style == DictationAppCategory::CodeEditor {
+        // Sentence polish must not turn cd into Cd, i into I, or -v into a
+        // bullet, collapse operators, or remove indentation.
+        return if normalized == trimmed {
+            normalized
+        } else {
+            compact_path_spacing(&normalized)
+        };
+    }
+    // A lone "i" is the English pronoun, but the Italian plural article.
+    let normalized = if english_rules {
+        capitalize_standalone_i(&normalized)
+    } else {
+        normalized
+    };
     let normalized = restore_structural_breaks(&compact_structural_symbol_spacing(
         &normalize_spacing_around_punctuation(&normalized),
     ));
+    let layout = structured_layout
+        && super::layout::category_supports_layout(mode_preset, app_style)
+        && !normalized.contains('\n');
     let normalized = preserve_structural_break_tokens(&normalized);
 
     if normalized.contains("__PLAINSONG_LINE_BREAK__")
@@ -1119,14 +1616,55 @@ pub fn smart_format_dictation_text_with_category(
         },
     };
 
+    if structured_layout
+        && matches!(
+            app_style,
+            DictationAppCategory::Messaging | DictationAppCategory::Other
+        )
+        && mode_preset != "messages"
+        && !normalized.contains('\n')
+    {
+        let punctuator = IntelligentPunctuator::new(PunctuationConfig {
+            paragraph_breaks: false,
+            ..config.clone()
+        });
+        let punctuate = |text: &str| punctuator.punctuate(text).trim().to_string();
+        let list = if app_style == DictationAppCategory::Messaging {
+            super::layout::announced_list_block(&normalized, &punctuate)
+        } else {
+            super::layout::explicit_list_block(&normalized, &punctuate)
+        };
+        if let Some(list) = list {
+            return normalize_for_app_style(
+                compact_structural_symbol_spacing(&capitalize_after_line_breaks(&list)),
+                mode_preset,
+                app_style,
+            );
+        }
+    }
+
+    if layout {
+        let laid_out = lay_out_dictation(&normalized, &config, app_style, dictated_punctuation);
+        return normalize_for_app_style(
+            compact_structural_symbol_spacing(&capitalize_after_line_breaks(&laid_out)),
+            mode_preset,
+            app_style,
+        );
+    }
+
     normalize_for_app_style(
         compact_structural_symbol_spacing(&capitalize_after_bullet_markers(
             &capitalize_after_line_breaks(&restore_structural_breaks(
                 &restore_structural_break_tokens(&capitalize_after_line_breaks(
                     &restore_structural_breaks(
-                        IntelligentPunctuator::new(config)
-                            .punctuate(&normalized)
-                            .trim(),
+                        // Paragraph breaks are layout: a single-line field,
+                        // an unknown field or layout turned off gets none.
+                        IntelligentPunctuator::new(PunctuationConfig {
+                            paragraph_breaks: false,
+                            ..config
+                        })
+                        .punctuate(&normalized)
+                        .trim(),
                     ),
                 )),
             )),
@@ -1134,6 +1672,70 @@ pub fn smart_format_dictation_text_with_category(
         mode_preset,
         app_style,
     )
+}
+
+/// Layout for single-line dictation going to a multi-line destination.
+/// Email splits off its greeting and sign-off first; then spoken breaks
+/// divide the body into blocks, and each block is punctuated on its own and
+/// given lists and paragraphs.
+fn lay_out_dictation(
+    text: &str,
+    config: &PunctuationConfig,
+    app_style: DictationAppCategory,
+    dictated_punctuation: bool,
+) -> String {
+    use super::layout;
+
+    let paragraph_threshold = config
+        .paragraph_breaks
+        .then_some(config.words_per_paragraph);
+    let block_config = PunctuationConfig {
+        paragraph_breaks: false,
+        ..config.clone()
+    };
+    let punctuator = IntelligentPunctuator::new(block_config);
+    let format_body = |body: &str, after_greeting: bool| -> String {
+        let converted = layout::convert_spoken_breaks(body, after_greeting, dictated_punctuation);
+        let mut output = String::with_capacity(converted.len() + 16);
+        let mut rest = converted.as_str();
+        while !rest.is_empty() {
+            let (block, separator, next) = match rest.find('\n') {
+                Some(index) => {
+                    let paragraph = rest[index..].starts_with("\n\n");
+                    let skip = if paragraph { 2 } else { 1 };
+                    (
+                        &rest[..index],
+                        if paragraph { "\n\n" } else { "\n" },
+                        &rest[index + skip..],
+                    )
+                }
+                None => (rest, "", ""),
+            };
+            let block = block.trim();
+            if !block.is_empty() {
+                output.push_str(&layout::structure_block(
+                    block,
+                    paragraph_threshold,
+                    &|text: &str| punctuator.punctuate(text).trim().to_string(),
+                ));
+            }
+            output.push_str(separator);
+            rest = next;
+        }
+        output.trim().to_string()
+    };
+
+    if app_style != DictationAppCategory::Email {
+        return format_body(text, false);
+    }
+    let frame = layout::split_email_frame(text);
+    let body = format_body(&frame.body, frame.greeting.is_some());
+    [frame.greeting, Some(body), frame.sign_off]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// Format transcript for specific use cases
@@ -1354,6 +1956,111 @@ mod tests {
     }
 
     #[test]
+    fn spoken_quote_pairs_keep_boundaries_and_literal_words() {
+        for (input, expected) in [
+            (
+                "write exactly quote \"do not reset production\" quote.",
+                "write exactly \"do not reset production\".",
+            ),
+            (
+                "write exactly open quote \"do not reset production\" close quote.",
+                "write exactly \"do not reset production\".",
+            ),
+        ] {
+            assert_eq!(
+                smart_format_dictation_text_for_app(input, "voice", Some("Cursor")),
+                expected
+            );
+        }
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "The button must say quote Save a copy quote, not Save copy.",
+                "voice",
+                Some("Notion")
+            ),
+            "The button must say \"Save a copy\", not Save copy."
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "Write exactly quote do not reset production quote.",
+                "voice",
+                Some("ChatGPT")
+            ),
+            "Write exactly \"do not reset production\"."
+        );
+        for text in [
+            "Please quote the invoice.",
+            "That quote is accurate.",
+            "Keep \"  literal spaces  \" here.",
+        ] {
+            assert_eq!(
+                smart_format_dictation_text_for_app(text, "voice", None),
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn spoken_absolute_paths_keep_the_preceding_article_separate() {
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "Keep the slash users endpoint.",
+                "voice",
+                Some("Cursor")
+            ),
+            "Keep the /users endpoint."
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app("slash users slash local", "voice", Some("Cursor")),
+            "/users/local"
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "keep the /users endpoint",
+                "voice",
+                Some("Cursor")
+            ),
+            "keep the /users endpoint"
+        );
+    }
+
+    #[test]
+    fn code_editor_spoken_double_dash_forms_a_command_flag() {
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "Run cargo test dash dash locked, not cargo update.",
+                "voice",
+                Some("Cursor")
+            ),
+            "Run cargo test --locked, not cargo update."
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app("git status --short", "voice", Some("Cursor")),
+            "git status --short"
+        );
+    }
+
+    #[test]
+    fn a_prohibition_keeps_its_statement_terminator() {
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "Do not deploy this tonight.",
+                "voice",
+                Some("Linear")
+            ),
+            "Do not deploy this tonight."
+        );
+        assert_eq!(
+            smart_format_dictation_text_for_app(
+                "Do you approve the deployment?",
+                "voice",
+                Some("Linear")
+            ),
+            "Do you approve the deployment?"
+        );
+    }
+
+    #[test]
     fn smart_format_dictation_preserves_decimals_versions_and_domains() {
         // Regression: a blanket `.` -> `. ` replace plus naive sentence
         // capitalization mangled "3.14" into "3. 14" and "linear.app" into
@@ -1374,6 +2081,125 @@ mod tests {
             ),
             "Check docs.google.com and linear.app"
         );
+    }
+
+    #[test]
+    fn spoken_identifiers_join_only_with_code_evidence() {
+        for (input, category, expected) in [
+            (
+                "Rename config underscore v3.yaml then push it",
+                DictationAppCategory::Notes,
+                "config_v3.yaml",
+            ),
+            (
+                "open settings dot json",
+                DictationAppCategory::Email,
+                "settings.json",
+            ),
+            (
+                "call get underscore user underscore id",
+                DictationAppCategory::CodeEditor,
+                "get_user_id",
+            ),
+        ] {
+            let output = smart_format_dictation_text_with_category(input, "voice", category);
+            assert!(output.contains(expected), "{input} -> {output}");
+        }
+        for (input, category) in [
+            (
+                "I want to underscore this point",
+                DictationAppCategory::Notes,
+            ),
+            (
+                "I want to underscore this point",
+                DictationAppCategory::Email,
+            ),
+            ("A polka dot pattern", DictationAppCategory::Notes),
+            (
+                "I want to underscore how important this is",
+                DictationAppCategory::AiChat,
+            ),
+            (
+                "This matters. Underscore that for the team.",
+                DictationAppCategory::Notes,
+            ),
+        ] {
+            let output = smart_format_dictation_text_with_category(input, "voice", category);
+            assert!(
+                !output.contains('_') && !output.contains("dot."),
+                "{input} -> {output}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_questions_requires_inversion_and_preserves_exclamations() {
+        let punctuator = IntelligentPunctuator::default();
+        for input in [
+            "Have a good day.",
+            "Will Smith called.",
+            "May release is delayed.",
+            "When I get home, I'll call.",
+            "What a day.",
+            "What I mean is...",
+            "Is.",
+            "Is the.",
+            "Islands are nice.",
+            "Is",
+            "Do not deploy.",
+            "Can you send it!",
+            "Do the dishes.",
+            "Have your team review it.",
+        ] {
+            assert_eq!(punctuator.detect_questions(input), input);
+            if input.ends_with('.') {
+                for mode in ["voice", "email", "notes"] {
+                    assert_eq!(
+                        smart_format_dictation_text_for_app(input, mode, None),
+                        input
+                    );
+                }
+            }
+        }
+        for (input, expected) in [
+            ("Can you send it.", "Can you send it?"),
+            ("Is it ready", "Is it ready?"),
+            ("What is the plan.", "What is the plan?"),
+            ("How do we ship", "How do we ship?"),
+            ("Why?", "Why?"),
+            ("Why", "Why?"),
+            ("Is the plan ready.", "Is the plan ready?"),
+            (
+                "Can you open linear.app at 3.14. Next sentence.",
+                "Can you open linear.app at 3.14? Next sentence.",
+            ),
+        ] {
+            assert_eq!(punctuator.detect_questions(input), expected);
+        }
+    }
+
+    #[test]
+    fn detect_questions_handles_bounded_subject_and_phrase_questions() {
+        let punctuator = IntelligentPunctuator::default();
+        for input in [
+            "What happened.",
+            "Who called.",
+            "What broke.",
+            "Who knows.",
+            "What time is it.",
+            "How much does it cost.",
+            "Which one works.",
+            "Which file did you change.",
+        ] {
+            let expected = format!("{}?", input.trim_end_matches('.'));
+            assert_eq!(punctuator.detect_questions(input), expected);
+            for mode in ["voice", "email"] {
+                assert_eq!(
+                    smart_format_dictation_text_for_app(input, mode, None),
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
@@ -1504,6 +2330,11 @@ mod tests {
             ("Microsoft Word", Notes),
             ("mail.google.com", Email),
             ("docs.google.com", Notes),
+            ("TextEdit", Notes),
+            ("Pages", Notes),
+            // A browser host is not the Pages app.
+            ("myapp.pages.dev", Other),
+            ("blog.pages.dev", Other),
             ("iTerm2", CodeEditor),
             ("Visual Studio Code", CodeEditor),
             ("Slack", Messaging),
@@ -1520,6 +2351,8 @@ mod tests {
             ("com.microsoft.Outlook", Email),
             ("notion.id", Notes),
             ("com.apple.Notes", Notes),
+            ("com.apple.TextEdit", Notes),
+            ("com.apple.iWork.Pages", Notes),
         ] {
             assert_eq!(
                 resolve_dictation_app_category(None, Some(bundle)),
@@ -1545,6 +2378,14 @@ mod tests {
             ("dev.warp.Warp-Stable", DictationAppCategory::CodeEditor),
             ("com.exafunction.windsurf", DictationAppCategory::CodeEditor),
             ("com.google.antigravity", DictationAppCategory::CodeEditor),
+            // Terminals report a multi-line text area, so an uncategorized
+            // one would get numbered lists typed at its prompt.
+            ("net.kovidgoyal.kitty", DictationAppCategory::CodeEditor),
+            ("org.alacritty", DictationAppCategory::CodeEditor),
+            ("com.github.wez.wezterm", DictationAppCategory::CodeEditor),
+            ("co.zeit.hyper", DictationAppCategory::CodeEditor),
+            ("org.tabby", DictationAppCategory::CodeEditor),
+            ("com.raphaelamorim.rio", DictationAppCategory::CodeEditor),
         ] {
             assert_eq!(
                 resolve_dictation_app_category(None, Some(bundle_id)),
@@ -1562,6 +2403,9 @@ mod tests {
             ("Zed", DictationAppCategory::CodeEditor),
             ("Warp", DictationAppCategory::CodeEditor),
             ("Windsurf", DictationAppCategory::CodeEditor),
+            ("kitty", DictationAppCategory::CodeEditor),
+            ("Alacritty", DictationAppCategory::CodeEditor),
+            ("WezTerm", DictationAppCategory::CodeEditor),
         ] {
             assert_eq!(
                 resolve_dictation_app_category(Some(app_name), None),
@@ -1594,7 +2438,7 @@ mod tests {
             smart_format_dictation_text_for_app(input, "voice", Some("Visual Studio Code"));
         // CodeEditor is passthrough for local punctuation formatting: no
         // paragraph-break normalization is applied like it would be for Notes.
-        assert_eq!(result, "First section. New paragraph second section.");
+        assert_eq!(result, "first section. new paragraph second section.");
     }
 
     #[test]
@@ -1666,9 +2510,447 @@ mod tests {
             "voice",
             DictationAppCategory::CodeEditor,
         );
+        assert_eq!(formatted, "cd ../src");
+        for literal in [
+            "fetchUserId",
+            "/users/local",
+            "git status --short",
+            "for i in items",
+            "node_ENV",
+            "load .env",
+            "cp ../a/b ../../c",
+            "a/b",
+            "-v",
+            "-5",
+            "value ?? fallback",
+            "!!enabled",
+            "for i in 1..=5",
+            "if ready:\n    return value",
+            "a / b",
+        ] {
+            assert_eq!(
+                smart_format_dictation_text_with_category(
+                    literal,
+                    "voice",
+                    DictationAppCategory::CodeEditor
+                ),
+                literal
+            );
+        }
+    }
+
+    fn laid_out(text: &str, mode: &str, category: DictationAppCategory) -> String {
+        smart_format_dictation_text_with_layout(text, mode, category, true)
+    }
+
+    #[test]
+    fn layout_numbers_spoken_lists_in_notes_email_and_worklog() {
+        use DictationAppCategory::*;
+        let spoken = "for the launch we need three things comma first comma the pricing page comma second comma the docs comma and third comma the changelog period";
+        assert_eq!(
+            laid_out(spoken, "voice", Notes),
+            "For the launch we need three things:\n1. The pricing page\n2. The docs\n3. The changelog"
+        );
+        assert_eq!(
+            laid_out(spoken, "voice", Worklog),
+            "For the launch we need three things:\n1. The pricing page\n2. The docs\n3. The changelog"
+        );
+        assert_eq!(
+            laid_out(
+                "Hi Sam, quick update. First, the build is green. Second, the docs are merged. Third, we ship Monday. Thanks, Jonathan.",
+                "voice",
+                Email
+            ),
+            "Hi Sam,\n\nQuick update.\n1. The build is green.\n2. The docs are merged.\n3. We ship Monday.\n\nThanks,\nJonathan"
+        );
+    }
+
+    #[test]
+    fn chat_apps_number_only_an_announced_list() {
+        use DictationAppCategory::*;
+        let announced = "three things for tomorrow comma first comma review the contract comma second comma call Dana comma and third comma book the flights";
+        let chat = laid_out(announced, "voice", Messaging);
         assert!(
-            formatted.contains("../src"),
-            "code editor formatting corrupted a relative path: {formatted}"
+            chat.ends_with("\n1. Review the contract\n2. Call Dana\n3. Book the flights"),
+            "{chat:?}"
+        );
+        assert!(!chat.contains("\n\n"), "{chat:?}");
+        // No list without the layout flag (setting off, single-line or
+        // unknown field), in "messages" mode, or in AI prompts and code.
+        assert!(
+            !smart_format_dictation_text_with_layout(announced, "voice", Messaging, false)
+                .contains('\n')
+        );
+        assert!(!laid_out(announced, "messages", Messaging).contains('\n'));
+        for category in [AiChat, CodeEditor] {
+            assert!(!laid_out(announced, "voice", category).contains('\n'));
+        }
+        // Chat still gets no paragraphs or spoken breaks.
+        let long = "first comma the pricing page comma second comma the docs comma third comma the changelog period new paragraph thanks";
+        assert!(!laid_out(long, "voice", Messaging).contains('\n'));
+    }
+
+    #[test]
+    fn unknown_apps_number_only_an_explicit_list() {
+        use DictationAppCategory::*;
+        assert_eq!(
+            laid_out(
+                "Three things for tomorrow. First, review the contract. Second, call Dana. Third, book the flights.",
+                "voice",
+                Other
+            ),
+            "Three things for tomorrow.\n1. Review the contract.\n2. Call Dana.\n3. Book the flights."
+        );
+        assert_eq!(
+            laid_out(
+                "Agenda for today, number 1, budget review, number 2, hiring update, number 3, the Q4 roadmap.",
+                "voice",
+                Other
+            ),
+            "Agenda for today:\n1. Budget review\n2. Hiring update\n3. The Q4 roadmap"
+        );
+        assert_eq!(
+            laid_out(
+                "Agenda for today. Number one, budget review. Number two, hiring update. Number three, the Q4 roadmap.",
+                "voice",
+                Other
+            ),
+            "Agenda for today.\n1. Budget review.\n2. Hiring update.\n3. The Q4 roadmap."
+        );
+        for prose in [
+            // Unannounced ordinals are prose there, as are paragraph and
+            // spoken-break cues.
+            "First, the build is green. Second, the docs are merged. Third, we ship Monday.",
+            "Done. New paragraph. Next we review the budget.",
+            // A "number one" that modifies a noun is not a marker, and two
+            // numbered items without an announcement are not enough.
+            "Number one priority is hiring, number two priority is budget, number three priority is the roadmap.",
+            "Number one, budget review. Number two, hiring update.",
+            "We ranked number 1, number 2 and number 3 in the region.",
+        ] {
+            let output = laid_out(prose, "voice", Other);
+            assert!(!output.contains('\n'), "{prose:?} became {output:?}");
+        }
+        // Single-line, unknown-role fields and the setting off pass no layout
+        // flag at all.
+        assert!(!smart_format_dictation_text_with_layout(
+            "Agenda for today, number 1, budget review, number 2, hiring update, number 3, the Q4 roadmap.",
+            "voice",
+            Other,
+            false
+        )
+        .contains('\n'));
+        // "messages" mode is an explicit ask for chat-style text.
+        assert!(!laid_out(
+            "Agenda for today, number 1, budget review, number 2, hiring update, number 3, the Q4 roadmap.",
+            "messages",
+            Other
+        )
+        .contains('\n'));
+    }
+
+    #[test]
+    fn layout_never_adds_line_breaks_to_chat_code_or_unknown_apps() {
+        use DictationAppCategory::*;
+        let spoken = "first, the pricing page. second, the docs. third, the changelog. new paragraph, thanks.";
+        for category in [Messaging, AiChat, CodeEditor, Other] {
+            let output = laid_out(spoken, "voice", category);
+            assert!(!output.contains('\n'), "{category:?}: {output:?}");
+        }
+        // "messages" mode asks for chat-style text even in a notes app.
+        assert!(!laid_out(spoken, "messages", Notes).contains('\n'));
+        // Without the layout flag (setting off or single-line field) the
+        // formatter behaves exactly as before.
+        for category in [Email, Notes, Worklog] {
+            assert_eq!(
+                smart_format_dictation_text_with_layout(spoken, "voice", category, false),
+                smart_format_dictation_text_with_category(spoken, "voice", category)
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_breaks_need_layout() {
+        use DictationAppCategory::*;
+        // 56 words, enough for a paragraph break in Notes.
+        let sentence = "We reviewed the launch plan with the whole team today.";
+        let spoken = [sentence; 5].join(" ") + " We agree on the next steps.";
+        assert_eq!(spoken.split_whitespace().count(), 56);
+        for category in [Notes, Email] {
+            for mode in ["voice", "notes", "email"] {
+                let output =
+                    smart_format_dictation_text_with_layout(&spoken, mode, category, false);
+                assert!(!output.contains('\n'), "{mode} {category:?}: {output:?}");
+            }
+        }
+        assert!(laid_out(&spoken, "voice", Notes).contains("\n\n"));
+    }
+
+    #[test]
+    fn intro_words_get_a_comma_only_before_a_pronoun() {
+        use DictationAppCategory::*;
+        for category in [Notes, Email] {
+            for (input, expected) in [
+                ("well water is contaminated", "Well water is contaminated."),
+                (
+                    "so many people came to the party",
+                    "So many people came to the party.",
+                ),
+                (
+                    "now that we are done we can go",
+                    "Now that we are done we can go.",
+                ),
+                ("then the board decides", "Then the board decides."),
+                (
+                    "however you want to do it is fine",
+                    "However you want to do it is fine.",
+                ),
+                ("so I booked the room", "So, I booked the room."),
+                ("well we tried", "Well, we tried."),
+                ("so it goes", "So it goes."),
+                ("so they say", "So they say."),
+                ("so it seems", "So it seems."),
+                ("so he says he is fine", "So he says he is fine."),
+                ("so she says", "So she says."),
+                (
+                    "now you see it now you don't",
+                    "Now you see it now you don't.",
+                ),
+            ] {
+                // Only the words and commas matter here, not the final stop.
+                let plain =
+                    smart_format_dictation_text_with_layout(input, "voice", category, false);
+                let expected = expected.trim_end_matches('.');
+                assert_eq!(
+                    plain.trim_end_matches('.'),
+                    expected,
+                    "{category:?}: {input}"
+                );
+                let structured = laid_out(input, "voice", category);
+                assert_eq!(
+                    structured.trim_end_matches('.'),
+                    expected,
+                    "{category:?}: {input}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layout_keeps_ordinary_sentences_unchanged() {
+        use DictationAppCategory::*;
+        for (input, category) in [
+            ("First, I want to thank you for coming.", Notes),
+            ("Our number one priority is speed.", Email),
+            ("First quarter results were strong, second quarter results were weak, third quarter is pending.", Notes),
+            ("The invoice is $1,250 and the call is at 3:30 pm.", Email),
+            ("I'll add a new paragraph about pricing.", Notes),
+            ("Thanks for the update.", Email),
+            ("Hey, can you check the deploy?", Email),
+        ] {
+            assert_eq!(
+                laid_out(input, "voice", category),
+                smart_format_dictation_text_with_category(input, "voice", category),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_honors_spoken_paragraphs_at_sentence_boundaries() {
+        use DictationAppCategory::*;
+        assert_eq!(
+            laid_out(
+                "first section period new paragraph second section period",
+                "voice",
+                Notes
+            ),
+            "First section.\n\nSecond section."
+        );
+        assert_eq!(
+            laid_out(
+                "hi priya comma new paragraph the contract is signed period new paragraph best comma jonathan",
+                "voice",
+                Email
+            ),
+            "Hi priya,\n\nThe contract is signed.\n\nBest, jonathan."
+        );
+    }
+
+    #[test]
+    fn layout_puts_email_greeting_and_sign_off_on_their_own_lines() {
+        use DictationAppCategory::*;
+        assert_eq!(
+            laid_out(
+                "Hi Sam, I reviewed the contract and it looks good. Can you send the signed copy by Friday? Best regards, Jonathan Reed.",
+                "voice",
+                Email
+            ),
+            "Hi Sam,\n\nI reviewed the contract, and it looks good. Can you send the signed copy by Friday?\n\nBest regards,\nJonathan Reed"
+        );
+        // Thanking the person greeted stays one line.
+        assert_eq!(
+            laid_out(
+                "Hi Sam, the contract is signed. Thanks, Sam.",
+                "voice",
+                Email
+            ),
+            "Hi Sam,\n\nThe contract is signed.\n\nThanks, Sam."
+        );
+        // Greeting and sign-off layout is email-only.
+        assert!(!laid_out(
+            "Hi Sam, the contract is signed and filed. Best, Jonathan.",
+            "voice",
+            Notes
+        )
+        .contains('\n'));
+    }
+
+    #[test]
+    fn layout_breaks_long_dictation_at_topic_shifts() {
+        use DictationAppCategory::*;
+        assert_eq!(
+            laid_out(
+                "The launch went well. Everyone liked the demo and the numbers look good so far. Also, I need the invoice by Friday.",
+                "voice",
+                Notes
+            ),
+            "The launch went well. Everyone liked the demo and the numbers look good so far.\n\nAlso, I need the invoice by Friday."
+        );
+    }
+
+    #[test]
+    fn layout_leaves_existing_line_breaks_to_the_structured_path() {
+        use DictationAppCategory::*;
+        let resumed = "5. Review\n6. Ship";
+        assert_eq!(laid_out(resumed, "voice", Notes), resumed);
+    }
+
+    #[test]
+    fn conjunction_commas_only_join_independent_clauses() {
+        for (input, expected) in [
+            (
+                "I reviewed the contract and it looks good",
+                "I reviewed the contract, and it looks good",
+            ),
+            (
+                "The numbers look good so far",
+                "The numbers look good so far",
+            ),
+            (
+                "I waited for you at the station",
+                "I waited for you at the station",
+            ),
+            ("We tested Tom and Jerry", "We tested Tom and Jerry"),
+            ("Sam and I are going", "Sam and I are going"),
+            ("I fixed it, and it works", "I fixed it, and it works"),
+            ("It was between you and I", "It was between you and I"),
+        ] {
+            assert_eq!(
+                IntelligentPunctuator::comma_before_joined_clauses(input),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn conjunction_commas_need_a_verb_before_and_no_open_condition() {
+        for text in [
+            "The project manager and I agreed on the scope",
+            "Our new designer and I will present on Friday",
+            "Don't merge it unless QA signs off and we have the docs.",
+            "If it rains and we cancel the trip we lose the deposit",
+            "We ship when the tests pass and we have sign-off",
+            "Wait until Sam replies and we have the numbers",
+        ] {
+            assert_eq!(
+                IntelligentPunctuator::comma_before_joined_clauses(text),
+                text,
+                "{text}"
+            );
+        }
+        // The condition covers the rest of its sentence, so no comma is
+        // added after it; the next sentence is free again.
+        assert_eq!(
+            IntelligentPunctuator::comma_before_joined_clauses(
+                "If it rains, we will stay in and we will play cards. I checked the forecast and it looks clear"
+            ),
+            "If it rains, we will stay in and we will play cards. I checked the forecast, and it looks clear"
+        );
+    }
+
+    #[test]
+    fn layout_does_not_add_commas_that_change_a_condition() {
+        use DictationAppCategory::*;
+        assert_eq!(
+            laid_out(
+                "Don't merge it unless QA signs off and we have the docs.",
+                "voice",
+                Email
+            ),
+            "Don't merge it unless QA signs off and we have the docs."
+        );
+        assert_eq!(
+            laid_out(
+                "The project manager and I agreed on the scope.",
+                "voice",
+                Notes
+            ),
+            "The project manager and I agreed on the scope."
+        );
+    }
+
+    #[test]
+    fn line_breaks_keep_mixed_case_words() {
+        use DictationAppCategory::*;
+        assert_eq!(
+            laid_out(
+                "Hi Sam, eBay sent the refund today. Thanks, Jon.",
+                "voice",
+                Email
+            ),
+            "Hi Sam,\n\neBay sent the refund today.\n\nThanks,\nJon"
+        );
+        assert_eq!(
+            laid_out(
+                "Three things: first, iPhone testing, second, macOS builds, and third, gRPC docs.",
+                "voice",
+                Notes
+            ),
+            "Three things:\n1. iPhone testing\n2. macOS builds\n3. gRPC docs"
+        );
+        assert_eq!(
+            capitalize_after_line_breaks("iOS\neBay\nmail"),
+            "iOS\neBay\nMail"
+        );
+        let punctuator = IntelligentPunctuator::new(PunctuationConfig {
+            paragraph_breaks: false,
+            ..PunctuationConfig::default()
+        });
+        assert_eq!(
+            punctuator.capitalize_sentences("done. iPhone ships. eBay too. ok"),
+            "Done. iPhone ships. eBay too. Ok"
+        );
+    }
+
+    #[test]
+    fn a_task_line_after_a_comma_still_gets_its_period() {
+        use DictationAppCategory::*;
+        assert_eq!(
+            laid_out("Done, new line, next item here", "voice", Worklog),
+            "Done,\nNext item here."
+        );
+    }
+
+    #[test]
+    fn layout_keeps_a_question_on_the_line_that_asks_it() {
+        assert_eq!(
+            laid_out(
+                "can you handle three things comma first comma the invoice comma second comma the contract comma and third comma the badge",
+                "voice",
+                DictationAppCategory::Notes
+            ),
+            "Can you handle three things?\n1. The invoice\n2. The contract\n3. The badge"
         );
     }
 }

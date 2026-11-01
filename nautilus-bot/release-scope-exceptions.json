@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "version": "0.9.0-beta.7",
+  "decisions": [
+    {
+      "requirement": "signed-updater",
+      "decision": "beta.5→beta.7 updater journey: skipped by Jonathan 2026-10-30",
+      "decidedBy": "Jonathan",
+      "date": "2026-10-30",
+      "reason": "if it breaks they can reload it"
+    },
+    {
+      "requirement": "audible-benchmark",
+      "decision": "audible benchmark: skipped for beta.7 by Jonathan 2026-10-30",
+      "decidedBy": "Jonathan",
+      "date": "2026-10-30",
+      "reason": "b23 measurement stands"
+    },
+    {
+      "requirement": "memory-footprint",
+      "scope": {
+        "tier": "8gb",
+        "state": "idle-after-dictation"
+      },
+      "decision": "Accept 8 GB window-open idle after dictation for beta.7; fix in beta.8",
+      "decidedBy": "Jonathan",
+      "date": "2026-10-31",
+      "reason": "Average is at the 300 MiB limit with the speech model kept warm and the main window open; brief graphics peaks to 534 MiB; window closed is about 200 MiB."
+    },
+    {
+      "requirement": "host-matrix",
+      "scope": {
+        "target": "Google Docs (Chrome)"
+      },
+      "decision": "Skip Google Docs typing for beta.7",
+      "decidedBy": "Jonathan",
+      "date": "2026-10-31",
+      "reason": "Chrome has no QA connection on this Mac; Notes, Slack and Messages pass."
+    },
+    {
+      "requirement": "clean-install",
+      "scope": {
+        "journey": "clean-account-first-run"
+      },
+      "decision": "Skip fresh-account install journey for beta.7",
+      "decidedBy": "Jonathan",
+      "date": "2026-10-31",
+      "reason": "Needs a new macOS user account; quarantined DMG install, signatures and Gatekeeper pass."
+    }
+  ]
+}

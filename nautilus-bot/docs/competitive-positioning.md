@@ -1,22 +1,23 @@
 # Competitive positioning and roadmap
 
-Last reviewed: 2026-08-27
+Research dates: July-September 2026. Historical candidates only.
+Scope clarified: October 22, 2026; no competitor facts refreshed.
 
-For the current comparison with Typeless and Wispr Flow, see
+For the September comparison with Typeless and Wispr Flow, see
 [typeless-wispr-comparison-2026-09.md](typeless-wispr-comparison-2026-09.md).
 
 The [September 4 beta 4 final pass](beta4-final-pass.md) supersedes this
-document's release status and current competitor claims. In particular,
-Granola now describes limited free history without the specific 25-note
-figure used below. Treat the rest of this document as historical research.
+document's August release status and competitor claims. In particular,
+the September review described limited free Granola history without the
+specific 25-note figure used below. Treat the rest of this document as historical research.
 
-This document keeps product claims tied to current, first-party evidence. It is
+This document preserves dated research and candidate measurements. It is
 not launch copy and it should not be used as a substitute for release QA.
 Competitor facts below are attributed research, not first-party verification —
 this repository cannot confirm what another product ships. Recheck them from
 primary sources before any public claim relies on them.
 
-## Current market facts
+## Historical market research
 
 - Free, local, open-source dictation is a crowded category. Handy is MIT,
   cross-platform, and added streaming model support in
@@ -28,13 +29,11 @@ primary sources before any public claim relies on them.
   [public MIT repository](https://github.com/Muesli-HQ/muesli). Its own
   one-line description is "local meeting transcription + dictation for macOS
   (Granola + WisprFlow alternative)" — the same sentence we would write about
-  ourselves. As of Aug 2026 research, Handy and VoiceInk are also each
-  reported to have moved toward covering both dictation and meeting-style
-  capture, not just dictation alone. **Do not claim Plainsong is the only
-  free, open-source, local-first app doing both pillars** — that claim was
-  already weakening before this review and should be treated as retired
-  until independently re-verified against each project's current README and
-  releases immediately before any public copy ships.
+  ourselves. Handy and VoiceInk are also in the comparison set as local
+  dictation tools. This review did not verify their meeting support. Do not
+  claim Plainsong is the only free, open-source, local-first app doing both
+  pillars. Recheck each project's documentation and releases before making
+  any public comparison.
 - Superwhisper offers both voice typing and device-side
   [meeting transcription](https://superwhisper.com/meeting-transcription),
   including optional speaker separation.
@@ -88,8 +87,8 @@ per-directory before/after:
 
 The receipts lane measured 383.92 MB on 2026-09-03, but that build predates
 the size work above (it branched before it landed), so it is not a reading of
-the current tree and is not a growth figure. The current number is the one
-above.
+the September 2 size-work candidate and is not a growth figure. The table
+lists the September 2 candidate. Neither figure measures beta.7.
 
 We have also said we are small in memory: "1.9 MB idle RSS on the sidecar,
 0.45% average idle CPU". **The RSS half of that is wrong.** Re-measured on
@@ -114,10 +113,7 @@ There is still no architecture defence: **227 MB of the 297 MB installed is the
 Electron framework** — 183 MB of Chromium binary, 24 MB of its graphics
 libraries, 19 MB of framework resources — 39 MB of what is left is the Rust
 sidecar, and 19 MB is the Chromium licence file we are required to distribute.
-Everything Plainsong itself wrote is now 4 MB, and it was 4 MB before. The
-remaining trims are Electron's to give, which is the case for the Tauri
-migration rather than against it: the ceiling on this approach is roughly where
-we now stand. Every
+Everything Plainsong itself wrote is now 4 MB, and it was 4 MB before. Every
 competitor above also ships a small-model option (Handy's Moonshine V2 Tiny is
 ~31 MB against our 148 MB `base.en`), so their realistic floor is far below
 ours.
@@ -138,7 +134,7 @@ the table invites exactly the diff that embarrasses us.
 
 Plainsong should compete on a complete local workflow, not on an exclusivity
 claim that the market has already invalidated. The durable wedge, in order of
-how well this repository can currently back it, is: **local-only, no-account,
+the evidence required to back each claim, is: **local-only, no-account,
 unlimited history, and honest engineering** — not "the only app that does
 both pillars," which is no longer defensible per the research above.
 
@@ -184,8 +180,8 @@ The near-term story is:
 > Private dictation and meeting transcription that stay under your control.
 > Use local models, keep your data on your Mac, and inspect the MIT source.
 
-Streaming alone is not a moat now that Handy and Muesli publicly ship streaming
-paths. It remains valuable product behavior, but it should be evaluated against
+The historical research above described streaming paths in Handy and Muesli.
+Streaming should not be presented as unique to Plainsong. It remains valuable product behavior, but it should be evaluated against
 reliability, model size, language coverage, power use, and final transcript
 quality before it becomes a launch claim.
 
@@ -215,9 +211,16 @@ and error recovery. Source tests are necessary but do not prove these flows.
 
 The unlabelled transcript must become durable and visible before best-effort
 diarization. Uncovered speech must stay unattributed instead of being assigned
-to a named speaker. Native system-audio capture should be preferred where the
-supported macOS and CPAL path is proven, with virtual loopback retained only as
-an explicit compatibility fallback.
+to a named speaker. On macOS 14.7+ the far side comes from a device-independent
+Core Audio process tap (every app's output, whatever the output device), so
+Me + Them works with headphones, AirPods and headsets; virtual loopback such as
+BlackHole is retained only as an explicit compatibility fallback. Granola,
+Otter, Notion, MacWhisper and Superwhisper also capture the far side locally
+without a bot (their docs ask for Screen & System Audio Recording); Krisp's
+main app uses its own virtual audio devices. Without headphones the microphone
+also hears the far side, so source-aware transcripts drop microphone lines that
+repeat the far side (see `suppress_far_side_bleed`). Of those apps, only
+Granola describes doing something similar, and only for its Mac app.
 
 ### 4. Analysis integrity
 
@@ -237,8 +240,6 @@ alone.
 
 - Cross-meeting agent memory and MCP access, until local search and transcript
   review are proven useful and an explicit read-only boundary is designed.
-- A Tauri migration, until it is justified by a supported-platform plan and
-  measured product constraints.
 - Persistent speaker voiceprints, until opt-in storage, deletion, consent, and
   model-specific thresholds are designed and tested.
 - A hosted sync business, until the local backup and bring-your-own-cloud
@@ -251,13 +252,13 @@ copy presents it as available.
 ## Sustainability
 
 The local core should remain useful without an account, subscription, or hosted
-service. Plausible funding paths include GitHub Sponsors, paid support, and
-optional hosted convenience services that do not reduce the local feature set.
+service, and Plainsong has no paid tier. Plausible funding paths are GitHub
+Sponsors and paid support.
 
-Do not promise "free forever" or a hosted tier before there is an explicit
-maintainer commitment and an operating plan. The durable promise today is
-narrower: the repository is MIT-licensed, the local workflow is the product,
-and optional remote services must remain opt-in.
+Do not promise "free forever" before there is an explicit maintainer
+commitment. The durable promise today is narrower: the repository is
+MIT-licensed, the local workflow is the product, and optional remote services
+must remain opt-in.
 
 ## Review cadence
 

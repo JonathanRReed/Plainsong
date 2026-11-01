@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import {
@@ -55,6 +55,24 @@ export function PreMeetingBriefPanel({
   event,
   onOpenMeeting,
 }: PreMeetingBriefPanelProps) {
+  // A calendar refresh may reuse the ID after changing the title or invitees.
+  // Scope local state to the exact context sent to the brief service.
+  const contextKey = JSON.stringify([
+    event.id,
+    event.title,
+    meetingAttendeesFromCalendar(event.attendees),
+  ]);
+  return <MeetingBriefContent key={contextKey} event={event} onOpenMeeting={onOpenMeeting} />;
+}
+
+function MeetingBriefContent({ event, onOpenMeeting }: PreMeetingBriefPanelProps) {
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
+  }, []);
   const [result, setResult] = useState<MeetingBriefResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,15 +88,16 @@ export function PreMeetingBriefPanel({
     setLoading(true);
     setError(null);
     try {
-      setResult(
-        await prepareMeetingBrief({
-          eventId: event.id,
-          title: event.title,
-          attendees: meetingAttendeesFromCalendar(event.attendees),
-          refresh,
-        }),
-      );
+      const prepared = await prepareMeetingBrief({
+        eventId: event.id,
+        title: event.title,
+        attendees: meetingAttendeesFromCalendar(event.attendees),
+        refresh,
+      });
+      if (!active.current) return;
+      setResult(prepared);
     } catch (caught) {
+      if (!active.current) return;
       console.error("Failed to prepare the meeting brief:", caught);
       setError(
         caught instanceof Error
@@ -86,7 +105,7 @@ export function PreMeetingBriefPanel({
           : "Plainsong could not prepare a brief for this meeting.",
       );
     } finally {
-      setLoading(false);
+      if (active.current) setLoading(false);
     }
   };
 
@@ -97,8 +116,8 @@ export function PreMeetingBriefPanel({
           Prepare
         </Button>
         <p className="mt-1.5 text-sm text-muted-foreground">
-          Reads meetings already on this Mac that share a person or a name with
-          this one.
+          Checks the newest 200 meetings on this Mac for a shared person or
+          meeting name.
         </p>
       </div>
     );
@@ -131,8 +150,14 @@ export function PreMeetingBriefPanel({
 
       {result?.state === "no_sources" ? (
         <p className="mt-2 text-sm text-muted-foreground">
-          No meeting on this Mac shares a person or a name with this one, so
-          there is nothing to brief from yet.
+          No related meeting was found among the newest 200 meetings on this
+          Mac. Older meetings were not checked.
+        </p>
+      ) : null}
+
+      {result && result.state !== "no_sources" ? (
+        <p className="mt-2 text-sm text-muted-foreground">
+          Checked the newest 200 meetings on this Mac. Older meetings were not checked.
         </p>
       ) : null}
 
@@ -180,8 +205,8 @@ export function PreMeetingBriefPanel({
           </p>
           {result?.grounded === false ? (
             <p className="mt-1 text-sm text-rust">
-              Some of this brief could not be traced back to a cited meeting.
-              Check it against the sources below.
+              This brief may contain unsupported claims or rely on sources that
+              need review. Check it against the original meetings below.
             </p>
           ) : null}
         </>
@@ -200,6 +225,13 @@ export function PreMeetingBriefPanel({
               <p className="mt-0.5 text-sm text-muted-foreground">
                 {describeReason(meeting)}
               </p>
+              {meeting.needsReview ? (
+                <p className="mt-1 text-sm text-rust">
+                  This source needs review. Its summary, decisions, or action items
+                  may contain unverified claims. Check the original meeting before
+                  relying on them.
+                </p>
+              ) : null}
               {meeting.openItems.length > 0 ? (
                 <ul className="mt-1 list-disc pl-5 text-sm text-muted-foreground">
                   {meeting.openItems.map((item, index) => (

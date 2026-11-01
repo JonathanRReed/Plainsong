@@ -73,7 +73,7 @@ export function ProjectsView() {
                 <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
                 <div className="min-w-0">
                   <p className="font-medium">Projects could not be loaded.</p>
-                  <p className="mt-0.5 break-words text-rust/90">{error}</p>
+                  <p className="mt-0.5 break-words text-rust">{error}</p>
                 </div>
               </div>
               <Button

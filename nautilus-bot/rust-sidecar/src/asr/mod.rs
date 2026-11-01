@@ -9,14 +9,16 @@ pub mod macos_apple_speech_provider;
 pub mod manager;
 pub mod mistral_voxtral;
 pub mod moonshine;
+#[cfg(feature = "asr-transcribe-cpp")]
+pub(crate) mod neural_engine;
 pub mod openai_cloud;
 pub mod parakeet;
 #[cfg(feature = "asr-parakeet")]
 pub mod parakeet_tdt;
-#[cfg(feature = "plainsong-plus")]
-pub mod plainsong_plus;
 pub mod platform;
+mod provider_cache;
 pub mod qwen3_asr;
+pub mod speech_residency;
 #[cfg(feature = "asr-transcribe-cpp")]
 pub mod transcribe_cpp;
 #[cfg(feature = "asr-whisper")]
@@ -27,6 +29,7 @@ pub mod xai_stt;
 #[cfg(not(feature = "asr-whisper"))]
 pub use whisper_stub as whisper;
 pub mod whisper_candle;
+pub mod whistle;
 pub mod windows_sdk_dictation_provider;
 
 use anyhow::Result;
@@ -171,6 +174,40 @@ pub(crate) fn upload_chunk_stream(
     })
 }
 
+/// Tell the speech runtime which language the user transcribes, as the app
+/// does from its settings: an English setting selects the English Parakeet
+/// build where one exists. For harnesses that run providers without the app.
+pub fn apply_transcription_language(language: Option<&str>) {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    neural_engine::set_transcription_language(language);
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    let _ = language;
+}
+
+/// The pinned files a request on this route loads, for checking them in the
+/// background before the first one. Cloud and system routes have none.
+pub(crate) fn route_model_artifacts(
+    models_root: &Path,
+    provider: AsrProviderType,
+    model_id: &str,
+) -> Vec<(PathBuf, String)> {
+    match provider {
+        #[cfg(feature = "asr-transcribe-cpp")]
+        AsrProviderType::TranscribeCpp => {
+            transcribe_cpp::route_model_artifacts(models_root, model_id)
+        }
+        AsrProviderType::Whisper => crate::download::whisper_route_artifacts(models_root, model_id),
+        AsrProviderType::Parakeet => parakeet::route_model_artifacts(models_root, model_id),
+        AsrProviderType::Moonshine => moonshine::route_model_artifacts(models_root, model_id),
+        AsrProviderType::WhisperCandle => whisper_candle::model_integrity_artifacts(models_root),
+        AsrProviderType::DistilWhisper => distil_whisper::model_integrity_artifacts(models_root),
+        AsrProviderType::Qwen3Asr => qwen3_asr::model_integrity_artifacts(models_root),
+        AsrProviderType::CohereLocal => cohere_local::model_integrity_artifacts(models_root),
+        AsrProviderType::Whistle => whistle::model_integrity_artifacts(models_root),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, String)> {
     let mut artifacts = Vec::new();
     artifacts.extend(distil_whisper::model_integrity_artifacts(models_root));
@@ -179,8 +216,11 @@ pub(crate) fn model_integrity_artifacts(models_root: &Path) -> Vec<(PathBuf, Str
     artifacts.extend(whisper_candle::model_integrity_artifacts(models_root));
     artifacts.extend(qwen3_asr::model_integrity_artifacts(models_root));
     artifacts.extend(cohere_local::model_integrity_artifacts(models_root));
+    artifacts.extend(whistle::model_integrity_artifacts(models_root));
     #[cfg(feature = "asr-transcribe-cpp")]
     artifacts.extend(transcribe_cpp::model_integrity_artifacts(models_root));
+    #[cfg(feature = "asr-transcribe-cpp")]
+    artifacts.extend(neural_engine::model_integrity_artifacts(models_root));
     artifacts
 }
 
@@ -247,6 +287,10 @@ pub(crate) fn provider_speaker_id(index: u32) -> String {
 pub struct TranscriptionResult {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
+    /// True only when every segment came from a complete, validated native
+    /// word alignment rather than coarse, estimated, or synthesized timing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub measured_word_timestamps: bool,
     /// Speaker turns the provider itself reported, empty for every provider
     /// that does not diarize (which is all of them except Deepgram, Gemini and
     /// Mistral Voxtral).
@@ -284,6 +328,50 @@ pub struct TranscriptionResult {
     /// it was handed is a measurement, not a field.
     #[serde(default)]
     pub vocabulary_hint_terms_applied: usize,
+    /// Spellings from the request's acoustic vocabulary that the recognizer's
+    /// own audio comparison preferred over what it wrote. Evidence only: the
+    /// text above is never rewritten by the route, and the dictation stage
+    /// that applies a candidate does so under its own rules (see
+    /// `dictation_vocabulary`). Never stored with the result.
+    #[serde(skip)]
+    pub vocabulary_candidates: Vec<VocabularyCandidate>,
+}
+
+/// One term for acoustic vocabulary scoring: how it is written, and plain
+/// respellings of how it is said ("neev" for Niamh).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcousticVocabularyTerm {
+    pub text: String,
+    pub spoken: Vec<String>,
+    /// From the built-in list rather than the user's own words, so applying
+    /// it needs stronger evidence. Not sent to the helper.
+    pub built_in: bool,
+}
+
+/// The recognizer's acoustic evidence that `heard` (words `word_start..word_end`
+/// of its transcript) was `term`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VocabularyCandidate {
+    pub term: String,
+    pub heard: String,
+    pub word_start: usize,
+    pub word_end: usize,
+    /// Spelling similarity the recognizer measured between `heard` and the
+    /// term or its matched spoken form, 0-1.
+    pub similarity: f32,
+    /// Per-frame CTC log-likelihood of the term over the heard span, of the
+    /// heard words themselves, and of the model's unconstrained best path
+    /// (an upper bound on both). Higher is better.
+    pub term_score: Option<f32>,
+    pub heard_score: Option<f32>,
+    pub best_path_score: Option<f32>,
+    pub spoken_form: Option<String>,
+    /// The vocabulary model's own spelling of the same stretch of audio.
+    pub ctc_heard: Option<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -400,6 +488,10 @@ pub struct TranscriptionOptions {
     /// nonsense while the route advertised itself as multilingual. Providers
     /// that read this map it onto their own vocabulary.
     pub language: Option<String>,
+    /// Terms the recognizer may score against the audio. Only Parakeet on
+    /// the Neural Engine reads it, and only with English speech; it returns
+    /// what it found as `TranscriptionResult::vocabulary_candidates`.
+    pub acoustic_vocabulary: Vec<AcousticVocabularyTerm>,
 }
 
 #[async_trait]
@@ -1378,7 +1470,7 @@ mod transcribe_cpp_feature_gate_tests {
         assert!(serde_json::from_str::<AsrProviderType>("\"transcribe_cpp\"").is_err());
         assert!(AsrProviderType::all()
             .iter()
-            .all(|provider| provider.display_name() != "transcribe.cpp (experimental)"));
+            .all(|provider| provider.display_name() != "transcribe.cpp"));
         assert!(AsrProviderType::all()
             .iter()
             .flat_map(|provider| provider.model_options())
@@ -1387,7 +1479,7 @@ mod transcribe_cpp_feature_gate_tests {
 
     #[cfg(feature = "asr-transcribe-cpp")]
     #[test]
-    fn the_spike_build_adds_exactly_one_experimental_route_and_replaces_nothing() {
+    fn the_spike_build_adds_one_experimental_provider_and_replaces_nothing() {
         let all = AsrProviderType::all();
         assert!(all.contains(&AsrProviderType::TranscribeCpp));
         // Every route the default build offers is still there.
@@ -1411,9 +1503,14 @@ mod transcribe_cpp_feature_gate_tests {
             serde_json::from_str::<AsrProviderType>("\"transcribe_cpp\"").unwrap(),
             AsrProviderType::TranscribeCpp
         );
-        // One model in the picker: the Nemotron streaming GGUF the benchmark
-        // loads is deliberately not a route.
-        assert_eq!(AsrProviderType::TranscribeCpp.model_options().len(), 1);
+        assert!(AsrProviderType::TranscribeCpp
+            .model_options()
+            .iter()
+            .any(|option| option.id == super::transcribe_cpp::PARAKEET_UNIFIED_EN_GGUF_MODEL_ID));
+        assert!(AsrProviderType::TranscribeCpp
+            .model_options()
+            .iter()
+            .any(|option| option.id == super::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID));
         assert_eq!(
             AsrProviderType::TranscribeCpp.default_model_id(),
             super::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
@@ -1421,6 +1518,72 @@ mod transcribe_cpp_feature_gate_tests {
         assert!(AsrProviderType::TranscribeCpp
             .provider_secret_name()
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod provider_wire_contract_tests {
+    use super::{manager::ProviderInfo, AsrProviderType};
+
+    #[test]
+    fn every_provider_serializes_with_the_settings_and_renderer_key() {
+        for provider in AsrProviderType::all() {
+            assert_eq!(
+                serde_json::to_value(provider).unwrap(),
+                crate::asr_provider_to_settings_value(provider),
+                "provider wire key differs from the renderer: {provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_acronym_keys_accept_canonical_and_legacy_inputs() {
+        for (provider, canonical, legacy) in [
+            (
+                AsrProviderType::ElevenLabsScribe,
+                "elevenlabs_scribe",
+                "eleven_labs_scribe",
+            ),
+            (
+                AsrProviderType::OpenAiCloud,
+                "openai_cloud",
+                "open_ai_cloud",
+            ),
+        ] {
+            for key in [canonical, legacy] {
+                assert_eq!(
+                    serde_json::from_value::<AsrProviderType>(serde_json::json!(key)).unwrap(),
+                    provider
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_inventory_converts_legacy_wire_keys_to_canonical_output() {
+        for (legacy, canonical) in [
+            ("eleven_labs_scribe", "elevenlabs_scribe"),
+            ("open_ai_cloud", "openai_cloud"),
+        ] {
+            let inventory: ProviderInfo = serde_json::from_value(serde_json::json!({
+                "providerType": legacy,
+                "name": "Test provider",
+                "description": "",
+                "isAvailable": false,
+                "inferenceEnabled": false,
+                "modelInfo": {
+                    "name": "Test model", "version": "", "sizeMb": 0.0,
+                    "parameters": "", "languages": [], "license": "",
+                    "sourceUrl": ""
+                },
+                "selectedModelId": "", "modelOptions": [],
+                "downloadStatus": "not_downloaded", "runtimeStatus": "missing_model",
+                "runtimeMessage": null, "runtimeDetails": {}
+            }))
+            .unwrap();
+            let output = serde_json::to_value(inventory).unwrap();
+            assert_eq!(output["providerType"], canonical);
+        }
     }
 }
 
@@ -1435,7 +1598,9 @@ pub enum AsrProviderType {
     MacosAppleSpeech,
     Moonshine,
     WindowsSdkDictation,
+    #[serde(rename = "elevenlabs_scribe", alias = "eleven_labs_scribe")]
     ElevenLabsScribe,
+    #[serde(rename = "openai_cloud", alias = "open_ai_cloud")]
     OpenAiCloud,
     Groq,
     CohereTranscribe,
@@ -1443,6 +1608,9 @@ pub enum AsrProviderType {
     /// on ONNX Runtime instead of over Cohere's API. Experimental, and never
     /// a default: see `asr/cohere_local.rs`.
     CohereLocal,
+    /// Sandboxed Whistle 2.0 native CLI, limited to short dictation on
+    /// Apple silicon Macs. Never a default, meeting, or live-preview route.
+    Whistle,
     Qwen3Asr,
     Deepgram,
     GeminiTranscribe,
@@ -1459,11 +1627,6 @@ pub enum AsrProviderType {
     /// a default build cannot name it, offer it, or persist it.
     #[cfg(feature = "asr-transcribe-cpp")]
     TranscribeCpp,
-    /// Plainsong Plus, the paid hosted tier (feature `plainsong-plus`, OFF
-    /// and NOT LAUNCHED). Exists only in builds that compile Plus in; see
-    /// `asr/plainsong_plus.rs` and `infra/plus-worker`.
-    #[cfg(feature = "plainsong-plus")]
-    PlainsongPlus,
 }
 
 impl AsrProviderType {
@@ -1481,6 +1644,7 @@ impl AsrProviderType {
             AsrProviderType::Groq,
             AsrProviderType::CohereTranscribe,
             AsrProviderType::CohereLocal,
+            AsrProviderType::Whistle,
             AsrProviderType::Qwen3Asr,
             AsrProviderType::Deepgram,
             AsrProviderType::GeminiTranscribe,
@@ -1488,8 +1652,6 @@ impl AsrProviderType {
             AsrProviderType::XaiStt,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp,
-            #[cfg(feature = "plainsong-plus")]
-            AsrProviderType::PlainsongPlus,
         ]
     }
 
@@ -1507,15 +1669,36 @@ impl AsrProviderType {
             AsrProviderType::Groq => "Groq Whisper (Cloud)",
             AsrProviderType::CohereTranscribe => "Cohere Transcribe",
             AsrProviderType::CohereLocal => "Cohere Transcribe (Local)",
+            AsrProviderType::Whistle => "Whistle 2.0 (Local, Experimental)",
             AsrProviderType::Qwen3Asr => "Qwen3-ASR (Local)",
             AsrProviderType::Deepgram => "Deepgram Nova",
             AsrProviderType::GeminiTranscribe => "Google Gemini Transcribe",
             AsrProviderType::MistralVoxtral => "Mistral Voxtral",
             AsrProviderType::XaiStt => "xAI Grok",
             #[cfg(feature = "asr-transcribe-cpp")]
-            AsrProviderType::TranscribeCpp => "transcribe.cpp (experimental)",
-            #[cfg(feature = "plainsong-plus")]
-            AsrProviderType::PlainsongPlus => "Plainsong Plus",
+            // Not "(experimental)" any more: it hosts the recommended Apple
+            // Silicon dictation model. The models that are still experimental
+            // say so in their own labels.
+            AsrProviderType::TranscribeCpp => "transcribe.cpp",
+        }
+    }
+
+    /// The name a person reads for a speech model in a message: the model by
+    /// itself for one that runs on this Mac ("Parakeet v3"), and the service
+    /// beside it for a cloud one ("Deepgram Nova · nova-3"), since that is
+    /// where the audio goes. Mirrors `routeDisplayLabel` and `speechRouteName`
+    /// in src/lib/asr-route-catalog.ts, so a toast names a model the way the
+    /// pickers do. Engine names and build details ("transcribe.cpp", "GGUF
+    /// Q8_0", "int8") stay in the ids, which the logs keep.
+    pub fn speech_model_name(&self, model_id: &str) -> String {
+        let model_id = model_id.trim();
+        if self.is_remote() {
+            return format!("{} · {}", self.display_name(), model_id);
+        }
+        match local_speech_model_name(*self, model_id) {
+            Some(name) => name.to_string(),
+            None if model_id.is_empty() => "the speech model".to_string(),
+            None => model_id.to_string(),
         }
     }
 
@@ -1540,6 +1723,7 @@ impl AsrProviderType {
             AsrProviderType::Groq => "whisper-large-v3-turbo",
             AsrProviderType::CohereTranscribe => "cohere-transcribe-03-2026",
             AsrProviderType::CohereLocal => cohere_local::COHERE_LOCAL_MODEL_ID,
+            AsrProviderType::Whistle => whistle::MODEL_ID,
             AsrProviderType::Qwen3Asr => "qwen3-asr-0.6b",
             // Verified live against
             // https://developers.deepgram.com/docs/pre-recorded-audio on
@@ -1563,8 +1747,6 @@ impl AsrProviderType {
             AsrProviderType::XaiStt => xai_stt::XAI_STT_MODEL_ID,
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
-            #[cfg(feature = "plainsong-plus")]
-            AsrProviderType::PlainsongPlus => plainsong_plus::PLUS_STT_MODEL_ID,
         }
     }
 
@@ -1587,14 +1769,12 @@ impl AsrProviderType {
             | AsrProviderType::Moonshine
             | AsrProviderType::WindowsSdkDictation
             | AsrProviderType::CohereLocal
+            | AsrProviderType::Whistle
             | AsrProviderType::Qwen3Asr => None,
             // Local weights on disk; no credential slot, like every other
             // local route.
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => None,
-            // A license key in its own internal slot, not a provider key.
-            #[cfg(feature = "plainsong-plus")]
-            AsrProviderType::PlainsongPlus => None,
         }
     }
 
@@ -1650,6 +1830,10 @@ impl AsrProviderType {
                 ModelOption {
                     id: "parakeet-tdt-0.6b-v2".to_string(),
                     label: "Parakeet TDT 0.6B v2 (English only)".to_string(),
+                },
+                ModelOption {
+                    id: "orukeet-v0.1.0-int8".to_string(),
+                    label: "Orukeet v0.1.0 int8 (experimental, English verified)".to_string(),
                 },
                 ModelOption {
                     id: "parakeet-tdt-ctc-110m".to_string(),
@@ -1732,6 +1916,10 @@ impl AsrProviderType {
                 id: cohere_local::COHERE_LOCAL_MODEL_ID.to_string(),
                 label: "Cohere Transcribe 03-2026 int4 (offline, 14 languages, slow)".to_string(),
             }],
+            AsrProviderType::Whistle => vec![ModelOption {
+                id: whistle::MODEL_ID.to_string(),
+                label: "Whistle 2.0 (Apple silicon, short dictation)".to_string(),
+            }],
             AsrProviderType::Qwen3Asr => vec![ModelOption {
                 id: "qwen3-asr-0.6b".to_string(),
                 label: "Qwen3-ASR 0.6B int4 (multilingual, fast)".to_string(),
@@ -1766,12 +1954,136 @@ impl AsrProviderType {
             }],
             #[cfg(feature = "asr-transcribe-cpp")]
             AsrProviderType::TranscribeCpp => transcribe_cpp::route_model_options(),
-            #[cfg(feature = "plainsong-plus")]
-            AsrProviderType::PlainsongPlus => vec![ModelOption {
-                id: plainsong_plus::PLUS_STT_MODEL_ID.to_string(),
-                label: "Best available (included with Plus)".to_string(),
-            }],
         }
+    }
+}
+
+/// Plain names for the local speech models the pickers offer. Both builds of
+/// Parakeet TDT 0.6B v3 are "Parakeet v3": where the GGUF build can run, the
+/// pickers offer only that one and the ONNX build stays an internal fallback,
+/// so there is never a second name to tell them apart.
+fn local_speech_model_name(provider: AsrProviderType, model_id: &str) -> Option<&'static str> {
+    let name = match (provider, model_id) {
+        (AsrProviderType::Parakeet, "parakeet-tdt-0.6b-v3") => "Parakeet v3",
+        (AsrProviderType::Parakeet, "parakeet-tdt-0.6b-v2") => "Parakeet v2 (English)",
+        (AsrProviderType::Parakeet, "orukeet-v0.1.0-int8") => "Orukeet v0.1 (experimental)",
+        (AsrProviderType::Parakeet, "parakeet-tdt-ctc-110m") => "Parakeet 110M (older, English)",
+        (AsrProviderType::Whisper, "tiny") => "Whisper Tiny",
+        (AsrProviderType::Whisper, "tiny.en") => "Whisper Tiny (English)",
+        (AsrProviderType::Whisper, "base") => "Whisper Base",
+        (AsrProviderType::Whisper, "base.en") => "Whisper Base (English)",
+        (AsrProviderType::Whisper, "small") => "Whisper Small",
+        (AsrProviderType::Whisper, "small.en") => "Whisper Small (English)",
+        (AsrProviderType::Whisper, "medium") => "Whisper Medium",
+        (AsrProviderType::Whisper, "medium.en") => "Whisper Medium (English)",
+        (AsrProviderType::Whisper, "large-v3-turbo") => "Whisper Large Turbo",
+        (AsrProviderType::Whisper, "large-v3") => "Whisper Large",
+        (AsrProviderType::WhisperCandle, "whisper-large-v3-turbo") => {
+            "Whisper Large Turbo, alternate (experimental)"
+        }
+        (AsrProviderType::DistilWhisper, "distil-large-v3.5") => "Distil-Whisper Large (English)",
+        (AsrProviderType::Moonshine, "moonshine-tiny") => "Moonshine Tiny (English)",
+        (AsrProviderType::Moonshine, "moonshine-base") => "Moonshine Base (English)",
+        (AsrProviderType::Whistle, whistle::MODEL_ID) => "Cactus Whistle 2.0 (experimental)",
+        (AsrProviderType::Qwen3Asr, "qwen3-asr-0.6b") => "Qwen3-ASR 0.6B (experimental)",
+        (AsrProviderType::CohereLocal, cohere_local::COHERE_LOCAL_MODEL_ID) => {
+            "Cohere Transcribe, offline (experimental)"
+        }
+        (AsrProviderType::MacosAppleSpeech, _) => "Apple Speech",
+        (AsrProviderType::WindowsSdkDictation, _) => "Windows Speech",
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::PARAKEET_GGUF_MODEL_ID) => "Parakeet v3",
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::PARAKEET_UNIFIED_EN_GGUF_MODEL_ID) => {
+            "Parakeet Unified English (experimental)"
+        }
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::ORUKEET_R3_GGUF_MODEL_ID) => {
+            "Orukeet r3 (experimental)"
+        }
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::QWEN3_ASR_17_GGUF_MODEL_ID) => {
+            "Qwen3-ASR 1.7B (experimental)"
+        }
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::QWEN3_ASR_06_GGUF_MODEL_ID) => {
+            "Qwen3-ASR 0.6B Lite (experimental)"
+        }
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID) => {
+            "Nemotron 3.5 Streaming (experimental)"
+        }
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::MOONSHINE_STREAM_MEDIUM_MODEL_ID) => {
+            "Moonshine Streaming Medium (experimental)"
+        }
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::FLUID_SPEECH_MINI_GGUF_MODEL_ID) => {
+            "Fluid Speech Mini by FluidVoice"
+        }
+        #[cfg(feature = "asr-transcribe-cpp")]
+        (AsrProviderType::TranscribeCpp, transcribe_cpp::UNDERDOG_BARK_PRO_GGUF_MODEL_ID) => {
+            "Underdog Bark 3.0 Pro by Conway Research"
+        }
+        _ => return None,
+    };
+    Some(name)
+}
+
+#[cfg(test)]
+mod speech_model_name_tests {
+    use super::AsrProviderType;
+
+    /// Every local model a picker offers has a plain name, so no message
+    /// falls back to a raw id or an engine's name.
+    #[test]
+    fn every_offered_local_model_has_a_plain_name() {
+        for provider in AsrProviderType::all() {
+            if provider.is_remote() {
+                continue;
+            }
+            for option in provider.model_options() {
+                let name = provider.speech_model_name(&option.id);
+                assert_ne!(
+                    name, option.id,
+                    "{provider:?} {} has no plain name",
+                    option.id
+                );
+                for word in [
+                    "GGUF",
+                    "ONNX",
+                    "Q8_0",
+                    "int8",
+                    "int4",
+                    "transcribe.cpp",
+                    "NVIDIA",
+                ] {
+                    assert!(!name.contains(word), "{name} names {word:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn both_parakeet_v3_builds_share_one_name() {
+        assert_eq!(
+            AsrProviderType::Parakeet.speech_model_name("parakeet-tdt-0.6b-v3"),
+            "Parakeet v3"
+        );
+        #[cfg(feature = "asr-transcribe-cpp")]
+        assert_eq!(
+            AsrProviderType::TranscribeCpp
+                .speech_model_name(super::transcribe_cpp::PARAKEET_GGUF_MODEL_ID),
+            "Parakeet v3"
+        );
+    }
+
+    #[test]
+    fn a_cloud_model_names_the_service_and_the_model() {
+        assert_eq!(
+            AsrProviderType::Deepgram.speech_model_name("nova-3"),
+            "Deepgram Nova · nova-3"
+        );
     }
 }
 
@@ -1817,6 +2129,7 @@ impl AsrProviderFactory {
             AsrProviderType::CohereLocal => {
                 Box::new(cohere_local::CohereLocalProvider::new(selected_model_id))
             }
+            AsrProviderType::Whistle => Box::new(whistle::WhistleProvider::new(selected_model_id)),
             AsrProviderType::Qwen3Asr => {
                 Box::new(qwen3_asr::Qwen3AsrProvider::new(selected_model_id))
             }
@@ -1834,10 +2147,6 @@ impl AsrProviderFactory {
             AsrProviderType::TranscribeCpp => Box::new(transcribe_cpp::TranscribeCppProvider::new(
                 selected_model_id,
             )),
-            #[cfg(feature = "plainsong-plus")]
-            AsrProviderType::PlainsongPlus => Box::new(plainsong_plus::PlainsongPlusProvider::new(
-                selected_model_id,
-            )),
         }
     }
 }
@@ -1846,3 +2155,19 @@ impl AsrProviderFactory {
 pub use manager::{
     AsrManager, BenchmarkResult, ProviderInfo, ProviderInventory, RuntimeDiagnostics,
 };
+
+#[cfg(test)]
+pub(crate) mod stage_timing {
+    use std::sync::{Arc, Mutex};
+    pub(crate) type Stages = Arc<Mutex<std::collections::BTreeMap<&'static str, f64>>>;
+    tokio::task_local! { pub(crate) static CURRENT: Stages; }
+    pub(crate) fn current() -> Option<Stages> {
+        CURRENT.try_with(Arc::clone).ok()
+    }
+    pub(crate) fn record(stages: &Option<Stages>, name: &'static str, start: std::time::Instant) {
+        if let Some(stages) = stages {
+            *stages.lock().unwrap().entry(name).or_default() +=
+                start.elapsed().as_secs_f64() * 1000.0;
+        }
+    }
+}

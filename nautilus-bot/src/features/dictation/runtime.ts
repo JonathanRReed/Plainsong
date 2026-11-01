@@ -1,3 +1,4 @@
+import type { DictationRecognitionReviewWord } from "@/lib/backend/dictation";
 import { useEffect, useState } from "react";
 import { invoke, listen } from "@/lib/electron";
 import type { DictationRoutePreference } from "@/lib/asr-capabilities";
@@ -57,6 +58,11 @@ export interface DictationStateChangedEvent {
    * AI pass. Drives the finishing bar's label and position.
    */
   processingStage?: "transcribing" | "polishing" | null;
+  /**
+   * The speech model is being prepared for this Mac before it transcribes:
+   * a one-time step (about 10 s) on the first dictation after its download.
+   */
+  speechModelPreparing?: boolean | null;
   /** Estimated speech-to-text time, learned from recent dictations. */
   expectedTranscribeMs?: number | null;
   /** Estimated AI pass time; null when no AI pass is expected. */
@@ -64,11 +70,13 @@ export interface DictationStateChangedEvent {
   sessionId?: number | null;
   stopReason?: string | null;
   outcome?: string | null;
+  warnings?: string[];
+  reviewHeld?: boolean;
   resolvedModePreset?: DictationModePreset | null;
   resolvedCustomModeId?: string | null;
   resolvedModeLabel?: string | null;
   contextSource?: DictationContextSource | null;
-  insertionMode?: DictationInsertionMode | null;
+  insertionMode?: DictationInsertionMode | "preview" | null;
   appTarget?: string | null;
   activationMatcher?: string | null;
   dictationProvider?: string | null;
@@ -86,6 +94,23 @@ export interface DictationStateChangedEvent {
   dictationResolvedHosting?: DictationRoutePreference | null;
   modelReadiness?: "loading" | "ready" | "deferred" | "not_required" | "error" | null;
   captureReady?: boolean;
+  /**
+   * On "recording" with `captureReady`: how long Electron holds the start
+   * sound for this input (a Bluetooth headset switches profile first).
+   */
+  startSoundDelayMs?: number | null;
+  /**
+   * On "done": where the words can be picked up again, reported apart from
+   * `outcome`, which only says what delivery observed.
+   */
+  recoveryLocation?: "clipboard" | "history" | "recent_dictations" | null;
+  /**
+   * This dictation takes its audio from a meeting that is recording (an
+   * aside). Its words go to the focused app and stay out of the meeting;
+   * the call still hears them. Sent from "preparing" on, and absent on
+   * events that only update the preview.
+   */
+  meetingAside?: boolean | null;
 }
 
 /**
@@ -118,12 +143,18 @@ export interface DictationTimingRecord {
 
 interface DictationTextReadyEvent {
   text: string;
+  sessionId?: number | null;
+  rawTranscript?: string | null;
+  recognitionReviewWords?: DictationRecognitionReviewWord[] | null;
+  /** Recording ID when this dictation was saved to history; otherwise null. */
+  recordingId?: string | null;
   /**
    * Terminal delivery outcome, mirrored from the sidecar: `pasted`,
    * `paste_dispatched`, `copied`, `replaced`, `copied_replacement`,
-   * `previewed`, `undone`, `error`, `empty`, or `secure_field` (delivery
+   * `previewed`, `undone`, `error`, `empty`, `secure_field` (delivery
    * refused because the focused control is a password or secure input —
-   * see `describeDictationDeliveryRefusal`).
+   * see `describeDictationDeliveryRefusal`), or `clipboard_kept` (refused,
+   * and a copy the user made meanwhile was left on the clipboard).
    */
   outcome?: string | null;
   pasted?: boolean;
@@ -156,6 +187,11 @@ interface DictationTextReadyEvent {
     | "none";
   commandApplied?: string | null;
   snippetAppliedCount?: number;
+  /**
+   * Present only when the starting binding asked for Return after inserting:
+   * whether the sidecar sent it (the text was confirmed in the same field).
+   */
+  submitAfterInsertSent?: boolean;
   appTarget?: string | null;
   activationMatcher?: string | null;
   contextSource?: DictationContextSource | null;
@@ -200,8 +236,8 @@ function normalizeStateEvent(payload: DictationStateChangedEvent): DictationStat
  * idle event that follows a done/error phase does not repeat them, so a plain
  * spread merge kept the finished session's message and outcome — a
  * secure-field refusal, say — on screen after the overlay had already reset.
- * Provider/route metadata is deliberately not in this list: it is sticky by
- * design and describes the configuration, not the session.
+ * Provider/route metadata survives idle within the same session. A new
+ * session discards the entire carried snapshot before applying its fields.
  */
 const VOLATILE_SESSION_FIELDS = [
   "message",
@@ -211,11 +247,15 @@ const VOLATILE_SESSION_FIELDS = [
   "partialVolatileText",
   "partialEngine",
   "processingStage",
+  "speechModelPreparing",
   "expectedTranscribeMs",
   "expectedPolishMs",
   "outcome",
+  "warnings",
+  "reviewHeld",
   "stopReason",
   "fallbackReason",
+  "meetingAside",
 ] as const;
 
 /**
@@ -226,7 +266,21 @@ export function reduceDictationStateEvent(
   previous: DictationStateChangedEvent | null,
   next: DictationStateChangedEvent,
 ): DictationStateChangedEvent {
-  const carried: Partial<DictationStateChangedEvent> = { ...(previous ?? {}) };
+  const validSessionId = (id: number | null | undefined) =>
+    typeof id === "number" && Number.isSafeInteger(id) && id > 0;
+  const changedSession = validSessionId(previous?.sessionId)
+    && validSessionId(next.sessionId)
+    && previous?.sessionId !== next.sessionId;
+  // A partial update belongs to one capture. Do not fill a new capture's
+  // omitted fields with the last capture's words, target or resolved route.
+  const carried: Partial<DictationStateChangedEvent> = changedSession
+    ? {}
+    : { ...(previous ?? {}) };
+  // Host-level startup failures have no native session to hold or cancel.
+  // Never inherit the previous capture's ID onto that error.
+  if (next.phase === "error" && !validSessionId(next.sessionId)) {
+    delete carried.sessionId;
+  }
   if (next.phase === "idle") {
     for (const field of VOLATILE_SESSION_FIELDS) {
       delete carried[field];
@@ -247,45 +301,91 @@ export function useDictationRuntime() {
     let unlistenState: (() => void) | undefined;
     let unlistenTextReady: (() => void) | undefined;
 
+    let receivedLiveEvent = false;
+    let currentSession: { id: number; startedAtMs: number | null } | null = null;
+    const deliveredKeys = new Set<string>();
+    const validId = (value: number | null | undefined): value is number =>
+      typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+    const acceptState = (payload: DictationStateChangedEvent) => {
+      if (!validId(payload.sessionId)) return true;
+      const startedAtMs = validId(payload.startedAtMs) ? payload.startedAtMs : null;
+      const startsCapture = payload.phase === "preparing"
+        || ((payload.phase === "primed" || payload.phase === "recording") && startedAtMs !== null);
+      if (!currentSession) {
+        currentSession = { id: payload.sessionId, startedAtMs };
+        return true;
+      }
+      if (startedAtMs !== null && currentSession.startedAtMs !== null
+        && startedAtMs < currentSession.startedAtMs) return false;
+      if (payload.sessionId !== currentSession.id) {
+        if (!startsCapture) return false;
+        if (startedAtMs === null && payload.sessionId < currentSession.id) return false;
+        if (startedAtMs !== null && startedAtMs === currentSession.startedAtMs
+          && payload.sessionId < currentSession.id) return false;
+        currentSession = { id: payload.sessionId, startedAtMs };
+      } else if (startedAtMs !== null) {
+        currentSession.startedAtMs = startedAtMs;
+      }
+      return true;
+    };
+    const acceptText = (payload: DictationTextReadyEvent) => {
+      if (!validId(payload.sessionId)) return true;
+      if (currentSession && payload.sessionId !== currentSession.id) return false;
+      // Both timestamps come from the sidecar: acknowledgement is recorded
+      // after capture starts. It distinguishes reused IDs after a restart.
+      if (validId(payload.acknowledgedAtMs) && currentSession?.startedAtMs != null
+        && payload.acknowledgedAtMs < currentSession.startedAtMs) return false;
+      const key = JSON.stringify([payload.sessionId, payload.acknowledgedAtMs ?? currentSession?.startedAtMs ?? payload.recordingId ?? null]);
+      if (deliveredKeys.has(key)) return false;
+      deliveredKeys.add(key);
+      if (deliveredKeys.size > 32) {
+        const oldest = deliveredKeys.values().next().value;
+        if (oldest !== undefined) deliveredKeys.delete(oldest);
+      }
+      if (!currentSession) currentSession = { id: payload.sessionId, startedAtMs: null };
+      return true;
+    };
     const setup = async () => {
+      // Subscribe before requesting a snapshot. A slow initial request must
+      // not prevent capture results from reaching the renderer.
+      await Promise.allSettled([
+        (async () => {
+          const unlisten = await listen<DictationStateChangedEvent>(
+            "dictation-state-changed",
+            (event) => {
+              if (!disposed && acceptState(event.payload)) {
+                receivedLiveEvent = true;
+                setStateEvent((previous) => reduceDictationStateEvent(previous, event.payload));
+              }
+            },
+          );
+          if (disposed) unlisten();
+          else unlistenState = unlisten;
+        })(),
+        (async () => {
+          const unlisten = await listen<DictationTextReadyEvent>(
+            "dictation-text-ready",
+            (event) => {
+              if (!disposed && acceptText(event.payload)) {
+                receivedLiveEvent = true;
+                setTextReadyEvent({ ...event.payload });
+              }
+            },
+          );
+          if (disposed) unlisten();
+          else unlistenTextReady = unlisten;
+        })(),
+      ]);
+      if (disposed) return;
       try {
         const initialState = await invoke<DictationStateChangedEvent>("get_dictation_overlay_state");
-        if (!disposed) {
+        // Live events describe newer state than this startup snapshot.
+        if (!disposed && !receivedLiveEvent && acceptState(initialState)) {
           setStateEvent((previous) => reduceDictationStateEvent(previous, initialState));
         }
       } catch {
-        // Ignore initial hydration failures.
+        // Live subscriptions still work when initial hydration fails.
       }
-
-      const nextUnlistenState = await listen<DictationStateChangedEvent>(
-        "dictation-state-changed",
-        (event) => {
-          if (!disposed) {
-            setStateEvent((previous) =>
-              reduceDictationStateEvent(previous, event.payload),
-            );
-          }
-        },
-      );
-      if (disposed) {
-        nextUnlistenState();
-        return;
-      }
-      unlistenState = nextUnlistenState;
-
-      const nextUnlistenTextReady = await listen<DictationTextReadyEvent>(
-        "dictation-text-ready",
-        (event) => {
-          if (!disposed) {
-            setTextReadyEvent({ ...event.payload });
-          }
-        },
-      );
-      if (disposed) {
-        nextUnlistenTextReady();
-        return;
-      }
-      unlistenTextReady = nextUnlistenTextReady;
     };
 
     void setup();

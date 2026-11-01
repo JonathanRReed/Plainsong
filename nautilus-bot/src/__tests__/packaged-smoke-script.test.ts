@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 describe("packaged macOS smoke harness", () => {
   it("uses a disposable profile and cloned model assets instead of the live profile", () => {
     const source = fs.readFileSync(
-      path.resolve(process.cwd(), "scripts/capture-packaged-macos-smoke.mjs"),
+      path.resolve(process.cwd(), "scripts/capture-packaged-macos-smoke.ts"),
       "utf8",
     );
 
@@ -19,16 +19,16 @@ describe("packaged macOS smoke harness", () => {
 
   it("allows cold native model teardown to finish before force termination", () => {
     const scripts = [
-      "capture-packaged-macos-app-matrix-insertion.mjs",
-      "capture-packaged-macos-backup-restore.mjs",
-      "capture-packaged-macos-dictation-hotkey.mjs",
-      "capture-packaged-macos-meeting-mic.mjs",
-      "capture-packaged-macos-meeting-soak.mjs",
-      "capture-packaged-macos-ollama-analysis.mjs",
-      "capture-packaged-macos-onboarding-settings.mjs",
-      "capture-packaged-macos-recovery-shortcuts.mjs",
-      "capture-packaged-macos-retention.mjs",
-      "capture-packaged-macos-whisper-transcription.mjs",
+      "capture-packaged-macos-app-matrix-insertion.ts",
+      "capture-packaged-macos-backup-restore.ts",
+      "capture-packaged-macos-dictation-hotkey.ts",
+      "capture-packaged-macos-meeting-mic.ts",
+      "capture-packaged-macos-meeting-soak.ts",
+      "capture-packaged-macos-ollama-analysis.ts",
+      "capture-packaged-macos-onboarding-settings.ts",
+      "capture-packaged-macos-recovery-shortcuts.ts",
+      "capture-packaged-macos-retention.ts",
+      "capture-packaged-macos-whisper-transcription.ts",
     ];
 
     for (const script of scripts) {
@@ -40,7 +40,7 @@ describe("packaged macOS smoke harness", () => {
 
   it("never searches unrelated TextEdit documents during recovery-shortcut cleanup", () => {
     const source = fs.readFileSync(
-      path.resolve(process.cwd(), "scripts/capture-packaged-macos-recovery-shortcuts.mjs"),
+      path.resolve(process.cwd(), "scripts/capture-packaged-macos-recovery-shortcuts.ts"),
       "utf8",
     );
     const cleanup = source.slice(

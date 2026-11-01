@@ -50,6 +50,43 @@ const EVENTS_PAYLOAD = {
 };
 
 describe("createMacosCalendarRuntime", () => {
+  it("drops an event read that completes after Disconnect", async () => {
+    let finishEvents!: (result: { stdout: string; stderr: string }) => void;
+    let disconnected = false;
+    const exec = vi.fn(async (_path: string, args: string[]) => args[0] === "--probe"
+      ? helperOutput(AUTHORIZED_PROBE)
+      : new Promise<{ stdout: string; stderr: string }>(resolve => { finishEvents = resolve; }));
+    const { runtime } = runtimeWith({}, { exec, isDisconnected: () => disconnected });
+    const reading = runtime.readSnapshot();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(exec).toHaveBeenCalledTimes(2);
+    disconnected = true;
+    runtime.invalidate();
+    finishEvents(helperOutput(EVENTS_PAYLOAD));
+    await expect(reading).resolves.toMatchObject({ authorization: "unknown", errorCode: "disconnected", events: [], calendars: [] });
+  });
+
+  it("does not reuse an in-flight authorized read after invalidation and permission revocation", async () => {
+    let finishEvents!: (result: { stdout: string; stderr: string }) => void;
+    let authorized = true;
+    const exec = vi.fn(async (_path: string, args: string[]) => args[0] === "--probe"
+      ? helperOutput({ type: "probe", authorization: authorized ? "authorized" : "denied" })
+      : new Promise<{ stdout: string; stderr: string }>(resolve => { finishEvents = resolve; }));
+    const { runtime } = runtimeWith({}, { exec });
+    const oldRead = runtime.readSnapshot();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(exec).toHaveBeenCalledTimes(2);
+    authorized = false;
+    runtime.invalidate();
+    const fresh = runtime.readSnapshot({ forceRefresh: true });
+    finishEvents(helperOutput(EVENTS_PAYLOAD));
+    await oldRead;
+    await expect(fresh).resolves.toMatchObject({ authorization: "denied", events: [] });
+    await expect(runtime.readSnapshot()).resolves.toMatchObject({ authorization: "denied", events: [] });
+  });
+
   it("never runs a mode that can prompt while only reading", async () => {
     // The whole scoping of this feature rests on this: reading the calendar
     // state on mount must be incapable of raising a TCC dialog.
@@ -175,5 +212,34 @@ describe("createMacosCalendarRuntime", () => {
 
     expect(snapshot.authorization).toBe("denied");
     expect(calls).toEqual([["--request-access"]]);
+  });
+
+  it("runs no helper at all while the reader has disconnected the calendar", async () => {
+    let disconnected = false;
+    const { runtime, calls } = runtimeWith(
+      { "--probe": AUTHORIZED_PROBE, "--events": EVENTS_PAYLOAD },
+      { isDisconnected: () => disconnected },
+    );
+    const connected = await runtime.readSnapshot();
+    expect(connected.events).toHaveLength(1);
+    const helperRuns = calls.length;
+
+    disconnected = true;
+    const read = await runtime.readSnapshot();
+    const forced = await runtime.readSnapshot({ forceRefresh: true });
+    const requested = await runtime.requestAccess();
+
+    expect(calls).toHaveLength(helperRuns);
+    for (const snapshot of [read, forced, requested]) {
+      expect(snapshot.events).toEqual([]);
+      expect(snapshot.calendars).toEqual([]);
+      expect(snapshot.errorCode).toBe("disconnected");
+    }
+
+    // Reconnecting reads afresh rather than serving what was held before.
+    disconnected = false;
+    const again = await runtime.readSnapshot();
+    expect(again.events).toHaveLength(1);
+    expect(calls.length).toBeGreaterThan(helperRuns);
   });
 });

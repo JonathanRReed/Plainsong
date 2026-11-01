@@ -19,6 +19,7 @@ pub struct MelSpectrogram {
     log_offset: f32,
     /// true = natural log (NeMo/Parakeet/Moonshine), false = log10 (Whisper)
     log_base_e: bool,
+    parakeet_v3_frontend: bool,
 }
 
 impl MelSpectrogram {
@@ -34,18 +35,28 @@ impl MelSpectrogram {
         mel
     }
 
-    /// Create with Parakeet TDT 0.6B **v3** defaults.
-    ///
-    /// Same frontend as [`Self::parakeet_defaults`] except the filterbank has
-    /// 128 bins rather than 80. That is not a tuning preference: the v3 encoder
-    /// declares `audio_signal [batch, 128, frames]` and carries `feat_dim: 128`
-    /// in its ONNX metadata, so an 80-bin frontend does not merely sound worse,
-    /// it fails to bind.
+    /// Parakeet v3's Sherpa/NeMo frontend: reflected frames, pre-emphasis,
+    /// Povey window and librosa/Slaney filters. Keep legacy frontends separate.
     pub fn parakeet_v3_defaults() -> Self {
-        let sample_rate = 16000u32;
-        let high_freq = sample_rate as f32 / 2.0 - 400.0;
-        let mut mel = Self::new(512, 160, 400, 128, sample_rate).with_nemo_log();
-        mel.mel_filters = compute_mel_filters(128, 512, sample_rate, 20.0, high_freq);
+        let mut mel = Self::new(512, 160, 400, 128, 16000).with_nemo_log();
+        mel.parakeet_v3_frontend = true;
+        mel.window = (0..400)
+            .map(|i| {
+                (0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / 399.0).cos()).powf(0.85)
+                    as f32
+            })
+            .collect();
+        mel.mel_filters = create_mel_filterbank_slaney(512, 16000.0, 128, 0.0, 7600.0)
+            .into_iter()
+            .map(|row| row.into_iter().map(|v| v as f32).collect())
+            .collect();
+        mel
+    }
+
+    /// Preserve the existing v2 route until its separate reference check.
+    pub fn parakeet_tdt_v2_defaults() -> Self {
+        let mut mel = Self::new(512, 160, 400, 128, 16000).with_nemo_log();
+        mel.mel_filters = compute_mel_filters(128, 512, 16000, 20.0, 7600.0);
         mel
     }
 
@@ -75,6 +86,7 @@ impl MelSpectrogram {
             mel_filters,
             log_offset: 1e-6,
             log_base_e: false,
+            parakeet_v3_frontend: false,
         }
     }
 
@@ -83,6 +95,9 @@ impl MelSpectrogram {
     /// Returns shape `[n_mels][n_frames]`, matching NeMo `processed_signal` after transposing to [n_mels, T].
     /// Uses snip_edges=False style frame calculation (centered frames, matches sherpa-onnx).
     pub fn compute(&self, samples: &[f32]) -> Vec<Vec<f32>> {
+        if self.parakeet_v3_frontend {
+            return self.compute_parakeet_v3(samples);
+        }
         // snip_edges=False: frames are centered, not snipped at edges
         // This matches sherpa-onnx/NeMo behavior
         let n_frames = if samples.len() >= self.hop_length {
@@ -139,6 +154,49 @@ impl MelSpectrogram {
         mel_spec
     }
 
+    fn compute_parakeet_v3(&self, samples: &[f32]) -> Vec<Vec<f32>> {
+        let frames = (samples.len() + self.hop_length / 2) / self.hop_length;
+        let mut spec = vec![Vec::with_capacity(frames); self.n_mels];
+        if frames == 0 {
+            return spec;
+        }
+        let period = (2 * samples.len()) as i64;
+        for frame_index in 0..frames {
+            let start = (frame_index * self.hop_length + self.hop_length / 2) as i64
+                - (self.win_length / 2) as i64;
+            let mut frame = vec![0.0; self.n_fft];
+            for (i, value) in frame.iter_mut().take(self.win_length).enumerate() {
+                let reflected = (start + i as i64).rem_euclid(period) as usize;
+                let index = if reflected >= samples.len() {
+                    2 * samples.len() - 1 - reflected
+                } else {
+                    reflected
+                };
+                *value = samples[index];
+            }
+            // Kaldi applies pre-emphasis within the reflected frame, before
+            // windowing. Descending iteration preserves each original sample.
+            for i in (1..self.win_length).rev() {
+                frame[i] -= 0.97 * frame[i - 1];
+            }
+            frame[0] *= 1.0 - 0.97;
+            for (value, window) in frame.iter_mut().zip(&self.window) {
+                *value *= window;
+            }
+            let spectrum = rfft(&frame);
+            let power: Vec<_> = spectrum
+                .iter()
+                .take(self.n_fft / 2 + 1)
+                .map(|(re, im)| re * re + im * im)
+                .collect();
+            for (band, filter) in spec.iter_mut().zip(&self.mel_filters) {
+                let energy: f32 = power.iter().zip(filter).map(|(p, w)| p * w).sum();
+                band.push(energy.max(f32::EPSILON).ln());
+            }
+        }
+        spec
+    }
+
     /// Compute mel spectrogram with per-feature normalization (sherpa-onnx/NeMo style).
     /// Normalizes each mel band by its mean and stddev across all frames.
     pub fn compute_normalized(&self, samples: &[f32]) -> Vec<Vec<f32>> {
@@ -157,7 +215,11 @@ impl MelSpectrogram {
             let band = &mel_spec[mel_idx];
 
             // Compute mean
-            let mean: f32 = band.iter().sum::<f32>() / n_frames as f32;
+            let mean: f32 = if self.parakeet_v3_frontend {
+                (band.iter().map(|v| f64::from(*v)).sum::<f64>() / n_frames as f64) as f32
+            } else {
+                band.iter().sum::<f32>() / n_frames as f32
+            };
 
             // Compute stddev
             let variance: f32 =
@@ -177,23 +239,69 @@ impl MelSpectrogram {
     ///
     /// Applies: `log10 → clamp(max-8) → (x+4)/4` as per OpenAI Whisper.
     /// Use this for Whisper-based models (Whisper Candle, DistilWhisper).
-    #[cfg(any(feature = "asr-canary", feature = "asr-whisper", test))]
+    #[cfg(feature = "asr-canary")]
     pub fn compute_whisper_normalized(&self, samples: &[f32]) -> Vec<Vec<f32>> {
-        let raw = self.compute(samples);
-        if raw.is_empty() || raw[0].is_empty() {
-            return raw;
+        use rustfft::{num_complex::Complex, FftPlanner};
+
+        // Whisper uses a periodic 400-point Hann window, centered reflected
+        // frames, Slaney filters and waveform padding before normalization.
+        // Keep this separate from the NeMo frontend used by other recognizers.
+        const FFT: usize = 400;
+        const HOP: usize = 160;
+        let length = samples.len().max(30 * 16_000);
+        let mut padded = vec![0.0; length];
+        padded[..samples.len()].copy_from_slice(samples);
+        let frames = length / HOP;
+        let window: Vec<_> = (0..FFT)
+            .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / FFT as f32).cos()))
+            .collect();
+        let filters: Vec<Vec<_>> =
+            create_mel_filterbank_slaney(FFT, 16000.0, self.n_mels, 0.0, 8000.0)
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .enumerate()
+                        .filter(|(_, weight)| *weight > 0.0)
+                        .map(|(bin, weight)| (bin, weight as f32))
+                        .collect()
+                })
+                .collect();
+        let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT);
+        let mut scratch = vec![Complex::default(); fft.get_inplace_scratch_len()];
+        let mut frame = vec![Complex::default(); FFT];
+        let mut power = vec![0.0; FFT / 2 + 1];
+        let mut output = vec![vec![0.0; frames]; self.n_mels];
+        let mut max_log = f32::NEG_INFINITY;
+        for (time, _) in padded.chunks_exact(HOP).enumerate() {
+            for (i, value) in frame.iter_mut().enumerate() {
+                let index = (time * HOP + i) as isize - (FFT / 2) as isize;
+                let index = if index < 0 {
+                    -index
+                } else if index >= length as isize {
+                    2 * length as isize - 2 - index
+                } else {
+                    index
+                } as usize;
+                *value = Complex::new(padded[index] * window[i], 0.0);
+            }
+            fft.process_with_scratch(&mut frame, &mut scratch);
+            for (bin, value) in power.iter_mut().enumerate() {
+                *value = frame[bin].norm_sqr();
+            }
+            for (mel, filter) in filters.iter().enumerate() {
+                let energy: f32 = filter
+                    .iter()
+                    .map(|(bin, weight)| power[*bin] * weight)
+                    .sum();
+                let log = energy.max(1e-10).log10();
+                output[mel][time] = log;
+                max_log = max_log.max(log);
+            }
         }
-        let max_val = raw
-            .iter()
-            .flat_map(|row| row.iter().copied())
-            .fold(f32::NEG_INFINITY, f32::max);
-        raw.into_iter()
-            .map(|row| {
-                row.into_iter()
-                    .map(|v| ((v.max(max_val - 8.0)) + 4.0) / 4.0)
-                    .collect()
-            })
-            .collect()
+        for value in output.iter_mut().flatten() {
+            *value = (value.max(max_log - 8.0) + 4.0) / 4.0;
+        }
+        output
     }
 }
 
@@ -490,6 +598,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parakeet_v3_matches_independent_kaldi_fbank_tensors() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/parakeet-v3-fbank.json")).unwrap();
+        let samples: Vec<f32> = serde_json::from_value(fixture["samples"].clone()).unwrap();
+        let expected_raw: Vec<Vec<f32>> = serde_json::from_value(fixture["raw"].clone()).unwrap();
+        let expected_normalized: Vec<Vec<f32>> =
+            serde_json::from_value(fixture["normalized"].clone()).unwrap();
+        let frontend = MelSpectrogram::parakeet_v3_defaults();
+        for (actual, expected, tolerance) in [
+            (frontend.compute(&samples), expected_raw, 2e-4f32),
+            (
+                frontend.compute_normalized(&samples),
+                expected_normalized,
+                5e-4f32,
+            ),
+        ] {
+            assert_eq!(actual.len(), 128);
+            let mut max_error = 0.0f32;
+            for (row, reference) in actual.iter().zip(expected) {
+                assert_eq!(row.len(), fixture["frames"].as_u64().unwrap() as usize);
+                for (value, target) in row.iter().zip(reference) {
+                    assert!(value.is_finite());
+                    max_error = max_error.max((value - target).abs());
+                }
+            }
+            assert!(
+                max_error <= tolerance,
+                "reference tensor max error {max_error} exceeds {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn parakeet_v3_short_frames_and_silence_are_finite() {
+        let frontend = MelSpectrogram::parakeet_v3_defaults();
+        for len in [0, 1, 79, 80, 159, 160, 239, 240, 399, 400, 8000] {
+            let output = frontend.compute_normalized(&vec![0.0; len]);
+            assert_eq!(output.len(), 128);
+            for band in output {
+                assert_eq!(band.len(), (len + 80) / 160);
+                assert!(band.iter().all(|v| v.is_finite() && v.abs() < 1e-5));
+            }
+        }
+    }
+
+    #[test]
     fn test_mel_spec_produces_correct_shape() {
         // 1 second of silence at 16kHz → 80 mel bins × ~101 frames (snip_edges=False)
         let samples = vec![0.0f32; 16000];
@@ -519,6 +673,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "asr-canary")]
     fn test_whisper_normalized_output_range() {
         let samples = vec![0.1f32; 16000];
         let mel = MelSpectrogram::new(512, 160, 400, 80, 16000);
@@ -618,5 +773,56 @@ mod tests {
         assert!(f16_bits_to_f32(0x7C00).is_infinite());
         // NaN = 0x7E00
         assert!(f16_bits_to_f32(0x7E00).is_nan());
+    }
+}
+
+#[cfg(all(test, feature = "asr-canary"))]
+mod whisper_frontend_reference_tests {
+    use super::MelSpectrogram;
+
+    fn input() -> Vec<f32> {
+        include_bytes!("fixtures/whisper-reference-input.f32")
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn whisper_frontend_matches_pinned_upstream_reference() {
+        let reference: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/whisper-reference.json")).unwrap();
+        for case in reference["cases"].as_array().unwrap() {
+            let bins = case["nMels"].as_u64().unwrap() as usize;
+            let mel = MelSpectrogram::new(512, 160, 400, bins, 16000);
+            let result = mel.compute_whisper_normalized(&input());
+            assert_eq!(result.len(), bins);
+            assert!(result.iter().all(|row| row.len() == 3000));
+            for sample in case["samples"].as_array().unwrap() {
+                let index = sample["index"].as_u64().unwrap() as usize;
+                let expected = sample["value"].as_f64().unwrap() as f32;
+                let actual = result[index / 3000][index % 3000];
+                assert!(
+                    (actual - expected).abs() < 0.0001,
+                    "{bins} bins at {index}: expected {expected}, got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an explicit local frontend output directory"]
+    fn export_whisper_frontend_reference_probe() {
+        let root =
+            std::path::PathBuf::from(std::env::var("PLAINSONG_WHISPER_FRONTEND_OUT").unwrap());
+        for bins in [80, 128] {
+            let mel = MelSpectrogram::new(512, 160, 400, bins, 16000);
+            let result = mel.compute_whisper_normalized(&input());
+            let bytes: Vec<_> = result
+                .iter()
+                .flatten()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            std::fs::write(root.join(format!("native-{bins}.f32")), bytes).unwrap();
+        }
     }
 }

@@ -21,6 +21,26 @@ pub(crate) fn meeting_transcription_chunk_seconds(provider: asr::AsrProviderType
     }
 }
 
+fn meeting_float_chunk(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(
+        &mut cursor,
+        hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    for sample in samples {
+        writer.write_sample(*sample).map_err(|e| e.to_string())?;
+    }
+    writer.finalize().map_err(|e| e.to_string())?;
+    Ok(cursor.into_inner())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn transcribe_recording_in_chunks(
     app: &impl crate::sidecar_handle::AppEmitter,
     asr_manager: Arc<asr::AsrManager>,
@@ -28,7 +48,12 @@ pub(crate) async fn transcribe_recording_in_chunks(
     audio_path: &Path,
     provider: asr::AsrProviderType,
     model_id: String,
+    wait_budget: &MeetingWaitBudget,
+    aside_spans: &[crate::meeting_asides::AsideSpan],
 ) -> Result<asr::TranscriptionResult, String> {
+    if wait_budget.memory_deferred() {
+        return Err(MEETING_TRANSCRIPTION_PENDING_NOTICE.to_string());
+    }
     let mut reader = hound::WavReader::open(audio_path).map_err(|error| {
         format!(
             "Failed to open recording '{}' for chunked transcription: {}",
@@ -40,6 +65,15 @@ pub(crate) async fn transcribe_recording_in_chunks(
     if spec.sample_rate == 0 || spec.channels == 0 {
         return Err("Chunked transcription requires a valid WAV sample rate/channels".to_string());
     }
+
+    // Dictations taken from this track during the meeting are silenced before
+    // any chunk is decoded, so none of their words can reach the transcript.
+    let aside_ranges = crate::meeting_asides::aside_frame_ranges(
+        aside_spans,
+        spec.sample_rate,
+        u64::from(reader.duration()),
+    );
+    let aside_ranges = &aside_ranges;
 
     let chunk_seconds = meeting_transcription_chunk_seconds(provider);
     let chunk_size_frames =
@@ -73,6 +107,7 @@ pub(crate) async fn transcribe_recording_in_chunks(
     let mut requested_engine: Option<String> = None;
     let mut actual_engine: Option<String> = None;
     let mut optimization_applied = false;
+    let mut measured_word_timestamps = true;
     let mut fallback_reason: Option<String> = None;
     let mut weighted_confidence_sum = 0.0_f64;
     let mut weighted_confidence_count = 0.0_f64;
@@ -93,36 +128,112 @@ pub(crate) async fn transcribe_recording_in_chunks(
         let model_id = model_id.clone();
         let streamed_preview = Arc::clone(&streamed_preview);
         Box::pin(async move {
+            if wait_budget.memory_deferred() {
+                return Err(MEETING_TRANSCRIPTION_PENDING_NOTICE.to_string());
+            }
             let chunk_start_seconds = chunk_start_frame as f64 / spec.sample_rate as f64;
             let chunk_end_seconds =
                 (chunk_start_frame + chunk.len()) as f64 / spec.sample_rate as f64;
+            let chunk_progress = if total_duration_seconds > 0.0 {
+                (chunk_start_seconds / total_duration_seconds).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             app.emit_event(
                 "recording-transcription-progress",
                 serde_json::json!({
                     "recordingId": recording_id,
                     "chunkIndex": chunk_idx + 1,
-                    "progress": if total_duration_seconds > 0.0 {
-                        (chunk_start_seconds / total_duration_seconds).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    },
+                    "progress": chunk_progress,
                     "stage": "chunk_started",
                     "startTime": chunk_start_seconds,
                     "endTime": chunk_end_seconds,
                 }),
             );
-            let wav_chunk = mono_samples_to_wav_bytes(&chunk, spec.sample_rate)?;
-            let result = asr_manager
-                .transcribe_bytes_for_meeting(provider, &wav_chunk, Some(model_id.as_str()))
-                .await
-                .map_err(|error| {
-                    format!(
+            let mut chunk = chunk;
+            crate::meeting_asides::silence_aside_frames(
+                &mut chunk,
+                chunk_start_frame as u64,
+                aside_ranges,
+            );
+            let wav_chunk =
+                if spec.sample_format == hound::SampleFormat::Int && spec.bits_per_sample == 24 {
+                    // Keep stored recognition samples through the provider's WAV
+                    // boundary. The local reader skips resampling at 16 kHz.
+                    meeting_float_chunk(&chunk, spec.sample_rate)?
+                } else {
+                    mono_samples_to_wav_bytes(&chunk, spec.sample_rate)?
+                };
+            let mut headroom_retries = 0u32;
+            let mut busy_retries = 0u32;
+            let result = loop {
+                let error = match asr_manager
+                    .transcribe_bytes_for_meeting(provider, &wav_chunk, Some(model_id.as_str()))
+                    .await
+                {
+                    Ok(result) => break result,
+                    Err(error) => error,
+                };
+                let message = format!("{error:#}");
+                let Some(wait) = wait_budget.retry_after_failure(
+                    provider,
+                    &message,
+                    headroom_retries,
+                    busy_retries,
+                ) else {
+                    return Err(format!(
                         "Chunk {} failed at {:.1}s: {}",
                         chunk_idx + 1,
                         chunk_start_frame as f64 / spec.sample_rate as f64,
-                        error
-                    )
-                })?;
+                        message
+                    ));
+                };
+                match wait.reason {
+                    MeetingWaitReason::MemoryHeadroom => headroom_retries += 1,
+                    MeetingWaitReason::RuntimeBusy => busy_retries += 1,
+                }
+                tracing::warn!(
+                    "Chunk {} of {} could not start ({}); trying again in {:.1}s: {}",
+                    chunk_idx + 1,
+                    recording_id,
+                    wait.reason.describe(),
+                    wait.delay.as_secs_f64(),
+                    error
+                );
+                // Say so: without this the meeting sits on "Transcribing an
+                // audio segment" for up to a minute at a time.
+                emit_recording_status(
+                    app,
+                    recording_id,
+                    "processing",
+                    Some(wait.reason.status_message()),
+                    Some(chunk_progress),
+                );
+                // Do not hold a cached ONNX model (about 2 GB for Parakeet)
+                // through a long wait for memory: it is part of what the
+                // machine is short of, and the retry loads it again.
+                // Never one dictation is using or keeping warm, though: see
+                // `MeetingWaitBudget::release_model_for_wait`.
+                if wait.reason == MeetingWaitReason::MemoryHeadroom
+                    && wait.delay >= MEETING_WAIT_RELEASE_MODEL_AFTER
+                    && asr_manager
+                        .supports_short_keep_warm(provider, model_id.as_str())
+                        .await
+                {
+                    wait_budget
+                        .release_model_for_wait(&asr_manager, provider, model_id.as_str())
+                        .await;
+                }
+                wait_budget.spend(wait.delay);
+                tokio::time::sleep(wait.delay).await;
+                emit_recording_status(
+                    app,
+                    recording_id,
+                    "processing",
+                    Some("Transcribing an audio segment"),
+                    Some(chunk_progress),
+                );
+            };
 
             let segment_text = result.text.trim();
             let preview_text = {
@@ -228,6 +339,11 @@ pub(crate) async fn transcribe_recording_in_chunks(
                     }
                     merged_text.push_str(result.text.trim());
                 }
+                // A chunk with no words (trailing silence) says nothing about
+                // timing, so it must not mark the whole meeting untimed.
+                if !result.segments.is_empty() || !result.text.trim().is_empty() {
+                    measured_word_timestamps &= result.measured_word_timestamps;
+                }
                 for mut segment in result.segments {
                     segment.start_time += offset_seconds;
                     segment.end_time += offset_seconds;
@@ -264,9 +380,15 @@ pub(crate) async fn transcribe_recording_in_chunks(
             }
         }
     } else {
-        for sample in reader.samples::<i16>() {
+        // Keep the existing PCM16 normalization and quantization unchanged.
+        let scale = if spec.bits_per_sample <= 16 {
+            i16::MAX as f32
+        } else {
+            (1_u64 << (spec.bits_per_sample - 1)) as f32
+        };
+        for sample in reader.samples::<i32>() {
             let sample = sample.map_err(|error| format!("Failed to read wav sample: {}", error))?;
-            channel_accumulator.push(sample as f32 / i16::MAX as f32);
+            channel_accumulator.push(sample as f32 / scale);
             if channel_accumulator.len() < spec.channels as usize {
                 continue;
             }
@@ -309,6 +431,11 @@ pub(crate) async fn transcribe_recording_in_chunks(
                         merged_text.push(' ');
                     }
                     merged_text.push_str(result.text.trim());
+                }
+                // A chunk with no words (trailing silence) says nothing about
+                // timing, so it must not mark the whole meeting untimed.
+                if !result.segments.is_empty() || !result.text.trim().is_empty() {
+                    measured_word_timestamps &= result.measured_word_timestamps;
                 }
                 for mut segment in result.segments {
                     segment.start_time += offset_seconds;
@@ -364,6 +491,11 @@ pub(crate) async fn transcribe_recording_in_chunks(
                         merged_text.push(' ');
                     }
                     merged_text.push_str(result.text.trim());
+                }
+                // A chunk with no words (trailing silence) says nothing about
+                // timing, so it must not mark the whole meeting untimed.
+                if !result.segments.is_empty() || !result.text.trim().is_empty() {
+                    measured_word_timestamps &= result.measured_word_timestamps;
                 }
                 for mut segment in result.segments {
                     segment.start_time += offset_seconds;
@@ -467,6 +599,9 @@ pub(crate) async fn transcribe_recording_in_chunks(
     Ok(asr::TranscriptionResult {
         text: merged_text,
         segments: merged_segments,
+        measured_word_timestamps: measured_word_timestamps
+            && successful_chunks > 0
+            && failed_chunks == 0,
         language: if language.is_empty() {
             "en".to_string()
         } else {
@@ -492,7 +627,285 @@ pub(crate) async fn transcribe_recording_in_chunks(
         fallback_reason,
         vocabulary_hint_terms_applied: 0,
         speaker_turns: merged_speaker_turns,
+        vocabulary_candidates: Vec::new(),
     })
+}
+
+/// Waits before asking a local model again for a chunk it refused for memory
+/// headroom: 5, 10, 20, 40, then 60 seconds until the recording's budget ends.
+const MEETING_CHUNK_HEADROOM_RETRY_SECONDS: [u64; 5] = [5, 10, 20, 40, 60];
+
+/// Waits before asking again when the native runtime was busy with another
+/// local operation (a cleanup or a dictation decode): short, because that
+/// work finishes in seconds, and bounded, because it is still the same
+/// recording's budget.
+const MEETING_CHUNK_BUSY_RETRY_MILLIS: [u64; 7] = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000];
+
+/// The most one recording may spend waiting, across its microphone and
+/// system-audio tracks, every chunk, and speaker separation. Transcription
+/// then stays pending for the user to retry from saved audio.
+const MEETING_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// A memory wait at least this long first releases the cached model of a
+/// route that keeps one, so the wait does not hold it -- unless dictation is
+/// using or keeping warm the same model (`release_meeting_route_for_memory_wait`).
+const MEETING_WAIT_RELEASE_MODEL_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Time one recording has spent waiting for memory or the native runtime.
+/// Shared by both tracks of a dual-source meeting and by its diarization, so
+/// the budget is the recording's, not each track's.
+#[derive(Default)]
+pub(crate) struct MeetingWaitBudget {
+    waited_ms: Arc<std::sync::atomic::AtomicU64>,
+    memory_deferred: std::sync::atomic::AtomicBool,
+    /// The app whose dictation lane shares the native runtime with this
+    /// meeting. `None` only in a process with no dictation (meeting-eval).
+    dictation: Option<Arc<AppState>>,
+}
+
+impl MeetingWaitBudget {
+    /// A budget for a process with no dictation lane to protect.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// A budget for a meeting in the app, where dictation may be using -- or
+    /// keeping warm -- the same speech model.
+    pub(crate) fn sharing_runtime_with(state: Arc<AppState>) -> Self {
+        Self {
+            waited_ms: Default::default(),
+            memory_deferred: Default::default(),
+            dictation: Some(state),
+        }
+    }
+
+    /// Drop the route's cached model before a long memory wait. In the app
+    /// this goes through the dictation release checks, so a model a dictation
+    /// session, warmup or keep-warm relies on stays loaded.
+    async fn release_model_for_wait(
+        &self,
+        asr_manager: &asr::AsrManager,
+        provider: asr::AsrProviderType,
+        model_id: &str,
+    ) {
+        match &self.dictation {
+            Some(state) => {
+                release_meeting_route_for_memory_wait(state, provider, model_id).await;
+            }
+            None => asr_manager.cool_down_local_route(provider, model_id).await,
+        }
+    }
+
+    fn retry_after_failure(
+        &self,
+        provider: asr::AsrProviderType,
+        error: &str,
+        headroom_retries: u32,
+        busy_retries: u32,
+    ) -> Option<MeetingWait> {
+        let wait = meeting_local_retry_wait(
+            provider,
+            error,
+            headroom_retries,
+            busy_retries,
+            self.waited(),
+        );
+        if wait.is_none()
+            && !provider.is_remote()
+            && crate::llm::local_model_load::is_headroom_refusal(error)
+        {
+            self.memory_deferred
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        wait
+    }
+
+    pub(crate) fn memory_deferred(&self) -> bool {
+        self.memory_deferred
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn waited(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.waited_ms.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    pub(crate) fn spend(&self, delay: std::time::Duration) {
+        self.waited_ms.fetch_add(
+            delay.as_millis() as u64,
+            std::sync::atomic::Ordering::AcqRel,
+        );
+        crate::llm::local_model_load::notify_background_waiters();
+    }
+}
+
+/// Why a meeting step is waiting rather than failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MeetingWaitReason {
+    /// Admission refused the allocation for lack of memory headroom.
+    MemoryHeadroom,
+    /// Another local operation held the native runtime.
+    RuntimeBusy,
+}
+
+impl MeetingWaitReason {
+    fn describe(self) -> &'static str {
+        match self {
+            MeetingWaitReason::MemoryHeadroom => "not enough free memory",
+            MeetingWaitReason::RuntimeBusy => "another local operation is running",
+        }
+    }
+
+    /// What the meeting's processing line says while it waits.
+    pub(crate) fn status_message(self) -> &'static str {
+        match self {
+            MeetingWaitReason::MemoryHeadroom => "Waiting for memory to free up\u{2026}",
+            MeetingWaitReason::RuntimeBusy => "Waiting for another local task to finish\u{2026}",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MeetingWait {
+    pub(crate) delay: std::time::Duration,
+    pub(crate) reason: MeetingWaitReason,
+}
+
+/// How long to wait before running a local meeting step again, or `None` to
+/// give up on it and record the gap.
+///
+/// Two failures are about the moment rather than the audio. Admission refuses
+/// while memory pressure is raised or other applications hold the headroom,
+/// and it answers in milliseconds, so without a wait every chunk queued behind
+/// the first refusal failed too: on a 17-minute AMI meeting under a pressure
+/// warning, 11 of 12 chunks failed inside half a second and the meeting was
+/// saved with 90 seconds of transcript. And the native runtime runs one local
+/// operation at a time, so a chunk that arrives during a cleanup or a
+/// dictation decode is told it is busy. Both are retried, on their own
+/// schedules (`MEETING_CHUNK_HEADROOM_RETRY_SECONDS`,
+/// `MEETING_CHUNK_BUSY_RETRY_MILLIS`), within one budget per recording
+/// (`MEETING_WAIT_BUDGET`). Each retry asks admission again; nothing here
+/// bypasses it. A cloud error, a corrupt model or bad audio fails as before.
+pub(crate) fn meeting_local_retry_wait(
+    provider: asr::AsrProviderType,
+    error: &str,
+    headroom_retries: u32,
+    busy_retries: u32,
+    waited_so_far: std::time::Duration,
+) -> Option<MeetingWait> {
+    if provider.is_remote() {
+        return None;
+    }
+    meeting_retry_wait(error, headroom_retries, busy_retries, waited_so_far)
+}
+
+/// [`meeting_local_retry_wait`] without the provider check, for local work
+/// that is not a transcription route (speaker separation).
+pub(crate) fn meeting_retry_wait(
+    error: &str,
+    headroom_retries: u32,
+    busy_retries: u32,
+    waited_so_far: std::time::Duration,
+) -> Option<MeetingWait> {
+    let wait = if crate::llm::local_model_load::is_headroom_refusal(error) {
+        MeetingWait {
+            delay: std::time::Duration::from_secs(
+                MEETING_CHUNK_HEADROOM_RETRY_SECONDS[(headroom_retries as usize)
+                    .min(MEETING_CHUNK_HEADROOM_RETRY_SECONDS.len() - 1)],
+            ),
+            reason: MeetingWaitReason::MemoryHeadroom,
+        }
+    } else if crate::llm::native_runtime_is_busy(error) {
+        MeetingWait {
+            delay: std::time::Duration::from_millis(
+                *MEETING_CHUNK_BUSY_RETRY_MILLIS.get(busy_retries as usize)?,
+            ),
+            reason: MeetingWaitReason::RuntimeBusy,
+        }
+    } else {
+        return None;
+    };
+    (waited_so_far + wait.delay <= MEETING_WAIT_BUDGET).then_some(wait)
+}
+
+/// Run the local diarizer for a finished meeting, waiting out memory-headroom
+/// refusals and a busy native runtime on the recording's own budget, exactly
+/// as its transcription chunks do.
+///
+/// Speaker separation runs after the transcript is saved, usually right after
+/// the speech model has finished with the memory it needed, so the first
+/// admission check can land in the same squeeze the chunks waited through.
+/// Without a wait the meeting was saved without speakers and only a log line
+/// said why.
+pub(crate) async fn run_meeting_diarization_with_waits(
+    audio_path: &Path,
+    model_id: &str,
+    recording_id: &str,
+    wait_budget: &MeetingWaitBudget,
+) -> anyhow::Result<diarization::DiarizationResult> {
+    let (mut headroom_retries, mut busy_retries) = (0u32, 0u32);
+    loop {
+        let error = match crate::llm::local_model_load::with_background_wait_budget(
+            Arc::clone(&wait_budget.waited_ms),
+            MEETING_WAIT_BUDGET,
+            diarization::run_diarization_with_model(audio_path, model_id),
+        )
+        .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error) => error,
+        };
+        let Some(wait) = meeting_retry_wait(
+            &format!("{error:#}"),
+            headroom_retries,
+            busy_retries,
+            wait_budget.waited(),
+        ) else {
+            return Err(error);
+        };
+        match wait.reason {
+            MeetingWaitReason::MemoryHeadroom => headroom_retries += 1,
+            MeetingWaitReason::RuntimeBusy => busy_retries += 1,
+        }
+        tracing::warn!(
+            "Speaker separation for {} could not start ({}); trying again in {:.1}s: {:#}",
+            recording_id,
+            wait.reason.describe(),
+            wait.delay.as_secs_f64(),
+            error
+        );
+        wait_budget.spend(wait.delay);
+        tokio::time::sleep(wait.delay).await;
+    }
+}
+
+/// The note a finished meeting carries when speaker separation failed, so the
+/// reader learns why the transcript has no speakers and how to try again.
+pub(crate) fn meeting_diarization_failure_notice(error: &str) -> String {
+    let cause = diarization_failure_cause(error);
+    format!(
+        "Speakers were not labelled because {cause}. The transcript is saved; choose Label the speakers to try again."
+    )
+}
+
+/// What the reader sees when they chose Label the speakers and it failed. The
+/// raw error (which can name model internals) stays in the log.
+pub(crate) fn manual_diarization_failure_message(error: &str) -> String {
+    let cause = diarization_failure_cause(error);
+    format!(
+        "Speakers were not labelled because {cause}. Nothing was changed; try again in a moment."
+    )
+}
+
+fn diarization_failure_cause(error: &str) -> &'static str {
+    if crate::llm::local_model_load::is_headroom_refusal(error) {
+        "there was not enough free memory"
+    } else if crate::llm::native_runtime_is_busy(error)
+        || crate::llm::local_model_load::is_background_wait_exhausted(error)
+    {
+        "another task on this Mac was using the speech model"
+    } else {
+        "the speaker model could not run"
+    }
 }
 
 /// Turn any cleanup warnings a provider raised into a record the user can act
@@ -776,6 +1189,7 @@ pub(crate) fn diarization_result_from_provider_turns(
         // A provider returns labels, not embeddings, so there is nothing to
         // remember a voice by. Voiceprints are a local-diarizer feature.
         cluster_centroids: std::collections::HashMap::new(),
+        word_activity: None,
     }
 }
 
@@ -812,29 +1226,39 @@ pub(crate) fn source_aware_speaker_aliases_from_segments(
     aliases
 }
 
+fn benchmark_entry_from_result(
+    result: &asr::BenchmarkResult,
+    id: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> models::AsrBenchmarkEntry {
+    models::AsrBenchmarkEntry {
+        id,
+        provider_type: asr_provider_to_settings_value(result.provider_type).to_string(),
+        provider_name: result.provider_name.clone(),
+        model_id: result.model_id.clone(),
+        runtime_status: runtime_status_to_db_value(&result.runtime_status).to_string(),
+        non_empty_transcript: result.non_empty_transcript,
+        processing_time_ms: result.processing_time_ms as i64,
+        confidence: result.confidence,
+        created_at,
+    }
+}
+
 pub(crate) async fn persist_benchmark_results(state: &AppState, results: &[asr::BenchmarkResult]) {
     if results.is_empty() {
         return;
     }
 
-    let mut entries = Vec::new();
-    for result in results {
-        let model_id = state
-            .asr_manager
-            .provider_model_id(result.provider_type)
-            .await;
-        entries.push(models::AsrBenchmarkEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            provider_type: asr_provider_to_settings_value(result.provider_type).to_string(),
-            provider_name: result.provider_name.clone(),
-            model_id,
-            runtime_status: runtime_status_to_db_value(&result.runtime_status).to_string(),
-            non_empty_transcript: result.non_empty_transcript,
-            processing_time_ms: result.processing_time_ms as i64,
-            confidence: result.confidence,
-            created_at: chrono::Utc::now(),
-        });
-    }
+    let entries = results
+        .iter()
+        .map(|result| {
+            benchmark_entry_from_result(
+                result,
+                uuid::Uuid::new_v4().to_string(),
+                chrono::Utc::now(),
+            )
+        })
+        .collect::<Vec<_>>();
 
     let mut db = state.db.lock().await;
     for entry in entries {
@@ -897,6 +1321,7 @@ pub(crate) fn build_models_transcript_from_asr_result(
     };
 
     models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: uuid::Uuid::new_v4().to_string(),
         recording_id: recording_id.to_string(),
         segments,
@@ -909,6 +1334,7 @@ pub(crate) fn build_models_transcript_from_asr_result(
             asr_provider_to_settings_value(result.requested_provider).to_string(),
         ),
         actual_provider: Some(asr_provider_to_settings_value(result.actual_provider).to_string()),
+        measured_word_timestamps: result.measured_word_timestamps,
         created_at: chrono::Utc::now(),
     }
 }
@@ -929,6 +1355,166 @@ pub(crate) struct MeetingTranscriptionOutput {
     pub(crate) actual_engine: Option<String>,
     pub(crate) optimization_applied: bool,
     pub(crate) fallback_reason: Option<String>,
+    /// Dictations taken from the microphone during the meeting, decoded on
+    /// their own and kept beside the transcript, never in it.
+    pub(crate) asides: Vec<crate::meeting_asides::MeetingAside>,
+}
+
+/// The aside frames of `track` and its rate, read from its header. An
+/// unreadable header places nothing; transcription reports that file itself.
+fn aside_ranges_on_track(
+    track: &Path,
+    aside_spans: &[crate::meeting_asides::AsideSpan],
+) -> Option<(Vec<std::ops::Range<u64>>, u32)> {
+    if aside_spans.is_empty() {
+        return None;
+    }
+    let (rate, frames) = track_rate_and_frames(track)?;
+    let ranges = crate::meeting_asides::aside_frame_ranges(aside_spans, rate, frames);
+    Some((ranges, rate))
+}
+
+/// A WAV track's sample rate and length in frames, from its header.
+fn track_rate_and_frames(track: &Path) -> Option<(u32, u64)> {
+    let reader = hound::WavReader::open(track).ok()?;
+    Some((reader.spec().sample_rate, u64::from(reader.duration())))
+}
+
+/// Keep rows invented over a silenced aside out of the stored transcript.
+fn drop_transcript_rows_inside_asides(
+    transcript: &mut models::Transcript,
+    me_track: &Path,
+    aside_spans: &[crate::meeting_asides::AsideSpan],
+    scope: crate::meeting_asides::AsideRowScope,
+) {
+    let Some((ranges, rate)) = aside_ranges_on_track(me_track, aside_spans) else {
+        return;
+    };
+    let seconds = crate::meeting_asides::aside_second_ranges(&ranges, rate);
+    let dropped = crate::meeting_asides::drop_rows_inside_asides(transcript, &seconds, scope);
+    if dropped > 0 {
+        tracing::info!(
+            "Dropped {dropped} row(s) the recognizer produced over silenced asides in {}",
+            transcript.recording_id
+        );
+    }
+}
+
+/// Mono samples of `track` from frame `range.start` to `range.end`.
+pub(crate) fn read_track_frames(
+    track: &Path,
+    range: &std::ops::Range<u64>,
+) -> Result<(Vec<f32>, u32), String> {
+    let mut reader = hound::WavReader::open(track).map_err(|error| error.to_string())?;
+    let spec = reader.spec();
+    let channels = usize::from(spec.channels.max(1));
+    let start = u32::try_from(range.start).map_err(|error| error.to_string())?;
+    reader.seek(start).map_err(|error| error.to_string())?;
+    let frames = usize::try_from(
+        range
+            .end
+            .min(u64::from(reader.duration()))
+            .saturating_sub(range.start),
+    )
+    .unwrap_or(usize::MAX);
+    let wanted = frames.saturating_mul(channels);
+    let interleaved: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float {
+        reader
+            .samples::<f32>()
+            .take(wanted)
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?
+    } else {
+        reader
+            .samples::<i16>()
+            .take(wanted)
+            .map(|sample| sample.map(|value| value as f32 / i16::MAX as f32))
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let mono = interleaved
+        .chunks_exact(channels)
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .collect();
+    Ok((mono, spec.sample_rate))
+}
+
+/// Decode each aside's own audio from the Me track, so the meeting can show
+/// it on request. An aside that cannot be read or decoded is skipped: its
+/// words stay out of the meeting either way, and its dictation kept them.
+pub(crate) async fn transcribe_meeting_asides(
+    asr_manager: &asr::AsrManager,
+    me_track: &Path,
+    aside_spans: &[crate::meeting_asides::AsideSpan],
+    provider: asr::AsrProviderType,
+    model_id: &str,
+    speaker_id: Option<&str>,
+) -> Vec<crate::meeting_asides::MeetingAside> {
+    if aside_spans.is_empty() {
+        return Vec::new();
+    }
+    let Some((rate, track_frames)) = track_rate_and_frames(me_track) else {
+        return Vec::new();
+    };
+    let mut asides = Vec::new();
+    for span in aside_spans {
+        let Some(range) = span.frames_on_track(rate, track_frames) else {
+            continue;
+        };
+        let Some(seconds) = crate::meeting_asides::aside_seconds(&range, rate) else {
+            continue;
+        };
+        let decoded = match read_track_frames(me_track, &range) {
+            Ok((samples, sample_rate)) => match mono_samples_to_wav_bytes(&samples, sample_rate) {
+                Ok(wav) => asr_manager
+                    .transcribe_bytes_for_meeting(provider, &wav, Some(model_id))
+                    .await
+                    .map_err(|error| format!("{error:#}")),
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        match decoded {
+            Ok(result) => asides.push(crate::meeting_asides::place_aside_decode(
+                &span.aside_id,
+                seconds,
+                speaker_id,
+                &result,
+            )),
+            Err(error) => tracing::warn!(
+                "Aside {} could not be decoded for the meeting view: {error}",
+                span.aside_id
+            ),
+        }
+    }
+    asides
+}
+
+/// Move the far side heard through the speakers out of the transcript.
+///
+/// Returns the moved rows, in their original order, for
+/// [`models::Transcript::heard_through_speakers`]. What counts as bleed, and
+/// why every doubt keeps the user's words, is in [`crate::meeting_bleed`].
+/// Untimed rows and single-source transcripts are never touched.
+pub(crate) fn separate_far_side_bleed(
+    segments: &mut Vec<models::TranscriptSegment>,
+    acoustics: Option<&crate::meeting_bleed::BleedAcoustics>,
+) -> Vec<models::TranscriptSegment> {
+    let bleed = crate::meeting_bleed::far_side_bleed_rows(segments, acoustics);
+    if bleed.is_empty() {
+        return Vec::new();
+    }
+    let mut kept = Vec::with_capacity(segments.len() - bleed.len());
+    let mut moved = Vec::with_capacity(bleed.len());
+    for (row, segment) in segments.drain(..).enumerate() {
+        if bleed.contains(&row) {
+            moved.push(segment);
+        } else {
+            kept.push(segment);
+        }
+    }
+    *segments = kept;
+    moved
 }
 
 pub(crate) fn build_source_aware_models_transcript(
@@ -936,15 +1522,16 @@ pub(crate) fn build_source_aware_models_transcript(
     provider: asr::AsrProviderType,
     model_id: &str,
     mut source_transcripts: Vec<(&str, asr::TranscriptionResult)>,
+    acoustics: Option<&crate::meeting_bleed::BleedAcoustics>,
 ) -> models::Transcript {
     let mut segments: Vec<models::TranscriptSegment> = Vec::new();
-    let mut full_text_parts: Vec<(f64, String)> = Vec::new();
     let mut language = "en".to_string();
     let mut model_name = provider.display_name().to_string();
     let mut requested_provider = provider;
     let mut actual_provider = provider;
     let mut weighted_confidence_sum = 0.0_f64;
     let mut weighted_confidence_count = 0.0_f64;
+    let mut measured_word_timestamps = true;
 
     for (speaker_id, result) in source_transcripts.drain(..) {
         if language == "en" && !result.language.trim().is_empty() {
@@ -955,6 +1542,11 @@ pub(crate) fn build_source_aware_models_transcript(
         }
         requested_provider = result.requested_provider;
         actual_provider = result.actual_provider;
+        // A chunk with no words (trailing silence) says nothing about
+        // timing, so it must not mark the whole meeting untimed.
+        if !result.segments.is_empty() || !result.text.trim().is_empty() {
+            measured_word_timestamps &= result.measured_word_timestamps;
+        }
 
         let text_weight = result.text.chars().count().max(1) as f64;
         weighted_confidence_sum += result.confidence * text_weight;
@@ -968,7 +1560,6 @@ pub(crate) fn build_source_aware_models_transcript(
                 continue;
             }
             inserted_source_segment = true;
-            full_text_parts.push((segment.start_time, text.clone()));
             segments.push(models::TranscriptSegment {
                 id: uuid::Uuid::new_v4().to_string(),
                 start_time: segment.start_time,
@@ -979,7 +1570,6 @@ pub(crate) fn build_source_aware_models_transcript(
             });
         }
         if !inserted_source_segment && !fallback_text.is_empty() {
-            full_text_parts.push((0.0, fallback_text.clone()));
             segments.push(models::TranscriptSegment {
                 id: uuid::Uuid::new_v4().to_string(),
                 start_time: 0.0,
@@ -991,22 +1581,28 @@ pub(crate) fn build_source_aware_models_transcript(
         }
     }
 
+    let mut heard_through_speakers = separate_far_side_bleed(&mut segments, acoustics);
+    if !heard_through_speakers.is_empty() {
+        tracing::info!(
+            "Set aside {} microphone row(s) that repeated the far side through the speakers for {recording_id} (acoustic check: {})",
+            heard_through_speakers.len(),
+            if acoustics.is_some() { "used" } else { "unavailable" }
+        );
+    }
+    heard_through_speakers.sort_by(|left, right| left.start_time.total_cmp(&right.start_time));
+
     segments.sort_by(|left, right| {
         left.start_time
             .partial_cmp(&right.start_time)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    full_text_parts.sort_by(|left, right| {
-        left.0
-            .partial_cmp(&right.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
 
-    let full_text = full_text_parts
-        .into_iter()
-        .map(|(_, text)| text)
+    let full_text = segments
+        .iter()
+        .map(|segment| segment.text.as_str())
         .collect::<Vec<_>>()
         .join(" ");
+    let measured_word_timestamps = measured_word_timestamps && !segments.is_empty();
 
     models::Transcript {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1023,7 +1619,9 @@ pub(crate) fn build_source_aware_models_transcript(
         model_id: Some(model_id.to_string()),
         requested_provider: Some(asr_provider_to_settings_value(requested_provider).to_string()),
         actual_provider: Some(asr_provider_to_settings_value(actual_provider).to_string()),
+        measured_word_timestamps,
         created_at: chrono::Utc::now(),
+        heard_through_speakers,
     }
 }
 
@@ -1078,6 +1676,8 @@ pub(crate) async fn transcribe_single_source_meeting(
     model_id: String,
     enable_diarization: bool,
     prefer_provider_diarization: bool,
+    wait_budget: &MeetingWaitBudget,
+    aside_spans: &[crate::meeting_asides::AsideSpan],
 ) -> Result<asr::TranscriptionResult, String> {
     let byte_len = tokio::fs::metadata(audio_path)
         .await
@@ -1086,13 +1686,17 @@ pub(crate) async fn transcribe_single_source_meeting(
     let duration_seconds =
         compute_wav_duration_seconds(audio_path.to_string_lossy().as_ref()).max(0) as f64;
 
-    if should_request_whole_file_meeting(
-        provider,
-        enable_diarization,
-        prefer_provider_diarization,
-        duration_seconds,
-        byte_len,
-    ) {
+    // A whole-file request sends the file as it is; asides on it have to be
+    // silenced chunk by chunk first.
+    if aside_spans.is_empty()
+        && should_request_whole_file_meeting(
+            provider,
+            enable_diarization,
+            prefer_provider_diarization,
+            duration_seconds,
+            byte_len,
+        )
+    {
         // No chunk-level progress is available on this route, so say the
         // transcription started rather than leaving the meeting looking
         // stalled for the length of one upload.
@@ -1134,8 +1738,32 @@ pub(crate) async fn transcribe_single_source_meeting(
         audio_path,
         provider,
         model_id,
+        wait_budget,
+        aside_spans,
     )
     .await
+}
+
+/// Whether the separate Me and Them tracks run as long as the combined
+/// recording. All three are written sample-aligned, so a separate track that
+/// is shorter stopped saving partway through, and transcribing it would drop
+/// everything that side said afterwards. Unreadable headers answer yes and
+/// leave the decision to the transcription itself, as before.
+pub(crate) fn separate_tracks_cover_the_mix(mixed: &Path, mic: &Path, system: &Path) -> bool {
+    let frames = |path: &Path| {
+        hound::WavReader::open(path)
+            .ok()
+            .map(|reader| (u64::from(reader.duration()), reader.spec().sample_rate))
+    };
+    let (Some((mixed_frames, sample_rate)), Some((mic_frames, _)), Some((system_frames, _))) =
+        (frames(mixed), frames(mic), frames(system))
+    else {
+        return true;
+    };
+    // One second of slack: the tracks end together, but a stop can land a
+    // partial chunk differently on each.
+    let slack = u64::from(sample_rate);
+    mic_frames + slack >= mixed_frames && system_frames + slack >= mixed_frames
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1150,9 +1778,32 @@ pub(crate) async fn transcribe_meeting_recording(
     model_id: String,
     enable_diarization: bool,
     prefer_provider_diarization: bool,
+    wait_budget: &MeetingWaitBudget,
+    aside_spans: &[crate::meeting_asides::AsideSpan],
 ) -> Result<MeetingTranscriptionOutput, String> {
+    // Without separate tracks the recording is microphone-only, and its one
+    // track is the Me track. A Me + Them recording's combined track already
+    // carries only the far side during an aside.
+    let primary_is_me_track = mic_audio_path.is_none() && system_audio_path.is_none();
+    let primary_aside_spans = if primary_is_me_track {
+        aside_spans
+    } else {
+        &[]
+    };
     let mic_path = mic_audio_path.filter(|path| path.exists());
     let system_path = system_audio_path.filter(|path| path.exists());
+    let (mic_path, system_path) = match (mic_path, system_path) {
+        (Some(mic), Some(system))
+            if !separate_tracks_cover_the_mix(mixed_audio_path, mic, system) =>
+        {
+            tracing::warn!(
+                "A separate track of {} stopped saving early; transcribing the combined recording",
+                recording_id
+            );
+            (None, None)
+        }
+        paths => paths,
+    };
 
     if mic_path.is_none() || system_path.is_none() {
         let result = transcribe_single_source_meeting(
@@ -1161,28 +1812,23 @@ pub(crate) async fn transcribe_meeting_recording(
             recording_id,
             mixed_audio_path,
             provider,
-            model_id,
+            model_id.clone(),
             enable_diarization,
             prefer_provider_diarization,
+            wait_budget,
+            primary_aside_spans,
         )
         .await?;
-        let requested_provider = result.requested_provider;
-        let actual_provider = result.actual_provider;
-        let requested_engine = result.requested_engine.clone();
-        let actual_engine = result.actual_engine.clone();
-        let optimization_applied = result.optimization_applied;
-        let fallback_reason = result.fallback_reason.clone();
-        let speaker_turns = result.speaker_turns.clone();
-        return Ok(MeetingTranscriptionOutput {
-            transcript: build_models_transcript_from_asr_result(recording_id, result),
-            speaker_turns,
-            requested_provider,
-            actual_provider,
-            requested_engine,
-            actual_engine,
-            optimization_applied,
-            fallback_reason,
-        });
+        return Ok(single_source_meeting_output(
+            &asr_manager,
+            recording_id,
+            mixed_audio_path,
+            primary_aside_spans,
+            provider,
+            &model_id,
+            result,
+        )
+        .await);
     }
 
     let mic_result = transcribe_recording_in_chunks(
@@ -1192,8 +1838,12 @@ pub(crate) async fn transcribe_meeting_recording(
         mic_path.as_ref().expect("checked above"),
         provider,
         model_id.clone(),
+        wait_budget,
+        aside_spans,
     )
     .await;
+    // The system track is never touched: during an aside the far side kept
+    // talking, and every word of it belongs to the meeting.
     let system_result = transcribe_recording_in_chunks(
         app,
         Arc::clone(&asr_manager),
@@ -1201,6 +1851,8 @@ pub(crate) async fn transcribe_meeting_recording(
         system_path.as_ref().expect("checked above"),
         provider,
         model_id.clone(),
+        wait_budget,
+        &[],
     )
     .await;
 
@@ -1238,32 +1890,78 @@ pub(crate) async fn transcribe_meeting_recording(
             recording_id,
             mixed_audio_path,
             provider,
-            model_id,
+            model_id.clone(),
             enable_diarization,
             prefer_provider_diarization,
+            wait_budget,
+            &[],
         )
         .await?;
-        let requested_provider = result.requested_provider;
-        let actual_provider = result.actual_provider;
-        let requested_engine = result.requested_engine.clone();
-        let actual_engine = result.actual_engine.clone();
-        let optimization_applied = result.optimization_applied;
-        let fallback_reason = result.fallback_reason.clone();
-        let speaker_turns = result.speaker_turns.clone();
-        return Ok(MeetingTranscriptionOutput {
-            transcript: build_models_transcript_from_asr_result(recording_id, result),
-            speaker_turns,
-            requested_provider,
-            actual_provider,
-            requested_engine,
-            actual_engine,
-            optimization_applied,
-            fallback_reason,
-        });
+        let mut output = single_source_meeting_output(
+            &asr_manager,
+            recording_id,
+            mixed_audio_path,
+            &[],
+            provider,
+            &model_id,
+            result,
+        )
+        .await;
+        // The combined track holds no aside; the Me track still has them.
+        if let Some(mic) = mic_path {
+            output.asides = transcribe_meeting_asides(
+                &asr_manager,
+                mic,
+                aside_spans,
+                provider,
+                &model_id,
+                Some("me"),
+            )
+            .await;
+        }
+        return Ok(output);
     }
 
-    let transcript =
-        build_source_aware_models_transcript(recording_id, provider, &model_id, source_results);
+    // The two tracks' loudness, so bleed is only set aside where the
+    // microphone actually followed the far side. Reading two long WAVs is
+    // blocking work; an unreadable file leaves the text and timing rules to
+    // decide alone.
+    let acoustics = {
+        let mic = mic_path.map(Path::to_path_buf);
+        let system = system_path.map(Path::to_path_buf);
+        tokio::task::spawn_blocking(move || {
+            crate::meeting_bleed::BleedAcoustics::from_wav_files(
+                mic.as_deref()?,
+                system.as_deref()?,
+            )
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+    let mut transcript = build_source_aware_models_transcript(
+        recording_id,
+        provider,
+        &model_id,
+        source_results,
+        acoustics.as_ref(),
+    );
+    let me_track = mic_path.expect("checked above");
+    drop_transcript_rows_inside_asides(
+        &mut transcript,
+        me_track,
+        aside_spans,
+        crate::meeting_asides::AsideRowScope::Speaker("me"),
+    );
+    let asides = transcribe_meeting_asides(
+        &asr_manager,
+        me_track,
+        aside_spans,
+        provider,
+        &model_id,
+        Some("me"),
+    )
+    .await;
 
     Ok(MeetingTranscriptionOutput {
         transcript,
@@ -1277,5 +1975,350 @@ pub(crate) async fn transcribe_meeting_recording(
         actual_engine: None,
         optimization_applied: false,
         fallback_reason,
+        asides,
     })
+}
+
+/// The output of a meeting transcribed from one track. When that track is
+/// the Me track (`aside_spans` non-empty), rows over its silenced asides are
+/// dropped and each aside is decoded on its own.
+pub(crate) async fn single_source_meeting_output(
+    asr_manager: &asr::AsrManager,
+    recording_id: &str,
+    track: &Path,
+    aside_spans: &[crate::meeting_asides::AsideSpan],
+    provider: asr::AsrProviderType,
+    model_id: &str,
+    result: asr::TranscriptionResult,
+) -> MeetingTranscriptionOutput {
+    let requested_provider = result.requested_provider;
+    let actual_provider = result.actual_provider;
+    let requested_engine = result.requested_engine.clone();
+    let actual_engine = result.actual_engine.clone();
+    let optimization_applied = result.optimization_applied;
+    let fallback_reason = result.fallback_reason.clone();
+    let speaker_turns = result.speaker_turns.clone();
+    let mut transcript = build_models_transcript_from_asr_result(recording_id, result);
+    drop_transcript_rows_inside_asides(
+        &mut transcript,
+        track,
+        aside_spans,
+        crate::meeting_asides::AsideRowScope::AllRows,
+    );
+    let asides =
+        transcribe_meeting_asides(asr_manager, track, aside_spans, provider, model_id, None).await;
+    MeetingTranscriptionOutput {
+        transcript,
+        speaker_turns,
+        requested_provider,
+        actual_provider,
+        requested_engine,
+        actual_engine,
+        optimization_applied,
+        fallback_reason,
+        asides,
+    }
+}
+
+#[cfg(test)]
+mod separate_track_coverage_tests {
+    use super::separate_tracks_cover_the_mix;
+
+    fn wav(path: &std::path::Path, seconds: u32) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for _ in 0..16_000 * seconds {
+            writer.write_sample(0_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn a_separate_track_that_stopped_early_sends_transcription_to_the_mix() {
+        let dir = crate::test_fs::TempDir::new("track-coverage");
+        let (mixed, mic, system) = (
+            dir.path().join("m.wav"),
+            dir.path().join("mic.wav"),
+            dir.path().join("sys.wav"),
+        );
+        wav(&mixed, 6);
+        wav(&mic, 6);
+        wav(&system, 6);
+        assert!(separate_tracks_cover_the_mix(&mixed, &mic, &system));
+
+        wav(&dir.path().join("short.wav"), 2);
+        assert!(!separate_tracks_cover_the_mix(
+            &mixed,
+            &dir.path().join("short.wav"),
+            &system
+        ));
+        // An unreadable header leaves the decision to transcription, as before.
+        std::fs::write(dir.path().join("junk.wav"), b"junk").unwrap();
+        assert!(separate_tracks_cover_the_mix(
+            &mixed,
+            &dir.path().join("junk.wav"),
+            &system
+        ));
+    }
+}
+
+#[cfg(test)]
+mod chunk_headroom_retry_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const REFUSED: &str = "NVIDIA Parakeet failed: Could not verify native memory headroom";
+    const BUSY: &str =
+        "NVIDIA Parakeet failed: Another local text operation is running. Try again after it finishes.";
+
+    fn delays(error: &str, busy: bool) -> Vec<Option<(Duration, MeetingWaitReason)>> {
+        (0..9)
+            .map(|retry| {
+                let (headroom, busy_retries) = if busy { (0, retry) } else { (retry, 0) };
+                meeting_local_retry_wait(
+                    asr::AsrProviderType::Parakeet,
+                    error,
+                    headroom,
+                    busy_retries,
+                    Duration::ZERO,
+                )
+                .map(|wait| (wait.delay, wait.reason))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_local_headroom_refusal_keeps_retrying_at_sixty_seconds_within_the_budget() {
+        let expected: Vec<_> = [5, 10, 20, 40, 60, 60, 60, 60, 60]
+            .map(|seconds| {
+                Some((
+                    Duration::from_secs(seconds),
+                    MeetingWaitReason::MemoryHeadroom,
+                ))
+            })
+            .into_iter()
+            .collect();
+        assert_eq!(delays(REFUSED, false), expected);
+    }
+
+    #[test]
+    fn exhausted_memory_admission_defers_the_recording_but_other_failures_do_not() {
+        let local = asr::AsrProviderType::Parakeet;
+        let budget = MeetingWaitBudget::new();
+        let mut retries = 0;
+        while let Some(wait) = budget.retry_after_failure(local, REFUSED, retries, 0) {
+            assert!(!budget.memory_deferred());
+            budget.spend(wait.delay);
+            retries += 1;
+        }
+        assert!(
+            retries > 5,
+            "retries continue after the first minute-long delay"
+        );
+        assert!(budget.waited() <= MEETING_WAIT_BUDGET);
+        assert!(budget.memory_deferred());
+        for (provider, error) in [
+            (local, "corrupt model"),
+            (asr::AsrProviderType::Deepgram, REFUSED),
+            (local, BUSY),
+        ] {
+            let budget = MeetingWaitBudget::new();
+            budget.spend(MEETING_WAIT_BUDGET);
+            assert!(budget.retry_after_failure(provider, error, 0, 0).is_none());
+            assert!(!budget.memory_deferred());
+        }
+    }
+
+    #[test]
+    fn a_busy_native_runtime_is_retried_on_a_short_schedule() {
+        let expected: Vec<_> = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000]
+            .map(|millis| {
+                Some((
+                    Duration::from_millis(millis),
+                    MeetingWaitReason::RuntimeBusy,
+                ))
+            })
+            .into_iter()
+            .chain([None, None])
+            .collect();
+        assert_eq!(delays(BUSY, true), expected);
+    }
+
+    #[test]
+    fn other_failures_and_cloud_routes_are_not_retried() {
+        let local = asr::AsrProviderType::Parakeet;
+        assert_eq!(
+            meeting_local_retry_wait(
+                local,
+                "Parakeet model files failed their integrity check.",
+                0,
+                0,
+                Duration::ZERO
+            ),
+            None
+        );
+        for error in [REFUSED, BUSY] {
+            assert_eq!(
+                meeting_local_retry_wait(
+                    asr::AsrProviderType::Deepgram,
+                    error,
+                    0,
+                    0,
+                    Duration::ZERO
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_recording_stops_waiting_once_its_budget_is_spent() {
+        let local = asr::AsrProviderType::Parakeet;
+        let wait = |waited| {
+            meeting_local_retry_wait(local, REFUSED, 0, 0, Duration::from_secs(waited))
+                .map(|wait| wait.delay)
+        };
+        assert_eq!(wait(594), Some(Duration::from_secs(5)));
+        assert_eq!(wait(596), None);
+    }
+
+    /// The microphone and system-audio tracks, and speaker separation after
+    /// them, draw on one budget: what one track waited is gone for the next.
+    #[test]
+    fn every_step_of_one_recording_shares_its_wait_budget() {
+        let budget = MeetingWaitBudget::new();
+        // The microphone track waits out most of the budget...
+        for _ in 0..9 {
+            budget.spend(Duration::from_secs(60));
+        }
+        budget.spend(Duration::from_secs(58));
+        // ...so the system track's first refusal (5 s) no longer fits.
+        assert_eq!(
+            meeting_local_retry_wait(
+                asr::AsrProviderType::Parakeet,
+                REFUSED,
+                0,
+                0,
+                budget.waited()
+            ),
+            None
+        );
+        // A busy runtime still gets its half-second retry.
+        assert!(meeting_retry_wait(BUSY, 0, 0, budget.waited()).is_some());
+    }
+
+    #[test]
+    fn a_failed_diarization_note_names_the_cause_and_the_way_back() {
+        let memory = meeting_diarization_failure_notice(
+            "Failed to create embedding extractor: Not enough verified memory headroom for native inference working buffers alongside other applications.",
+        );
+        assert!(memory.contains("not enough free memory"), "{memory}");
+        assert!(memory.contains("Label the speakers"), "{memory}");
+        let busy = meeting_diarization_failure_notice(BUSY);
+        assert!(busy.contains("was using the speech model"), "{busy}");
+        // A pass that waited out the recording's budget behind foreground
+        // work was kept busy; the model itself did not fail.
+        let exhausted = meeting_diarization_failure_notice(
+            "Meeting wait budget exhausted during speaker separation",
+        );
+        assert!(
+            exhausted.contains("was using the speech model"),
+            "{exhausted}"
+        );
+        assert!(!exhausted.contains("could not run"), "{exhausted}");
+        let other = meeting_diarization_failure_notice("No usable speech embeddings");
+        assert!(other.contains("could not run"), "{other}");
+        let manual = manual_diarization_failure_message(
+            "Failed to create embedding extractor: ONNX diarization model inference failed",
+        );
+        assert!(manual.contains("could not run"), "{manual}");
+        for note in [memory, busy, other, manual] {
+            let lower = note.to_ascii_lowercase();
+            for banned in [
+                "runtime",
+                "headroom",
+                "onnx",
+                "embedd",
+                "extractor",
+                "admission",
+            ] {
+                assert!(!lower.contains(banned), "{banned} in {note}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_meeting_lane_creates_one_wait_budget_per_recording() {
+        const SOURCE: &str = include_str!("meeting_pipeline.rs");
+        assert_eq!(
+            SOURCE.matches("MeetingWaitBudget::").count(),
+            1,
+            "one budget for the whole recording, shared by transcription and diarization"
+        );
+        assert_eq!(
+            SOURCE
+                .matches("MeetingWaitBudget::sharing_runtime_with(")
+                .count(),
+            1,
+            "a model release during a meeting's wait must respect dictation"
+        );
+        const TRANSCRIBE: &str = include_str!("meeting_transcribe.rs");
+        let body = &TRANSCRIBE[TRANSCRIBE
+            .find("pub(crate) async fn transcribe_meeting_recording(")
+            .expect("transcribe_meeting_recording")..];
+        let body = &body[..body.find("\n}\n").expect("function end")];
+        assert!(
+            !body.contains("MeetingWaitBudget::new()"),
+            "the tracks must not get budgets of their own"
+        );
+    }
+}
+
+#[cfg(test)]
+mod benchmark_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn persistence_uses_the_model_snapshot_from_the_result() {
+        let result = asr::BenchmarkResult {
+            provider_type: asr::AsrProviderType::Whisper,
+            provider_name: "Whisper".to_string(),
+            model_id: "selected-a".to_string(),
+            runtime_status: crate::RuntimeStatus::Ready,
+            non_empty_transcript: true,
+            processing_time_ms: 42,
+            transcription: "hello".to_string(),
+            confidence: 0.9,
+            error_message: None,
+        };
+
+        let entry = benchmark_entry_from_result(&result, "id".to_string(), chrono::Utc::now());
+
+        assert_eq!(entry.model_id, "selected-a");
+        assert_ne!(entry.model_id, "current-b");
+    }
+}
+
+#[cfg(test)]
+mod stored_audio_precision_tests {
+    #[test]
+    fn pcm24_chunks_reach_the_provider_without_pcm16_quantization() {
+        let samples = [-1.0, -0.123456, 0.0, 0.123456, 8_388_607.0 / 8_388_608.0];
+        let bytes = super::meeting_float_chunk(&samples, 16_000).unwrap();
+        let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
+        assert_eq!(
+            reader
+                .samples::<f32>()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>(),
+            samples
+        );
+    }
 }

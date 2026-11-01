@@ -15,7 +15,7 @@ use super::*;
 /// converted WAV's validated metadata.
 #[derive(Debug)]
 pub(crate) struct PreparedAudioImport {
-    plan: recording_audio::RecordingCapturePlan,
+    pub(crate) plan: recording_audio::RecordingCapturePlan,
     title: String,
     source_file_name: String,
     validated: recording_audio::ValidatedRecordingAudio,
@@ -37,19 +37,27 @@ pub(crate) const IMPORT_UNSUPPORTED_PLATFORM: &str =
 /// A length nobody can state is a refusal, not a pass. Refusing costs an
 /// unreadable file an error it was going to get from `afconvert` a moment
 /// later; passing costs an unbounded decode.
-pub(crate) fn probe_audio_duration_seconds(path: &Path) -> Result<f64, String> {
+fn probe_audio_info(path: &Path) -> Result<(f64, Option<u32>), String> {
     if !cfg!(target_os = "macos") {
         return Err(IMPORT_UNSUPPORTED_PLATFORM.to_string());
     }
-    let output = std::process::Command::new("/usr/bin/afinfo")
+    let output = crate::qos::background_command("/usr/bin/afinfo")
         .arg(path)
         .output()
         .map_err(|error| format!("Plainsong could not run the macOS audio inspector: {error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    audio_import::parse_afinfo_duration_seconds(&stdout)
+    let duration = audio_import::parse_afinfo_duration_seconds(&stdout)
         .or_else(|| audio_import::parse_afinfo_duration_seconds(&stderr))
-        .ok_or_else(|| audio_import::unreadable_duration_message(&stderr))
+        .ok_or_else(|| audio_import::unreadable_duration_message(&stderr))?;
+    let channels = audio_import::parse_afinfo_channel_count(&stdout)
+        .or_else(|| audio_import::parse_afinfo_channel_count(&stderr));
+    Ok((duration, channels))
+}
+
+#[cfg(test)]
+pub(crate) fn probe_audio_duration_seconds(path: &Path) -> Result<f64, String> {
+    probe_audio_info(path).map(|(duration, _)| duration)
 }
 
 /// How often the conversion is checked for having finished. Short enough that
@@ -72,12 +80,38 @@ pub(crate) fn run_afconvert(
     source: &Path,
     destination: &Path,
     timeout: std::time::Duration,
+    source_channels: Option<u32>,
+) -> Result<(), String> {
+    run_audio_conversion(
+        audio_import::afconvert_args(source, destination, source_channels),
+        timeout,
+    )
+}
+
+pub(crate) fn run_audio_conversion(
+    args: Vec<std::ffi::OsString>,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    run_audio_conversion_while(args, timeout, &|| true)
+}
+
+pub(crate) fn run_audio_conversion_while(
+    args: Vec<std::ffi::OsString>,
+    timeout: std::time::Duration,
+    may_continue: &dyn Fn() -> bool,
 ) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Err(IMPORT_UNSUPPORTED_PLATFORM.to_string());
     }
-    let mut child = std::process::Command::new("/usr/bin/afconvert")
-        .args(audio_import::afconvert_args(source, destination))
+    if !may_continue() {
+        return Err("Audio conversion deferred for foreground work or memory pressure".into());
+    }
+    // Discretionary I/O can starve afconvert even for a two-second clip while
+    // another app writes to disk. Lower CPU priority without suspending I/O.
+    let mut child = std::process::Command::new("/usr/bin/nice")
+        .args(["-n", "10", "/usr/bin/afconvert"])
+        .args(args)
+        .stdin(std::process::Stdio::null())
         // stdout is discarded rather than piped: nothing reads it until the
         // child exits, and an unread pipe that fills would hang the very wait
         // this function exists to bound. afconvert says nothing there anyway --
@@ -101,6 +135,11 @@ pub(crate) fn run_afconvert(
                     "Plainsong lost track of the macOS audio converter: {error}"
                 ));
             }
+        }
+        if !may_continue() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Audio conversion deferred for foreground work or memory pressure".into());
         }
         if std::time::Instant::now() >= deadline {
             // Kill first, then reap, so the caller's locks are released with no
@@ -160,7 +199,7 @@ pub(crate) fn prepare_audio_import(
     // Before anything is decoded: a length macOS will not state is a refusal,
     // and the length it does state is what the 4-hour guard, the conversion
     // timeout and the free-space estimate are all derived from.
-    let probed_seconds = probe_audio_duration_seconds(source_path)?;
+    let (probed_seconds, source_channels) = probe_audio_info(source_path)?;
     audio_import::validate_import_duration(probed_seconds)?;
 
     std::fs::create_dir_all(recordings_dir).map_err(|error| {
@@ -190,6 +229,7 @@ pub(crate) fn prepare_audio_import(
         source_path,
         &plan.primary_path,
         audio_import::import_conversion_timeout(probed_seconds),
+        source_channels,
     )?;
     let validated = match recording_audio::validate_plaintext_wav(&plan.primary_path) {
         recording_audio::RecordingAudioValidation::Ready(metadata) => metadata,
@@ -288,13 +328,14 @@ pub(crate) fn persist_audio_import(
         None,
     )
     .map_err(|error| error.to_string())?;
-    // The original file's name is recorded; its directory is not, so the audit
-    // log does not become a map of the reader's disk.
+    // Only the original file's format is recorded. Its name is the reader's
+    // own words and its directory a map of their disk; the audit log outlives
+    // the meeting, so it keeps neither.
     if let Err(error) = db.log_audit_event(
         "meeting_audio_imported",
         Some(serde_json::json!({
             "recording_id": &recording.id,
-            "source_file_name": &prepared.source_file_name,
+            "source_format": audit_source_format(&prepared.source_file_name),
             "duration_seconds": prepared.validated.duration_seconds,
             "converted_bytes": prepared.validated.plaintext_bytes,
         })),
@@ -303,6 +344,16 @@ pub(crate) fn persist_audio_import(
         tracing::warn!("Failed to log audio import audit event: {}", error);
     }
     Ok(())
+}
+
+/// The imported file's format for the audit log: its extension, lowercased,
+/// and only when it looks like one. Never the name itself.
+fn audit_source_format(source_file_name: &str) -> Option<String> {
+    let extension = Path::new(source_file_name).extension()?.to_str()?;
+    (!extension.is_empty()
+        && extension.len() <= 8
+        && extension.chars().all(|c| c.is_ascii_alphanumeric()))
+    .then(|| extension.to_ascii_lowercase())
 }
 
 /// `import_audio_file`: decode a file the user picked, save it as a meeting,
@@ -317,9 +368,10 @@ pub(crate) async fn import_audio_file_impl(
     // Same lease the stop path and `retranscribe_recording` take, so an import
     // cannot start on top of a backup, a vault migration, or another meeting's
     // post-processing.
-    let postprocessing_lease = state
-        .operation_coordinator
-        .try_acquire(operation_coordinator::OperationKind::PostProcess)?;
+    let postprocessing_lease = state.operation_coordinator.try_acquire_named(
+        operation_coordinator::OperationKind::PostProcess,
+        "audio import transcription",
+    )?;
 
     let project_id = {
         let settings = state.settings_manager.lock().await;
@@ -434,6 +486,16 @@ mod audio_import_tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn the_audit_log_gets_the_imported_format_not_the_name() {
+        assert_eq!(
+            audit_source_format("Q3 planning call with Priya.M4A").as_deref(),
+            Some("m4a")
+        );
+        assert_eq!(audit_source_format("no extension"), None);
+        assert_eq!(audit_source_format("notes.Priya Smith call"), None);
+    }
+
     /// A short stereo 44.1 kHz WAV, i.e. deliberately not the shape the
     /// meeting pipeline wants, so the conversion has something to do.
     fn write_stereo_fixture(path: &Path, seconds: u32) {
@@ -460,6 +522,81 @@ mod audio_import_tests {
         let dir = std::env::temp_dir().join(format!("nautilus-import-{label}-{suffix}"));
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
+    }
+
+    #[test]
+    fn importing_mono_wav_and_m4a_keeps_the_audio() {
+        let root = scratch_dir("mono");
+        let wav = root.join("mono.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&wav, spec).unwrap();
+        for index in 0..16_000 {
+            writer
+                .write_sample(((index as f32 * 0.08).sin() * 8_000.0) as i16)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        let m4a = root.join("mono.m4a");
+        assert!(crate::qos::background_command("/usr/bin/afconvert")
+            .args(["-f", "m4af", "-d", "aac"])
+            .arg(&wav)
+            .arg(&m4a)
+            .status()
+            .unwrap()
+            .success());
+        for source in [&wav, &m4a] {
+            let prepared = prepare_audio_import(source, &root.join("recordings"))
+                .expect("mono audio must import");
+            let mut converted = hound::WavReader::open(&prepared.plan.primary_path).unwrap();
+            assert_eq!(converted.spec().channels, 1);
+            assert_eq!(converted.spec().sample_rate, 16_000);
+            assert!(
+                converted
+                    .samples::<i16>()
+                    .map(|s| i32::from(s.unwrap()).abs())
+                    .max()
+                    .unwrap()
+                    > 1_000
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn importing_stereo_keeps_speech_from_the_right_channel() {
+        let root = scratch_dir("right-channel");
+        let source = root.join("right.wav");
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&source, spec).unwrap();
+        for index in 0..44_100 {
+            writer.write_sample(0_i16).unwrap();
+            writer
+                .write_sample(((index as f32 * 0.03).sin() * 8_000.0) as i16)
+                .unwrap();
+        }
+        writer.finalize().unwrap();
+        let prepared = prepare_audio_import(&source, &root.join("recordings")).unwrap();
+        let mut converted = hound::WavReader::open(&prepared.plan.primary_path).unwrap();
+        assert!(
+            converted
+                .samples::<i16>()
+                .map(|s| i32::from(s.unwrap()).abs())
+                .max()
+                .unwrap()
+                > 1_000,
+            "downmix must retain the right channel"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -632,8 +769,13 @@ mod audio_import_tests {
         let destination = root.join("out.wav");
 
         let started = std::time::Instant::now();
-        let failure =
-            run_afconvert(&source, &destination, std::time::Duration::from_millis(0)).unwrap_err();
+        let failure = run_afconvert(
+            &source,
+            &destination,
+            std::time::Duration::from_millis(0),
+            Some(2),
+        )
+        .unwrap_err();
         // A zero budget is past its deadline on the first poll, so this is the
         // timeout path even though the file itself is trivial.
         assert!(failure.contains("Plainsong stopped it"), "{failure}");
@@ -650,7 +792,8 @@ mod audio_import_tests {
         assert!(run_afconvert(
             &source,
             &destination,
-            audio_import::import_conversion_timeout(1.0)
+            audio_import::import_conversion_timeout(1.0),
+            Some(2),
         )
         .is_ok());
         assert!(destination.is_file());
@@ -669,7 +812,7 @@ mod audio_import_tests {
         // each one and probing it back proves the pipeline's own claim.
         for (extension, file_format) in [("m4a", "m4af"), ("mp4", "mp4f"), ("caf", "caff")] {
             let converted = root.join(format!("probe.{extension}"));
-            let status = std::process::Command::new("/usr/bin/afconvert")
+            let status = crate::qos::background_command("/usr/bin/afconvert")
                 .args(["-f", file_format, "-d", "aac"])
                 .arg(&source)
                 .arg(&converted)

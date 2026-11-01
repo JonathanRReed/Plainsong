@@ -193,6 +193,10 @@ export function historyPipelineStageLabel(stageKey: string): string {
       return "Spoken correction";
     case "dictionary":
       return "Dictionary";
+    case "nearby_spelling":
+      return "Nearby spelling";
+    case "vocabulary_spelling":
+      return "Name and term spelling";
     case "translate_to_english":
       return "Translated to English";
     case "translate_to_english_fallback":
@@ -208,4 +212,12 @@ export function historyPipelineStageLabel(stageKey: string): string {
     default:
       return formatSnakeCaseLabel(stageKey);
   }
+}
+
+/** Search provenance describes stored text, not whether cursor insertion succeeded. */
+export function dictationSearchMatchLabel(field: string): string {
+  if (field === "corrected") return "Matched saved corrections";
+  if (field === "raw") return "Matched what Plainsong heard";
+  if (field === "final") return "Matched the original result";
+  return "Matched dictation text";
 }

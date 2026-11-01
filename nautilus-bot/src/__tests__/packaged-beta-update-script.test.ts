@@ -9,15 +9,16 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { collectAppBundleIdentity } from "../../scripts/lib/release-candidate-identity";
 import { describe, expect, it } from "vitest";
 
 const scriptPath = path.resolve(
   process.cwd(),
-  "scripts/capture-packaged-macos-beta-update.mjs",
+  "scripts/capture-packaged-macos-beta-update.ts",
 );
 const releaseAuditPath = path.resolve(
   process.cwd(),
-  "scripts/capture-packaged-macos-release-audit.mjs",
+  "scripts/capture-packaged-macos-release-audit.ts",
 );
 
 function sha256(filePath: string) {
@@ -35,18 +36,22 @@ function writeFakeApp(root: string, name: string, version: string) {
   return appPath;
 }
 
-function createFixture() {
+function createFixture(beforeVersion = "0.9.0-beta.1", afterVersion = "0.9.0-beta.2") {
   const root = mkdtempSync(path.join(os.tmpdir(), "plainsong-beta-update-"));
-  const beforeArtifact = path.join(root, "Plainsong-0.9.0-beta.1-arm64.dmg");
-  const afterArtifact = path.join(root, "Plainsong-0.9.0-beta.2-arm64.dmg");
+  mkdirSync(path.join(root, "before"));
+  mkdirSync(path.join(root, "after"));
+  const beforeArtifact = path.join(root, "before", `Plainsong-${beforeVersion}-arm64.dmg`);
+  const afterArtifact = path.join(root, "after", `Plainsong-${afterVersion}-arm64.dmg`);
   writeFileSync(beforeArtifact, "signed beta one");
   writeFileSync(afterArtifact, "signed beta two");
   return {
     root,
+    beforeVersion,
+    afterVersion,
     beforeArtifact,
     afterArtifact,
-    beforeApp: writeFakeApp(root, "Before.app", "0.9.0-beta.1"),
-    afterApp: writeFakeApp(root, "After.app", "0.9.0-beta.2"),
+    beforeApp: writeFakeApp(root, "Before.app", beforeVersion),
+    afterApp: writeFakeApp(root, "After.app", afterVersion),
   };
 }
 
@@ -60,8 +65,8 @@ function validJourney(fixture: ReturnType<typeof createFixture>) {
       production: false,
     },
     observedAt: "2026-08-08T18:00:00.000Z",
-    beforeVersion: "0.9.0-beta.1",
-    afterVersion: "0.9.0-beta.2",
+    beforeVersion: fixture.beforeVersion,
+    afterVersion: fixture.afterVersion,
     beforeArtifactSha256: sha256(fixture.beforeArtifact),
     afterArtifactSha256: sha256(fixture.afterArtifact),
     installedThroughUpdater: true,
@@ -96,6 +101,7 @@ function runFixture(
     before?: Record<string, unknown>;
     after?: Record<string, unknown>;
   } = {},
+  expectedAfterVersion = fixture.afterVersion,
 ) {
   const journeyPath = path.join(fixture.root, "journey.json");
   const beforeTrustPath = path.join(fixture.root, "before-trust.json");
@@ -106,7 +112,7 @@ function runFixture(
     beforeTrustPath,
     JSON.stringify({
       pass: true,
-      packageVersion: "0.9.0-beta.1",
+      packageVersion: fixture.beforeVersion,
       artifactSha256: sha256(fixture.beforeArtifact),
       ...trustOverrides.before,
     }),
@@ -115,15 +121,17 @@ function runFixture(
     afterTrustPath,
     JSON.stringify({
       pass: true,
-      packageVersion: "0.9.0-beta.2",
+      packageVersion: fixture.afterVersion,
       artifactSha256: sha256(fixture.afterArtifact),
       ...trustOverrides.after,
     }),
   );
   const result = spawnSync(
-    "node",
+    "bun",
     [
       scriptPath,
+      "--expected-before-version", fixture.beforeVersion,
+      "--expected-after-version", expectedAfterVersion,
       "--before-app",
       fixture.beforeApp,
       "--after-app",
@@ -146,7 +154,7 @@ function runFixture(
   return { result, receipt: JSON.parse(readFileSync(outPath, "utf8")) };
 }
 
-describe("capture-packaged-macos-beta-update.mjs", () => {
+describe("capture-packaged-macos-beta-update.ts", () => {
   it("keeps local updater proof separate from the client-reachable production feed gate", () => {
     const auditSource = readFileSync(releaseAuditPath, "utf8");
 
@@ -165,6 +173,48 @@ describe("capture-packaged-macos-beta-update.mjs", () => {
       expect(receipt.scope).toBe("local-signed-update-mechanism");
       expect(receipt.productionFeedProven).toBe(false);
       expect(Object.values(receipt.checks).every(Boolean)).toBe(true);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("binds beta.5 to beta.6 proof to the delivered after app", () => {
+    const fixture = createFixture("0.9.0-beta.5", "0.9.0-beta.6");
+    try {
+      const { result, receipt } = runFixture(fixture, validJourney(fixture));
+      expect(result.status).toBe(0);
+      const plist = receipt.candidateIdentity.appComponents.find(
+        (entry: { name: string }) => entry.name === "Contents/Info.plist",
+      );
+      expect(plist.sha256).toBe(sha256(path.join(fixture.afterApp, "Contents/Info.plist")));
+      expect(receipt.candidateIdentity.artifacts.map((entry: { name: string }) => entry.name)).toEqual([path.basename(fixture.afterArtifact)]);
+      expect(plist.sha256).not.toBe(sha256(path.join(fixture.beforeApp, "Contents/Info.plist")));
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an after app that differs from the expected delivered version", () => {
+    const fixture = createFixture("0.9.0-beta.5", "0.9.0-beta.6");
+    try {
+      const { result, receipt } = runFixture(fixture, validJourney(fixture), {}, "0.9.0-beta.7");
+      expect(result.status).toBe(1);
+      expect(receipt.checks.afterVersionMatchesExpected).toBe(false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["0.9.0-beta.6", "0.9.0-beta.5"],
+    ["0.9.0-beta.6", "0.9.0-beta.6"],
+    ["0.9.0-beta.6", "invalid"],
+  ])("rejects a non-forward transition %s to %s", (before, after) => {
+    const fixture = createFixture(before, after);
+    try {
+      const { result, receipt } = runFixture(fixture, validJourney(fixture));
+      expect(result.status).toBe(1);
+      expect(receipt.checks.versionTransitionIsForward).toBe(false);
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
@@ -208,4 +258,42 @@ describe("capture-packaged-macos-beta-update.mjs", () => {
       rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+  it("accepts the managed macOS install-on-quit handoff", () => {
+    const fixture = createFixture();
+    try {
+      const journey = { ...validJourney(fixture), installHandoff: "managed-macos-install-on-quit" };
+      journey.events = journey.events.map((event) => event === "before-quit-for-update" ? "app-before-quit" : event);
+      const { result, receipt } = runFixture(fixture, journey);
+      expect(result.status).toBe(0);
+      expect(receipt.pass).toBe(true);
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  });
+
+  it.each(["http://0x7f000001/", "http://127.0.0.1.nip.io/", "http://user@localhost/"])("rejects bypass feed evidence %s", (baseUrl) => {
+    const fixture = createFixture();
+    try {
+      const journey = validJourney(fixture);
+      journey.feed.baseUrl = baseUrl;
+      const { result, receipt } = runFixture(fixture, journey);
+      expect(result.status).toBe(1);
+      expect(receipt.checks.feedIsLocalGeneric).toBe(false);
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  });
+
+  it("accepts current trust-gate receipts bound to full app and artifact bytes", () => {
+    const fixture = createFixture();
+    try {
+      const trust = (app: string, artifact: string) => ({
+        packageVersion: undefined, artifactSha256: undefined,
+        candidateIdentity: { complete: true, appBundle: collectAppBundleIdentity(app), artifacts: [{ name: path.basename(artifact), sha256: sha256(artifact) }] },
+      });
+      const overrides = { before: trust(fixture.beforeApp, fixture.beforeArtifact), after: trust(fixture.afterApp, fixture.afterArtifact) };
+      expect(runFixture(fixture, validJourney(fixture), overrides).result.status).toBe(0);
+      writeFileSync(path.join(fixture.afterApp, "Contents/extra"), "changed candidate");
+      const { result, receipt } = runFixture(fixture, validJourney(fixture), overrides);
+      expect(result.status).toBe(1);
+      expect(receipt.checks.afterTrustPasses).toBe(false);
+    } finally { rmSync(fixture.root, { recursive: true, force: true }); }
+  });
+
 });

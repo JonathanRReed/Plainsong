@@ -1,0 +1,1570 @@
+{
+  "schema": "plainsong-notes-variants-gold-v1",
+  "description": "Hand-written meaning annotations for docs/evals/notes-variants-holdout-r7-fixtures.json, written blind to earlier held-out rounds. Terms are lowercase prefixes matched against canonicalized words: number words become digits and ordinal suffixes are dropped. A commitment is mentioned when one verb prefix and one object prefix occur outside a condition span. Condition terms must all occur in the attached condition span. Dates list canonical forms, after any spoken correction; owners and quantities are the final ones after any correction or retraction. key marks a decision or conditional commitment that the prose must state with its condition and date. action marks a commitment that the action list must contain. Statuses list the only status or completion assertions the source makes. labels lists spoken headings or capture labels that name no participant, deliverable or product; a claim may not use a word that occurs only inside one. numbers lists each final quantity (not calendar dates) with the prefixes of the words it is stated with in its own clause, and restriction prefixes a restatement must keep; quantities replaced by a spoken correction are not listed. actors maps each person to the verb prefixes the source makes that person the subject of, including speech acts the person actually made and reported speech; an assignment that was corrected to another person is not listed for the first person. Vendor, product and place names (Hartley, Whitlock, Juniper, Dunmore, Marlow, Harlan, Wren, Brightside, Marlowe, Rosalind, Stanton, Carver, Rowan) are not people and have no actor entry.",
+  "families": {
+    "heldout7-allotment-society": {
+      "fixtures": [
+        "heldout7-allotment-society"
+      ],
+      "commitments": [
+        {
+          "id": "dig",
+          "owner": null,
+          "verb": [
+            "dig"
+          ],
+          "object": [
+            "trench",
+            "standpipe"
+          ],
+          "condition": [
+            "council",
+            "sign",
+            "lease",
+            "extension"
+          ],
+          "dates": [
+            "november 14"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "order",
+          "owner": "Dougal",
+          "verb": [
+            "order"
+          ],
+          "object": [
+            "pipe"
+          ],
+          "condition": null,
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "fittings",
+          "owner": "Dougal",
+          "verb": [
+            "collect"
+          ],
+          "object": [
+            "fitting"
+          ],
+          "condition": null,
+          "dates": [
+            "november 12"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "posts",
+          "owner": "Osric",
+          "verb": [
+            "buy"
+          ],
+          "object": [
+            "post"
+          ],
+          "condition": [
+            "grant",
+            "come",
+            "through"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "driver",
+          "owner": "Prisha",
+          "verb": [
+            "hire"
+          ],
+          "object": [
+            "driver"
+          ],
+          "condition": [
+            "grant",
+            "come",
+            "through"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "phone",
+          "owner": "Dougal",
+          "verb": [
+            "phon"
+          ],
+          "object": [
+            "board",
+            "meter"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        },
+        {
+          "id": "notice",
+          "owner": "Wilhelmina",
+          "verb": [
+            "send"
+          ],
+          "object": [
+            "notice"
+          ],
+          "condition": null,
+          "dates": [
+            "end of the month"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "bonfires",
+          "owner": null,
+          "verb": [
+            "allow"
+          ],
+          "object": [
+            "bonfire"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "rent",
+            "letter"
+          ],
+          "status": [
+            "post"
+          ]
+        },
+        {
+          "subject": [
+            "hall"
+          ],
+          "status": [
+            "book"
+          ]
+        },
+        {
+          "subject": [
+            "post",
+            "driver"
+          ],
+          "status": [
+            "book"
+          ]
+        },
+        {
+          "subject": [
+            "lease",
+            "extension"
+          ],
+          "status": [
+            "sign"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "grant"
+          ],
+          "status": [
+            "come"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Water and fencing",
+        "Seed potatoes"
+      ],
+      "numbers": [
+        {
+          "value": "4",
+          "terms": [
+            "sack",
+            "first",
+            "earl",
+            "need"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "36",
+          "terms": [
+            "plot",
+            "rent",
+            "pound",
+            "year"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "18",
+          "terms": [
+            "plot",
+            "rent",
+            "pound",
+            "pensioner"
+          ],
+          "restriction": [
+            "pensioner"
+          ]
+        }
+      ],
+      "actors": {
+        "Wilhelmina": [
+          "agree",
+          "send"
+        ],
+        "Dougal": [
+          "order",
+          "collect",
+          "phon"
+        ],
+        "Prisha": [
+          "hire"
+        ],
+        "Osric": [
+          "buy",
+          "phon",
+          "decid"
+        ]
+      }
+    },
+    "heldout7-vet-clinic": {
+      "fixtures": [
+        "heldout7-vet-clinic"
+      ],
+      "commitments": [
+        {
+          "id": "surgery",
+          "owner": null,
+          "verb": [
+            "open"
+          ],
+          "object": [
+            "surgery"
+          ],
+          "condition": [
+            "least",
+            "2",
+            "nurse",
+            "shift"
+          ],
+          "dates": [
+            "november 2"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "scaler",
+          "owner": "Cormac",
+          "verb": [
+            "order"
+          ],
+          "object": [
+            "scaler"
+          ],
+          "condition": null,
+          "dates": [
+            "wednesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "locum",
+          "owner": "Cormac",
+          "verb": [
+            "book"
+          ],
+          "object": [
+            "locum"
+          ],
+          "condition": null,
+          "dates": [
+            "15"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "count",
+          "owner": "Zofia",
+          "verb": [
+            "count"
+          ],
+          "object": [
+            "fridge"
+          ],
+          "condition": null,
+          "dates": [
+            "21"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "phones",
+          "owner": "Lachlan",
+          "verb": [
+            "switch"
+          ],
+          "object": [
+            "phone"
+          ],
+          "condition": [
+            "juniper",
+            "live"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "website",
+          "owner": "Zofia",
+          "verb": [
+            "updat"
+          ],
+          "object": [
+            "website"
+          ],
+          "condition": null,
+          "dates": [
+            "tuesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "walkin",
+          "owner": null,
+          "verb": [
+            "offer"
+          ],
+          "object": [
+            "clinic"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "kennel",
+            "repair"
+          ],
+          "status": [
+            "done"
+          ]
+        },
+        {
+          "subject": [
+            "website"
+          ],
+          "status": [
+            "down"
+          ]
+        },
+        {
+          "subject": [
+            "vaccine",
+            "batch"
+          ],
+          "status": [
+            "delay"
+          ]
+        },
+        {
+          "subject": [
+            "juniper"
+          ],
+          "status": [
+            "live"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "nurse"
+          ],
+          "status": [
+            "shift"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Rota",
+        "Stock check",
+        "Boarding"
+      ],
+      "numbers": [
+        {
+          "value": "2",
+          "terms": [
+            "nurse",
+            "shift",
+            "least"
+          ],
+          "restriction": [
+            "least"
+          ]
+        },
+        {
+          "value": "24",
+          "terms": [
+            "pound",
+            "box",
+            "dewormer",
+            "whitlock",
+            "quot"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "19",
+          "terms": [
+            "pound",
+            "box",
+            "order",
+            "whitlock",
+            "quot"
+          ],
+          "restriction": [
+            "order",
+            "10",
+            "more"
+          ]
+        },
+        {
+          "value": "10",
+          "terms": [
+            "order",
+            "box",
+            "more"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Ingrid": [
+          "agree",
+          "decid"
+        ],
+        "Cormac": [
+          "order",
+          "book"
+        ],
+        "Zofia": [
+          "count",
+          "updat"
+        ],
+        "Lachlan": [
+          "switch"
+        ]
+      }
+    },
+    "heldout7-food-bank": {
+      "fixtures": [
+        "heldout7-food-bank"
+      ],
+      "commitments": [
+        {
+          "id": "move",
+          "owner": null,
+          "verb": [
+            "mov"
+          ],
+          "object": [
+            "pick",
+            "depot"
+          ],
+          "condition": [
+            "van",
+            "pass",
+            "inspection"
+          ],
+          "dates": [
+            "january 7"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "inspection",
+          "owner": "Obadiah",
+          "verb": [
+            "book"
+          ],
+          "object": [
+            "inspection"
+          ],
+          "condition": null,
+          "dates": [
+            "5"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "email",
+          "owner": "Obadiah",
+          "verb": [
+            "email"
+          ],
+          "object": [
+            "dunmore",
+            "time"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "shelving",
+          "owner": "Pearl",
+          "verb": [
+            "collect"
+          ],
+          "object": [
+            "shelving"
+          ],
+          "condition": null,
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "summary",
+          "owner": "Quentin",
+          "verb": [
+            "send"
+          ],
+          "object": [
+            "summary"
+          ],
+          "condition": [
+            "trustee",
+            "confirm",
+            "rent"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "lease",
+          "owner": "Quentin",
+          "verb": [
+            "sign"
+          ],
+          "object": [
+            "lease"
+          ],
+          "condition": [
+            "auditor",
+            "seen"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "vouchers",
+          "owner": null,
+          "verb": [
+            "hand"
+          ],
+          "object": [
+            "voucher"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "freezer",
+            "order"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "food",
+            "hygiene",
+            "certificate"
+          ],
+          "status": [
+            "renew"
+          ]
+        },
+        {
+          "subject": [
+            "quentin"
+          ],
+          "status": [
+            "away"
+          ]
+        },
+        {
+          "subject": [
+            "van"
+          ],
+          "status": [
+            "pass"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "rent"
+          ],
+          "status": [
+            "confirm"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "auditor"
+          ],
+          "status": [
+            "seen"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Deliveries",
+        "Volunteers"
+      ],
+      "numbers": [
+        {
+          "value": "8",
+          "terms": [
+            "volunteer",
+            "sort",
+            "saturday"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "2",
+          "terms": [
+            "least",
+            "lift",
+            "pallet",
+            "volunteer"
+          ],
+          "restriction": [
+            "least"
+          ]
+        },
+        {
+          "value": "10",
+          "terms": [
+            "pound",
+            "household",
+            "voucher"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "20",
+          "terms": [
+            "pound",
+            "household",
+            "five",
+            "more"
+          ],
+          "restriction": [
+            "five",
+            "more"
+          ]
+        },
+        {
+          "value": "5",
+          "terms": [
+            "household",
+            "more",
+            "pound"
+          ],
+          "restriction": []
+        }
+      ],
+      "actors": {
+        "Nadia": [
+          "decid"
+        ],
+        "Obadiah": [
+          "book",
+          "email",
+          "agree"
+        ],
+        "Pearl": [
+          "collect",
+          "told"
+        ],
+        "Quentin": [
+          "send",
+          "sign",
+          "away"
+        ]
+      }
+    },
+    "heldout7-brewery": {
+      "fixtures": [
+        "heldout7-brewery"
+      ],
+      "commitments": [
+        {
+          "id": "fermenter",
+          "owner": null,
+          "verb": [
+            "order"
+          ],
+          "object": [
+            "fermenter"
+          ],
+          "condition": [
+            "bank",
+            "approv",
+            "loan"
+          ],
+          "dates": [
+            "november 14"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "hops",
+          "owner": "Basil",
+          "verb": [
+            "collect"
+          ],
+          "object": [
+            "hop"
+          ],
+          "condition": null,
+          "dates": [
+            "10"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "recipe",
+          "owner": "Basil",
+          "verb": [
+            "write"
+          ],
+          "object": [
+            "recipe"
+          ],
+          "condition": null,
+          "dates": [
+            "end of the month"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "proof",
+          "owner": "Imogen",
+          "verb": [
+            "sign"
+          ],
+          "object": [
+            "proof",
+            "label"
+          ],
+          "condition": [
+            "colour",
+            "match",
+            "sample"
+          ],
+          "dates": [
+            "monday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "cleaning",
+          "owner": "Tamar",
+          "verb": [
+            "book"
+          ],
+          "object": [
+            "crew",
+            "brightside"
+          ],
+          "condition": [
+            "imogen",
+            "find",
+            "cheaper",
+            "firm"
+          ],
+          "dates": [
+            "october 9"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "stout",
+          "owner": null,
+          "verb": [
+            "brew"
+          ],
+          "object": [
+            "stout"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "summer",
+            "ale",
+            "batch"
+          ],
+          "status": [
+            "bottl"
+          ]
+        },
+        {
+          "subject": [
+            "crystal",
+            "malt"
+          ],
+          "status": [
+            "sold"
+          ]
+        },
+        {
+          "subject": [
+            "colour"
+          ],
+          "status": [
+            "match"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "bank"
+          ],
+          "status": [
+            "approv"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Budget",
+        "Label design"
+      ],
+      "numbers": [
+        {
+          "value": "18500",
+          "terms": [
+            "tank",
+            "upgrade",
+            "cost",
+            "pound"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "12000",
+          "terms": [
+            "set",
+            "aside",
+            "pound"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "45",
+          "terms": [
+            "pence",
+            "label",
+            "wren",
+            "quot"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "30",
+          "terms": [
+            "pence",
+            "label",
+            "run",
+            "wren",
+            "quot"
+          ],
+          "restriction": [
+            "run",
+            "least",
+            "5000"
+          ]
+        },
+        {
+          "value": "5000",
+          "terms": [
+            "run",
+            "least",
+            "label"
+          ],
+          "restriction": [
+            "least"
+          ]
+        }
+      ],
+      "actors": {
+        "Imogen": [
+          "set",
+          "agree",
+          "sign",
+          "confirm",
+          "find"
+        ],
+        "Basil": [
+          "collect",
+          "write"
+        ],
+        "Tamar": [
+          "book"
+        ],
+        "Ulric": [
+          "decid",
+          "show"
+        ]
+      }
+    },
+    "heldout7-theatre-company": {
+      "fixtures": [
+        "heldout7-theatre-company"
+      ],
+      "commitments": [
+        {
+          "id": "rehearsal",
+          "owner": null,
+          "verb": [
+            "hold"
+          ],
+          "object": [
+            "rehearsal"
+          ],
+          "condition": [
+            "heating",
+            "fix"
+          ],
+          "dates": [
+            "march 18"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "posters",
+          "owner": "Hettie",
+          "verb": [
+            "print"
+          ],
+          "object": [
+            "poster"
+          ],
+          "condition": null,
+          "dates": [
+            "monday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "programmes",
+          "owner": "Hettie",
+          "verb": [
+            "print"
+          ],
+          "object": [
+            "programme"
+          ],
+          "condition": null,
+          "dates": [
+            "wednesday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "rails",
+          "owner": "Ambrose",
+          "verb": [
+            "collect"
+          ],
+          "object": [
+            "rail",
+            "costume"
+          ],
+          "condition": [
+            "minibus",
+            "free"
+          ],
+          "dates": [
+            "22"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "staircase",
+          "owner": "Ambrose",
+          "verb": [
+            "build"
+          ],
+          "object": [
+            "staircase"
+          ],
+          "condition": null,
+          "dates": [
+            "march 5"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "rig",
+          "owner": "Wilfred",
+          "verb": [
+            "rig"
+          ],
+          "object": [
+            "desk"
+          ],
+          "condition": [
+            "electrician",
+            "sign",
+            "power",
+            "supply"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "licence",
+          "owner": "Wilfred",
+          "verb": [
+            "phone"
+          ],
+          "object": [
+            "office",
+            "licensing"
+          ],
+          "condition": null,
+          "dates": [
+            "thursday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "tour",
+          "owner": null,
+          "verb": [
+            "tour"
+          ],
+          "object": [
+            "show"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "rosalind",
+            "desk"
+          ],
+          "status": [
+            "deliver"
+          ]
+        },
+        {
+          "subject": [
+            "office"
+          ],
+          "status": [
+            "shut"
+          ]
+        },
+        {
+          "subject": [
+            "heating"
+          ],
+          "status": [
+            "fix"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "minibus"
+          ],
+          "status": [
+            "free"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "power",
+            "supply"
+          ],
+          "status": [
+            "sign"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Venue",
+        "Props",
+        "Tickets",
+        "Lighting",
+        "Raffle"
+      ],
+      "numbers": [
+        {
+          "value": "14",
+          "terms": [
+            "pound",
+            "ticket"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "9",
+          "terms": [
+            "pound",
+            "senior",
+            "citizen",
+            "ticket"
+          ],
+          "restriction": [
+            "senior",
+            "citizen"
+          ]
+        },
+        {
+          "value": "6",
+          "terms": [
+            "usher",
+            "opening",
+            "night",
+            "need"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "2",
+          "terms": [
+            "least",
+            "first",
+            "aider"
+          ],
+          "restriction": [
+            "least"
+          ]
+        }
+      ],
+      "actors": {
+        "Cordelia": [
+          "agree",
+          "decid"
+        ],
+        "Hettie": [
+          "print"
+        ],
+        "Ambrose": [
+          "collect",
+          "build",
+          "told"
+        ],
+        "Wilfred": [
+          "rig",
+          "phon"
+        ]
+      }
+    },
+    "heldout7-fire-station": {
+      "fixtures": [
+        "heldout7-fire-station"
+      ],
+      "commitments": [
+        {
+          "id": "hose",
+          "owner": null,
+          "verb": [
+            "buy"
+          ],
+          "object": [
+            "hose"
+          ],
+          "condition": [
+            "parish",
+            "council",
+            "releas",
+            "grant"
+          ],
+          "dates": [
+            "28"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "pump",
+          "owner": "Marisol",
+          "verb": [
+            "test"
+          ],
+          "object": [
+            "pump"
+          ],
+          "condition": null,
+          "dates": [
+            "19"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "engines",
+          "owner": "Marisol",
+          "verb": [
+            "wash"
+          ],
+          "object": [
+            "engine"
+          ],
+          "condition": [
+            "weather",
+            "permit"
+          ],
+          "dates": [
+            "saturday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "signoff",
+          "owner": "Delphine",
+          "verb": [
+            "sign"
+          ],
+          "object": [
+            "recruit"
+          ],
+          "condition": [
+            "least",
+            "12",
+            "hour",
+            "drill"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "email",
+          "owner": "Gideon",
+          "verb": [
+            "email"
+          ],
+          "object": [
+            "county",
+            "budget"
+          ],
+          "condition": [
+            "ottoline",
+            "call"
+          ],
+          "dates": [
+            "october 9"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "openday",
+          "owner": null,
+          "verb": [
+            "hold"
+          ],
+          "object": [
+            "open",
+            "day"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "pump",
+            "bay"
+          ],
+          "status": [
+            "repaint"
+          ]
+        },
+        {
+          "subject": [
+            "pager"
+          ],
+          "status": [
+            "work"
+          ]
+        },
+        {
+          "subject": [
+            "pager"
+          ],
+          "status": [
+            "fix"
+          ]
+        },
+        {
+          "subject": [
+            "training",
+            "budget"
+          ],
+          "status": [
+            "approv"
+          ]
+        },
+        {
+          "subject": [
+            "ladder",
+            "drill"
+          ],
+          "status": [
+            "cancel"
+          ]
+        },
+        {
+          "subject": [
+            "grant"
+          ],
+          "status": [
+            "releas"
+          ],
+          "conditionOnly": true
+        },
+        {
+          "subject": [
+            "weather"
+          ],
+          "status": [
+            "permit"
+          ],
+          "conditionOnly": true
+        }
+      ],
+      "labels": [
+        "Equipment",
+        "Recruitment",
+        "Communications"
+      ],
+      "numbers": [
+        {
+          "value": "8",
+          "terms": [
+            "volunteer",
+            "need",
+            "new"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "3",
+          "terms": [
+            "least",
+            "driving",
+            "licence",
+            "volunteer"
+          ],
+          "restriction": [
+            "least"
+          ]
+        },
+        {
+          "value": "12",
+          "terms": [
+            "least",
+            "hour",
+            "drill"
+          ],
+          "restriction": [
+            "least"
+          ]
+        },
+        {
+          "value": "13",
+          "terms": [
+            "pager",
+            "work"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "90",
+          "terms": [
+            "pound",
+            "handset",
+            "rowan",
+            "quot"
+          ],
+          "restriction": []
+        },
+        {
+          "value": "70",
+          "terms": [
+            "pound",
+            "handset",
+            "order",
+            "rowan",
+            "quot"
+          ],
+          "restriction": [
+            "order",
+            "least",
+            "5"
+          ]
+        },
+        {
+          "value": "5",
+          "terms": [
+            "order",
+            "handset",
+            "least"
+          ],
+          "restriction": [
+            "least"
+          ]
+        }
+      ],
+      "actors": {
+        "Gideon": [
+          "decid",
+          "email"
+        ],
+        "Marisol": [
+          "test",
+          "wash"
+        ],
+        "Phineas": [
+          "fix",
+          "agree"
+        ],
+        "Delphine": [
+          "sign"
+        ],
+        "Ottoline": [
+          "told",
+          "call"
+        ]
+      }
+    }
+  }
+}

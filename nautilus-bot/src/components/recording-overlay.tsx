@@ -5,9 +5,16 @@ import { Mic, Monitor, CheckCircle, Loader2 } from "lucide-react";
 import {
   getMeetingConsentNoticeStatus,
   getSystemAudioCapability,
+  testSystemAudioCapture,
   type MeetingConsentNoticeStatus,
   type SystemAudioCapability,
 } from "@/lib/backend/recordings";
+import { openPermissionSettings } from "@/lib/backend/settings";
+import {
+  describeMeetingAudio,
+  isMeetingAudioReady,
+  MEETING_AUDIO_EXPLAINER,
+} from "@/lib/meeting-audio-status";
 import { MEETING_CONSENT_NOTICE_TEXT } from "@/lib/meeting-consent";
 import {
   getAllMeetingTemplateOptions,
@@ -23,6 +30,12 @@ interface ConsentDialogProps {
    * labeled as theirs. Optional so every other caller (and the mocked
    * version in recordings-view.test.tsx) keeps working unchanged. */
   customTemplates?: CustomMeetingTemplate[];
+  joinServiceLabel?: string | null;
+  startBlockedReason?: string | null;
+  startFailureMessage?: string | null;
+  /** The one fix for that failure, offered beside it: the dialog is modal,
+   * so a button behind it cannot be reached until it closes. */
+  startFailureAction?: { label: string; onSelect: () => void } | null;
 }
 
 export function ConsentDialog({
@@ -30,17 +43,18 @@ export function ConsentDialog({
   onOpenChange,
   onStart,
   customTemplates = [],
+  joinServiceLabel = null,
+  startBlockedReason = null,
+  startFailureMessage = null,
+  startFailureAction = null,
 }: ConsentDialogProps) {
   const [captureMode, setCaptureMode] = useState<"mic_only" | "me_them">("mic_only");
   const [template, setTemplate] = useState("auto");
   const [systemAudioCapability, setSystemAudioCapability] =
     useState<SystemAudioCapability | null>(null);
-  const systemAudioRouteDetected =
-    systemAudioCapability !== null && systemAudioCapability.backend !== "none";
-  const systemAudioReady =
-    systemAudioCapability?.ready === true &&
-    systemAudioCapability.readiness === "ready" &&
-    systemAudioCapability.backend !== "none";
+  const systemAudioReady = isMeetingAudioReady(systemAudioCapability);
+  const meetingAudio = describeMeetingAudio(systemAudioCapability);
+  const [meetingAudioBusy, setMeetingAudioBusy] = useState(false);
   const [consentNotice, setConsentNotice] =
     useState<MeetingConsentNoticeStatus | null>(null);
   const [copiedNotice, setCopiedNotice] = useState(false);
@@ -73,12 +87,7 @@ export function ConsentDialog({
           return;
         }
         setSystemAudioCapability(capability);
-        if (
-          capability.ready &&
-          capability.readiness === "ready" &&
-          capability.backend !== "none" &&
-          !captureModeTouchedRef.current
-        ) {
+        if (isMeetingAudioReady(capability) && !captureModeTouchedRef.current) {
           setCaptureMode("me_them");
         }
       })
@@ -95,7 +104,8 @@ export function ConsentDialog({
             readiness: "unavailable",
             ready: false,
             reason: "stream_construction",
-            actionableReason: "Could not inspect system-audio routes.",
+            actionableReason:
+              "Plainsong couldn't check the meeting audio just now. Mic only still works.",
           });
         }
       });
@@ -125,8 +135,42 @@ export function ConsentDialog({
     return () => window.clearTimeout(id);
   }, [copiedNotice, open]);
 
+  // The reader asked for Me + Them, so this is the moment macOS may show its
+  // one-time permission prompt: the check starts the same silent capture a
+  // meeting would. A denied permission is answered with the way to fix it.
+  const runMeetingAudioAction = async () => {
+    if (meetingAudio.action === "open_settings") {
+      await openPermissionSettings("system_audio").catch(() => undefined);
+      return;
+    }
+    setMeetingAudioBusy(true);
+    try {
+      const result = await testSystemAudioCapture();
+      setSystemAudioCapability(result.capability);
+      if (isMeetingAudioReady(result.capability)) {
+        captureModeTouchedRef.current = true;
+        setCaptureMode("me_them");
+      }
+    } catch (error) {
+      setStartError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMeetingAudioBusy(false);
+    }
+  };
+
+  const recheckMeetingAudio = async () => {
+    setMeetingAudioBusy(true);
+    try {
+      setSystemAudioCapability(await getSystemAudioCapability());
+    } catch {
+      // Keep the last answer; the button stays available.
+    } finally {
+      setMeetingAudioBusy(false);
+    }
+  };
+
   const submitMeeting = async () => {
-    if (isStartingRef.current) {
+    if (isStartingRef.current || startBlockedReason) {
       return;
     }
 
@@ -157,7 +201,7 @@ export function ConsentDialog({
       }}
     >
       <DialogContent
-        className="max-h-[calc(100vh-2rem)] max-w-2xl overflow-hidden"
+        className="flex max-h-[calc(100vh-2rem)] max-w-2xl flex-col overflow-hidden"
         onPointerDownOutside={(e) => e.preventDefault()}
         onOpenAutoFocus={() => {
           const activeElement = document.activeElement;
@@ -176,14 +220,15 @@ export function ConsentDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle>Start Meeting</DialogTitle>
+          <DialogTitle>{joinServiceLabel ? "Join and capture" : "Start Meeting"}</DialogTitle>
           <DialogDescription>
+            {joinServiceLabel ? `After you confirm, capture starts and ${joinServiceLabel} opens in your browser. ` : null}
             Choose the capture mode and note format. Plainsong will carry these choices into the live recorder and review view.
           </DialogDescription>
         </DialogHeader>
 
         <form
-          className="flex min-h-0 flex-col"
+          className="flex min-h-0 flex-1 flex-col"
           onSubmit={(event) => {
             event.preventDefault();
             void submitMeeting();
@@ -239,33 +284,58 @@ export function ConsentDialog({
                   <p className="font-medium">Me + Them</p>
                 </div>
                 <p className="mt-2 text-sm text-muted-foreground">
-                  Capture your microphone and remote participants for meeting-grade notes and follow-up.
-                </p>
-                <p
-                  className="mt-2 text-sm text-muted-foreground"
-                  role="status"
-                  aria-live="polite"
-                  aria-label="System audio capability"
-                >
-                  <span
-                    aria-hidden="true"
-                    className={`neume mr-1.5 align-middle ${
-                      systemAudioCapability === null
-                        ? "neume-hollow"
-                        : systemAudioReady
-                          ? "neume-lit"
-                          : "neume-rust"
-                    }`}
-                  />
-                  {systemAudioCapability === null
-                    ? "Checking the current system-audio capability..."
-                    : systemAudioReady
-                      ? `Verified via ${systemAudioCapability.routeDevice || "system audio capture"}.`
-                      : systemAudioRouteDetected
-                        ? `Route detected via ${systemAudioCapability.routeDevice || "system audio capture"}, but callbacks are unverified. Run Test system audio before using Me + Them.`
-                        : "Me + Them is unavailable right now. Mic only remains ready to use."}
+                  {MEETING_AUDIO_EXPLAINER}
                 </p>
               </button>
+            </div>
+            <div className="mt-2 space-y-2">
+              <p
+                className="text-sm text-muted-foreground"
+                role="status"
+                aria-live="polite"
+                aria-label="Meeting audio"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`neume mr-1.5 align-middle ${
+                    meetingAudio.state === "checking"
+                      ? "neume-hollow"
+                      : meetingAudio.state === "ready"
+                        ? "neume-lit"
+                        : "neume-rust"
+                  }`}
+                />
+                {meetingAudioBusy && meetingAudio.action !== "open_settings"
+                  ? "Checking the meeting audio. If macOS asks, choose Allow."
+                  : meetingAudio.sentence}
+              </p>
+              {meetingAudio.action ? (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={isStarting || meetingAudioBusy}
+                    onClick={() => void runMeetingAudioAction()}
+                  >
+                    {meetingAudioBusy && meetingAudio.action !== "open_settings" ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    ) : null}
+                    {meetingAudio.actionLabel}
+                  </Button>
+                  {meetingAudio.action === "open_settings" ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      disabled={isStarting || meetingAudioBusy}
+                      onClick={() => void recheckMeetingAudio()}
+                    >
+                      Check again
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -377,10 +447,18 @@ export function ConsentDialog({
               ) : null}
             </div>
           </div>
-          {startError ? (
-            <p role="alert" className="text-sm text-destructive">
-              {startError}
-            </p>
+          {startBlockedReason && !isStarting ? <p role="status" className="text-sm text-muted-foreground">{startBlockedReason}</p> : null}
+          {startError || startFailureMessage ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <p role="alert" className="text-sm text-destructive">
+                {startError ?? startFailureMessage}
+              </p>
+              {!startError && startFailureAction ? (
+                <Button type="button" size="sm" variant="outline" onClick={startFailureAction.onSelect}>
+                  {startFailureAction.label}
+                </Button>
+              ) : null}
+            </div>
           ) : null}
         </div>
 
@@ -395,7 +473,7 @@ export function ConsentDialog({
           </Button>
           <button
             type="submit"
-            disabled={isStarting}
+            disabled={isStarting || Boolean(startBlockedReason)}
             className="inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2"
           >
             {isStarting ? (
@@ -404,7 +482,7 @@ export function ConsentDialog({
                 Starting…
               </>
             ) : (
-              "Start Meeting"
+              joinServiceLabel ? "Join and capture" : "Start Meeting"
             )}
           </button>
         </DialogFooter>

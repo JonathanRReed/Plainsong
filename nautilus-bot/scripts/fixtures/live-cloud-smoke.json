@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "kind": "synthetic speech",
+  "sha256": "e60342a88459a91f112d4d8c12e03ee76ffef7f8586cd8cf5a6755056e86aea5",
+  "expectedTranscript": "Please send the revised meeting notes tomorrow morning.",
+  "source": "Project-authored phrase synthesized with eSpeak NG. No human recording.",
+  "purpose": "Cloud ASR connectivity smoke, not natural-speech quality or end-to-end dictation latency.",
+  "audio": {
+    "sampleRateHz": 16000,
+    "channels": 1,
+    "sampleBytes": 2,
+    "frames": 56138,
+    "durationSeconds": 3.508625
+  },
+  "generation": {
+    "espeakVersion": "1.52.0",
+    "voice": "en-us",
+    "wordsPerMinute": 155,
+    "amplitude": 100,
+    "ffmpegVersion": "9.0.1",
+    "steps": [
+      "espeak-ng -v en-us -s 155 -a 100 -w source.wav \"Please send the revised meeting notes tomorrow morning.\"",
+      "ffmpeg -nostdin -loglevel error -i source.wav -f s16le -ar 16000 -ac 1 speech.s16le",
+      "Wrap speech.s16le in a mono PCM16 16000 Hz WAV header using Python wave."
+    ]
+  }
+}

@@ -99,16 +99,6 @@ pub fn parse_stored_action_item(text: &str) -> StructuredActionItem {
     }
 }
 
-/// Every non-empty stored line, parsed.
-pub fn structured_action_items(items: &[String]) -> Vec<StructuredActionItem> {
-    items
-        .iter()
-        .map(|item| item.trim())
-        .filter(|item| !item.is_empty())
-        .map(parse_stored_action_item)
-        .collect()
-}
-
 /// One Markdown bullet with the parts spelled out.
 pub fn markdown_bullet(item: &StructuredActionItem) -> String {
     let mut line = format!("- {}", item.task);
@@ -183,17 +173,13 @@ mod tests {
     }
 
     #[test]
-    fn structured_list_skips_blank_lines_and_markdown_spells_out_the_parts() {
-        let items = structured_action_items(&[
-            "Send the deck (Owner: Jane · Due: Friday)".to_string(),
-            "   ".to_string(),
-            "Plain task".to_string(),
-        ]);
-        assert_eq!(items.len(), 2);
+    fn markdown_bullets_spell_out_stored_owner_and_due_parts() {
+        let item = parse_stored_action_item("Send the deck (Owner: Jane · Due: Friday)");
         assert_eq!(
-            markdown_bullet(&items[0]),
+            markdown_bullet(&item),
             "- Send the deck — **Owner:** Jane · **Due:** Friday"
         );
-        assert_eq!(markdown_bullet(&items[1]), "- Plain task");
+        let plain = parse_stored_action_item("Plain task");
+        assert_eq!(markdown_bullet(&plain), "- Plain task");
     }
 }

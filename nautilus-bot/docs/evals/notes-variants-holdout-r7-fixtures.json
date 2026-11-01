@@ -1,0 +1,1116 @@
+{
+  "schema": "plainsong-notes-fidelity-v1",
+  "description": "Round-seven held-out synthetic meetings for the variant robustness eval, written blind to earlier rounds and to the Rust implementation. Settings are an allotment society, a veterinary clinic, a food bank, a brewery, a theatre company and a volunteer fire station. They cover conditional and negated commitments with varied cues (if, only if, unless, until, provided that, as long as, once, after, weather permitting), negated group decisions, two commitments by one speaker in one sentence, date corrections within a sentence and by another speaker (with and without owner confirmation), an ownership correction combined with a date correction, quantities restated mid-meeting, prices and counts with restrictions and at-least thresholds, multi-word dates, weekdays and bare days, spoken headings, supplier and product names that look like people or places, questions and ideas that are not tasks, completed statuses and reported speech. Further phenomena: a condition stated in the next sentence, a correction that targets an earlier commitment rather than the nearest one, a retracted commitment, a commitment restated later with the same date, a condition shared by two commitments, a commitment made in answer to a request, a commitment reported by a third person, the same verb with two objects and two dates, deadline phrases such as end of the month and next Friday, a cancelled event with a date that is no one's deadline, and a quantity corrected in a status report. Not used by Rust tests.",
+  "meetings": [
+    {
+      "id": "heldout7-allotment-society",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Wilhelmina",
+          "text": "Water and fencing. We agreed to dig the standpipe trench on the 14th of November, provided that the council signs the lease extension."
+        },
+        {
+          "start": 11.0,
+          "end": 20.0,
+          "speaker": "Dougal",
+          "text": "I'll order the pipe by Thursday, no, Friday, and I'll collect the fittings from Hartley Hire on the 12th of November."
+        },
+        {
+          "start": 21.0,
+          "end": 32.0,
+          "speaker": "Prisha",
+          "text": "Seed potatoes. We need 3 sacks of first earlies. Actually, make that 4, because the new plots at the top end want some too."
+        },
+        {
+          "start": 33.0,
+          "end": 42.0,
+          "speaker": "Osric",
+          "text": "Plot rents are 36 pounds a year, or 18 pounds for pensioners. The rent letters were posted last week."
+        },
+        {
+          "start": 43.0,
+          "end": 52.0,
+          "speaker": "Wilhelmina",
+          "text": "Provided that the grant comes through, Osric will buy the fence posts and Prisha will hire the post driver."
+        },
+        {
+          "start": 53.0,
+          "end": 62.0,
+          "speaker": "Dougal",
+          "text": "I'll phone the water board about the meter on Monday. Scratch that, Osric phoned them yesterday, so I won't phone them."
+        },
+        {
+          "start": 63.0,
+          "end": 74.0,
+          "speaker": "Prisha",
+          "text": "The AGM hall was booked last month. Wilhelmina, could you send the AGM notice to all plot holders by the end of the month?"
+        },
+        {
+          "start": 75.0,
+          "end": 80.0,
+          "speaker": "Wilhelmina",
+          "text": "Yes, I'll send the notice by the end of the month."
+        },
+        {
+          "start": 81.0,
+          "end": 92.0,
+          "speaker": "Osric",
+          "text": "We decided not to allow bonfires on site this winter. Somebody should look into a shed for the tool library, but that's only an idea."
+        },
+        {
+          "start": 93.0,
+          "end": 99.0,
+          "speaker": "Dougal",
+          "text": "Hartley Hire said the post driver is already booked out this week."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "dig",
+            "standpipe",
+            "trench",
+            "provided",
+            "council",
+            "signs",
+            "lease",
+            "extension"
+          ],
+          "owner": null,
+          "due": [
+            "the 14th of November",
+            "November 14",
+            "November 14th"
+          ]
+        },
+        {
+          "task": [
+            "order",
+            "pipe"
+          ],
+          "owner": "Dougal",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "collect",
+            "fittings"
+          ],
+          "owner": "Dougal",
+          "due": [
+            "the 12th of November",
+            "November 12",
+            "November 12th"
+          ]
+        },
+        {
+          "task": [
+            "buy",
+            "fence",
+            "posts",
+            "provided",
+            "grant",
+            "comes",
+            "through"
+          ],
+          "owner": "Osric",
+          "due": []
+        },
+        {
+          "task": [
+            "hire",
+            "post",
+            "driver",
+            "provided",
+            "grant",
+            "comes",
+            "through"
+          ],
+          "owner": "Prisha",
+          "due": []
+        },
+        {
+          "task": [
+            "send",
+            "notice"
+          ],
+          "owner": "Wilhelmina",
+          "due": [
+            "the end of the month",
+            "end of the month"
+          ]
+        }
+      ],
+      "names": [
+        "Wilhelmina",
+        "Dougal",
+        "Prisha",
+        "Osric"
+      ],
+      "numbers": [
+        [
+          "4",
+          "four"
+        ],
+        [
+          "36"
+        ],
+        [
+          "18"
+        ],
+        [
+          "14th of November",
+          "November 14"
+        ],
+        [
+          "12th of November",
+          "November 12"
+        ]
+      ]
+    },
+    {
+      "id": "heldout7-vet-clinic",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Ingrid",
+          "text": "Rota. We agreed to open the Saturday surgery on November the 2nd, provided that at least 2 nurses are on shift."
+        },
+        {
+          "start": 10.0,
+          "end": 19.0,
+          "speaker": "Cormac",
+          "text": "I'll order the dental scaler from Whitlock on Tuesday, or rather Wednesday, and I'll book the locum for the 15th."
+        },
+        {
+          "start": 20.0,
+          "end": 25.0,
+          "speaker": "Zofia",
+          "text": "Stock check: I'll count the vaccine fridge on the 12th."
+        },
+        {
+          "start": 26.0,
+          "end": 32.0,
+          "speaker": "Ingrid",
+          "text": "Sorry, Zofia, make it the 21st. The auditors arrive on the 12th."
+        },
+        {
+          "start": 33.0,
+          "end": 38.0,
+          "speaker": "Zofia",
+          "text": "Fine, the 21st works for me."
+        },
+        {
+          "start": 39.0,
+          "end": 47.0,
+          "speaker": "Lachlan",
+          "text": "I won't switch the phones to the answering service until Juniper, the new booking software, is live."
+        },
+        {
+          "start": 48.0,
+          "end": 57.0,
+          "speaker": "Ingrid",
+          "text": "Boarding: the kennel repairs are already done. Lachlan, you'll update the website with the new opening hours by Monday."
+        },
+        {
+          "start": 58.0,
+          "end": 68.0,
+          "speaker": "Cormac",
+          "text": "Actually, Zofia has the login, so Zofia should do that instead. And make it Tuesday, the website is down for maintenance on Monday."
+        },
+        {
+          "start": 69.0,
+          "end": 74.0,
+          "speaker": "Zofia",
+          "text": "Okay, I'll update the website by Tuesday."
+        },
+        {
+          "start": 75.0,
+          "end": 84.0,
+          "speaker": "Ingrid",
+          "text": "We decided not to offer Sunday walk-in clinics this winter. Whitlock, the wholesaler, told me the new vaccine batch was delayed."
+        },
+        {
+          "start": 85.0,
+          "end": 100.0,
+          "speaker": "Cormac",
+          "text": "Whitlock quoted 24 pounds a box for dewormer, or 19 pounds a box on orders of 10 boxes or more. Could we ever stock a cheaper dog food? That's a question, not a task."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "open",
+            "saturday",
+            "surgery",
+            "provided",
+            "least",
+            "nurses",
+            "shift"
+          ],
+          "owner": null,
+          "due": [
+            "November the 2nd",
+            "November 2",
+            "November 2nd"
+          ]
+        },
+        {
+          "task": [
+            "order",
+            "dental",
+            "scaler"
+          ],
+          "owner": "Cormac",
+          "due": [
+            "Wednesday"
+          ]
+        },
+        {
+          "task": [
+            "book",
+            "locum"
+          ],
+          "owner": "Cormac",
+          "due": [
+            "the 15th",
+            "15th",
+            "the fifteenth"
+          ]
+        },
+        {
+          "task": [
+            "count",
+            "vaccine",
+            "fridge"
+          ],
+          "owner": "Zofia",
+          "due": [
+            "the 21st",
+            "21st",
+            "the twenty-first"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "switch",
+            "phones",
+            "answering",
+            "service",
+            "until",
+            "juniper",
+            "live"
+          ],
+          "owner": "Lachlan",
+          "due": []
+        },
+        {
+          "task": [
+            "update",
+            "website"
+          ],
+          "owner": "Zofia",
+          "due": [
+            "Tuesday"
+          ]
+        }
+      ],
+      "names": [
+        "Ingrid",
+        "Cormac",
+        "Zofia",
+        "Lachlan"
+      ],
+      "numbers": [
+        [
+          "2",
+          "two"
+        ],
+        [
+          "November the 2nd",
+          "November 2"
+        ],
+        [
+          "15th",
+          "fifteenth"
+        ],
+        [
+          "21st",
+          "twenty-first"
+        ],
+        [
+          "24"
+        ],
+        [
+          "19"
+        ],
+        [
+          "10",
+          "ten"
+        ]
+      ]
+    },
+    {
+      "id": "heldout7-food-bank",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Nadia",
+          "text": "Deliveries. We decided to move the Tuesday pick-up to the Dunmore depot on the 7th of January, as long as the van passes its inspection."
+        },
+        {
+          "start": 12.0,
+          "end": 21.0,
+          "speaker": "Obadiah",
+          "text": "I'll book the van inspection for the 3rd, sorry, I mean the 5th, and I'll email Dunmore the new pick-up time."
+        },
+        {
+          "start": 22.0,
+          "end": 33.0,
+          "speaker": "Pearl",
+          "text": "Volunteers: we need 6 volunteers for the Saturday sort. Actually, make that 8, and at least 2 of them must be able to lift pallets."
+        },
+        {
+          "start": 34.0,
+          "end": 41.0,
+          "speaker": "Quentin",
+          "text": "Vouchers are worth 10 pounds per household, or 20 pounds for households of five or more."
+        },
+        {
+          "start": 42.0,
+          "end": 47.0,
+          "speaker": "Nadia",
+          "text": "Quentin, you'll collect the shelving from Marlow Storage by Friday."
+        },
+        {
+          "start": 48.0,
+          "end": 56.0,
+          "speaker": "Obadiah",
+          "text": "Quentin can't, he's away all week. Pearl should do it, and she'd better make it next Friday."
+        },
+        {
+          "start": 57.0,
+          "end": 62.0,
+          "speaker": "Pearl",
+          "text": "Okay, I'll collect the shelving by next Friday."
+        },
+        {
+          "start": 63.0,
+          "end": 74.0,
+          "speaker": "Quentin",
+          "text": "I'll send the committee the lease summary after the trustees confirm the rent, and I won't sign the lease until the auditor has seen it."
+        },
+        {
+          "start": 75.0,
+          "end": 86.0,
+          "speaker": "Nadia",
+          "text": "Just a thought: could we ask the school about a collection box? That's an idea, not a task. The freezer order was approved last week."
+        },
+        {
+          "start": 87.0,
+          "end": 96.0,
+          "speaker": "Obadiah",
+          "text": "Pearl told me the council has already renewed our food hygiene certificate. We agreed not to hand out vouchers on Saturdays."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "move",
+            "depot",
+            "as long as",
+            "van",
+            "passes",
+            "inspection"
+          ],
+          "owner": null,
+          "due": [
+            "the 7th of January",
+            "January 7",
+            "January 7th"
+          ]
+        },
+        {
+          "task": [
+            "book",
+            "van",
+            "inspection"
+          ],
+          "owner": "Obadiah",
+          "due": [
+            "the 5th",
+            "5th",
+            "the fifth"
+          ]
+        },
+        {
+          "task": [
+            "email",
+            "dunmore",
+            "time"
+          ],
+          "owner": "Obadiah",
+          "due": []
+        },
+        {
+          "task": [
+            "collect",
+            "shelving"
+          ],
+          "owner": "Pearl",
+          "due": [
+            "next Friday",
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "send",
+            "committee",
+            "lease",
+            "summary",
+            "after",
+            "trustees",
+            "confirm",
+            "rent"
+          ],
+          "owner": "Quentin",
+          "due": []
+        },
+        {
+          "task": [
+            "not",
+            "sign",
+            "lease",
+            "until",
+            "auditor",
+            "seen"
+          ],
+          "owner": "Quentin",
+          "due": []
+        }
+      ],
+      "names": [
+        "Nadia",
+        "Obadiah",
+        "Pearl",
+        "Quentin"
+      ],
+      "numbers": [
+        [
+          "8",
+          "eight"
+        ],
+        [
+          "2",
+          "two"
+        ],
+        [
+          "10",
+          "ten"
+        ],
+        [
+          "20",
+          "twenty"
+        ],
+        [
+          "five",
+          "5"
+        ],
+        [
+          "7th of January",
+          "January 7"
+        ],
+        [
+          "5th",
+          "fifth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout7-brewery",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 7.0,
+          "speaker": "Imogen",
+          "text": "Budget. The tank upgrade costs 18,500 pounds, and we've set aside 12,000 pounds so far."
+        },
+        {
+          "start": 8.0,
+          "end": 17.0,
+          "speaker": "Imogen",
+          "text": "We agreed to order the new fermenter on the 14th of November, only if the bank approves the loan."
+        },
+        {
+          "start": 18.0,
+          "end": 28.0,
+          "speaker": "Basil",
+          "text": "I'll collect the hops from Harlan on the 3rd, and I'll write up the new recipe by the end of the month."
+        },
+        {
+          "start": 29.0,
+          "end": 34.0,
+          "speaker": "Tamar",
+          "text": "Basil, the hops are ready on the 10th, not the 3rd."
+        },
+        {
+          "start": 35.0,
+          "end": 44.0,
+          "speaker": "Ulric",
+          "text": "Label design: Wren Print quoted 45 pence a label, or 30 pence a label for runs of at least 5,000."
+        },
+        {
+          "start": 45.0,
+          "end": 54.0,
+          "speaker": "Imogen",
+          "text": "I'll sign off the label proof on Monday. That's only if the colours match the sample Ulric showed us."
+        },
+        {
+          "start": 55.0,
+          "end": 62.0,
+          "speaker": "Tamar",
+          "text": "I'll book the Brightside cleaning crew on October the ninth unless Imogen finds a cheaper firm."
+        },
+        {
+          "start": 63.0,
+          "end": 70.0,
+          "speaker": "Imogen",
+          "text": "Basil, just to confirm, you're writing up the recipe by the end of the month?"
+        },
+        {
+          "start": 71.0,
+          "end": 77.0,
+          "speaker": "Basil",
+          "text": "Yes, I'll write up the recipe by the end of the month."
+        },
+        {
+          "start": 78.0,
+          "end": 86.0,
+          "speaker": "Ulric",
+          "text": "We decided not to brew the winter stout this year. The summer ale batch was bottled last week."
+        },
+        {
+          "start": 87.0,
+          "end": 98.0,
+          "speaker": "Tamar",
+          "text": "Harlan told me the crystal malt is sold out until January. And could we ever open a taproom? That's an idea, not a task."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "order",
+            "new",
+            "fermenter",
+            "only if",
+            "bank",
+            "approves",
+            "loan"
+          ],
+          "owner": null,
+          "due": [
+            "the 14th of November",
+            "November 14",
+            "November 14th"
+          ]
+        },
+        {
+          "task": [
+            "collect",
+            "hops",
+            "harlan"
+          ],
+          "owner": "Basil",
+          "due": [
+            "the 10th",
+            "10th",
+            "the tenth"
+          ]
+        },
+        {
+          "task": [
+            "write",
+            "recipe"
+          ],
+          "owner": "Basil",
+          "due": [
+            "the end of the month",
+            "end of the month"
+          ]
+        },
+        {
+          "task": [
+            "sign",
+            "label",
+            "proof",
+            "only if",
+            "colours",
+            "match",
+            "sample"
+          ],
+          "owner": "Imogen",
+          "due": [
+            "Monday"
+          ]
+        },
+        {
+          "task": [
+            "book",
+            "brightside",
+            "cleaning",
+            "crew",
+            "unless",
+            "imogen",
+            "finds",
+            "cheaper",
+            "firm"
+          ],
+          "owner": "Tamar",
+          "due": [
+            "October the ninth",
+            "October 9",
+            "October 9th"
+          ]
+        }
+      ],
+      "names": [
+        "Imogen",
+        "Basil",
+        "Tamar",
+        "Ulric"
+      ],
+      "numbers": [
+        [
+          "18,500",
+          "18500"
+        ],
+        [
+          "12,000",
+          "12000"
+        ],
+        [
+          "14th of November",
+          "November 14"
+        ],
+        [
+          "10th",
+          "tenth"
+        ],
+        [
+          "45"
+        ],
+        [
+          "30"
+        ],
+        [
+          "5,000",
+          "5000"
+        ],
+        [
+          "October the ninth",
+          "October 9"
+        ]
+      ]
+    },
+    {
+      "id": "heldout7-theatre-company",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Cordelia",
+          "text": "Venue. We agreed to hold the dress rehearsal at Stanton Hall on the 18th of March once the heating is fixed."
+        },
+        {
+          "start": 10.0,
+          "end": 15.0,
+          "speaker": "Hettie",
+          "text": "I'll print the posters on Monday and the programmes on Wednesday."
+        },
+        {
+          "start": 16.0,
+          "end": 25.0,
+          "speaker": "Ambrose",
+          "text": "Props. I'll collect the costume rails from Marlowe on the 20th, or rather the 22nd, if the minibus is free."
+        },
+        {
+          "start": 26.0,
+          "end": 31.0,
+          "speaker": "Wilfred",
+          "text": "Tickets: 14 pounds, or 9 pounds for senior citizens."
+        },
+        {
+          "start": 32.0,
+          "end": 41.0,
+          "speaker": "Cordelia",
+          "text": "We need 5 ushers for opening night. Actually, make that 6, and at least 2 of them should be first aiders."
+        },
+        {
+          "start": 42.0,
+          "end": 48.0,
+          "speaker": "Hettie",
+          "text": "Ambrose told me he'll build the second staircase by the 5th of March."
+        },
+        {
+          "start": 49.0,
+          "end": 60.0,
+          "speaker": "Wilfred",
+          "text": "Lighting: Rosalind, the new lighting desk, was delivered on Tuesday. I won't rig the desk until the electrician has signed off the power supply."
+        },
+        {
+          "start": 61.0,
+          "end": 67.0,
+          "speaker": "Cordelia",
+          "text": "Raffle. Hettie, you'll phone the licensing office about the raffle permit by Wednesday."
+        },
+        {
+          "start": 68.0,
+          "end": 75.0,
+          "speaker": "Ambrose",
+          "text": "Not Hettie, Wilfred should do that, and make it Thursday, the office is shut on Wednesdays."
+        },
+        {
+          "start": 76.0,
+          "end": 81.0,
+          "speaker": "Wilfred",
+          "text": "Fine, I'll phone the licensing office on Thursday."
+        },
+        {
+          "start": 82.0,
+          "end": 93.0,
+          "speaker": "Cordelia",
+          "text": "We decided not to tour the show this summer. And should we think about an understudy for the lead? That's a question, not a task."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "hold",
+            "dress",
+            "rehearsal",
+            "once",
+            "heating",
+            "fixed"
+          ],
+          "owner": null,
+          "due": [
+            "the 18th of March",
+            "March 18",
+            "March 18th"
+          ]
+        },
+        {
+          "task": [
+            "print",
+            "posters"
+          ],
+          "owner": "Hettie",
+          "due": [
+            "Monday"
+          ]
+        },
+        {
+          "task": [
+            "print",
+            "programmes"
+          ],
+          "owner": "Hettie",
+          "due": [
+            "Wednesday"
+          ]
+        },
+        {
+          "task": [
+            "collect",
+            "costume",
+            "rails",
+            "if",
+            "minibus",
+            "free"
+          ],
+          "owner": "Ambrose",
+          "due": [
+            "the 22nd",
+            "22nd",
+            "the twenty-second"
+          ]
+        },
+        {
+          "task": [
+            "build",
+            "second",
+            "staircase"
+          ],
+          "owner": "Ambrose",
+          "due": [
+            "the 5th of March",
+            "March 5",
+            "March 5th"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "rig",
+            "desk",
+            "until",
+            "electrician",
+            "signed",
+            "power",
+            "supply"
+          ],
+          "owner": "Wilfred",
+          "due": []
+        },
+        {
+          "task": [
+            "phone",
+            "licensing",
+            "office"
+          ],
+          "owner": "Wilfred",
+          "due": [
+            "Thursday"
+          ]
+        }
+      ],
+      "names": [
+        "Cordelia",
+        "Hettie",
+        "Ambrose",
+        "Wilfred"
+      ],
+      "numbers": [
+        [
+          "14",
+          "fourteen"
+        ],
+        [
+          "9",
+          "nine"
+        ],
+        [
+          "6",
+          "six"
+        ],
+        [
+          "2",
+          "two"
+        ],
+        [
+          "18th of March",
+          "March 18"
+        ],
+        [
+          "22nd",
+          "twenty-second"
+        ],
+        [
+          "5th of March",
+          "March 5"
+        ]
+      ]
+    },
+    {
+      "id": "heldout7-fire-station",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Gideon",
+          "text": "Equipment. We decided to buy the replacement hose from Carver on the 28th, after the parish council releases the grant."
+        },
+        {
+          "start": 10.0,
+          "end": 17.0,
+          "speaker": "Marisol",
+          "text": "I'll test the pump on the 12th, and I'll wash the engines on Saturday, weather permitting."
+        },
+        {
+          "start": 18.0,
+          "end": 25.0,
+          "speaker": "Gideon",
+          "text": "Not the 12th, the 19th. The pump bay is being repainted until the 15th."
+        },
+        {
+          "start": 26.0,
+          "end": 31.0,
+          "speaker": "Marisol",
+          "text": "Right, the 19th then."
+        },
+        {
+          "start": 32.0,
+          "end": 40.0,
+          "speaker": "Phineas",
+          "text": "Recruitment: we need 8 new volunteers, and at least 3 of them must hold a driving licence."
+        },
+        {
+          "start": 41.0,
+          "end": 48.0,
+          "speaker": "Delphine",
+          "text": "I won't sign off any recruit until they've done at least 12 hours of drills."
+        },
+        {
+          "start": 49.0,
+          "end": 55.0,
+          "speaker": "Gideon",
+          "text": "Communications. We have 12 pagers working. Sorry, 13, Phineas fixed one this morning."
+        },
+        {
+          "start": 56.0,
+          "end": 65.0,
+          "speaker": "Phineas",
+          "text": "Rowan, the radio maker, quoted 90 pounds a handset, or 70 pounds a handset for orders of at least 5."
+        },
+        {
+          "start": 66.0,
+          "end": 76.0,
+          "speaker": "Delphine",
+          "text": "Ottoline from the county told me the training budget was approved last week. The ladder drill planned for the 3rd has been cancelled."
+        },
+        {
+          "start": 77.0,
+          "end": 84.0,
+          "speaker": "Gideon",
+          "text": "I'll email the county about the budget on October the ninth, unless Ottoline calls me first."
+        },
+        {
+          "start": 85.0,
+          "end": 95.0,
+          "speaker": "Phineas",
+          "text": "We agreed not to hold the open day this year. Could we run a school visit instead? That's a question, not a task."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "buy",
+            "replacement",
+            "hose",
+            "after",
+            "parish",
+            "council",
+            "releases",
+            "grant"
+          ],
+          "owner": null,
+          "due": [
+            "the 28th",
+            "28th",
+            "the twenty-eighth"
+          ]
+        },
+        {
+          "task": [
+            "test",
+            "pump"
+          ],
+          "owner": "Marisol",
+          "due": [
+            "the 19th",
+            "19th",
+            "the nineteenth"
+          ]
+        },
+        {
+          "task": [
+            "wash",
+            "engines",
+            "weather",
+            "permitting"
+          ],
+          "owner": "Marisol",
+          "due": [
+            "Saturday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "sign",
+            "off",
+            "recruit",
+            "until",
+            "at least",
+            "12",
+            "hours",
+            "drills"
+          ],
+          "owner": "Delphine",
+          "due": []
+        },
+        {
+          "task": [
+            "email",
+            "county",
+            "budget",
+            "unless",
+            "ottoline",
+            "calls"
+          ],
+          "owner": "Gideon",
+          "due": [
+            "October the ninth",
+            "October 9",
+            "October 9th"
+          ]
+        }
+      ],
+      "names": [
+        "Gideon",
+        "Marisol",
+        "Phineas",
+        "Delphine",
+        "Ottoline"
+      ],
+      "numbers": [
+        [
+          "8",
+          "eight"
+        ],
+        [
+          "3",
+          "three"
+        ],
+        [
+          "12",
+          "twelve"
+        ],
+        [
+          "13",
+          "thirteen"
+        ],
+        [
+          "90"
+        ],
+        [
+          "70"
+        ],
+        [
+          "5",
+          "five"
+        ],
+        [
+          "28th",
+          "twenty-eighth"
+        ],
+        [
+          "19th",
+          "nineteenth"
+        ],
+        [
+          "October the ninth",
+          "October 9"
+        ]
+      ]
+    }
+  ]
+}

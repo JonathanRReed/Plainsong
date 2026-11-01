@@ -526,6 +526,17 @@ impl StreamingVadGate {
 
 /// Pre-process audio with VAD to trim silence
 pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec<f32> {
+    samples[silence_trim_range(samples, sample_rate, threshold_db)].to_vec()
+}
+
+pub(crate) fn silence_trim_range(
+    samples: &[f32],
+    sample_rate: u32,
+    threshold_db: f32,
+) -> std::ops::Range<usize> {
+    if sample_rate == 0 {
+        return 0..samples.len();
+    }
     let mut vad = VoiceActivityDetector::new(VadConfig {
         sample_rate,
         threshold_db: Some(threshold_db),
@@ -538,14 +549,14 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec
     let segments = vad.detect_speech(samples);
 
     if segments.is_empty() {
-        return samples.to_vec();
+        return 0..samples.len();
     }
 
     let Some(first_segment) = segments.first() else {
-        return samples.to_vec();
+        return 0..samples.len();
     };
     let Some(last_segment) = segments.last() else {
-        return samples.to_vec();
+        return 0..samples.len();
     };
 
     let start_sample =
@@ -553,12 +564,12 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec
     let end_sample = ((last_segment.end * sample_rate as f64).ceil() as usize).min(samples.len());
 
     if end_sample <= start_sample {
-        return samples.to_vec();
+        return 0..samples.len();
     }
 
     let retained_len = end_sample.saturating_sub(start_sample);
     if retained_len == 0 {
-        return samples.to_vec();
+        return 0..samples.len();
     }
 
     let original_len = samples.len().max(1);
@@ -567,16 +578,20 @@ pub fn trim_silence(samples: &[f32], sample_rate: u32, threshold_db: f32) -> Vec
     let trailing_trim_seconds =
         (samples.len().saturating_sub(end_sample)) as f32 / sample_rate as f32;
 
-    // If VAD wants to throw away a large chunk from the front, it likely missed a quiet
-    // opening speaker. In that case keep the original audio instead of being destructive.
+    // A long, quiet opening can be speech the energy gate missed. Preserve
+    // it when it contains a signal, but allow near-zero digital silence to
+    // be removed rather than sent through the recognizer.
     if leading_trim_seconds > 0.75
         && leading_trim_seconds > (trailing_trim_seconds * 2.0)
         && kept_ratio < 0.8
+        && samples[..start_sample]
+            .iter()
+            .any(|sample| !sample.is_finite() || sample.abs() > 1e-6)
     {
-        return samples.to_vec();
+        return 0..samples.len();
     }
 
-    samples[start_sample..end_sample].to_vec()
+    start_sample..end_sample
 }
 
 #[cfg(test)]
@@ -682,7 +697,7 @@ mod energy_gate_framing_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{trim_silence, StreamingVadGate, VadConfig, VadEdge};
+    use super::{silence_trim_range, trim_silence, StreamingVadGate, VadConfig, VadEdge};
 
     fn repeated_sample(amplitude: f32, sample_rate: u32, seconds: usize) -> Vec<f32> {
         vec![amplitude; sample_rate as usize * seconds]
@@ -700,6 +715,21 @@ mod tests {
     }
 
     #[test]
+    fn trim_silence_removes_long_digital_zeroes_before_speech() {
+        let mut samples = repeated_sample(0.0, 16_000, 60);
+        samples.extend(repeated_sample(0.06, 16_000, 2));
+        samples.extend(repeated_sample(0.0, 16_000, 1));
+        let range = silence_trim_range(&samples, 16_000, -40.0);
+        assert!(range.start > 59 * 16_000);
+        assert!(range.len() < 3 * 16_000);
+        assert_eq!(
+            samples[range.clone()].to_vec(),
+            trim_silence(&samples, 16_000, -40.0)
+        );
+        assert!(samples[range].contains(&0.06));
+    }
+
+    #[test]
     fn trim_silence_still_removes_clear_leading_and_trailing_dead_air() {
         let sample_rate = 16_000;
         let mut samples = repeated_sample(0.0, sample_rate, 1);
@@ -710,6 +740,21 @@ mod tests {
 
         assert!(trimmed.len() < samples.len());
         assert!(trimmed.len() > sample_rate as usize);
+    }
+
+    #[test]
+    fn trim_range_keeps_exact_source_samples_and_their_offset() {
+        let mut samples = repeated_sample(0.0, 16_000, 2);
+        samples.extend(repeated_sample(0.06, 16_000, 2));
+        samples.extend(repeated_sample(0.0, 16_000, 2));
+        let range = silence_trim_range(&samples, 16_000, -40.0);
+        assert!(range.start > 16_000);
+        assert!(range.end < samples.len());
+        assert_eq!(
+            trim_silence(&samples, 16_000, -40.0),
+            samples[range].to_vec()
+        );
+        assert_eq!(silence_trim_range(&samples, 0, -40.0), 0..samples.len());
     }
 
     /// Test config: fixed threshold (no adaptive noise-floor drift to reason

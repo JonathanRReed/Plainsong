@@ -69,6 +69,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.removeListener(subscription.channel, subscription.wrapped);
   },
 
+  requestMicrophoneAccess: (): Promise<boolean> =>
+    ipcRenderer.invoke("microphone:request-access"),
+
   getWindowLabel: (): Promise<string | null> =>
     ipcRenderer.invoke("window:get-label"),
 

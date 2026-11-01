@@ -92,12 +92,67 @@ pub(crate) fn resolve_dictation_live_preview_engine(
     }
 }
 
+/// The live-preview engine setting to resolve for this dictation route.
+///
+/// On `auto`, Parakeet on the Neural Engine draws the preview by re-decoding
+/// with the model already loaded for the final text (about 65 ms for 10 s of
+/// speech), instead of loading the separate streaming model next to it. That
+/// keeps one speech model resident during dictation. An explicit choice is
+/// left alone.
+pub(crate) fn live_preview_engine_setting_for_route<'a>(
+    setting: &'a str,
+    provider: asr::AsrProviderType,
+    model_id: &str,
+) -> &'a str {
+    if setting.trim() == "auto" && dictation_route_runs_on_neural_engine(provider, model_id) {
+        "redecode"
+    } else {
+        setting
+    }
+}
+
+fn dictation_route_runs_on_neural_engine(provider: asr::AsrProviderType, model_id: &str) -> bool {
+    crate::paths::data_dir()
+        .map(|dir| dir.join("Plainsong").join("models"))
+        .is_some_and(|models_root| route_runs_on_neural_engine_at(&models_root, provider, model_id))
+}
+
+fn route_runs_on_neural_engine_at(
+    models_root: &std::path::Path,
+    provider: asr::AsrProviderType,
+    model_id: &str,
+) -> bool {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    {
+        if provider != asr::AsrProviderType::TranscribeCpp
+            || asr::transcribe_cpp::route_spec_for(model_id).model_id
+                != asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+        {
+            return false;
+        }
+        // Also before a first dictation has compiled a Core ML build that
+        // serves alone (no ggml file here): that dictation decodes on it.
+        asr::neural_engine::request_spec_for_family(
+            models_root,
+            asr::neural_engine::preferred_family(),
+            asr::transcribe_cpp::parakeet_ggml_ready(models_root),
+        )
+        .is_some()
+    }
+    #[cfg(not(feature = "asr-transcribe-cpp"))]
+    {
+        let _ = (models_root, provider, model_id);
+        false
+    }
+}
+
 /// Whether this build has a streaming live-preview engine compiled in at all.
 pub(crate) fn streaming_live_preview_compiled_in() -> bool {
     cfg!(feature = "asr-transcribe-cpp")
 }
 
-/// Whether the streaming engine's weights are on disk with a trusted receipt.
+/// Whether the streaming engine's pinned weights are on disk and this session
+/// has not found them wrong.
 pub(crate) fn streaming_live_preview_model_ready() -> bool {
     #[cfg(feature = "asr-transcribe-cpp")]
     {
@@ -174,9 +229,8 @@ pub(crate) async fn download_live_preview_engine_model(
 ) -> Result<(), String> {
     #[cfg(feature = "asr-transcribe-cpp")]
     {
-        let provider = asr::transcribe_cpp::TranscribeCppProvider::new(Some(
-            asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID,
-        ));
+        let provider =
+            asr::transcribe_cpp::TranscribeCppStreamingProvider::new().download_provider();
         let progress_handle = handle.clone();
         let progress: Box<dyn Fn(f32) + Send + Sync> = Box::new(move |percentage| {
             progress_handle.emit_event(
@@ -201,7 +255,7 @@ pub(crate) async fn download_live_preview_engine_model(
     }
 }
 
-/// Delete those weights and their integrity receipt.
+/// Delete those weights, and any receipt file an older build left beside them.
 pub(crate) async fn delete_live_preview_engine_model() -> Result<(), String> {
     #[cfg(feature = "asr-transcribe-cpp")]
     {
@@ -225,7 +279,20 @@ pub(crate) async fn delete_live_preview_engine_model() -> Result<(), String> {
     }
 }
 
-/// A running streaming live preview, and the handle that stops it.
+pub(crate) enum DictationLivePreviewTask {
+    Streaming(tokio::task::JoinHandle<()>),
+    Redecode(tokio::task::JoinHandle<()>),
+}
+
+impl DictationLivePreviewTask {
+    fn is_finished(&self) -> bool {
+        match self {
+            Self::Streaming(task) | Self::Redecode(task) => task.is_finished(),
+        }
+    }
+}
+
+/// A running live preview, retained through native completion.
 ///
 /// Held in `AppState` so `stop_dictation_for_sidecar` can close the session
 /// *before* it starts the batch decode: the two would otherwise contend for the
@@ -233,10 +300,19 @@ pub(crate) async fn delete_live_preview_engine_model() -> Result<(), String> {
 pub(crate) struct DictationLivePreviewControl {
     pub(crate) session_id: u64,
     pub(crate) stop: Arc<AtomicBool>,
-    pub(crate) task: tokio::task::JoinHandle<()>,
+    pub(crate) task: DictationLivePreviewTask,
 }
 
-/// How long the stop path waits for the preview task to put its session down.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DictationLivePreviewStop {
+    NotOwned,
+    Closed,
+    Pending,
+}
+
+const DICTATION_REDECODE_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the streaming stop waits for its preview task to put its session down.
 /// Longer than a chunk decode by a wide margin; short enough that a wedged
 /// engine costs the user a moment rather than the dictation.
 pub(crate) const DICTATION_LIVE_PREVIEW_CLOSE_TIMEOUT: Duration = Duration::from_millis(2_000);
@@ -334,16 +410,11 @@ pub(crate) fn finish_streaming_utterance(
     }
 }
 
-/// Wait for one live-preview task to end, and *abort* it if it will not.
-///
-/// Returns true when the task ended on its own. Dropping a `JoinHandle`
-/// detaches the task rather than cancelling it, so a bare `timeout` left a
-/// wedged preview running — with its model resident — while the next dictation
-/// started. The abort is what makes "the preview is closed" true rather than
-/// hopeful; the engine slot in [`live_preview_engine_permits`] is what keeps a
-/// second model from loading in the window where it is not yet.
+/// Keep the streaming preview's bounded wait and abort policy. Its engine slot
+/// remains with blocking recognizer work until that work drops the engine.
+/// Re-decode must use a drain instead: aborting its caller does not stop ASR.
 pub(crate) async fn await_live_preview_task(
-    task: tokio::task::JoinHandle<()>,
+    task: &mut tokio::task::JoinHandle<()>,
     session_id: u64,
 ) -> bool {
     let abort = task.abort_handle();
@@ -366,32 +437,138 @@ pub(crate) async fn await_live_preview_task(
     }
 }
 
-/// Stop the streaming live preview, if one is running, and wait for it to
-/// release the recognizer.
-///
-/// Called on every dictation stop path before transcription starts. Waits, but
-/// never forever: a preview that will not put itself down must not take the
-/// user's words with it.
-/// Stop the preview only when it still belongs to `expected_session_id`.
-/// A stale stop failure must not take a replacement session's preview slot.
-pub(crate) async fn stop_dictation_live_preview_for_session(
-    state: &AppState,
-    expected_session_id: u64,
-) -> bool {
-    let control = {
-        let mut slot = state.dictation_live_preview.lock().await;
-        if slot.as_ref().map(|control| control.session_id) != Some(expected_session_id) {
-            return false;
-        }
-        slot.take()
-    };
-    let Some(control) = control else {
-        return false;
-    };
+async fn close_live_preview(control: &mut DictationLivePreviewControl) -> bool {
     control
         .stop
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    await_live_preview_task(control.task, control.session_id).await;
+    match &mut control.task {
+        DictationLivePreviewTask::Streaming(task) => {
+            await_live_preview_task(task, control.session_id).await;
+            true
+        }
+        DictationLivePreviewTask::Redecode(task) => {
+            // Aborting this async task would detach its spawn_blocking decode,
+            // which keeps the native lease until it actually returns.
+            match tokio::time::timeout(DICTATION_REDECODE_CLOSE_TIMEOUT, task).await {
+                Ok(result) => {
+                    if let Err(error) = result {
+                        tracing::debug!("The re-decode preview ended abnormally: {}", error);
+                    }
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    }
+}
+
+async fn stop_live_preview_slot_for_session(
+    slot: &Mutex<Option<DictationLivePreviewControl>>,
+    expected_session_id: u64,
+) -> DictationLivePreviewStop {
+    let mut slot = slot.lock().await;
+    let Some(control) = slot.as_mut() else {
+        return DictationLivePreviewStop::NotOwned;
+    };
+    if control.session_id != expected_session_id {
+        return if control.session_id < expected_session_id && !control.task.is_finished() {
+            DictationLivePreviewStop::Pending
+        } else {
+            DictationLivePreviewStop::NotOwned
+        };
+    }
+    if matches!(&control.task, DictationLivePreviewTask::Redecode(_))
+        && control.stop.load(std::sync::atomic::Ordering::SeqCst)
+        && !control.task.is_finished()
+    {
+        // Terminal error cleanup must not spend another grace period on work
+        // whose stop already timed out or whose waiting caller was cancelled.
+        return DictationLivePreviewStop::Pending;
+    }
+    // Borrow the handle in its slot. Cancellation or a timeout must leave the
+    // native worker owned and available to the next cleanup attempt.
+    if !close_live_preview(control).await {
+        return DictationLivePreviewStop::Pending;
+    }
+    slot.take();
+    DictationLivePreviewStop::Closed
+}
+
+pub(crate) async fn stop_dictation_live_preview_for_session(
+    state: &AppState,
+    expected_session_id: u64,
+) -> DictationLivePreviewStop {
+    stop_live_preview_slot_for_session(&state.dictation_live_preview, expected_session_id).await
+}
+
+/// A pending preview gets one final bounded drain before final recognition.
+/// Keep its handle and native lease owned if it cannot finish; never start a
+/// second recognizer beside an unaccounted blocking decode.
+pub(crate) async fn drain_pending_dictation_live_preview(
+    slot: &Mutex<Option<DictationLivePreviewControl>>,
+    session_id: u64,
+) -> DictationLivePreviewStop {
+    let mut slot = slot.lock().await;
+    let Some(control) = slot.as_mut() else {
+        return DictationLivePreviewStop::NotOwned;
+    };
+    if control.session_id > session_id {
+        return DictationLivePreviewStop::NotOwned;
+    }
+    control
+        .stop
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let task = match &mut control.task {
+        DictationLivePreviewTask::Streaming(task) | DictationLivePreviewTask::Redecode(task) => {
+            task
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(20), task)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            session_id,
+            "Live preview still owns the recognizer after the final drain"
+        );
+        return DictationLivePreviewStop::Pending;
+    }
+    slot.take();
+    DictationLivePreviewStop::Closed
+}
+
+pub(crate) async fn install_dictation_live_preview_for_session(
+    slot: &Mutex<Option<DictationLivePreviewControl>>,
+    tracker: &Mutex<DictationSessionTracker>,
+    session_id: u64,
+    spawn: impl FnOnce() -> DictationLivePreviewControl,
+) -> bool {
+    let mut slot = slot.lock().await;
+    if slot
+        .as_ref()
+        .is_some_and(|control| control.session_id > session_id)
+    {
+        return false;
+    }
+    let may_start = || async {
+        let tracker = tracker.lock().await;
+        tracker.active_session_id == Some(session_id)
+            && tracker.stopping_session_id != Some(session_id)
+            && tracker.cancellation_requested_session_id != Some(session_id)
+    };
+    if !may_start().await {
+        return false;
+    }
+    if let Some(previous) = slot.as_mut() {
+        if !close_live_preview(previous).await {
+            return false;
+        }
+    }
+    slot.take();
+    if !may_start().await {
+        return false;
+    }
+    slot.replace(spawn());
     true
 }
 
@@ -664,6 +841,263 @@ pub(crate) fn spawn_streaming_live_preview(
     DictationLivePreviewControl {
         session_id,
         stop,
-        task,
+        task: DictationLivePreviewTask::Streaming(task),
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    async fn blocked_redecode(
+        session_id: u64,
+    ) -> (
+        DictationLivePreviewControl,
+        Arc<tokio::sync::Semaphore>,
+        std::sync::mpsc::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let worker_gate = Arc::clone(&gate);
+        let (release, released) = std::sync::mpsc::channel();
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (finished, finished_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let _lease = worker_gate.try_acquire().expect("mock native lease");
+                let _ = started.send(());
+                // Dropping the sender on a failed assertion also releases this
+                // worker, so the test cannot strand a blocking thread.
+                let _ = released.recv();
+            })
+            .await
+            .unwrap();
+            let _ = finished.send(());
+        });
+        started_rx.await.unwrap();
+        (
+            DictationLivePreviewControl {
+                session_id,
+                stop: Arc::new(AtomicBool::new(false)),
+                task: DictationLivePreviewTask::Redecode(task),
+            },
+            gate,
+            release,
+            finished_rx,
+        )
+    }
+
+    async fn wait_for_stop(stop: &AtomicBool) {
+        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn redecode_handoff_waits_for_its_blocking_native_lease() {
+        let (control, gate, release, finished) = blocked_redecode(7).await;
+        let stop = Arc::clone(&control.stop);
+        let slot = Arc::new(Mutex::new(Some(control)));
+        let draining = tokio::spawn({
+            let slot = Arc::clone(&slot);
+            let gate = Arc::clone(&gate);
+            async move {
+                let result = stop_live_preview_slot_for_session(&slot, 7).await;
+                assert_eq!(result, DictationLivePreviewStop::Closed);
+                assert!(
+                    gate.try_acquire().is_ok(),
+                    "final decode must acquire after handoff"
+                );
+            }
+        });
+        wait_for_stop(&stop).await;
+        tokio::time::advance(DICTATION_LIVE_PREVIEW_CLOSE_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(
+            !draining.is_finished(),
+            "streaming's timeout must not abort re-decode"
+        );
+        assert!(gate.try_acquire().is_err());
+        release.send(()).unwrap();
+        finished.await.unwrap();
+        draining.await.unwrap();
+        assert!(slot.lock().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn redecode_timeout_retains_owner_without_repeating_terminal_cleanup_wait() {
+        let (control, gate, release, finished) = blocked_redecode(7).await;
+        let stop = Arc::clone(&control.stop);
+        let slot = Arc::new(Mutex::new(Some(control)));
+        let draining = tokio::spawn({
+            let slot = Arc::clone(&slot);
+            async move { stop_live_preview_slot_for_session(&slot, 7).await }
+        });
+        wait_for_stop(&stop).await;
+        tokio::time::advance(DICTATION_REDECODE_CLOSE_TIMEOUT + Duration::from_millis(1)).await;
+        assert_eq!(draining.await.unwrap(), DictationLivePreviewStop::Pending);
+        assert!(slot.lock().await.is_some());
+        assert!(
+            gate.try_acquire().is_err(),
+            "a timeout did not release the blocking lease"
+        );
+        let terminal_cleanup_started = tokio::time::Instant::now();
+        assert_eq!(
+            stop_live_preview_slot_for_session(&slot, 7).await,
+            DictationLivePreviewStop::Pending
+        );
+        assert_eq!(tokio::time::Instant::now(), terminal_cleanup_started);
+        let final_drain = tokio::spawn({
+            let slot = Arc::clone(&slot);
+            async move { drain_pending_dictation_live_preview(&slot, 7).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!final_drain.is_finished());
+        assert!(gate.try_acquire().is_err());
+        release.send(()).unwrap();
+        finished.await.unwrap();
+        assert_eq!(final_drain.await.unwrap(), DictationLivePreviewStop::Closed);
+        assert!(slot.lock().await.is_none());
+        assert!(gate.try_acquire().is_ok(), "final recognition can now run");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_drain_is_bounded_and_keeps_a_stuck_preview_owned() {
+        let (control, gate, release, finished) = blocked_redecode(7).await;
+        let stop = Arc::clone(&control.stop);
+        let slot = Arc::new(Mutex::new(Some(control)));
+        let draining = tokio::spawn({
+            let slot = Arc::clone(&slot);
+            async move { drain_pending_dictation_live_preview(&slot, 7).await }
+        });
+        wait_for_stop(&stop).await;
+        tokio::time::advance(Duration::from_secs(21)).await;
+        assert_eq!(draining.await.unwrap(), DictationLivePreviewStop::Pending);
+        assert!(slot.lock().await.is_some());
+        assert!(gate.try_acquire().is_err());
+        release.send(()).unwrap();
+        finished.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_redecode_stop_keeps_the_owned_handle_in_its_slot() {
+        let (control, gate, release, finished) = blocked_redecode(7).await;
+        let stop = Arc::clone(&control.stop);
+        let slot = Arc::new(Mutex::new(Some(control)));
+        let draining = tokio::spawn({
+            let slot = Arc::clone(&slot);
+            async move { stop_live_preview_slot_for_session(&slot, 7).await }
+        });
+        wait_for_stop(&stop).await;
+        draining.abort();
+        assert!(draining.await.unwrap_err().is_cancelled());
+        assert!(slot.lock().await.is_some());
+        assert!(stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(gate.try_acquire().is_err());
+        release.send(()).unwrap();
+        finished.await.unwrap();
+        assert_eq!(
+            stop_live_preview_slot_for_session(&slot, 7).await,
+            DictationLivePreviewStop::Closed
+        );
+        assert!(gate.try_acquire().is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stale_preview_stop_does_not_touch_a_newer_session() {
+        let (control, gate, release, finished) = blocked_redecode(9).await;
+        let stop = Arc::clone(&control.stop);
+        let slot = Mutex::new(Some(control));
+        assert_eq!(
+            stop_live_preview_slot_for_session(&slot, 8).await,
+            DictationLivePreviewStop::NotOwned
+        );
+        assert_eq!(
+            stop_live_preview_slot_for_session(&slot, 10).await,
+            DictationLivePreviewStop::Pending
+        );
+        assert!(!stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(slot.lock().await.as_ref().unwrap().session_id, 9);
+        assert!(gate.try_acquire().is_err());
+        release.send(()).unwrap();
+        finished.await.unwrap();
+        assert_eq!(
+            stop_live_preview_slot_for_session(&slot, 9).await,
+            DictationLivePreviewStop::Closed
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn preview_install_rechecks_session_after_draining_previous_work() {
+        let (control, _, release, finished) = blocked_redecode(7).await;
+        let stop = Arc::clone(&control.stop);
+        let slot = Arc::new(Mutex::new(Some(control)));
+        let tracker = Arc::new(Mutex::new(DictationSessionTracker {
+            active_session_id: Some(8),
+            ..Default::default()
+        }));
+        let spawned = Arc::new(AtomicBool::new(false));
+        let installing = tokio::spawn({
+            let slot = Arc::clone(&slot);
+            let tracker = Arc::clone(&tracker);
+            let spawned = Arc::clone(&spawned);
+            async move {
+                install_dictation_live_preview_for_session(&slot, &tracker, 8, || {
+                    spawned.store(true, std::sync::atomic::Ordering::SeqCst);
+                    panic!("a replaced session must not spawn its preview")
+                })
+                .await
+            }
+        });
+        wait_for_stop(&stop).await;
+        // The preview must be able to read its tracker while stop joins it.
+        tokio::time::timeout(Duration::from_millis(100), tracker.lock())
+            .await
+            .unwrap()
+            .active_session_id = Some(9);
+        release.send(()).unwrap();
+        finished.await.unwrap();
+        assert!(!installing.await.unwrap());
+        assert!(!spawned.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(slot.lock().await.is_none());
+    }
+}
+
+#[cfg(all(test, feature = "asr-transcribe-cpp"))]
+mod route_tests {
+    use super::*;
+    use crate::asr::neural_engine::{self, PARAKEET_V2_COREML, PARAKEET_V3_COREML};
+
+    #[test]
+    fn the_preview_redecodes_on_a_core_ml_build_with_no_ggml_file() {
+        let root =
+            std::env::temp_dir().join(format!("live-preview-coreml-{}", uuid::Uuid::new_v4()));
+        for spec in [&PARAKEET_V3_COREML, &PARAKEET_V2_COREML] {
+            let dir = spec.dir(&root);
+            for file in spec.files {
+                let path = dir.join(file.path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"x").unwrap();
+            }
+        }
+        let parakeet = asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID;
+        let provider = asr::AsrProviderType::TranscribeCpp;
+        // The final text decodes on the Core ML build (compiling it first),
+        // so the preview reuses that model instead of loading another.
+        assert_eq!(
+            route_runs_on_neural_engine_at(&root, provider, parakeet),
+            neural_engine::serves_without_ggml(&root, neural_engine::preferred_family())
+        );
+        // Other routes never do.
+        assert!(!route_runs_on_neural_engine_at(
+            &root,
+            provider,
+            asr::transcribe_cpp::NEMOTRON_STREAMING_GGUF_MODEL_ID
+        ));
+        assert!(!route_runs_on_neural_engine_at(
+            &root,
+            asr::AsrProviderType::Whisper,
+            "base.en"
+        ));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

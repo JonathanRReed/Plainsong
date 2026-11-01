@@ -38,6 +38,7 @@ pub(crate) fn normalize_meeting_audio_storage_mode(value: &str) -> &'static str 
 
 pub(crate) fn normalize_meeting_retention_preset(value: &str) -> &'static str {
     match value {
+        "1w" => "1w",
         "1m" => "1m",
         "2m" => "2m",
         "3m" => "3m",
@@ -72,11 +73,14 @@ pub(crate) fn meeting_retention_cutoff(
     custom_months: u32,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
+    if normalize_meeting_retention_preset(preset) == "1w" {
+        return Some(now - chrono::Duration::days(7));
+    }
     let months = match normalize_meeting_retention_preset(preset) {
         "1m" => 1,
         "2m" => 2,
         "3m" => 3,
-        "custom" => custom_months.max(1),
+        "custom" => custom_months.clamp(1, 1200),
         _ => return None,
     };
 
@@ -198,31 +202,58 @@ pub(crate) fn remove_owned_recording_audio_in_roots(
     outcome
 }
 
+pub(crate) fn meeting_audio_can_be_pruned(
+    recording: &models::Recording,
+    active: &HashMap<String, usize>,
+    has_transcript: bool,
+) -> bool {
+    recording.source_type == "meeting"
+        && recording.status == "completed"
+        && !active.contains_key(&recording.id)
+        && has_transcript
+        && (recording.transcript_complete
+            || recording.transcript_incomplete_acknowledged_at.is_some())
+}
+
 pub(crate) async fn remove_recording_audio_for_retention(
     state: &AppState,
     recording_id: &str,
     context: &str,
 ) -> Result<OwnedRecordingAudioDeletion, String> {
-    let bundle = {
-        let db = state.db.lock().await;
-        if db
-            .load_open_recording_audio_operation(recording_id)
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            return Err(format!(
-                "Recording '{}' audio encryption is pending; storage cleanup will retry later",
-                recording_id
-            ));
-        }
-        db.load_recording_audio_bundle(recording_id)
-            .map_err(|error| error.to_string())?
+    let mut db = state.db.lock().await;
+    // A retry cannot register between this check and the filesystem/DB deletion.
+    let active = state
+        .active_meeting_audio_postprocessing
+        .lock()
+        .map_err(|_| "Could not check current meeting audio activity".to_string())?;
+    let Some(current) = db.get_recording(recording_id).map_err(|e| e.to_string())? else {
+        return Ok(OwnedRecordingAudioDeletion::default());
     };
+    if !meeting_audio_can_be_pruned(
+        &current,
+        &active,
+        db.recording_has_transcript(recording_id)
+            .map_err(|e| e.to_string())?,
+    ) {
+        return Ok(OwnedRecordingAudioDeletion::default());
+    }
+    if db
+        .has_pending_audio_compression(recording_id)
+        .map_err(|e| e.to_string())?
+        || db
+            .load_open_recording_audio_operation(recording_id)
+            .map_err(|e| e.to_string())?
+            .is_some()
+    {
+        return Err("Audio storage work is pending; cleanup will retry later".into());
+    }
+    let bundle = db
+        .load_recording_audio_bundle(recording_id)
+        .map_err(|e| e.to_string())?;
     let outcome = remove_owned_recording_audio(&bundle, context);
     if !outcome.cleared_roles.is_empty() {
-        let mut db = state.db.lock().await;
         db.delete_recording_audio_assets(recording_id, &outcome.cleared_roles)
-            .map_err(|error| error.to_string())?;
+            .map_err(|e| e.to_string())?;
     }
     Ok(outcome)
 }
@@ -438,7 +469,8 @@ pub(crate) fn reset_settings_preserving_encrypted_database_state(
     database_encrypted: bool,
 ) {
     let vault_salt = settings.privacy.vault_salt.clone();
-    *settings = settings::Settings::default();
+    // A reset starts over the way a new install does, dictation default included.
+    *settings = settings::Settings::fresh_install();
     if database_encrypted {
         settings.privacy.vault_initialized = true;
         settings.privacy.vault_salt = vault_salt;
@@ -477,6 +509,15 @@ pub(crate) fn lock_vault_runtime_after_reset(
     vault_state.db_encrypted = database_encrypted;
 }
 
+pub(crate) fn dictation_retention_cleanup_candidate(
+    recording: &models::Recording,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    recording.source_type == "dictation"
+        && recording.status == "completed"
+        && recording.created_at <= cutoff
+}
+
 pub(crate) async fn enforce_dictation_retention_policy(
     state: &AppState,
     app: Option<&impl crate::sidecar_handle::AppEmitter>,
@@ -502,6 +543,10 @@ pub(crate) async fn enforce_dictation_retention_policy(
         return Ok((0, 0));
     };
 
+    let _maintenance = state
+        .operation_coordinator
+        .try_acquire(operation_coordinator::OperationKind::StorageMaintenance)?;
+    let _storage = state.audio_storage_gate.lock().await;
     let mut db = state.db.lock().await;
     let recordings = db
         .get_recordings(None)
@@ -509,13 +554,25 @@ pub(crate) async fn enforce_dictation_retention_policy(
 
     let mut deleted_recordings = 0usize;
     let mut audio_paths: Vec<String> = Vec::new();
+    let mut deleted_ids: Vec<String> = Vec::new();
     for recording in recordings
         .into_iter()
-        .filter(|recording| recording.source_type == "dictation" && recording.created_at <= cutoff)
+        .filter(|recording| dictation_retention_cleanup_candidate(recording, cutoff))
     {
+        if db
+            .has_pending_audio_compression(&recording.id)
+            .map_err(|e| e.to_string())?
+            || db
+                .load_open_recording_audio_operation(&recording.id)
+                .map_err(|e| e.to_string())?
+                .is_some()
+        {
+            continue;
+        }
         match db.delete_recording(&recording.id) {
             Ok(path) => {
                 deleted_recordings += 1;
+                deleted_ids.push(recording.id.clone());
                 if !path.trim().is_empty() {
                     audio_paths.push(path);
                 }
@@ -551,6 +608,7 @@ pub(crate) async fn enforce_dictation_retention_policy(
         }
     }
     drop(db);
+    crate::dictation_session::forget_deleted_dictation_results(state, app, &deleted_ids);
 
     if let Some(app_handle) = app {
         app_handle.emit_event(
@@ -590,7 +648,7 @@ pub(crate) fn meeting_retention_cleanup_candidate(
     incomplete_transcripts: &HashSet<String>,
 ) -> bool {
     recording.source_type == "meeting"
-        && matches!(recording.status.as_str(), "completed" | "error")
+        && recording.status == "completed"
         && recording.created_at <= cutoff
         && !active_postprocessing.contains(&recording.id)
         && !meeting_audio_is_the_only_complete_record(&recording.id, incomplete_transcripts)
@@ -607,7 +665,6 @@ pub(crate) fn meeting_transcript_only_cleanup_candidate(
 ) -> bool {
     recording.source_type == "meeting"
         && recording.status == "completed"
-        && !recording.audio_path.trim().is_empty()
         && !active_postprocessing.contains(&recording.id)
         && !meeting_audio_is_the_only_complete_record(&recording.id, incomplete_transcripts)
         && recording_id_filter
@@ -637,6 +694,16 @@ pub(crate) async fn enforce_meeting_retention_policy(
     reason: &str,
     recording_id_filter: Option<&str>,
 ) -> Result<(usize, usize, usize), String> {
+    enforce_meeting_retention_policy_inner(state, app, reason, recording_id_filter, None).await
+}
+
+pub(crate) async fn enforce_meeting_retention_policy_inner(
+    state: &AppState,
+    app: Option<&impl crate::sidecar_handle::AppEmitter>,
+    reason: &str,
+    recording_id_filter: Option<&str>,
+    confirmed_audio_policy: Option<(&str, u32)>,
+) -> Result<(usize, usize, usize), String> {
     // Claim the lease before the gate. This sweep holds the audio storage gate
     // for as long as it takes to delete every eligible meeting's audio, and
     // stopping a live meeting has to take the same gate — so a sweep that starts
@@ -645,22 +712,34 @@ pub(crate) async fn enforce_meeting_retention_policy(
         .operation_coordinator
         .try_acquire(operation_coordinator::OperationKind::StorageMaintenance)?;
     let _storage_guard = state.audio_storage_gate.lock().await;
-    let (preset, custom_months, delete_mode) = {
-        let settings_manager = state.settings_manager.lock().await;
-        let transcription = &settings_manager.settings().transcription;
-        (
-            transcription.meeting_retention_preset.clone(),
-            transcription.meeting_retention_custom_months,
-            transcription.meeting_retention_delete_mode.clone(),
-        )
-    };
+    let audio_only = confirmed_audio_policy.is_some();
+    let (preset, custom_months, delete_mode) =
+        if let Some((preset, months)) = confirmed_audio_policy {
+            (preset.to_owned(), months, "audio_only".to_owned())
+        } else {
+            let settings_manager = state.settings_manager.lock().await;
+            let transcription = &settings_manager.settings().transcription;
+            if !transcription.meeting_retention_confirmed {
+                return Ok((0, 0, 0));
+            }
+            (
+                transcription.meeting_retention_preset.clone(),
+                transcription.meeting_retention_custom_months,
+                transcription.meeting_retention_delete_mode.clone(),
+            )
+        };
 
     let now = chrono::Utc::now();
     let Some(cutoff) = meeting_retention_cutoff(&preset, custom_months, now) else {
         return Ok((0, 0, 0));
     };
 
-    let delete_mode = normalize_meeting_retention_delete_mode(&delete_mode).to_string();
+    let delete_mode = if audio_only {
+        "audio_only"
+    } else {
+        normalize_meeting_retention_delete_mode(&delete_mode)
+    }
+    .to_string();
     let recordings = {
         let db = state.db.lock().await;
         db.get_recordings(None).map_err(|error| {
@@ -696,6 +775,21 @@ pub(crate) async fn enforce_meeting_retention_policy(
         .collect::<Vec<_>>();
 
     for recording in due {
+        // Error rows and absent transcripts remain recoverable. Pending audio
+        // operations also own source copies that cannot be pruned yet.
+        {
+            let db = state.db.lock().await;
+            if db
+                .has_pending_audio_compression(&recording.id)
+                .map_err(|e| e.to_string())?
+                || db
+                    .get_transcript(&recording.id)
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+            {
+                continue;
+            }
+        }
         // Both delete modes remove the audio, so both have to respect the
         // meetings whose audio is the only complete record. Retention that
         // silently destroys the one artifact holding the missing minutes is not
@@ -715,22 +809,32 @@ pub(crate) async fn enforce_meeting_retention_policy(
             continue;
         }
         if delete_mode == "audio_and_transcript" {
-            let bundle = {
-                let db = state.db.lock().await;
-                if db
-                    .load_open_recording_audio_operation(&recording.id)
-                    .map_err(|error| error.to_string())?
-                    .is_some()
-                {
-                    tracing::warn!(
-                        "Keeping meeting '{}' while audio encryption is pending",
-                        recording.id
-                    );
-                    continue;
-                }
-                db.load_recording_audio_bundle(&recording.id)
-                    .map_err(|error| error.to_string())?
+            let mut db = state.db.lock().await;
+            let active = state
+                .active_meeting_audio_postprocessing
+                .lock()
+                .map_err(|_| "Could not check current meeting audio activity".to_string())?;
+            let Some(current) = db.get_recording(&recording.id).map_err(|e| e.to_string())? else {
+                continue;
             };
+            if !meeting_audio_can_be_pruned(
+                &current,
+                &active,
+                db.recording_has_transcript(&recording.id)
+                    .map_err(|e| e.to_string())?,
+            ) || db
+                .has_pending_audio_compression(&recording.id)
+                .map_err(|e| e.to_string())?
+                || db
+                    .load_open_recording_audio_operation(&recording.id)
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+            {
+                continue;
+            }
+            let bundle = db
+                .load_recording_audio_bundle(&recording.id)
+                .map_err(|e| e.to_string())?;
             let deletion = remove_owned_recording_audio(&bundle, "meeting retention cleanup");
             if !deletion.failures.is_empty() {
                 tracing::warn!(
@@ -740,7 +844,6 @@ pub(crate) async fn enforce_meeting_retention_policy(
                 );
                 continue;
             }
-            let mut db = state.db.lock().await;
             match db.delete_recording(&recording.id) {
                 Ok(_) => {
                     deleted_recordings += 1;
@@ -755,13 +858,30 @@ pub(crate) async fn enforce_meeting_retention_policy(
             continue;
         }
 
-        let deletion =
-            remove_recording_audio_for_retention(state, &recording.id, "meeting retention cleanup")
-                .await?;
+        // One meeting whose audio cannot be cleared yet (an encryption step
+        // still open) must not stop the sweep for every meeting after it.
+        let deletion = match remove_recording_audio_for_retention(
+            state,
+            &recording.id,
+            "meeting retention cleanup",
+        )
+        .await
+        {
+            Ok(deletion) => deletion,
+            Err(error) => {
+                tracing::warn!(
+                    "Keeping the audio of meeting '{}' for the next cleanup: {}",
+                    recording.id,
+                    error
+                );
+                continue;
+            }
+        };
         deleted_audio_files += deletion.deleted_files;
         if deletion
             .cleared_roles
             .contains(&recording_audio::RecordingAudioRole::Primary)
+            || (!deletion.cleared_roles.is_empty() && deletion.failures.is_empty())
         {
             audio_only_clears += 1;
         }
@@ -827,11 +947,11 @@ pub(crate) async fn apply_meeting_transcript_only_storage_policy(
     let _storage_guard = state.audio_storage_gate.lock().await;
     let storage_mode = {
         let settings_manager = state.settings_manager.lock().await;
-        settings_manager
-            .settings()
-            .transcription
-            .meeting_audio_storage_mode
-            .clone()
+        let transcription = &settings_manager.settings().transcription;
+        if !transcription.meeting_retention_confirmed && reason != "manual-audio-cleanup" {
+            return Ok((0, 0));
+        }
+        transcription.meeting_audio_storage_mode.clone()
     };
 
     if normalize_meeting_audio_storage_mode(&storage_mode) != "transcript_only" {
@@ -900,16 +1020,28 @@ pub(crate) async fn apply_meeting_transcript_only_storage_policy(
             continue;
         }
 
-        let deletion = remove_recording_audio_for_retention(
+        let deletion = match remove_recording_audio_for_retention(
             state,
             &recording.id,
             "transcript-only storage cleanup",
         )
-        .await?;
+        .await
+        {
+            Ok(deletion) => deletion,
+            Err(error) => {
+                tracing::warn!(
+                    "Keeping meeting '{}' audio for the next cleanup: {}",
+                    recording.id,
+                    error
+                );
+                continue;
+            }
+        };
         deleted_audio_files += deletion.deleted_files;
         if deletion
             .cleared_roles
             .contains(&recording_audio::RecordingAudioRole::Primary)
+            || (!deletion.cleared_roles.is_empty() && deletion.failures.is_empty())
         {
             audio_paths_cleared += 1;
         }
@@ -1160,6 +1292,10 @@ pub(crate) async fn auto_name_meeting_recording(
         let (segments, _, _, _) = load_recording_analysis_input(state, recording_id).await?;
         match generate_bounded_meeting_title(state, &segments, model_override.as_deref()).await {
             Ok(title) => title,
+            // The notes pass comes back once speech ends; keep the placeholder.
+            Err(error) if error.contains(crate::llm::native_text::SPEECH_YIELD_REFUSAL) => {
+                return Err(error);
+            }
             Err(error) => {
                 tracing::warn!(
                     "Bounded meeting title generation failed for '{}': {}",
@@ -1170,6 +1306,16 @@ pub(crate) async fn auto_name_meeting_recording(
             }
         }
     };
+
+    let mut db = state.db.lock().await;
+    let current = db
+        .get_recording(recording_id)
+        .map_err(|error| error.to_string())?;
+    if !current.is_some_and(|recording| {
+        recording.source_type == "meeting" && recording.title == existing.title
+    }) {
+        return Ok(None);
+    }
 
     let Some(new_title) = new_title else {
         if !allow_title_fallback {
@@ -1189,14 +1335,17 @@ pub(crate) async fn auto_name_meeting_recording(
         return Err(message);
     };
 
-    let mut db = state.db.lock().await;
-    db.rename_recording(recording_id, &new_title)
-        .map_err(|error| format!("Failed to persist auto-generated meeting title: {}", error))?;
+    if !db
+        .rename_recording_if_title_matches(recording_id, &existing.title, &new_title)
+        .map_err(|error| format!("Failed to persist auto-generated meeting title: {}", error))?
+    {
+        return Ok(None);
+    }
     if let Err(error) = db.log_audit_event(
         "meeting_auto_named",
         Some(serde_json::json!({
             "recording_id": recording_id,
-            "new_title": new_title,
+            "title_chars": new_title.chars().count(),
             "source": if successful_summary.is_some() { "summary" } else { "bounded_title_fallback" },
         })),
         "info",

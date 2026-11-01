@@ -1,9 +1,11 @@
+import { resolveDisplayedDictationHotkeyMode } from "@/lib/dictation-hotkey-mode";
 import { describe, expect, it } from "vitest";
 import {
   buildNativeHelperBindingTable,
   cycleDictationMode,
   describeDictationBindingTrigger,
   dictationBindingAllowsTapToLock,
+  dictationBindingSubmitsAfterInsert,
   dictationBindingTriggerKey,
   electronFallbackDictationBindings,
   findPrimaryDictationBinding,
@@ -67,6 +69,26 @@ describe("resolveDictationBindings (migration)", () => {
         action: { kind: "dictation", modeId: "email", behavior: "inherit" },
       },
     ]);
+  });
+
+  it("keeps Return after inserting off unless a binding stores exactly true", () => {
+    const table = [
+      keyBinding("absent", "Cmd+Alt+A"),
+      keyBinding("on", "Cmd+Alt+B", { kind: "dictation", modeId: null, behavior: "hold", submitAfterInsert: true }),
+      keyBinding("off", "Cmd+Alt+C", { kind: "dictation", modeId: null, behavior: "toggle", submitAfterInsert: false }),
+      { id: "string", trigger: { kind: "key", accelerator: "Cmd+Alt+D" }, action: { kind: "dictation", modeId: null, behavior: "inherit", submitAfterInsert: "true" } },
+      { id: "number", trigger: { kind: "key", accelerator: "Cmd+Alt+E" }, action: { kind: "dictation", modeId: null, behavior: "inherit", submitAfterInsert: 1 } },
+    ] as unknown as DictationBinding[];
+
+    const resolved = resolveDictationBindings({ dictationBindings: table });
+    expect(resolved.map((binding) => binding.id)).toEqual(["absent", "on", "off", "string", "number"]);
+    expect(resolved.map(dictationBindingSubmitsAfterInsert)).toEqual([false, true, false, false, false]);
+    expect(resolved[0]).toBe(table[0]);
+    expect(resolved[1]).toBe(table[1]);
+    expect(resolved[3]?.action).toEqual({ kind: "dictation", modeId: null, behavior: "inherit" });
+    expect(resolveDictationBindings({ toggleDictation: "Ctrl+Alt+D" }).map(dictationBindingSubmitsAfterInsert)).toEqual([false]);
+    expect(dictationBindingSubmitsAfterInsert(undefined)).toBe(false);
+    expect(dictationBindingSubmitsAfterInsert(keyBinding("cancel", "Cmd+Alt+X", { kind: "cancel" }))).toBe(false);
   });
 
   it("returns nothing when the legacy key was cleared and no table exists", () => {
@@ -148,7 +170,7 @@ describe("validateDictationBindings", () => {
   // The helper matches `.maskCommand` (either Cmd key) and arms after 150 ms
   // with nothing else pressed, so a lone Cmd would start dictation from an
   // ordinary pause mid-chord. Fn is the only one the selector ever offered.
-  it("allows only Fn as a trigger on its own", () => {
+  it("rejects unsided modifiers on their own", () => {
     const issues = validateDictationBindings(
       [
         keyBinding("fn", "Fn"),
@@ -163,7 +185,7 @@ describe("validateDictationBindings", () => {
       ["ctrl", "unsupported_lone_modifier"],
       ["shift", "unsupported_lone_modifier"],
     ]);
-    expect(issues[0].message).toMatch(/Fn is the only modifier that can\./);
+    expect(issues[0].message).toMatch(/Choose Fn, RightCommand, or RightOption\./);
   });
 
   it("refuses chords macOS owns, however they are spelled", () => {
@@ -397,5 +419,59 @@ describe("cycleDictationMode", () => {
       selectedCustomModeId: null,
       label: "General",
     });
+  });
+});
+
+it.each(["RightCommand", "RightOption"])("registers %s only through the native helper", (accelerator) => {
+  const binding = keyBinding("right", accelerator);
+  expect(validateDictationBindings([binding], { nativeShortcutAvailable: true })).toEqual([]);
+  expect(electronFallbackDictationBindings([binding])).toEqual([]);
+  expect(buildNativeHelperBindingTable([binding], normalizeNativeShortcutHelperShortcut)).toEqual([
+    { id: "right", kind: "modifier", modifier: accelerator },
+  ]);
+  expect(validateDictationBindings([binding], { nativeShortcutAvailable: false })[0]?.code).toBe("needs_native_helper");
+});
+
+it("rejects duplicate right-side triggers and mixed side-specific chords", () => {
+  expect(validateDictationBindings([keyBinding("a", "RightCommand"), keyBinding("b", "rightcommand")], { nativeShortcutAvailable: true })[0]?.code).toBe("duplicate_trigger");
+  expect(validateDictationBindings([keyBinding("bad", "RightCommand+C")], { nativeShortcutAvailable: true })).not.toEqual([]);
+  expect(resolveDictationBindings({ dictationBindings: [keyBinding("saved", "RightOption")] })[0]?.trigger).toEqual({ kind: "key", accelerator: "RightOption" });
+});
+
+
+describe("displayed dictation binding behavior", () => {
+  it.each([null, "notes", "saved-profile"])("uses hold for the displayed key, including profile %s", (modeId) => {
+    expect(resolveDisplayedDictationHotkeyMode({
+      shortcut: "RightCommand",
+      bindings: [keyBinding("selected", "RightCommand", { kind: "dictation", modeId, behavior: "hold" })],
+      pushToTalk: false,
+      handsFreeEnabled: false,
+    })).toBe("hold_to_talk");
+  });
+
+  it.each(["hold", "toggle", "inherit"] as const)("matches Electron's %s override with hands-free enabled", (behavior) => {
+    expect(resolveDisplayedDictationHotkeyMode({
+      shortcut: "Cmd+Shift+D",
+      bindings: [keyBinding("selected", "Command+Shift+D", { kind: "dictation", modeId: null, behavior })],
+      pushToTalk: true,
+      handsFreeEnabled: true,
+    })).toBe(resolveDictationBindingBehavior(behavior, "hands_free"));
+  });
+
+  it.each(["", "Ctrl+Shift+D"])("does not use an unrelated or disabled displayed key %s", (shortcut) => {
+    expect(resolveDisplayedDictationHotkeyMode({
+      shortcut,
+      bindings: [keyBinding("other", "RightCommand", { kind: "dictation", modeId: null, behavior: "hold" })],
+      pushToTalk: false,
+      handsFreeEnabled: false,
+    })).toBe("toggle");
+  });
+
+  it("ignores non-dictation and mouse triggers and supports legacy settings", () => {
+    for (const bindings of [undefined, [], [keyBinding("cancel", "RightCommand", { kind: "cancel" })],
+      [keyBinding("cycle", "RightCommand", { kind: "cycleMode" })],
+      [{ id: "mouse", trigger: { kind: "mouse", button: 3 }, action: { kind: "dictation", modeId: null, behavior: "toggle" } } satisfies DictationBinding]]) {
+      expect(resolveDisplayedDictationHotkeyMode({ shortcut: "RightCommand", bindings, pushToTalk: true, handsFreeEnabled: false })).toBe("hold_to_talk");
+    }
   });
 });

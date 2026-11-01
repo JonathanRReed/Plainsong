@@ -7,7 +7,7 @@
 // Models screen is now the one place either lane is chosen, and the Settings
 // view still imports `describeAnalysisDestination` for the disclosures that
 // name where a finished meeting goes.
-import { PLUS_ANALYSIS_PROVIDER, PLUS_CHAT_MODELS } from "@/lib/plus";
+import { CHATGPT_PLAN_PROVIDER } from "@/lib/backend/chatgpt-plan";
 
 export const AI_LANE_KEYS = ["dictationAi", "meetingsAi"] as const;
 export type AiLaneKey = (typeof AI_LANE_KEYS)[number];
@@ -21,6 +21,7 @@ const ANALYSIS_PROVIDER_DESTINATIONS: Record<
 > = {
   // The license on the bundled model requires this exact name wherever it is
   // used: "S1-mini" by "Superwhisper". Do not shorten it.
+  native_text: { label: "Plainsong's built-in text model on this Mac", remote: false },
   bundled_local: { label: "S1-mini by Superwhisper, on this Mac", remote: false },
   apple_language_model: {
     label: "Apple's on-device model on this Mac",
@@ -32,21 +33,23 @@ const ANALYSIS_PROVIDER_DESTINATIONS: Record<
   gemini: { label: "Google Gemini", remote: true },
   deepseek: { label: "DeepSeek", remote: true },
   "ollama-cloud": { label: "Ollama Cloud", remote: true },
-  [PLUS_ANALYSIS_PROVIDER]: { label: "Plainsong Plus", remote: true },
+  [CHATGPT_PLAN_PROVIDER]: { label: "ChatGPT", remote: true },
 };
 
 export const ANALYSIS_PROVIDER_OPTIONS: ReadonlyArray<{
   value: string;
   label: string;
 }> = [
-  { value: "bundled_local", label: "Built-in (no setup)" },
-  { value: "apple_language_model", label: "Apple on-device model" },
+  { value: "bundled_local", label: "Built-in cleanup (no setup)" },
+  { value: "apple_language_model", label: "Apple Intelligence" },
+  { value: "native_text", label: "Built-in text model (experimental)" },
   { value: "ollama", label: "Ollama (on this Mac)" },
   { value: "openai", label: "OpenAI" },
   { value: "anthropic", label: "Anthropic" },
   { value: "gemini", label: "Google Gemini" },
   { value: "deepseek", label: "DeepSeek" },
   { value: "ollama-cloud", label: "Ollama Cloud" },
+  { value: CHATGPT_PLAN_PROVIDER, label: "ChatGPT plan" },
 ];
 
 /**
@@ -62,7 +65,6 @@ export const ANALYSIS_PROVIDER_OPTIONS: ReadonlyArray<{
  */
 const DICTATION_ONLY_ANALYSIS_PROVIDERS = new Set([
   "bundled_local",
-  "apple_language_model",
 ]);
 
 export function isDictationOnlyAnalysisProvider(
@@ -79,24 +81,19 @@ export function isDictationOnlyAnalysisProvider(
 export function isZeroSetupAnalysisProvider(
   provider: string | undefined,
 ): boolean {
-  return DICTATION_ONLY_ANALYSIS_PROVIDERS.has(provider ?? "");
+  return provider === "native_text" || provider === "apple_language_model" || DICTATION_ONLY_ANALYSIS_PROVIDERS.has(provider ?? "");
 }
 
 /** The provider choices a lane may offer. */
 export function analysisProviderOptionsForLane(
   lane: AiLaneKey,
-  plusAvailable = false,
 ): ReadonlyArray<{ value: string; label: string }> {
-  // Plus is offered only by a build that compiled it in (see lib/plus.ts).
-  const options = plusAvailable
-    ? [...ANALYSIS_PROVIDER_OPTIONS, { value: PLUS_ANALYSIS_PROVIDER, label: "Plainsong Plus" }]
-    : ANALYSIS_PROVIDER_OPTIONS;
   if (lane === "meetingsAi") {
-    return options.filter(
+    return ANALYSIS_PROVIDER_OPTIONS.filter(
       (option) => !isDictationOnlyAnalysisProvider(option.value),
     );
   }
-  return options;
+  return ANALYSIS_PROVIDER_OPTIONS;
 }
 
 /**
@@ -170,6 +167,7 @@ export function analysisModelChoices(
     // Both on-device providers serve exactly one model, and neither has a
     // catalogue endpoint to list it from. Returning nothing here is what tells
     // the lane row to render the fixed-model card instead of a picker.
+    case "native_text":
     case "bundled_local":
     case "apple_language_model":
       return [];
@@ -186,9 +184,8 @@ export function analysisModelChoices(
         .sort();
     case "gemini":
       return models.filter((model) => model.includes("gemini")).filter(canWriteCompletions);
-    // The relay's two aliases; it has no catalogue endpoint.
-    case PLUS_ANALYSIS_PROVIDER:
-      return [...PLUS_CHAT_MODELS];
+    case CHATGPT_PLAN_PROVIDER:
+      return [...models];
     default:
       return models.filter(canWriteCompletions);
   }

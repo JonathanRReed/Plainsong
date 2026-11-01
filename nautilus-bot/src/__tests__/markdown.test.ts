@@ -3,6 +3,7 @@ import {
   actionItemsToMarkdownList,
   parseMarkdownBlocks,
   parseMarkdownSpans,
+  parseRecapQuote,
 } from "@/lib/markdown";
 
 describe("parseMarkdownSpans", () => {
@@ -104,5 +105,30 @@ describe("actionItemsToMarkdownList", () => {
 
   it("does not double-bullet a line the user already bulleted", () => {
     expect(actionItemsToMarkdownList(["- Send packet"])).toBe("- Send packet");
+  });
+});
+
+describe("recap quotes", () => {
+  it("reads a quoted recap line with its speaker and time", () => {
+    expect(parseRecapQuote("Priya (0:12): “We agreed to ship the beta on the 14th if the memory gate passes.”")).toEqual({
+      speaker: "Priya",
+      time: "0:12",
+      quote: "We agreed to ship the beta on the 14th if the memory gate passes.",
+    });
+    expect(parseRecapQuote("1:02:03: “I can explain the setup.”")).toEqual({
+      speaker: null,
+      time: "1:02:03",
+      quote: "I can explain the setup.",
+    });
+    expect(parseRecapQuote("Your notes: “Ask Ben about parking.”")).toEqual({
+      speaker: "Your notes",
+      time: null,
+      quote: "Ask Ben about parking.",
+    });
+  });
+
+  it("leaves ordinary bullets alone", () => {
+    expect(parseRecapQuote("Ship the beta on the 14th")).toBeNull();
+    expect(parseRecapQuote("Priya said “ship it” today")).toBeNull();
   });
 });

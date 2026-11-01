@@ -94,6 +94,12 @@ export interface AsrProviderInfo {
   runtimeDetails: AsrRuntimeDetails;
   engineDiagnostics?: AsrEngineDiagnostics;
   platformReadiness?: AppleSpeechReadiness | null;
+  /**
+   * Bytes a Download fetches per model on this Mac, where the sidecar knows
+   * that is more than the catalog's file size (Parakeet with its Neural
+   * Engine build and vocabulary model). Keyed by model id.
+   */
+  modelDownloadBytes?: Record<string, number>;
 }
 
 export interface AsrProviderInventory {
@@ -106,6 +112,12 @@ export interface AsrProviderInventory {
   modelOptions: AsrModelOption[];
   downloadStatus: DownloadStatus;
   platformReadiness?: AppleSpeechReadiness | null;
+  /**
+   * Bytes a Download fetches per model on this Mac, where the sidecar knows
+   * that is more than the catalog's file size (Parakeet with its Neural
+   * Engine build and vocabulary model). Keyed by model id.
+   */
+  modelDownloadBytes?: Record<string, number>;
 }
 
 interface AsrModelOption {
@@ -159,6 +171,7 @@ export interface BenchmarkResult {
   processingTimeMs: number;
   transcription: string;
   confidence: number;
+  errorMessage?: string | null;
 }
 
 // Kept in lockstep with `AsrProviderType` in rust-sidecar/src/asr/mod.rs. Any
@@ -182,6 +195,8 @@ export type AsrProviderType =
   // its segment times are estimated rather than measured.
   | "cohere_local"
   | "qwen3_asr"
+  // Experimental CPU-only short dictation, not a meeting route.
+  | "whistle"
   | "deepgram"
   | "mistral_voxtral"
   // xAI Grok speech-to-text. Dictation only until xAI's meeting limits are
@@ -193,11 +208,7 @@ export type AsrProviderType =
   // the release feature list), so no shipped build ever sends it -- but the
   // renderer has to be able to render it honestly when a developer build does,
   // instead of dropping an unknown provider out of the picker.
-  | "transcribe_cpp"
-  // Plainsong Plus, the paid hosted tier. Like `transcribe_cpp`, only a
-  // sidecar built with `--features plainsong-plus` reports it, and no release
-  // is. Not launched.
-  | "plainsong_plus";
+  | "transcribe_cpp";
 
 // LLM Types
 export interface LlmAnalysisResult {
@@ -215,6 +226,7 @@ export interface LlmAnalysisResult {
 
 export interface LlmCitation {
   text: string;
+  sourceKind?: "transcript" | "meeting_note" | null;
   lineId?: string;
   segmentId?: string;
   startTime?: number;
@@ -223,8 +235,39 @@ export interface LlmCitation {
   certainty?: number;
 }
 
+// Keep aligned with the summary and action-item acceptance policy in rust-sidecar/src/models.rs.
+export const SUMMARY_GROUNDING_POLICY_VERSION = 16;
+
+/**
+ * A summary statement that needs review: it names people, products or acronyms the
+ * meeting never mentions, or no transcript line supports its content. Statements
+ * saved before the support check have no kind and are always invented names.
+ */
+export interface UnverifiedStatement {
+  statement: string;
+  kind?: "invented_name" | "unknown_fact" | "unsupported";
+  unknownFacts?: string[];
+  unknownNames: string[];
+}
+
+export interface SummaryDiagnostics {
+  draftSource: "initial" | "repaired";
+  draftIssues: string[];
+  repairOutcome: "not_attempted" | "not_needed" | "sentence_selection" | "accepted" | "rejected" | "invalid_payload" | "request_failed" | "input_budget_exceeded";
+  verificationStatus: "not_requested" | "complete" | "no_candidates" | "no_sources" | "input_budget_exceeded" | "request_failed" | "invalid_payload" | "invalid_verdicts";
+  requestErrorKind?: string | null;
+  candidateStatements: number;
+  supportedStatements: number;
+  retainedStatements: number;
+  rejectionCounts: Record<string, number>;
+  fallbackReason: string | null;
+  /** `extractive_v1` when the recap quotes source sentences. */
+  recapMode?: string | null;
+}
+
 export interface AnalysisProvenance {
   version: number;
+  groundingPolicyVersion?: number | null;
   contentHash: string;
   actualProvider: string;
   actualModel: string;
@@ -232,12 +275,19 @@ export interface AnalysisProvenance {
   completedAt: string;
   citations: LlmCitation[];
   grounded: boolean;
+  unverifiedStatements?: UnverifiedStatement[];
+  summaryDiagnostics?: SummaryDiagnostics | null;
 }
 
 export interface ActionItemProvenance {
+  generated?: boolean;
   contentHash: string;
   citations: LlmCitation[];
   grounded: boolean;
+  /** The source sentences a generated item comes from, as the recap quotes them. */
+  evidence?: string | null;
+  /** A generated item quoting a commitment whose scope, owner or date the meeting left unclear. */
+  unclear?: boolean;
 }
 
 export interface ActionItemsProvenance extends AnalysisProvenance {
@@ -286,6 +336,10 @@ export interface GroundedSummaryResult {
 export interface GroundedActionItem extends ActionItem {
   citations: LlmCitation[];
   grounded?: boolean;
+  /** The source sentences the item comes from. */
+  evidence?: string | null;
+  /** The meeting left this commitment's owner or a restated value unclear. */
+  unclear?: boolean;
 }
 
 export interface GroundedActionItemsResult {

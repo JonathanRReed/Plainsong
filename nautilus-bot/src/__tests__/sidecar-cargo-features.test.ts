@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   MACOS_SIDECAR_CARGO_FEATURES,
   sidecarCargoFeatureArgs,
-} from "../../scripts/sidecar-cargo-features.mjs";
+} from "../../scripts/sidecar-cargo-features.ts";
 
 const repoRoot = path.resolve(import.meta.dirname, "../..");
 const workspaceRoot = path.resolve(repoRoot, "..");
@@ -14,46 +14,42 @@ function readRepoFile(relativePath: string) {
 }
 
 describe("sidecar cargo feature set", () => {
-  it("ships Candle Metal on macOS only, and keeps ort-coreml off", () => {
+  it("ships compact meeting storage and macOS acceleration features", () => {
     // ort-coreml measured as a regression on Moonshine (24 s first-load
     // compile, slower steady state); see
     // artifacts/qa/acceleration-receipt-2026-09-01.md before adding it back.
-    expect([...MACOS_SIDECAR_CARGO_FEATURES]).toEqual(["candle-metal"]);
+    expect([...MACOS_SIDECAR_CARGO_FEATURES]).toEqual([
+      "meeting-audio-16k",
+      "candle-metal",
+      "asr-transcribe-cpp",
+      "diarization-nemotron",
+      "ort-coreml-ep",
+    ]);
     expect(sidecarCargoFeatureArgs("darwin")).toEqual([
       "--features",
-      "candle-metal",
+      "meeting-audio-16k,candle-metal,asr-transcribe-cpp,diarization-nemotron,ort-coreml-ep",
     ]);
     expect(sidecarCargoFeatureArgs("win32")).toEqual([]);
     expect(sidecarCargoFeatureArgs("linux")).toEqual([]);
   });
 
-  it("keeps the opt-in features out of Cargo.toml's default set", () => {
+  it("keeps platform features optional and compact meeting audio in defaults", () => {
     const cargoToml = readRepoFile("rust-sidecar/Cargo.toml");
     const defaultLine = cargoToml.match(/^default = \[(.*)\]$/m)?.[1] ?? "";
-    // `diarization-speakrs` is listed here for the same reason as
-    // `ort-coreml`: it exists, it must stay out of `default`, and it must stay
-    // out of the shipped set until a measurement justifies the cost. See
-    // artifacts/qa/diarization-speakrs-spike-2026-09-02.md.
     for (const feature of [
       ...MACOS_SIDECAR_CARGO_FEATURES,
       "ort-coreml",
       "asr-transcribe-cpp",
-      "diarization-speakrs",
       "diarization-nemotron",
-      // Plainsong Plus is not launched: no build users get compiles it in.
-      "plainsong-plus",
     ]) {
       expect(cargoToml).toMatch(new RegExp(`^${feature} = \\[`, "m"));
-      expect(defaultLine).not.toContain(feature);
+      if (feature === "meeting-audio-16k") expect(defaultLine).toContain(`"${feature}"`);
+      else expect(defaultLine).not.toContain(feature);
     }
   });
 
-  it("leaves the transcribe.cpp spike out of every build users get", () => {
-    // The spike is evidence for a decision, not a shipped route: it must not
-    // be in `default` (checked above), and it must not be in the macOS
-    // release feature list either, or every DMG would carry a second ggml
-    // runtime and a second copy of the Parakeet weights' worth of code.
-    expect([...MACOS_SIDECAR_CARGO_FEATURES]).not.toContain(
+  it("includes the qualified native runtime in macOS builds with a pinned dependency", () => {
+    expect([...MACOS_SIDECAR_CARGO_FEATURES]).toContain(
       "asr-transcribe-cpp",
     );
     const cargoToml = readRepoFile("rust-sidecar/Cargo.toml");
@@ -81,13 +77,13 @@ describe("sidecar cargo feature set", () => {
     expect(dependency).toContain(`version = "${locked?.[1]}"`);
   });
 
-  it("keeps the spike's crates out of the release build's third-party notices", () => {
+  it("includes the native runtime's crates in the build's third-party notices", () => {
     // The spike's backend is named on the dependency line
     // (`features = ["metal"]`), NOT as a `whisper-gpu`-style
     // `transcribe-cpp?/metal` feature in `default`. A `dep?/feature` reference
     // from an enabled feature pulls the optional crate into the release resolve
     // graph even though nothing compiles it, and
-    // scripts/generate-third-party-notices.mjs resolves that same graph -- so
+    // scripts/generate-third-party-notices.ts resolves that same graph -- so
     // that shape added transcribe-cpp and transcribe-cpp-sys to the shipped
     // notices (532 -> 534 Rust packages) for crates the shipped binary does not
     // contain.
@@ -95,42 +91,48 @@ describe("sidecar cargo feature set", () => {
     // Any non-comment line naming `transcribe-cpp?/…` would be that shape.
     expect(cargoToml).not.toMatch(/^[^#\n]*"transcribe-cpp\?\/[^"]*"/m);
     const notices = readRepoFile("THIRD-PARTY-NOTICES.txt");
-    expect(notices).not.toContain("transcribe-cpp");
+    const dependencyIndex = notices.split("RUST DEPENDENCY INDEX")[1]?.split("RUST LICENSE DOCUMENTS")[0];
+    expect(dependencyIndex).toBeDefined();
+    expect(dependencyIndex).toMatch(/^transcribe-cpp\s/m);
+    expect(dependencyIndex).toMatch(/^transcribe-cpp-sys\s/m);
   });
 
   it("uses one feature list for the release build, cargo wrapper, notices, and CI", () => {
-    const sidecarBuild = readRepoFile("scripts/build-rust-sidecar.mjs");
+    const sidecarBuild = readRepoFile("scripts/build-rust-sidecar.ts");
     expect(sidecarBuild).toContain(
-      'import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.mjs";',
+      'import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.ts";',
     );
     expect(sidecarBuild).toMatch(
       /manifestPath,\s*\.\.\.sidecarCargoFeatureArgs\(\),\s*"--bin",\s*"plainsong-sidecar"/,
     );
 
-    const cargoWrapper = readRepoFile("scripts/cargo-sidecar.mjs");
+    const cargoWrapper = readRepoFile("scripts/cargo-sidecar.ts");
     expect(cargoWrapper).toContain(
-      'import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.mjs";',
+      'import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.ts";',
     );
     expect(cargoWrapper).toMatch(
-      /"--manifest-path",\s*manifestPath,\s*\.\.\.sidecarCargoFeatureArgs\(\)/,
+      /"--manifest-path",\s*manifestPath,/,
     );
 
-    const notices = readRepoFile("scripts/generate-third-party-notices.mjs");
+    expect(cargoWrapper).toContain("sidecarCargoFeatureArgs()");
+
+    const notices = readRepoFile("scripts/generate-third-party-notices.ts");
     expect(notices).toContain(
-      'import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.mjs";',
+      'import { sidecarCargoFeatureArgs } from "./sidecar-cargo-features.ts";',
     );
     expect(notices).toMatch(
-      /"metadata",[\s\S]*?cargoManifestPath,[\s\S]*?\.\.\.sidecarCargoFeatureArgs\(\),/,
+      /cargoMetadataFor\(cargoManifestPath, sidecarCargoFeatureArgs\(\)\)/,
     );
+    expect(notices).toMatch(/cargoMetadataFor\(textHelperManifestPath, \[\]\)/);
 
     const ci = fs.readFileSync(
       path.join(workspaceRoot, ".github/workflows/ci.yml"),
       "utf8",
     );
     expect(ci).toContain(
-      "node scripts/cargo-sidecar.mjs clippy --locked --all-targets -- -D warnings",
+      "bun scripts/cargo-sidecar.ts clippy --locked --all-targets -- -D warnings",
     );
-    expect(ci).toContain("node scripts/cargo-sidecar.mjs test --locked --lib --bins");
+    expect(ci).toContain("bun scripts/cargo-sidecar.ts test --locked --lib --bins");
     expect(ci).not.toMatch(/run: cargo (clippy|test) /);
   });
 });

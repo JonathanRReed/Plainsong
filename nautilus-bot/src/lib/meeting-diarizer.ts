@@ -2,6 +2,7 @@ import {
   isKnownAsrProvider,
   providerReturnsSpeakerLabels,
 } from "@/lib/asr-capabilities";
+import { speakerModelName } from "@/lib/speaker-models";
 import type { AsrProviderType, MeetingTranscriptDetails } from "@/types";
 
 /**
@@ -75,10 +76,10 @@ export function describeMeetingDiarizerDetail(
   }
 
   if (recorded.startsWith("plainsong:")) {
-    const model = recorded.slice("plainsong:".length);
-    return `Speakers were separated on this Mac by Plainsong's own diarizer (${model}). No audio left the machine for this step.`;
+    const model = speakerModelName(recorded.slice("plainsong:".length));
+    return `Speakers were told apart on this Mac${model ? ` with ${model}` : ""}. No audio left the machine for this step.`;
   }
 
   const name = PROVIDER_DIARIZER_NAMES[recorded as AsrProviderType] ?? recorded;
-  return `Speakers came back with the transcript from ${name}, which already had the audio. Plainsong did not run its own diarizer over it a second time.`;
+  return `Speakers came back with the transcript from ${name}, which already had the audio. Plainsong did not tell them apart again on this Mac.`;
 }

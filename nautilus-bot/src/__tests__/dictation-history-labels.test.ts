@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  dictationSearchMatchLabel,
   formatInsertionModeLabel,
   historyModeLabel,
   historyPipelineStageLabel,
@@ -10,6 +11,15 @@ import {
 } from "@/lib/dictation-history-labels";
 
 describe("dictation history labels", () => {
+  it.each([
+    ["raw", "Matched what Plainsong heard"],
+    ["final", "Matched the original result"],
+    ["corrected", "Matched saved corrections"],
+    ["future_field", "Matched dictation text"],
+  ])("labels a %s history search match", (field, expected) => {
+    expect(dictationSearchMatchLabel(field)).toBe(expected);
+  });
+
   it("formats insertion modes for live state and saved sessions", () => {
     expect(INSERTION_MODE_LABELS.clipboard_only).toBe("Clipboard only");
     expect(SESSION_INSERTION_MODE_LABELS.command_only).toBe("Command only");
@@ -82,6 +92,10 @@ describe("dictation history labels", () => {
 
   it("keeps pipeline stage labels readable", () => {
     expect(historyPipelineStageLabel("dictionary")).toBe("Dictionary");
+    expect(historyPipelineStageLabel("nearby_spelling")).toBe("Nearby spelling");
+    expect(historyPipelineStageLabel("vocabulary_spelling")).toBe(
+      "Name and term spelling",
+    );
     expect(historyPipelineStageLabel("spoken_correction")).toBe("Spoken correction");
     expect(historyPipelineStageLabel("mode_transform")).toBe("Mode transform");
     expect(historyPipelineStageLabel("mode_transform_fallback")).toBe(

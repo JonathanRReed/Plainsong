@@ -13,6 +13,7 @@ pnpm-debug.log*
 dist/
 build/
 target/
+*.tsbuildinfo
 
 # Environment variables
 .env
@@ -94,10 +95,6 @@ jspm_packages/
 # DynamoDB Local files
 .dynamodb/
 
-# Tauri specific
-src-tauri/target/
-src-tauri/Cargo.lock
-
 # Rust
 **/*.rs.bk
 
@@ -127,3 +124,14 @@ release/
 # Stray duplicate/rename-experiment checkouts of the app that have
 # accidentally ended up at the repo root (see git history 2026-06-22)
 /plainsong/
+
+# Cloudflare local state
+.wrangler/
+
+# Local adversarial QA logs and reports stay on disk, outside source control.
+/nautilus-bot/artifacts/adv-meeting-2026-10-23/
+/nautilus-bot/artifacts/adv-ui/
+
+# TypeScript output beside the maintained Vite configuration.
+/nautilus-bot/vite.config.js
+/nautilus-bot/vite.config.d.ts

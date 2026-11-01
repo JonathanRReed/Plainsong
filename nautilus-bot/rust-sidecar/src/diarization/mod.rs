@@ -16,29 +16,24 @@ use std::path::Path;
 /// `asr::whisper` / `asr::whisper_stub`.
 #[cfg(feature = "diarization")]
 mod embedder;
+#[cfg(all(test, target_os = "macos", feature = "diarization"))]
+#[path = "../asr/speech_survey.rs"]
+mod speech_survey;
 pub mod voiceprints;
+mod word_activity;
+pub use word_activity::SpeakerActivity;
+mod word_owner;
 
-/// EXPERIMENTAL alternative backend; see the module docs. Off by default.
-#[cfg(feature = "diarization-speakrs")]
-mod speakrs_backend;
+/// pyannote community-1, ported to Rust on ONNX Runtime.
+#[cfg(feature = "diarization")]
+pub(crate) mod community1;
 
-/// EXPERIMENTAL Nemotron 3 Diarization backend, eval harness only. Off by default.
+/// Optional experimental Nemotron 3 Diarization backend.
 #[cfg(feature = "diarization-nemotron")]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only the ignored eval harness calls it until the model has a pinned download"
-    )
-)]
 mod nemotron_backend;
 
 /// Turn normalization shared by the end-to-end backends above.
-#[cfg(any(
-    test,
-    feature = "diarization-speakrs",
-    feature = "diarization-nemotron"
-))]
+#[cfg(any(test, feature = "diarization"))]
 mod turns;
 
 /// Per-model ONNX session policy and input-length guard for the embedders.
@@ -54,6 +49,11 @@ pub mod segmentation;
 /// See `artifacts/qa/campplus-divergence-2026-09-02.md`.
 #[cfg(all(test, feature = "diarization"))]
 mod ort_parity;
+
+/// Test-only: Silero VAD and ECAPA-TDNN on the ONNX Runtime build with and
+/// without the Core ML execution provider linked.
+#[cfg(all(test, feature = "diarization"))]
+mod ort_build_equivalence;
 
 #[cfg(feature = "diarization")]
 pub use embedder::{
@@ -102,6 +102,9 @@ pub struct DiarizationResult {
     /// the result goes out of scope.
     #[serde(skip)]
     pub cluster_centroids: HashMap<String, Vec<f32>>,
+    /// Raw activity never leaves the local in-memory diarization pass.
+    #[serde(skip)]
+    pub word_activity: Option<SpeakerActivity>,
 }
 
 /// Diarization method used
@@ -172,11 +175,87 @@ pub enum SegmentationMode {
 /// re-checked. See `artifacts/qa/diarization-turn-floor-2026-09-03.md`.
 pub const DEFAULT_SEGMENTATION: SegmentationMode = SegmentationMode::FixedGrid;
 
+/// A refinement to the embedding pipeline's clustering, measured on real
+/// meetings (`artifacts/continuation-2026-10-20/opus-meeting/scores/`). It
+/// does not move a window or change what an embedding is, so the voiceprint
+/// thresholds still describe every window that is embedded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClusterRefinement {
+    /// Fold clusters holding less than this share of the embedded windows
+    /// into the nearest larger one.
+    pub minor_cluster_share: Option<f64>,
+    /// ...but never call a cluster of this many windows or more small,
+    /// however long the meeting.
+    pub minor_cluster_max_windows: usize,
+    /// ...and fold one of `minor_cluster_min_voice_windows` or more only
+    /// when its centroid is within this cosine distance of an established
+    /// voice. `None` folds every small cluster.
+    pub minor_cluster_fold_distance: Option<f32>,
+    /// Smaller clusters than this are folded whatever their distance.
+    pub minor_cluster_min_voice_windows: usize,
+}
+
+#[cfg(test)]
+mod refinement_default_tests {
+    #[test]
+    fn the_product_folds_clusters_under_one_percent_of_windows() {
+        assert_eq!(
+            super::DEFAULT_CLUSTER_REFINEMENT.minor_cluster_share,
+            Some(0.01)
+        );
+    }
+
+    #[test]
+    fn the_product_keeps_a_distinct_voice_of_ten_windows_or_three_far_ones() {
+        let refinement = super::DEFAULT_CLUSTER_REFINEMENT;
+        assert_eq!(refinement.minor_cluster_max_windows, 10);
+        assert_eq!(refinement.minor_cluster_min_voice_windows, 3);
+        assert_eq!(refinement.minor_cluster_fold_distance, Some(0.70));
+    }
+}
+
+/// The refinement the product runs: clusters under 1% of the embedded
+/// windows join the nearest larger one.
+///
+/// Measured on five AMI meetings (14-39 min, four people), headset mix and
+/// one far-field microphone, with GGUF Parakeet word timings: the shipped
+/// clusterer reported 60-283 speakers per meeting; folding at 1% leaves 3-6.
+/// The share of transcript words carrying the right speaker rose from 77.8%
+/// to 89.0% (headset) and 51.1% to 85.8% (far field), cpWER fell from 52.6%
+/// to 34.2% and 92.5% to 41.4%, and words left without a speaker fell from
+/// 9.7% to 6.4% and 18.9% to 7.4%. 2% was no better and 5% started merging
+/// real people. On the synthetic two- and three-speaker fixtures confusion
+/// stays at zero; the cost is windows of silence that the turn floor used to
+/// drop now carrying a label (mean false alarm 25.8% to 29.1%), which no
+/// transcript word sits in. Per-meeting scores:
+/// `artifacts/continuation-2026-10-20/opus-meeting/scores/` (`da.*` shipped,
+/// `dabs1.*` 1%, `dabs.*` 2%, `dabs5.*` 5%, `syn_*` synthetic).
+///
+/// The share alone also folded a real brief speaker: in a 75-minute meeting
+/// 1% is about 45 windows, so a guest's 10-second sentence (9 windows,
+/// 0.75 from every other voice) became one of the hosts. Two limits keep such
+/// a voice. A cluster of 10 windows or more is never small, and a small one of
+/// 3 windows or more folds only when its centroid is within 0.70 of an
+/// established voice; one or two windows always fold, because a fifth of that
+/// tail sits further than 0.70 from everyone and sparing it brought back the
+/// dozens of speakers. With both limits the inserted 10- and 15-second guests
+/// (`derived/GUEST10`, `GUEST15`) keep their own label on every word, and the
+/// AMI means barely move: right speaker 89.0 -> 89.1% (headset) and 85.8 ->
+/// 85.7% (far field), cpWER 34.2 -> 34.3% and 41.4 -> 41.5%, speakers found
+/// 3-6 as before (`p12new.*` against `dfinal.*`).
+pub const DEFAULT_CLUSTER_REFINEMENT: ClusterRefinement = ClusterRefinement {
+    minor_cluster_share: Some(0.01),
+    minor_cluster_max_windows: 10,
+    minor_cluster_fold_distance: Some(0.70),
+    minor_cluster_min_voice_windows: 3,
+};
+
 /// Speaker diarization engine
 pub struct DiarizationEngine {
     speakers: HashMap<String, Speaker>,
     model_id: String,
     segmentation: SegmentationMode,
+    refinement: ClusterRefinement,
 }
 
 impl DiarizationEngine {
@@ -190,7 +269,16 @@ impl DiarizationEngine {
             speakers: HashMap::new(),
             model_id: model_id.to_string(),
             segmentation: DEFAULT_SEGMENTATION,
+            refinement: DEFAULT_CLUSTER_REFINEMENT,
         }
+    }
+
+    /// Override the cluster refinements. The meeting evaluation harness uses
+    /// this to compare them on the same audio; the product takes
+    /// [`DEFAULT_CLUSTER_REFINEMENT`].
+    pub fn with_refinement(mut self, refinement: ClusterRefinement) -> Self {
+        self.refinement = refinement;
+        self
     }
 
     /// Override how windows are cut. Only the evaluation harness uses this;
@@ -236,6 +324,7 @@ impl DiarizationEngine {
                 duration,
                 method: DiarizationMethod::Embedding,
                 cluster_centroids: HashMap::new(),
+                word_activity: None,
             });
         }
 
@@ -247,7 +336,7 @@ impl DiarizationEngine {
 
         if embeddings.is_empty() {
             return Err(anyhow::anyhow!(
-                "Diarization model returned no embeddings; cannot infer speakers."
+                "No usable speech embeddings; cannot infer speakers."
             ));
         }
 
@@ -258,11 +347,33 @@ impl DiarizationEngine {
         // The per-segment embeddings die with this closure. Only the per
         // cluster mean survives, and only in memory: whether any of it is
         // written down is the caller's decision, gated on the opt-in setting.
+        let refinement = self.refinement;
         let (smoothed, label_centroids) = tokio::task::spawn_blocking(move || {
             let clusterer = EmbeddingClusterer::new();
-            let labels = clusterer.cluster(&embeddings);
+            let mut labels = clusterer.cluster(&embeddings);
+            let mut moved = vec![false; labels.len()];
+            if let Some(share) = refinement.minor_cluster_share {
+                (labels, moved) = clusterer.absorb_minor_clusters(
+                    &embeddings,
+                    &labels,
+                    embedder::MinorClusterFold {
+                        min_share: share,
+                        max_windows: refinement.minor_cluster_max_windows,
+                        max_distance: refinement.minor_cluster_fold_distance,
+                        min_voice_windows: refinement.minor_cluster_min_voice_windows,
+                    },
+                );
+            }
+            // A voiceprint describes a voice by the windows that clustered
+            // with it on their own; windows folded in from a minor cluster
+            // carry a speaker label but stay out of its centroid.
             let mut grouped: HashMap<usize, Vec<Vec<f32>>> = HashMap::new();
-            for (label, (_, _, embedding)) in labels.iter().zip(embeddings.iter()) {
+            for ((label, (_, _, embedding)), moved) in
+                labels.iter().zip(embeddings.iter()).zip(moved.iter())
+            {
+                if *moved {
+                    continue;
+                }
                 grouped
                     .entry(*label)
                     .or_default()
@@ -274,10 +385,8 @@ impl DiarizationEngine {
                     voiceprints::centroid_of(&samples).map(|centroid| (label, centroid))
                 })
                 .collect();
-            (
-                clusterer.smooth_segments(&segments_for_clustering, &labels),
-                centroids,
-            )
+            let smoothed = clusterer.smooth_segments(&segments_for_clustering, &labels);
+            (smoothed, centroids)
         })
         .await
         .context("Failed to join diarization clustering task")?;
@@ -329,6 +438,7 @@ impl DiarizationEngine {
             duration,
             method: DiarizationMethod::Embedding,
             cluster_centroids,
+            word_activity: None,
         })
     }
 
@@ -383,12 +493,34 @@ impl DiarizationEngine {
     }
 
     /// Merge diarization results with transcript segments.
-    /// Splits transcript segments at diarization boundaries while keeping any
-    /// uncovered speech explicitly anonymous (`speaker_id: None`).
+    /// Splits multi-word segments at diarization boundaries while keeping any
+    /// uncovered speech explicitly anonymous (`speaker_id: None`). A
+    /// single-word row keeps its text and interval and gets the speaker that
+    /// owns its midpoint (`word_owner::owner_at`).
     pub fn merge_with_transcript(
         &self,
         diarization: &DiarizationResult,
         transcript_segments: &mut Vec<crate::models::TranscriptSegment>,
+    ) {
+        self.merge_internal(diarization, transcript_segments, false);
+    }
+
+    /// As [`Self::merge_with_transcript`], and a measured word whose midpoint
+    /// falls between turns may take its speaker from the turns or activity
+    /// evidence around it (`word_owner::uncovered_word_speaker`).
+    pub fn merge_with_measured_words(
+        &self,
+        diarization: &DiarizationResult,
+        transcript_segments: &mut Vec<crate::models::TranscriptSegment>,
+    ) {
+        self.merge_internal(diarization, transcript_segments, true);
+    }
+
+    fn merge_internal(
+        &self,
+        diarization: &DiarizationResult,
+        transcript_segments: &mut Vec<crate::models::TranscriptSegment>,
+        measured_words: bool,
     ) {
         tracing::debug!(
             "Merging {} diarization segments with {} transcript segments",
@@ -420,6 +552,30 @@ impl DiarizationEngine {
             if words.is_empty() || !total_duration.is_finite() || total_duration <= 0.0 {
                 let mut preserved = transcript_segment.clone();
                 preserved.speaker_id = None;
+                new_segments.push(preserved);
+                continue;
+            }
+
+            // A single aligned word is already an atomic timed row. Speaker
+            // boundaries must not replace its source identity or measured
+            // interval; only its speaker is decided, by `word_owner`.
+            if words.len() == 1 {
+                let midpoint = transcript_segment.start_time + total_duration / 2.0;
+                let covered = sorted_diarization
+                    .iter()
+                    .any(|segment| segment.start_time <= midpoint && midpoint < segment.end_time);
+                let speaker = if covered || !measured_words {
+                    word_owner::owner_at(&sorted_diarization, midpoint)
+                } else {
+                    word_owner::uncovered_word_speaker(
+                        &sorted_diarization,
+                        diarization.word_activity.as_ref(),
+                        transcript_segment.start_time,
+                        transcript_segment.end_time,
+                    )
+                };
+                let mut preserved = transcript_segment.clone();
+                preserved.speaker_id = speaker.map(str::to_owned);
                 new_segments.push(preserved);
                 continue;
             }
@@ -532,21 +688,25 @@ impl Default for DiarizationEngine {
 /// The embedding model every install starts on and every fallback lands on.
 pub const DEFAULT_EMBEDDING_MODEL_ID: &str = "ecapa_tdnn_speaker";
 
+/// ERes2NetV2 is turned off while its license is unresolved: the mirror its
+/// file is pinned to declares none (`scripts/model-weights-manifest.mjs`). It
+/// is not offered, downloaded or run, even when an earlier download is still
+/// on disk; Settings > Meetings > Speaker model offers to remove that file.
+pub(crate) const LICENSE_BLOCKED_SPEAKER_MODEL_ID: &str = "eres2netv2_speaker";
+
 /// Label for a diarization model, as the picker names it.
 ///
 /// One table so the picker, the readiness probe and the fallback notice cannot
 /// name the same model three different ways. An id this build does not know is
 /// returned as-is rather than given an invented name.
 pub fn model_label(model_id: &str) -> &str {
-    #[cfg(feature = "diarization-speakrs")]
-    if model_id == crate::download::SPEAKRS_MODEL_ID {
-        return "pyannote community-1 (experimental)";
-    }
     match model_id {
+        crate::download::COMMUNITY1_MODEL_ID => "pyannote community-1",
+        crate::download::NEMOTRON_DIARIZATION_MODEL_ID => "Nemotron 3 Diarization (experimental)",
         "ecapa_tdnn_speaker" => "ECAPA-TDNN 512",
         "resnet34_speaker" => "ResNet34",
         "campplus_speaker" => "CAM++",
-        "eres2netv2_speaker" => "ERes2NetV2 (int8)",
+        "eres2netv2_speaker" => "ERes2NetV2",
         other => other,
     }
 }
@@ -580,8 +740,11 @@ pub(crate) fn diarization_models_dir() -> std::path::PathBuf {
 /// Takes the directory so the rule is testable against a fixture instead of the
 /// user's own data directory.
 pub(crate) fn is_embedding_model_available_in(models_dir: &Path, model_id: &str) -> bool {
+    if model_id == LICENSE_BLOCKED_SPEAKER_MODEL_ID {
+        return false;
+    }
     let artifact_id = embedding_model_artifact_id(model_id);
-    crate::download::is_diarization_model_artifact_trusted(
+    crate::download::is_diarization_model_artifact_installed(
         artifact_id,
         &models_dir.join(format!("{artifact_id}.onnx")),
     )
@@ -590,16 +753,24 @@ pub(crate) fn is_embedding_model_available_in(models_dir: &Path, model_id: &str)
 /// Whether the diarization model the user selected can actually run right now.
 ///
 /// Per-model because the backends have different readiness conditions: the
-/// embedding backend needs one verified `.onnx`, the experimental speakrs
-/// backend needs a ten-file bundle. Callers that gate an automatic pass on
+/// embedding backend needs one verified `.onnx`, pyannote community-1 needs
+/// its six-file bundle. Callers that gate an automatic pass on
 /// "is diarization available" must ask about the model they are about to run,
 /// not about the default one -- this used to probe ECAPA-TDNN whatever the
 /// argument said, so a user who picked CAM++ without downloading it passed the
 /// gate and then lost speaker labels on every meeting.
 pub fn is_model_available(model_id: &str) -> bool {
-    #[cfg(feature = "diarization-speakrs")]
-    if model_id == crate::download::SPEAKRS_MODEL_ID {
-        return speakrs_backend::is_available();
+    if model_id == crate::download::NEMOTRON_DIARIZATION_MODEL_ID {
+        #[cfg(feature = "diarization-nemotron")]
+        return nemotron_backend::is_available();
+        #[cfg(not(feature = "diarization-nemotron"))]
+        return false;
+    }
+    if model_id == crate::download::COMMUNITY1_MODEL_ID {
+        #[cfg(feature = "diarization")]
+        return community1::is_available();
+        #[cfg(not(feature = "diarization"))]
+        return false;
     }
     // `cfg!` rather than `#[cfg]`: a build without the feature has no ONNX
     // runtime and no clusterer compiled in, so nothing it finds on disk can
@@ -615,29 +786,90 @@ pub fn is_model_available(model_id: &str) -> bool {
 pub struct ResolvedDiarizationModel {
     /// The id to hand to [`run_diarization_with_model`].
     pub model_id: String,
-    /// Copy for the meeting when the picked model was not on disk and the
-    /// default ran in its place. `None` when the picked model ran.
+    /// Copy for the meeting when the picked model was not on disk and another
+    /// downloaded one ran in its place. `None` when the picked model ran.
     pub fallback_notice: Option<String>,
 }
 
-/// Copy for the one case where the picked model is not downloaded and the
-/// default runs instead: state, cause, and the next action, in that order.
-pub fn model_fallback_notice(requested_id: &str, ran_id: &str) -> String {
+/// Where the user downloads or changes the speaker model, named the way the
+/// Settings window labels it.
+pub const SPEAKER_MODEL_SETTINGS_PATH: &str = "Settings > Meetings > Speaker model";
+
+/// The order in which already-downloaded models stand in for a picked one
+/// that is not on disk: community-1 first, then the long-standing default,
+/// then the other embedders, and the experimental Nemotron last because it
+/// computes no voice signatures. Nothing in this list is ever downloaded to
+/// fill the gap -- a meeting reaches the network only when the user asks.
+const FALLBACK_ORDER: [&str; 5] = [
+    crate::download::COMMUNITY1_MODEL_ID,
+    DEFAULT_EMBEDDING_MODEL_ID,
+    "resnet34_speaker",
+    "campplus_speaker",
+    crate::download::NEMOTRON_DIARIZATION_MODEL_ID,
+];
+
+/// The download size of a speaker model, as Finder would show it (decimal
+/// MB), for the buttons that offer the download. `None` for an id this build
+/// does not offer.
+pub fn model_download_size(model_id: &str) -> Option<&'static str> {
+    match model_id {
+        // Six pinned release files total 32,753,512 bytes (decimal MB).
+        // See docs/evals/beta7-evidence.md for the staged-file calculation.
+        crate::download::COMMUNITY1_MODEL_ID => Some("33 MB"),
+        crate::download::NEMOTRON_DIARIZATION_MODEL_ID => Some("400 MB"),
+        "ecapa_tdnn_speaker" => Some("25 MB"),
+        "resnet34_speaker" => Some("30 MB"),
+        "campplus_speaker" => Some("29 MB"),
+        _ => None,
+    }
+}
+
+/// Copy for the case where the picked model is not downloaded and another
+/// downloaded one ran instead: one sentence for what happened, one for what
+/// to do. A meeting says "the speaker model", as its download button does;
+/// the models' own names belong to the Settings picker, and the meeting
+/// records which one ran (`plainsong:<id>`).
+pub fn model_fallback_notice(requested_id: &str) -> String {
+    if requested_id == LICENSE_BLOCKED_SPEAKER_MODEL_ID {
+        format!(
+            "ERes2NetV2 is turned off while its license is unresolved, so this meeting used another speaker model on this Mac. Choose one in {}.",
+            SPEAKER_MODEL_SETTINGS_PATH
+        )
+    } else if known_diarization_model_id(requested_id) {
+        format!(
+            "The speaker model you chose isn't downloaded, so this meeting used another one on this Mac. Download it in {}.",
+            SPEAKER_MODEL_SETTINGS_PATH
+        )
+    } else {
+        format!(
+            "The speaker model you chose isn't part of this version of Plainsong, so this meeting used another one on this Mac. Choose a speaker model in {}.",
+            SPEAKER_MODEL_SETTINGS_PATH
+        )
+    }
+}
+
+/// Copy for a meeting saved without speaker labels because no speaker model
+/// is on this Mac at all. The meeting itself offers the download.
+pub fn no_speaker_model_notice(requested_id: &str) -> String {
+    let offered = if known_diarization_model_id(requested_id) {
+        requested_id
+    } else {
+        DEFAULT_EMBEDDING_MODEL_ID
+    };
+    let size = model_download_size(offered)
+        .map(|size| format!(" ({size})"))
+        .unwrap_or_default();
     format!(
-        "Speaker labels used {} because {} is not downloaded. Download it under \
-         Settings, Speaker separation model, to use it.",
-        model_label(ran_id),
-        model_label(requested_id)
+        "No speaker model is downloaded, so this meeting was saved without speaker labels. Open the meeting to download the speaker model{size}, then label the speakers."
     )
 }
 
-/// Pick the model a run should use given what is on disk.
+/// Pick the model a run should use given what is on disk. Never downloads.
 ///
-/// `None` means nothing can run: neither the picked model nor the default is
-/// downloaded, so the caller must not claim speaker labels at all. Falling back
-/// is better than the previous behaviour (an error logged at warn level and a
-/// meeting with no speakers) only because the substitution is reported -- a
-/// silent swap would be a capability claim the user never agreed to.
+/// `None` means nothing can run: neither the picked model nor any other
+/// speaker model is downloaded, so the caller must not claim speaker labels at
+/// all. A substitution is always reported -- a silent swap would be a
+/// capability claim the user never agreed to.
 pub fn resolve_model_for_run(requested_id: &str) -> Option<ResolvedDiarizationModel> {
     resolve_model_for_run_with(requested_id, is_model_available)
 }
@@ -652,39 +884,34 @@ fn resolve_model_for_run_with(
     // unknown id answers for ECAPA-TDNN. Do not let that implementation detail
     // make an unknown selection look as though it ran unchanged: only ids this
     // build actually offers may take the no-substitution branch.
-    let requested_is_known = known_diarization_model_id(requested_id);
-    if requested_is_known && is_available(requested_id) {
+    if known_diarization_model_id(requested_id) && is_available(requested_id) {
         return Some(ResolvedDiarizationModel {
             model_id: requested_id.to_string(),
             fallback_notice: None,
         });
     }
-    if requested_id != DEFAULT_EMBEDDING_MODEL_ID && is_available(DEFAULT_EMBEDDING_MODEL_ID) {
-        return Some(ResolvedDiarizationModel {
-            model_id: DEFAULT_EMBEDDING_MODEL_ID.to_string(),
-            fallback_notice: Some(model_fallback_notice(
-                requested_id,
-                DEFAULT_EMBEDDING_MODEL_ID,
-            )),
-        });
-    }
-    None
+    FALLBACK_ORDER
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != requested_id)
+        .find(|candidate| known_diarization_model_id(candidate) && is_available(candidate))
+        .map(|ran| ResolvedDiarizationModel {
+            model_id: ran.to_string(),
+            fallback_notice: Some(model_fallback_notice(requested_id)),
+        })
 }
 
 fn known_diarization_model_id(model_id: &str) -> bool {
-    if embedding_model_artifact_id(model_id) == model_id {
-        return true;
+    if model_id == LICENSE_BLOCKED_SPEAKER_MODEL_ID {
+        return false;
     }
-
-    #[cfg(feature = "diarization-speakrs")]
-    {
-        model_id == crate::download::SPEAKRS_MODEL_ID
+    if model_id == crate::download::NEMOTRON_DIARIZATION_MODEL_ID {
+        return cfg!(feature = "diarization-nemotron");
     }
-
-    #[cfg(not(feature = "diarization-speakrs"))]
-    {
-        false
+    if model_id == crate::download::COMMUNITY1_MODEL_ID {
+        return cfg!(feature = "diarization");
     }
+    embedding_model_artifact_id(model_id) == model_id
 }
 
 /// Run diarization with a specific speaker embedding model.
@@ -692,10 +919,43 @@ pub async fn run_diarization_with_model(
     audio_path: &Path,
     model_id: &str,
 ) -> Result<DiarizationResult> {
-    #[cfg(feature = "diarization-speakrs")]
-    if model_id == crate::download::SPEAKRS_MODEL_ID {
-        let duration = get_audio_duration(audio_path).await?;
-        return speakrs_backend::run(audio_path, duration).await;
+    run_diarization_with_model_refined(audio_path, model_id, DEFAULT_CLUSTER_REFINEMENT).await
+}
+
+/// [`run_diarization_with_model`] with explicit cluster refinements; they
+/// apply to the embedding backends only.
+pub async fn run_diarization_with_model_refined(
+    audio_path: &Path,
+    model_id: &str,
+    refinement: ClusterRefinement,
+) -> Result<DiarizationResult> {
+    if model_id == crate::download::NEMOTRON_DIARIZATION_MODEL_ID {
+        #[cfg(feature = "diarization-nemotron")]
+        {
+            if !nemotron_backend::is_available() {
+                return Err(anyhow::anyhow!(
+                    "Nemotron diarization is not downloaded and verified."
+                ));
+            }
+            let duration = get_audio_duration(audio_path).await?;
+            return nemotron_backend::run(audio_path, duration, nemotron_backend::model_path())
+                .await;
+        }
+        #[cfg(not(feature = "diarization-nemotron"))]
+        return Err(anyhow::anyhow!(
+            "Nemotron diarization is not compiled into this build."
+        ));
+    }
+    if model_id == crate::download::COMMUNITY1_MODEL_ID {
+        #[cfg(feature = "diarization")]
+        {
+            let duration = get_audio_duration(audio_path).await?;
+            return community1::run(audio_path, duration).await;
+        }
+        #[cfg(not(feature = "diarization"))]
+        return Err(anyhow::anyhow!(
+            "pyannote community-1 is not compiled into this build."
+        ));
     }
 
     if !is_model_available(model_id) {
@@ -706,7 +966,7 @@ pub async fn run_diarization_with_model(
     }
 
     let duration = get_audio_duration(audio_path).await?;
-    let mut engine = DiarizationEngine::with_model(model_id);
+    let mut engine = DiarizationEngine::with_model(model_id).with_refinement(refinement);
     engine.diarize(audio_path, duration).await
 }
 
@@ -725,12 +985,22 @@ async fn get_audio_duration(audio_path: &Path) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "diarization-nemotron")]
+    #[test]
+    fn ready_nemotron_selection_keeps_its_own_route() {
+        let id = crate::download::NEMOTRON_DIARIZATION_MODEL_ID;
+        let resolved = resolve_model_for_run_with(id, |candidate| candidate == id)
+            .expect("ready selected route");
+        assert_eq!(resolved.model_id, id);
+        assert_eq!(resolved.fallback_notice, None);
+    }
     use std::path::PathBuf;
 
     /// Install `model_id` into `models_dir` the way a completed download leaves
-    /// it: the artifact plus the integrity receipt keyed to its pinned digest.
-    /// The bytes are a stand-in -- the receipt records size and mtime against
-    /// the pin, so readiness is decided without re-hashing megabytes here.
+    /// it: the artifact, remembered as verified against its pinned digest for
+    /// this session. The bytes are a stand-in, so nothing hashes megabytes
+    /// here.
     async fn install_embedding_model(models_dir: &Path, model_id: &str) {
         let sha256 = crate::download::diarization_model_expected_sha256(model_id)
             .expect("a pinned diarization model");
@@ -739,9 +1009,9 @@ mod tests {
         tokio::fs::write(&path, format!("fixture-{model_id}"))
             .await
             .expect("write model");
-        crate::download::record_model_integrity_receipt_for_tests(&path, sha256)
+        crate::download::mark_model_verified_for_tests(&path, sha256)
             .await
-            .expect("receipt");
+            .expect("mark test model verified");
     }
 
     fn scratch_models_dir(name: &str) -> PathBuf {
@@ -826,19 +1096,54 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_selected_model_runs_the_default_and_says_so() {
+    fn license_blocked_model_never_runs_even_when_downloaded() {
+        let blocked = LICENSE_BLOCKED_SPEAKER_MODEL_ID;
+        assert!(resolve_model_for_run_with(blocked, |id| id == blocked).is_none());
+        assert!(resolve_model_for_run_with("campplus_speaker", |id| id == blocked).is_none());
+        let resolved = resolve_model_for_run_with(blocked, |id| {
+            id == blocked || id == DEFAULT_EMBEDDING_MODEL_ID
+        })
+        .expect("downloaded ECAPA replaces the blocked model");
+        assert_eq!(resolved.model_id, DEFAULT_EMBEDDING_MODEL_ID);
+        assert_eq!(
+            resolved.fallback_notice.as_deref(),
+            Some("ERes2NetV2 is turned off while its license is unresolved, so this meeting used another speaker model on this Mac. Choose one in Settings > Meetings > Speaker model.")
+        );
+        #[cfg(feature = "diarization")]
+        assert_eq!(
+            resolve_model_for_run_with(blocked, |_| true)
+                .unwrap()
+                .model_id,
+            crate::download::COMMUNITY1_MODEL_ID
+        );
+        assert_eq!(model_download_size(blocked), None);
+        assert_eq!(
+            no_speaker_model_notice(blocked),
+            no_speaker_model_notice(DEFAULT_EMBEDDING_MODEL_ID)
+        );
+        assert_ne!(
+            crate::permissions::diarization_model_plan(blocked).selected_model_id,
+            blocked
+        );
+        assert!(!crate::permissions::list_diarization_models()
+            .iter()
+            .any(|model| model.id == blocked));
+    }
+
+    #[test]
+    fn a_missing_selected_model_runs_a_downloaded_one_and_says_so() {
         let only_default = |id: &str| id == DEFAULT_EMBEDDING_MODEL_ID;
 
         let resolved = resolve_model_for_run_with("campplus_speaker", only_default)
             .expect("the default can still run");
         assert_eq!(resolved.model_id, DEFAULT_EMBEDDING_MODEL_ID);
-        let notice = resolved
-            .fallback_notice
-            .expect("a substitution is reported");
-        assert!(notice.contains("CAM++"), "{notice}");
-        assert!(notice.contains("ECAPA-TDNN 512"), "{notice}");
-        assert!(notice.contains("not downloaded"), "{notice}");
-        assert!(notice.contains("Settings"), "{notice}");
+        assert_eq!(
+            resolved.fallback_notice.as_deref(),
+            Some(
+                "The speaker model you chose isn't downloaded, so this meeting used another one \
+                 on this Mac. Download it in Settings > Meetings > Speaker model."
+            )
+        );
     }
 
     #[test]
@@ -850,15 +1155,118 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_model_id_runs_the_default_and_says_so() {
-        let resolved = resolve_model_for_run_with("retired_speaker_model", |_| true)
+    fn an_unknown_model_id_runs_a_downloaded_one_and_says_so() {
+        let only_default = |id: &str| id == DEFAULT_EMBEDDING_MODEL_ID;
+        let resolved = resolve_model_for_run_with("retired_speaker_model", only_default)
             .expect("the default can still run");
         assert_eq!(resolved.model_id, DEFAULT_EMBEDDING_MODEL_ID);
         let notice = resolved
             .fallback_notice
             .expect("normalizing an unknown id is a reported substitution");
-        assert!(notice.contains("retired_speaker_model"), "{notice}");
-        assert!(notice.contains("ECAPA-TDNN 512"), "{notice}");
+        assert!(
+            notice.starts_with(
+                "The speaker model you chose isn't part of this version of Plainsong, so this meeting used another one on this Mac."
+            ),
+            "{notice}"
+        );
+    }
+
+    /// community-1 first, then ECAPA, then whatever else is on disk; never the
+    /// picked model itself, and never a model that is not downloaded.
+    #[test]
+    fn fallback_prefers_community1_then_ecapa_then_any_downloaded_model() {
+        let on_disk = |ids: &'static [&'static str]| move |id: &str| ids.contains(&id);
+
+        #[cfg(feature = "diarization")]
+        {
+            let resolved = resolve_model_for_run_with(
+                "campplus_speaker",
+                on_disk(&[
+                    DEFAULT_EMBEDDING_MODEL_ID,
+                    crate::download::COMMUNITY1_MODEL_ID,
+                ]),
+            )
+            .unwrap();
+            assert_eq!(resolved.model_id, crate::download::COMMUNITY1_MODEL_ID);
+        }
+
+        let resolved = resolve_model_for_run_with(
+            crate::download::COMMUNITY1_MODEL_ID,
+            on_disk(&["resnet34_speaker", DEFAULT_EMBEDDING_MODEL_ID]),
+        )
+        .unwrap();
+        assert_eq!(resolved.model_id, DEFAULT_EMBEDDING_MODEL_ID);
+
+        let resolved = resolve_model_for_run_with(
+            crate::download::COMMUNITY1_MODEL_ID,
+            on_disk(&["resnet34_speaker"]),
+        )
+        .unwrap();
+        assert_eq!(resolved.model_id, "resnet34_speaker");
+        #[cfg(feature = "diarization")]
+        assert_eq!(
+            resolved.fallback_notice.as_deref(),
+            Some(
+                "The speaker model you chose isn't downloaded, so this meeting used another one \
+                 on this Mac. Download it in Settings > Meetings > Speaker model."
+            )
+        );
+    }
+
+    /// The note a meeting saved without speakers carries offers the picked
+    /// model's download by its size, or the default's for an id this build
+    /// lacks, and calls it "the speaker model" as the meeting's button does.
+    #[test]
+    fn no_speaker_model_notice_offers_the_speaker_model_by_size() {
+        assert_eq!(
+            no_speaker_model_notice(DEFAULT_EMBEDDING_MODEL_ID),
+            "No speaker model is downloaded, so this meeting was saved without speaker labels. \
+             Open the meeting to download the speaker model (25 MB), then label the speakers."
+        );
+        assert!(no_speaker_model_notice("retired_speaker_model").contains("speaker model (25 MB)"));
+        #[cfg(feature = "diarization")]
+        assert!(
+            no_speaker_model_notice(crate::download::COMMUNITY1_MODEL_ID)
+                .contains("the speaker model (33 MB)")
+        );
+    }
+
+    /// Resolving never reaches the network: there is no download hook to call,
+    /// and a meeting with nothing on disk resolves to `None` on its own.
+    #[test]
+    fn resolving_for_a_meeting_never_downloads() {
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let probe = |id: &str| {
+            asked.borrow_mut().push(id.to_string());
+            false
+        };
+        assert_eq!(
+            resolve_model_for_run_with(crate::download::COMMUNITY1_MODEL_ID, probe),
+            None
+        );
+        // Every probe is a disk check of a model this build offers.
+        assert!(asked
+            .borrow()
+            .iter()
+            .all(|id| known_diarization_model_id(id)));
+    }
+
+    /// The automatic meeting pass has no path to the network for speaker
+    /// models: downloads happen only from Settings, the first-run meeting
+    /// step and the meeting's own Download button, each a click.
+    #[test]
+    fn the_meeting_pipeline_never_downloads_a_speaker_model() {
+        let pipeline = include_str!("../meeting_pipeline.rs");
+        for forbidden in [
+            "DownloadManager",
+            "download_diarization_model_by_id",
+            "download_community1_bundle",
+        ] {
+            assert!(
+                !pipeline.contains(forbidden),
+                "meeting_pipeline.rs uses {forbidden}"
+            );
+        }
     }
 
     /// Nothing downloaded means no speaker labels, not a quiet substitution of
@@ -883,7 +1291,7 @@ mod tests {
         assert_eq!(model_label("ecapa_tdnn_speaker"), "ECAPA-TDNN 512");
         assert_eq!(model_label("resnet34_speaker"), "ResNet34");
         assert_eq!(model_label("campplus_speaker"), "CAM++");
-        assert_eq!(model_label("eres2netv2_speaker"), "ERes2NetV2 (int8)");
+        assert_eq!(model_label("eres2netv2_speaker"), "ERes2NetV2");
         // No invented name for an id this build does not know.
         assert_eq!(model_label("not_a_real_model"), "not_a_real_model");
     }
@@ -1083,6 +1491,154 @@ mod tests {
     }
 
     #[test]
+    fn merge_preserves_single_word_bounds_and_source_identity() {
+        let diarization = DiarizationResult {
+            segments: vec![SpeakerSegment {
+                start_time: 1.2,
+                end_time: 1.8,
+                speaker_id: "S1".into(),
+                confidence: 0.9,
+            }],
+            speakers: Vec::new(),
+            duration: 3.0,
+            method: DiarizationMethod::Model,
+            cluster_centroids: HashMap::new(),
+            word_activity: None,
+        };
+        let original = crate::models::TranscriptSegment {
+            id: "measured-word".into(),
+            start_time: 1.0,
+            end_time: 2.0,
+            text: "twenty".into(),
+            speaker_id: None,
+            confidence: 0.88,
+        };
+        let mut transcript = vec![original.clone()];
+        DiarizationEngine::new().merge_with_transcript(&diarization, &mut transcript);
+        assert_eq!(transcript.len(), 1);
+        assert_eq!(transcript[0].id, original.id);
+        assert_eq!(transcript[0].start_time, original.start_time);
+        assert_eq!(transcript[0].end_time, original.end_time);
+        assert_eq!(transcript[0].text, original.text);
+        assert_eq!(transcript[0].confidence, original.confidence);
+        assert_eq!(transcript[0].speaker_id.as_deref(), Some("S1"));
+    }
+
+    #[test]
+    fn merge_gives_a_contested_word_to_the_deeper_turn_and_leaves_a_contested_gap_anonymous() {
+        for (turns, expected, measured) in [
+            // Midpoint 1.5 is 0.5 s inside S1's turn and 0.3 s inside S2's.
+            (vec![(1.0, 2.0, "S1"), (1.2, 1.8, "S2")], Some("S1"), false),
+            (vec![(1.0, 2.0, "S1"), (1.2, 1.8, "S2")], Some("S1"), true),
+            // Identical turns of two speakers: an exact tie.
+            (vec![(0.5, 2.5, "S1"), (0.5, 2.5, "S2")], None, true),
+            // Midpoint in a gap the word shares with two speakers' turns.
+            (vec![(1.0, 1.4, "S1"), (1.6, 2.0, "S2")], None, false),
+            (vec![(1.0, 1.4, "S1"), (1.6, 2.0, "S2")], None, true),
+        ] {
+            let diarization = DiarizationResult {
+                segments: turns
+                    .into_iter()
+                    .map(|(start_time, end_time, id)| SpeakerSegment {
+                        start_time,
+                        end_time,
+                        speaker_id: id.into(),
+                        confidence: 0.9,
+                    })
+                    .collect(),
+                speakers: Vec::new(),
+                duration: 3.0,
+                method: DiarizationMethod::Model,
+                cluster_centroids: HashMap::new(),
+                word_activity: None,
+            };
+            let mut transcript = vec![crate::models::TranscriptSegment {
+                id: "word".into(),
+                start_time: 1.0,
+                end_time: 2.0,
+                text: "twenty".into(),
+                speaker_id: Some("old".into()),
+                confidence: 0.88,
+            }];
+            if measured {
+                DiarizationEngine::new().merge_with_measured_words(&diarization, &mut transcript);
+            } else {
+                DiarizationEngine::new().merge_with_transcript(&diarization, &mut transcript);
+            }
+            assert_eq!(transcript.len(), 1);
+            assert_eq!(transcript[0].id, "word");
+            assert_eq!(transcript[0].text, "twenty");
+            assert_eq!(transcript[0].start_time, 1.0);
+            assert_eq!(transcript[0].end_time, 2.0);
+            assert_eq!(transcript[0].confidence, 0.88);
+            assert_eq!(transcript[0].speaker_id.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn a_measured_word_between_turns_takes_the_one_speaker_beside_it() {
+        let diarization = DiarizationResult {
+            segments: vec![
+                SpeakerSegment {
+                    start_time: 0.0,
+                    end_time: 1.0,
+                    speaker_id: "S1".into(),
+                    confidence: 0.9,
+                },
+                SpeakerSegment {
+                    start_time: 3.0,
+                    end_time: 4.0,
+                    speaker_id: "S2".into(),
+                    confidence: 0.9,
+                },
+            ],
+            speakers: Vec::new(),
+            duration: 4.0,
+            method: DiarizationMethod::Embedding,
+            cluster_centroids: HashMap::new(),
+            word_activity: None,
+        };
+        let words = [
+            (0.8, 1.4, "after"),
+            (1.6, 2.4, "alone"),
+            (2.7, 3.1, "before"),
+        ];
+        let source: Vec<crate::models::TranscriptSegment> = words
+            .iter()
+            .map(
+                |&(start_time, end_time, text)| crate::models::TranscriptSegment {
+                    id: text.into(),
+                    start_time,
+                    end_time,
+                    text: text.into(),
+                    speaker_id: None,
+                    confidence: 0.7,
+                },
+            )
+            .collect();
+        let mut rows = source.clone();
+        DiarizationEngine::new().merge_with_measured_words(&diarization, &mut rows);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.speaker_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("S1"), None, Some("S2")]
+        );
+        // Only the speaker changed.
+        for (row, original) in rows.iter().zip(&source) {
+            assert_eq!(row.id, original.id);
+            assert_eq!(row.text, original.text);
+            assert_eq!(row.start_time, original.start_time);
+            assert_eq!(row.end_time, original.end_time);
+            assert_eq!(row.confidence, original.confidence);
+        }
+        // Without measured timings the gap is not filled.
+        let mut rows = source.clone();
+        DiarizationEngine::new().merge_with_transcript(&diarization, &mut rows);
+        assert!(rows.iter().all(|row| row.speaker_id.is_none()));
+    }
+
+    #[test]
     fn merge_preserves_uncovered_prefix_gaps_and_suffix_as_none() {
         let diarization = DiarizationResult {
             segments: vec![
@@ -1103,6 +1659,7 @@ mod tests {
             duration: 10.0,
             method: DiarizationMethod::Embedding,
             cluster_centroids: HashMap::new(),
+            word_activity: None,
         };
         let original_text = "one two three four five six seven eight nine ten";
         let mut transcript = vec![crate::models::TranscriptSegment {
@@ -1154,6 +1711,7 @@ mod tests {
             duration: 14.0,
             method: DiarizationMethod::Embedding,
             cluster_centroids: HashMap::new(),
+            word_activity: None,
         };
         let mut transcript = vec![crate::models::TranscriptSegment {
             id: "segment-1".to_string(),
@@ -1174,6 +1732,94 @@ mod tests {
         assert_eq!(transcript[1].start_time, 6.0);
         assert_eq!(transcript[1].end_time, 8.0);
         assert_eq!(transcript[2].speaker_id.as_deref(), Some("S1"));
+    }
+    #[test]
+    fn measured_word_recovery_keeps_source_rows_and_requires_explicit_provenance() {
+        let activity = SpeakerActivity::new(
+            vec![[0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 100],
+            std::array::from_fn(|i| if i == 0 { Some("S1".into()) } else { None }),
+            1.0,
+        );
+        let result = DiarizationResult {
+            segments: vec![],
+            speakers: vec![],
+            duration: 1.0,
+            method: DiarizationMethod::Model,
+            cluster_centroids: HashMap::new(),
+            word_activity: Some(activity),
+        };
+        let source = crate::models::TranscriptSegment {
+            id: "source-word".into(),
+            start_time: 0.3,
+            end_time: 0.7,
+            text: "Francina".into(),
+            speaker_id: None,
+            confidence: 0.88,
+        };
+        let mut rows = vec![source.clone()];
+        DiarizationEngine::new().merge_with_transcript(&result, &mut rows);
+        assert_eq!(rows[0].speaker_id, None);
+        DiarizationEngine::new().merge_with_measured_words(&result, &mut rows);
+        assert_eq!(rows[0].speaker_id.as_deref(), Some("S1"));
+        assert_eq!(rows[0].id, source.id);
+        assert_eq!(rows[0].text, source.text);
+        assert_eq!(rows[0].start_time, source.start_time);
+        assert_eq!(rows[0].end_time, source.end_time);
+        assert_eq!(rows[0].confidence, source.confidence);
+        let serialized = serde_json::to_value(&result).unwrap();
+        assert!(serialized.get("wordActivity").is_none());
+    }
+
+    #[test]
+    fn measured_word_turns_outrank_activity_and_two_speakers_keep_a_word_anonymous() {
+        let mut result = DiarizationResult {
+            segments: vec![SpeakerSegment {
+                start_time: 0.0,
+                end_time: 1.0,
+                speaker_id: "S2".into(),
+                confidence: 0.0,
+            }],
+            speakers: vec![],
+            duration: 1.0,
+            method: DiarizationMethod::Model,
+            cluster_centroids: HashMap::new(),
+            word_activity: Some(SpeakerActivity::new(
+                vec![[0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]; 100],
+                std::array::from_fn(|i| Some(format!("S{}", i + 1))),
+                1.0,
+            )),
+        };
+        let source = crate::models::TranscriptSegment {
+            id: "word".into(),
+            start_time: 0.0,
+            end_time: 0.8,
+            text: "name".into(),
+            speaker_id: None,
+            confidence: 0.88,
+        };
+        let mut rows = vec![source.clone()];
+        DiarizationEngine::new().merge_with_measured_words(&result, &mut rows);
+        assert_eq!(rows[0].speaker_id.as_deref(), Some("S2"));
+        result.segments.push(SpeakerSegment {
+            start_time: 0.0,
+            end_time: 1.0,
+            speaker_id: "S3".into(),
+            confidence: 0.0,
+        });
+        rows = vec![source.clone()];
+        DiarizationEngine::new().merge_with_measured_words(&result, &mut rows);
+        assert_eq!(rows[0].speaker_id, None);
+        for s in &mut result.segments {
+            s.end_time = 0.2;
+        }
+        rows = vec![source];
+        DiarizationEngine::new().merge_with_measured_words(&result, &mut rows);
+        assert_eq!(rows[0].speaker_id, None);
+        // One speaker's turn touches the uncovered word: it wins over the
+        // activity evidence, which names S1.
+        result.segments.truncate(1);
+        DiarizationEngine::new().merge_with_measured_words(&result, &mut rows);
+        assert_eq!(rows[0].speaker_id.as_deref(), Some("S2"));
     }
 }
 
@@ -1239,7 +1885,7 @@ mod calibration {
         let model_path = models_dir.join(format!("{model_id}.onnx"));
         let sha = crate::download::diarization_model_expected_sha256(model_id)
             .expect("every calibrated model must be a known diarization model");
-        crate::download::record_model_integrity_receipt_for_tests(&model_path, sha)
+        crate::download::mark_model_verified_for_tests(&model_path, sha)
             .await
             .expect("the staged model file must match this build's pinned digest");
 
@@ -1347,9 +1993,9 @@ mod calibration {
                 .join("diarization");
             let model_path = models_dir.join(format!("{model_id}.onnx"));
             let sha = crate::download::diarization_model_expected_sha256(model_id).unwrap();
-            crate::download::record_model_integrity_receipt_for_tests(&model_path, sha)
+            crate::download::mark_model_verified_for_tests(&model_path, sha)
                 .await
-                .expect("integrity receipt");
+                .expect("mark test model verified");
 
             let mut engine = DiarizationEngine::with_model(model_id);
             let result = engine
@@ -1511,11 +2157,11 @@ mod calibration {
 /// of both.
 ///
 ///   PLAINSONG_DATA_DIR=<scratch> PLAINSONG_DIAR_EVAL_AUDIO=<wav> \
-///     cargo test --features diarization-speakrs --lib \
+///     cargo test --lib \
 ///     diarization::eval_tests::eval_embedding_backend -- --ignored --nocapture
 ///
 /// Each test prints one JSON line prefixed `DIAR-EVAL ` so a scorer can pick
-/// it out of cargo's output; `scripts/score-diarization-eval.mjs` compares
+/// it out of cargo's output; `scripts/score-diarization-eval.ts` compares
 /// those turns against the fixture's ground truth.
 #[cfg(test)]
 mod eval_tests {
@@ -1547,7 +2193,7 @@ mod eval_tests {
     ///
     /// Ignored like its neighbours: it downloads weights and runs real
     /// inference. Prints one `DIAR-EVAL` line per mode so
-    /// `scripts/score-diarization-eval.mjs` can score all three against the
+    /// `scripts/score-diarization-eval.ts` can score all three against the
     /// same ground truth:
     ///
     /// ```text
@@ -1657,11 +2303,11 @@ mod eval_tests {
     /// - one `DIAR-LABELS` line: the raw window/label list, so a hermetic
     ///   regression test can pin the frame error without an ONNX runtime;
     /// - one `DIAR-EVAL` line per floor per policy, for
-    ///   `scripts/score-diarization-eval.mjs`.
+    ///   `scripts/score-diarization-eval.ts`.
     ///
     /// ```text
     /// PLAINSONG_DIAR_EVAL_AUDIO=<wav> PLAINSONG_DIAR_EVAL_MODEL=<id> \
-    ///   node scripts/cargo-sidecar.mjs test --locked --lib \
+    ///   bun scripts/cargo-sidecar.ts test --locked --lib \
     ///   diarization::eval_tests::eval_turn_floor_sweep -- --ignored --nocapture
     /// ```
     #[cfg(feature = "diarization")]
@@ -1717,7 +2363,20 @@ mod eval_tests {
             .iter()
             .map(|(start, end, _)| (*start, *end))
             .collect();
-        let labels = EmbeddingClusterer::new().cluster(&embeddings);
+        let threshold = std::env::var("PLAINSONG_DIAR_EVAL_THRESHOLD")
+            .ok()
+            .map(|value| value.parse::<f32>().expect("threshold must be a number"));
+        if let Some(threshold) = threshold {
+            assert!(
+                threshold.is_finite() && (0.0..=1.0).contains(&threshold),
+                "threshold must be between zero and one"
+            );
+        }
+        let clusterer = match threshold {
+            Some(threshold) => EmbeddingClusterer::new().with_threshold(threshold),
+            None => EmbeddingClusterer::new(),
+        };
+        let labels = clusterer.cluster(&embeddings);
         let shared = started.elapsed();
 
         println!(
@@ -1725,6 +2384,7 @@ mod eval_tests {
             serde_json::json!({
                 "audio": audio.to_string_lossy(),
                 "model": model_id,
+                "thresholdOverride": threshold,
                 "durationSeconds": duration,
                 "windows": windows
                     .iter()
@@ -1736,9 +2396,17 @@ mod eval_tests {
 
         for floor in floors {
             let clusterer = EmbeddingClusterer::new().with_min_segment_duration(floor);
+            let established = clusterer.smooth_established_segments(&windows, &labels);
+            report_turns(
+                &format!("{model_id}/established/threshold-{threshold:?}/anchor-{floor:.1}"),
+                &audio,
+                duration,
+                shared,
+                &established,
+            );
             let discarded = clusterer.smooth_segments(&windows, &labels);
             report_turns(
-                &format!("{model_id}/discard/floor-{floor:.1}"),
+                &format!("{model_id}/discard/threshold-{threshold:?}/floor-{floor:.1}"),
                 &audio,
                 duration,
                 shared,
@@ -1779,8 +2447,8 @@ mod eval_tests {
             let label = labels[i];
             let mut j = i + 1;
             let mut end = windows[i].1;
-            while j < windows.len() && labels[j] == label {
-                end = windows[j].1;
+            while j < windows.len() && labels[j] == label && windows[j].0 <= end + 1e-6 {
+                end = end.max(windows[j].1);
                 j += 1;
             }
             runs.push((start, end, label, i..j));
@@ -1816,13 +2484,17 @@ mod eval_tests {
             }
             let previous = index
                 .checked_sub(1)
+                .filter(|&p| runs[index].0 <= runs[p].1 + 1e-6)
                 .map(|p| (relabelled[p], distance(&centroids[index], &centroids[p])));
-            let next = runs.get(index + 1).map(|_| {
-                (
-                    relabelled[index + 1],
-                    distance(&centroids[index], &centroids[index + 1]),
-                )
-            });
+            let next = runs
+                .get(index + 1)
+                .filter(|next| next.0 <= runs[index].1 + 1e-6)
+                .map(|_| {
+                    (
+                        relabelled[index + 1],
+                        distance(&centroids[index], &centroids[index + 1]),
+                    )
+                });
             let winner = match (previous, next) {
                 (Some(a), Some(b)) => Some(if a.1 <= b.1 { a.0 } else { b.0 }),
                 (Some(a), None) => Some(a.0),
@@ -1838,11 +2510,41 @@ mod eval_tests {
         for (index, run) in runs.iter().enumerate() {
             let label = relabelled[index];
             match turns.last_mut() {
-                Some(last) if last.2 == label => last.1 = run.1,
+                Some(last) if last.2 == label && run.0 <= last.1 + 1e-6 => {
+                    last.1 = last.1.max(run.1);
+                }
                 _ => turns.push((run.0, run.1, label)),
             }
         }
         turns
+    }
+
+    #[cfg(feature = "diarization")]
+    #[test]
+    fn absorption_preserves_silence_gaps_and_isolated_turn_labels() {
+        let windows = [(0.0, 2.0), (8.0, 10.0), (16.0, 18.0)];
+        let embeddings = windows
+            .iter()
+            .map(|&(start, end)| (start, end, Array1::from(vec![1.0, 0.0])))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            absorb_short_runs(&windows, &[0, 0, 1], &embeddings, 3.0),
+            vec![(0.0, 2.0, 0), (8.0, 10.0, 0), (16.0, 18.0, 1)]
+        );
+    }
+
+    #[cfg(feature = "diarization")]
+    #[test]
+    fn absorption_keeps_nested_window_coverage_and_can_merge_touching_runs() {
+        let windows = [(0.0, 4.0), (1.0, 2.0), (4.0, 5.0)];
+        let embeddings = windows
+            .iter()
+            .map(|&(start, end)| (start, end, Array1::from(vec![1.0, 0.0])))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            absorb_short_runs(&windows, &[0, 0, 1], &embeddings, 3.0),
+            vec![(0.0, 5.0, 0)]
+        );
     }
 
     #[cfg(feature = "diarization")]
@@ -1926,22 +2628,22 @@ mod eval_tests {
         report("embedding-ecapa_tdnn", &audio, started.elapsed(), &result);
     }
 
-    #[cfg(feature = "diarization-speakrs")]
+    #[cfg(feature = "diarization")]
     #[tokio::test]
     #[ignore = "evaluation harness: downloads models and runs real inference"]
-    async fn eval_speakrs_backend() {
+    async fn eval_community1_backend() {
         let audio = eval_audio_path();
         let manager = crate::download::DownloadManager::new().expect("download manager");
         manager
-            .download_speakrs_bundle(|_: crate::download::DownloadProgress| {})
+            .download_community1_bundle(|_: crate::download::DownloadProgress| {})
             .await
-            .expect("speakrs bundle");
+            .expect("community-1 bundle");
 
         let started = std::time::Instant::now();
-        let result = run_diarization_with_model(&audio, crate::download::SPEAKRS_MODEL_ID)
+        let result = run_diarization_with_model(&audio, crate::download::COMMUNITY1_MODEL_ID)
             .await
-            .expect("speakrs diarization");
-        report("speakrs-community1", &audio, started.elapsed(), &result);
+            .expect("community-1 diarization");
+        report("pyannote-community1", &audio, started.elapsed(), &result);
     }
 
     /// Nemotron has no pinned download yet: point
@@ -1958,5 +2660,159 @@ mod eval_tests {
             .await
             .expect("Nemotron diarization");
         report("nemotron3-diarization", &audio, started.elapsed(), &result);
+    }
+
+    #[cfg(feature = "diarization-nemotron")]
+    #[tokio::test]
+    #[ignore = "requires public fixture audio, pinned Nemotron weights and explicit output directory"]
+    async fn eval_nemotron_activity_probabilities() {
+        use parakeet_rs::sortformer::{DiarizationConfig, Sortformer};
+        let audio = eval_audio_path();
+        let out = std::path::PathBuf::from(
+            std::env::var("PLAINSONG_NEMOTRON_PROBE_OUT").expect("explicit output directory"),
+        );
+        let model = nemotron_backend::model_path();
+        assert!(crate::download::verify_or_record_model_integrity(
+            &model,
+            Some("915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a")
+        )
+        .await
+        .unwrap());
+        let samples = crate::audio::utils::load_audio_file(&audio).unwrap();
+        let duration = samples.len() as f64 / 16_000.0;
+        let mut diarizer = Sortformer::new(&model).unwrap();
+        let started = std::time::Instant::now();
+        let (predictions, sample_count) = diarizer.predict_raw(samples, 16_000, 1).unwrap();
+        let elapsed = started.elapsed();
+        assert!(predictions
+            .iter()
+            .all(|p| p.is_finite() && (0.0..=1.0).contains(p)));
+        std::fs::create_dir_all(&out).unwrap();
+        let bytes: Vec<u8> = predictions.iter().flat_map(|p| p.to_le_bytes()).collect();
+        std::fs::write(out.join("probabilities.f32"), bytes).unwrap();
+        std::fs::write(
+            out.join("metadata.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "audio": audio, "model": model, "frames": predictions.nrows(),
+                "speakers": predictions.ncols(), "sampleCount": sample_count,
+                "frameSeconds": 0.01, "durationSeconds": duration,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for (onset, offset) in [(0.4, 0.4), (0.5, 0.4), (0.5, 0.5), (0.6, 0.6), (0.7, 0.7)] {
+            let raw = Sortformer::post_process(
+                &DiarizationConfig::custom(onset, offset),
+                &predictions,
+                sample_count,
+            );
+            let turns = nemotron_backend::raw_turns_from_sample_offsets(
+                raw.iter().map(|s| (s.start, s.end, s.speaker_id)),
+            );
+            let normalized = turns::normalize_turns(&turns, duration);
+            let result = DiarizationResult {
+                segments: normalized.clone(),
+                speakers: turns::speakers_for(&normalized),
+                duration,
+                method: DiarizationMethod::Model,
+                cluster_centroids: HashMap::new(),
+                word_activity: None,
+            };
+            report(
+                &format!("nemotron/onset-{onset}/offset-{offset}"),
+                &audio,
+                elapsed,
+                &result,
+            );
+        }
+    }
+
+    #[cfg(feature = "diarization-nemotron")]
+    #[tokio::test]
+    #[ignore = "requires measured provider rows, frozen public excerpts and pinned Nemotron weights"]
+    async fn measured_words_to_speaker_passages_probe() {
+        let root = std::path::PathBuf::from(
+            std::env::var("PLAINSONG_QWEN17_EVAL_ROOT").expect("explicit fixture root"),
+        );
+        let model = nemotron_backend::model_path();
+        assert!(crate::download::verify_or_record_model_integrity(
+            &model,
+            Some("915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a")
+        )
+        .await
+        .unwrap());
+        let data: Vec<serde_json::Value> = serde_json::from_slice(
+            &std::fs::read(root.join("production-word-alignment.json")).unwrap(),
+        )
+        .unwrap();
+        let mut receipts = Vec::new();
+        for row in data {
+            let file = row["file"].as_str().unwrap();
+            let audio = root.join(file);
+            let duration = get_audio_duration(&audio).await.unwrap();
+            let diarization = nemotron_backend::run(&audio, duration, model.clone())
+                .await
+                .unwrap();
+            let original: Vec<crate::models::TranscriptSegment> = row["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .map(|(i, s)| crate::models::TranscriptSegment {
+                    id: format!("{file}-word-{i}"),
+                    start_time: s["startTime"].as_f64().unwrap(),
+                    end_time: s["endTime"].as_f64().unwrap(),
+                    text: s["text"].as_str().unwrap().into(),
+                    speaker_id: None,
+                    confidence: s["confidence"].as_f64().unwrap(),
+                })
+                .collect();
+            let mut labeled = original.clone();
+            DiarizationEngine::new().merge_with_transcript(&diarization, &mut labeled);
+            assert_eq!(labeled.len(), original.len());
+            assert!(
+                labeled.iter().any(|word| word.speaker_id.is_some()),
+                "fixture must produce actual speaker assignments"
+            );
+            for (after, before) in labeled.iter().zip(&original) {
+                assert_eq!(after.id, before.id);
+                assert_eq!(after.start_time, before.start_time);
+                assert_eq!(after.end_time, before.end_time);
+                assert_eq!(after.text, before.text);
+                assert_eq!(after.confidence, before.confidence);
+            }
+            let passages = crate::analysis::group_transcript_segments_for_analysis(file, &labeled);
+            for passage in &passages {
+                let start = labeled
+                    .iter()
+                    .position(|word| word.id == passage.segment_id)
+                    .unwrap();
+                let count = passage.text.split_whitespace().count();
+                let members = &labeled[start..start + count];
+                assert!(members
+                    .iter()
+                    .all(|word| word.speaker_id == members[0].speaker_id));
+                assert_eq!(passage.start_time, members[0].start_time);
+                assert_eq!(passage.end_time, members.last().unwrap().end_time);
+            }
+            assert_eq!(
+                passages
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                original
+                    .iter()
+                    .map(|p| p.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            receipts.push(serde_json::json!({"file":file,"wordRows":labeled,"diarization":diarization,"passages":passages.iter().map(|p|serde_json::json!({"sourceId":p.segment_id,"start":p.start_time,"end":p.end_time,"text":p.text})).collect::<Vec<_>>(),"scope":"Model-assigned anonymous speaker groups; no verified identity or DER claim"}));
+        }
+        std::fs::write(
+            root.join("measured-speaker-passages.json"),
+            serde_json::to_vec_pretty(&receipts).unwrap(),
+        )
+        .unwrap();
     }
 }

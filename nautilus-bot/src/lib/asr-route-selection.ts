@@ -108,19 +108,35 @@ function normalizeProviderModelSelection(
   };
 }
 
+/**
+ * Mirrors `preferred_meeting_provider_candidates` in
+ * rust-sidecar/src/asr_routing.rs.
+ *
+ * transcribe.cpp leads the meeting lane's display order (GGUF Parakeet is the
+ * recommended meeting route on Apple Silicon), but a lane is never moved onto
+ * it by inheritance: it is a candidate only when the meeting slot names it, so
+ * an older install that dictates on GGUF keeps recording meetings on whatever
+ * its meeting slot says. When the meeting slot names it and this build cannot
+ * list it, ONNX Parakeet -- the same weights -- is the next candidate.
+ */
 function preferredMeetingProviderCandidates(
   meetingRoutePolicy: "prefer_local" | "best_available",
   defaultProvider: AsrProviderType,
   dictationProvider: AsrProviderType,
   meetingProvider?: AsrProviderType
 ) {
-  const orderedCandidates = [meetingProvider, defaultProvider, dictationProvider];
+  const ggufSubstitute: AsrProviderType | undefined =
+    meetingProvider === "transcribe_cpp" ? "parakeet" : undefined;
+  const orderedCandidates = [meetingProvider, ggufSubstitute, defaultProvider, dictationProvider];
   orderedCandidates.push(...laneProviderOrder("meeting", meetingRoutePolicy));
 
   const seen = new Set<AsrProviderType>();
   const candidates: AsrProviderType[] = [];
   for (const candidate of orderedCandidates) {
     if (!candidate || seen.has(candidate) || !isMeetingEligibleProvider(candidate)) {
+      continue;
+    }
+    if (candidate === "transcribe_cpp" && meetingProvider !== "transcribe_cpp") {
       continue;
     }
     seen.add(candidate);

@@ -18,29 +18,47 @@ type ExplicitUpdaterInstallFlowOptions = {
   updateReadyToInstall: boolean;
   setDownloading: () => void;
   setInstalling: () => void;
+  prepareToQuit: () => Promise<boolean>;
   waitForMacosStaging?: () => Promise<unknown>;
-  launchMacosRelauncher?: () => Promise<unknown>;
-  quitApp?: () => void;
-  onFailure: (error: unknown) => void;
+  launchMacosRelauncher?: () => Promise<() => void>;
+  quitApp?: () => Promise<void>;
+  onFailure: (error: unknown, state: { downloaded: boolean; staged: boolean }) => void;
 };
 
-/**
- * The user-consented install state machine. Keeping this outside Electron's
- * bootstrap module makes every failure boundary executable in unit tests.
- */
-export async function runExplicitUpdaterInstallFlow(
+const pendingInstalls = new WeakMap<ExplicitInstallUpdater, Promise<void>>();
+
+export function runExplicitUpdaterInstallFlow(
   options: ExplicitUpdaterInstallFlowOptions,
 ): Promise<void> {
+  const pending = pendingInstalls.get(options.updater);
+  if (pending) return pending;
+  const work = executeInstall(options);
+  pendingInstalls.set(options.updater, work);
+  const clear = () => pendingInstalls.delete(options.updater);
+  void work.then(clear, clear);
+  return work;
+}
+
+async function executeInstall(options: ExplicitUpdaterInstallFlowOptions): Promise<void> {
   const platform = options.platform ?? process.platform;
+  let downloaded = options.updateReadyToInstall;
+  let staged = false;
+  let cancelRelauncher: (() => void) | undefined;
+  const prepare = async () => {
+    if (!(await options.prepareToQuit())) {
+      throw new Error("Save open drafts before installing the update.");
+    }
+  };
 
   try {
+    await prepare();
     if (!options.updateReadyToInstall) {
       options.setDownloading();
       if (platform === "darwin") {
         // MacUpdater checks autoInstallOnAppQuit synchronously after emitting
         // update-downloaded. Arm it for only that turn so Squirrel begins
-        // staging, then disarm it while staging is validated. A normal quit in
-        // the download/staging window must never install the update.
+        // staging, then disarm the JavaScript updater while staging is validated.
+        // Resetting this flag does not undo native Squirrel staging.
         const beginStaging = () => {
           prepareUpdaterForExplicitInstall(options.updater, platform);
           queueMicrotask(() => {
@@ -57,6 +75,7 @@ export async function runExplicitUpdaterInstallFlow(
       } else {
         await options.updater.downloadUpdate();
       }
+      downloaded = true;
     }
     options.setInstalling();
 
@@ -69,17 +88,26 @@ export async function runExplicitUpdaterInstallFlow(
         throw new Error("macOS updater install handoff is not configured");
       }
       await options.waitForMacosStaging();
-      await options.launchMacosRelauncher();
+      staged = true;
+      await prepare();
+      cancelRelauncher = await options.launchMacosRelauncher();
       prepareUpdaterForExplicitInstall(options.updater, platform);
-      options.quitApp();
+      await options.quitApp();
       return;
     }
 
+    await prepare();
     prepareUpdaterForExplicitInstall(options.updater, platform);
     options.updater.quitAndInstall();
   } catch (error) {
     resetUpdaterAfterExplicitInstallFailure(options.updater, platform);
-    options.onFailure(error);
-    throw error;
+    let failure = error;
+    try {
+      cancelRelauncher?.();
+    } catch (cleanupError) {
+      failure = new AggregateError([error, cleanupError], "Update installation stopped, but its relaunch helper could not be stopped.");
+    }
+    options.onFailure(failure, { downloaded, staged });
+    throw failure;
   }
 }

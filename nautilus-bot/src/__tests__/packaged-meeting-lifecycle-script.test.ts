@@ -5,7 +5,7 @@ import {
   REQUIRED_AUTOMATED_MEETING_SCENARIOS,
   REQUIRED_REAL_DEVICE_MEETING_SCENARIOS,
   evaluateMeetingLifecycleEvidence,
-} from "../../scripts/capture-packaged-macos-meeting-lifecycle.mjs";
+} from "../../scripts/capture-packaged-macos-meeting-lifecycle.ts";
 
 const appHash = "a".repeat(64);
 const candidateComponents = {
@@ -15,12 +15,21 @@ const candidateComponents = {
   speechHelper: "d".repeat(64),
 };
 
+const fullBundleHash = "e".repeat(64);
+const releaseHash = "f".repeat(64);
+function receiptBinding() {
+  return { candidateIdentity: { appBundle: { sha256: fullBundleHash } }, candidateAppUnchanged: true };
+}
+
 function passingEvidence() {
   return {
+    candidateAppBundleSha256: fullBundleHash,
+    candidateReleaseSha256: releaseHash,
     candidateIdentityTarget: "packaged-app-components",
     candidateAppSha256: appHash,
     candidateComponents,
     microphone: {
+      ...receiptBinding(),
       pass: true,
       expectedCaptureMode: "mic_only",
       checks: {
@@ -30,6 +39,7 @@ function passingEvidence() {
       },
     },
     combined: {
+      ...receiptBinding(),
       pass: true,
       includeSystemAudio: true,
       expectedCaptureMode: "me_and_them",
@@ -37,6 +47,7 @@ function passingEvidence() {
       checks: { duplicateStopIdempotent: true },
     },
     soak: {
+      candidateIdentity: { appBundle: { sha256: fullBundleHash }, complete: true, releaseSha256: releaseHash },
       pass: true,
       fixtureTranscriptMatch: {
         matched: true,
@@ -47,6 +58,8 @@ function passingEvidence() {
       },
     },
     realDevice: {
+      ...receiptBinding(),
+      pass: true,
       candidateAppSha256: appHash,
       candidateComponents,
       evidence: {
@@ -77,9 +90,20 @@ function passingEvidence() {
 describe("packaged Meeting lifecycle receipt", () => {
   const repoRoot = path.resolve(import.meta.dirname, "../..");
 
+  it("rejects stale nested evidence even when component hashes match", () => {
+    for (const child of ["microphone", "combined", "realDevice"] as const) {
+      const evidence = passingEvidence();
+      evidence[child].candidateIdentity.appBundle.sha256 = "0".repeat(64);
+      expect(evaluateMeetingLifecycleEvidence(evidence).pass).toBe(false);
+    }
+    const evidence = passingEvidence();
+    evidence.soak.candidateIdentity.releaseSha256 = "0".repeat(64);
+    expect(evaluateMeetingLifecycleEvidence(evidence).pass).toBe(false);
+  });
+
   it("binds real-device observations to the packaged app archive", () => {
     const source = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-lifecycle.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-lifecycle.ts"),
       "utf8",
     );
 
@@ -107,6 +131,29 @@ describe("packaged Meeting lifecycle receipt", () => {
       "export",
       "deletion",
     ]);
+  });
+
+  it("rejects nested receipts without unchanged-app proof", () => {
+    for (const child of ["microphone", "combined", "realDevice"] as const) {
+      const evidence = passingEvidence();
+      evidence[child].candidateAppUnchanged = false;
+      expect(evaluateMeetingLifecycleEvidence(evidence).pass).toBe(false);
+    }
+  });
+
+  it("rejects a soak receipt from a different full app bundle", () => {
+    const evidence = passingEvidence();
+    evidence.soak.candidateIdentity.appBundle.sha256 = "0".repeat(64);
+    expect(evaluateMeetingLifecycleEvidence(evidence).pass).toBe(false);
+  });
+
+  it("rejects a failed real-device receipt despite matching identity and observations", () => {
+    const evidence = passingEvidence();
+    evidence.realDevice.pass = false;
+    const receipt = evaluateMeetingLifecycleEvidence(evidence);
+    expect(receipt.pass).toBe(false);
+    expect(receipt.checks.filter(check => check.mode === "real_device")
+      .every(check => !check.pass)).toBe(true);
   });
 
   it("passes only when both evidence classes cover the exact candidate", () => {
@@ -162,11 +209,11 @@ describe("packaged Meeting lifecycle receipt", () => {
 
   it("uses the packaged QA producers' canonical receipt directory and filenames", () => {
     const lifecycleSource = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-lifecycle.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-meeting-lifecycle.ts"),
       "utf8",
     );
     const auditSource = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.ts"),
       "utf8",
     );
 
@@ -185,7 +232,7 @@ describe("packaged Meeting lifecycle receipt", () => {
 
   it("is required by the exact-candidate release audit", () => {
     const auditSource = fs.readFileSync(
-      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.mjs"),
+      path.join(repoRoot, "scripts", "capture-packaged-macos-release-audit.ts"),
       "utf8",
     );
 
@@ -197,8 +244,8 @@ describe("packaged Meeting lifecycle receipt", () => {
 
   it("uses privileged-admission-shaped nonces and the processing phase in capture harnesses", () => {
     for (const scriptName of [
-      "capture-packaged-macos-meeting-mic.mjs",
-      "capture-packaged-macos-meeting-soak.mjs",
+      "capture-packaged-macos-meeting-mic.ts",
+      "capture-packaged-macos-meeting-soak.ts",
     ]) {
       const source = fs.readFileSync(path.join(repoRoot, "scripts", scriptName), "utf8");
       expect(source).toContain("admissionNonce: crypto.randomUUID()");

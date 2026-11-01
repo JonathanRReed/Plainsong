@@ -3,6 +3,7 @@
 // verification script can assert against the exact rule the shipped app uses.
 
 import path from "path";
+import fs from "node:fs";
 import { fileURLToPath } from "url";
 
 export type UpdateChannel = "stable" | "beta";
@@ -120,13 +121,42 @@ export type MacosShipItStateSnapshot = {
   updateBundleVersion: string;
 };
 
+// Resolve aliases and symlinks even while ShipIt is still creating the leaf.
+// Only missing entries permit walking up. Permission failures, loops and
+// dangling symlinks fail closed rather than weakening the containment check.
+function canonicalPath(filePath: string): string | null {
+  let ancestor = path.resolve(filePath);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return path.join(fs.realpathSync.native(ancestor), ...missing);
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") {
+        return null;
+      }
+      try {
+        fs.lstatSync(ancestor);
+        return null;
+      } catch (statError) {
+        if (!(statError instanceof Error) || !("code" in statError) || statError.code !== "ENOENT") {
+          return null;
+        }
+      }
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return null;
+      missing.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
 function normalizedFileUrlPath(rawUrl: string): string | null {
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== "file:") {
       return null;
     }
-    return path.resolve(fileURLToPath(url));
+    return canonicalPath(fileURLToPath(url));
   } catch {
     return null;
   }
@@ -149,11 +179,13 @@ export function macosShipItStateTargetsExpectedUpdate(
 
   const targetBundlePath = normalizedFileUrlPath(state.targetBundleUrl);
   const updateBundlePath = normalizedFileUrlPath(state.updateBundleUrl);
-  if (!targetBundlePath || !updateBundlePath) {
+  const expectedAppPath = canonicalPath(appBundlePath);
+  const expectedShipItPath = canonicalPath(shipItDirectory);
+  if (!targetBundlePath || !updateBundlePath || !expectedAppPath || !expectedShipItPath) {
     return false;
   }
   const relativeUpdatePath = path.relative(
-    path.resolve(shipItDirectory),
+    expectedShipItPath,
     updateBundlePath,
   );
   const relativeParts = relativeUpdatePath.split(path.sep);
@@ -164,7 +196,7 @@ export function macosShipItStateTargetsExpectedUpdate(
     !path.isAbsolute(relativeUpdatePath) &&
     !relativeUpdatePath.startsWith(`..${path.sep}`);
   return (
-    targetBundlePath === path.resolve(appBundlePath) &&
+    targetBundlePath === expectedAppPath &&
     updateIsThisShipItPayload
   );
 }
@@ -188,6 +220,7 @@ export function macosUpdateRelauncherArgs(
   appBundlePath: string,
   expectedVersion: string,
   readyFilePath: string,
+  qaRelaunchArgs?: readonly string[],
 ): string[] {
   const script = [
     'target="$1";',
@@ -198,7 +231,9 @@ export function macosUpdateRelauncherArgs(
     'while [ "$count" -lt 120 ]; do',
     'version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$target/Contents/Info.plist" 2>/dev/null || true);',
     'if [ "$version" = "$expected" ]; then',
-    '/usr/bin/open "$target";',
+    ...(qaRelaunchArgs === undefined
+      ? ['/usr/bin/open "$target";']
+      : ['shift 3;', '"$target/Contents/MacOS/Plainsong" "$@" >/dev/null 2>&1 &']),
     "exit $?;",
     "fi;",
     "/bin/sleep 0.5;",
@@ -214,6 +249,7 @@ export function macosUpdateRelauncherArgs(
     appBundlePath,
     expectedVersion,
     readyFilePath,
+    ...(qaRelaunchArgs ?? []),
   ];
 }
 

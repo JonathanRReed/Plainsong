@@ -92,7 +92,11 @@ export function AppCommandPalette({ open, onOpenChange }: AppCommandPaletteProps
       const result = await transformSelectedText(command);
       toast(
         formatSelectedTextActionStatusMessage(action, result),
-        result.error && !result.pasted && !result.copied ? "error" : "success",
+        result.error && !result.pasted && !result.copied
+          ? "error"
+          : result.pasted && result.confirmed !== true
+            ? "info"
+            : "success",
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

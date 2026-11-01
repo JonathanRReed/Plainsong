@@ -1,0 +1,667 @@
+{
+  "schema": "plainsong-notes-fidelity-v1",
+  "description": "Second held-out set of synthetic meetings for the notes variant eval, written blind to the summarizer and verifier source. People, organisations and products are invented. The meetings mix conditional agreements, unconditional commitments in the same sentence, spoken recording or agenda labels, product names that look like first names, restricted and unrestricted prices or quantities, adjacent counts with different subjects, suggestions and questions that are not tasks, negated commitments and decisions, a spoken date correction, and completed statuses. Agenda numbering inside labels is not a quantity.",
+  "meetings": [
+    {
+      "id": "heldout2-quarterly-sync",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Ana",
+          "text": "Quarterly sync. We agreed to renew the Marlowe license on the 9th if finance signs the order form, and Joren will update the seat count."
+        },
+        {
+          "start": 12.0,
+          "end": 18.0,
+          "speaker": "Joren",
+          "text": "I'll update the seat count by Friday. Right now we use 48 seats."
+        },
+        {
+          "start": 19.0,
+          "end": 29.0,
+          "speaker": "Ana",
+          "text": "Quarterly sync. Quillon offered $40 per user per month for Marlowe, only with a two-year term. The onboarding package is a flat $1,200."
+        },
+        {
+          "start": 30.0,
+          "end": 38.0,
+          "speaker": "Pilar",
+          "text": "Could we ask Quillon for a nonprofit discount? I'm only asking, I'm not taking that on."
+        },
+        {
+          "start": 39.0,
+          "end": 45.0,
+          "speaker": "Joren",
+          "text": "I will email the Quillon account manager about the renewal terms on Tuesday."
+        },
+        {
+          "start": 46.0,
+          "end": 54.0,
+          "speaker": "Ana",
+          "text": "Quarterly sync. The security audit is already done. We have not approved the extra storage tier."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "renew",
+            "marlowe",
+            "license",
+            "if",
+            "finance",
+            "signs"
+          ],
+          "owner": null,
+          "due": [
+            "the 9th",
+            "the ninth"
+          ]
+        },
+        {
+          "task": [
+            "update",
+            "seat",
+            "count"
+          ],
+          "owner": "Joren",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "email",
+            "account",
+            "manager"
+          ],
+          "owner": "Joren",
+          "due": [
+            "Tuesday"
+          ]
+        }
+      ],
+      "names": [
+        "Ana",
+        "Joren",
+        "Pilar"
+      ],
+      "numbers": [
+        [
+          "9th",
+          "ninth"
+        ],
+        [
+          "48",
+          "forty-eight"
+        ],
+        [
+          "$40",
+          "40 dollars"
+        ],
+        [
+          "$1,200",
+          "$1200",
+          "1,200 dollars"
+        ]
+      ]
+    },
+    {
+      "id": "heldout2-warehouse-staffing",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 8.0,
+          "speaker": "Bram",
+          "text": "Agenda item one, inventory: Cleo counted 340 pallets in the north bay. Dara scanned 85 returns."
+        },
+        {
+          "start": 9.0,
+          "end": 17.0,
+          "speaker": "Cleo",
+          "text": "Agenda item two, staffing: we need 6 extra pickers for the holiday peak. The temp budget is $18,500."
+        },
+        {
+          "start": 18.0,
+          "end": 24.0,
+          "speaker": "Dara",
+          "text": "I'll post the picker job ads on Tuesday once Bram approves the budget."
+        },
+        {
+          "start": 25.0,
+          "end": 28.0,
+          "speaker": "Dara",
+          "text": "Correction: Thursday, not Tuesday."
+        },
+        {
+          "start": 29.0,
+          "end": 35.0,
+          "speaker": "Bram",
+          "text": "I won't approve the budget until Cleo sends the shift plan."
+        },
+        {
+          "start": 36.0,
+          "end": 41.0,
+          "speaker": "Cleo",
+          "text": "I'll send the shift plan by the 14th."
+        },
+        {
+          "start": 42.0,
+          "end": 47.0,
+          "speaker": "Bram",
+          "text": "Agenda item three, safety: the forklift inspection is already done."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "post",
+            "job",
+            "ads",
+            "once",
+            "bram",
+            "approves"
+          ],
+          "owner": "Dara",
+          "due": [
+            "Thursday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "approve",
+            "budget",
+            "until",
+            "sends"
+          ],
+          "owner": "Bram",
+          "due": []
+        },
+        {
+          "task": [
+            "send",
+            "shift",
+            "plan"
+          ],
+          "owner": "Cleo",
+          "due": [
+            "the 14th",
+            "the fourteenth"
+          ]
+        }
+      ],
+      "names": [
+        "Bram",
+        "Cleo",
+        "Dara"
+      ],
+      "numbers": [
+        [
+          "340"
+        ],
+        [
+          "85",
+          "eighty-five"
+        ],
+        [
+          "6",
+          "six"
+        ],
+        [
+          "$18,500",
+          "$18500",
+          "18,500 dollars"
+        ],
+        [
+          "14th",
+          "fourteenth"
+        ]
+      ]
+    },
+    {
+      "id": "heldout2-cowork-desks",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Fenna",
+          "text": "Space planning call. Northgate Commons can give us 12 desks, except on Fridays. The meeting room is ours for 3 hours a week."
+        },
+        {
+          "start": 11.0,
+          "end": 21.0,
+          "speaker": "Gus",
+          "text": "We agreed to sign the desk agreement on April 3 unless the price changes, and Hiro will set up Odette for desk bookings."
+        },
+        {
+          "start": 22.0,
+          "end": 26.0,
+          "speaker": "Hiro",
+          "text": "I'll set up Odette by Wednesday."
+        },
+        {
+          "start": 27.0,
+          "end": 35.0,
+          "speaker": "Fenna",
+          "text": "I suggest we try standing desks too, but that's just an idea, not a task for anyone."
+        },
+        {
+          "start": 36.0,
+          "end": 44.0,
+          "speaker": "Gus",
+          "text": "Space planning call. I won't give out the door keys until Hiro finishes the Odette setup."
+        },
+        {
+          "start": 45.0,
+          "end": 52.0,
+          "speaker": "Hiro",
+          "text": "The fire safety walkthrough is already done. We have not approved the parking spaces."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "sign",
+            "desk",
+            "agreement",
+            "unless",
+            "price",
+            "changes"
+          ],
+          "owner": null,
+          "due": [
+            "April 3",
+            "April 3rd",
+            "April third"
+          ]
+        },
+        {
+          "task": [
+            "set",
+            "odette"
+          ],
+          "owner": "Hiro",
+          "due": [
+            "Wednesday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "give",
+            "door",
+            "keys",
+            "until",
+            "finishes"
+          ],
+          "owner": "Gus",
+          "due": []
+        }
+      ],
+      "names": [
+        "Fenna",
+        "Gus",
+        "Hiro"
+      ],
+      "numbers": [
+        [
+          "12",
+          "twelve"
+        ],
+        [
+          "3 hours",
+          "three hours"
+        ],
+        [
+          "April 3",
+          "April third"
+        ]
+      ]
+    },
+    {
+      "id": "heldout2-grant-report",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 7.0,
+          "speaker": "Ivo",
+          "text": "Board prep. Project Wren reached 1,900 households this year. The volunteers logged 260 hours."
+        },
+        {
+          "start": 8.0,
+          "end": 16.0,
+          "speaker": "Kenji",
+          "text": "The Wren grant budget for next year is $72,000. That plan also covers 2 field coordinators."
+        },
+        {
+          "start": 17.0,
+          "end": 24.0,
+          "speaker": "Lior",
+          "text": "I'll submit the grant report on Tuesday only if Maren signs the budget page."
+        },
+        {
+          "start": 25.0,
+          "end": 34.0,
+          "speaker": "Maren",
+          "text": "Correction: Lior submits the report on Thursday, not Tuesday. I'll sign the budget page after Kenji checks the totals."
+        },
+        {
+          "start": 35.0,
+          "end": 45.0,
+          "speaker": "Ivo",
+          "text": "I want to ask whether we should mention the new van in the report. It's only a question, not a task."
+        },
+        {
+          "start": 46.0,
+          "end": 52.0,
+          "speaker": "Kenji",
+          "text": "I'll check the totals by Monday. The volunteer survey is already done."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "submit",
+            "grant",
+            "report",
+            "only if",
+            "signs"
+          ],
+          "owner": "Lior",
+          "due": [
+            "Thursday"
+          ]
+        },
+        {
+          "task": [
+            "sign",
+            "budget",
+            "page",
+            "after",
+            "checks"
+          ],
+          "owner": "Maren",
+          "due": []
+        },
+        {
+          "task": [
+            "check",
+            "totals"
+          ],
+          "owner": "Kenji",
+          "due": [
+            "Monday"
+          ]
+        }
+      ],
+      "names": [
+        "Ivo",
+        "Kenji",
+        "Lior",
+        "Maren"
+      ],
+      "numbers": [
+        [
+          "1,900",
+          "1900"
+        ],
+        [
+          "260"
+        ],
+        [
+          "$72,000",
+          "$72000",
+          "72,000 dollars"
+        ],
+        [
+          "2",
+          "two"
+        ]
+      ]
+    },
+    {
+      "id": "heldout2-app-launch",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 10.0,
+          "speaker": "Nadia",
+          "text": "Launch review. We agreed to release Tobin on the 22nd once the payment test passes, and Oskar will write the release notes."
+        },
+        {
+          "start": 11.0,
+          "end": 15.0,
+          "speaker": "Oskar",
+          "text": "I'll write the release notes by Wednesday."
+        },
+        {
+          "start": 16.0,
+          "end": 26.0,
+          "speaker": "Tali",
+          "text": "Launch review. Pricing: the student plan is $9 a month only with a school email address. The standard plan is $15 a month."
+        },
+        {
+          "start": 27.0,
+          "end": 35.0,
+          "speaker": "Oskar",
+          "text": "I suggest we add a family plan later, but nobody needs to act on that now."
+        },
+        {
+          "start": 36.0,
+          "end": 46.0,
+          "speaker": "Tali",
+          "text": "I will update the pricing page on Friday if Nadia approves the copy. I won't announce the price until the payment test passes."
+        },
+        {
+          "start": 47.0,
+          "end": 53.0,
+          "speaker": "Nadia",
+          "text": "We have not approved the Android version. The accessibility review is already done."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "release",
+            "tobin",
+            "once",
+            "payment",
+            "passes"
+          ],
+          "owner": null,
+          "due": [
+            "the 22nd",
+            "the twenty-second"
+          ]
+        },
+        {
+          "task": [
+            "write",
+            "release",
+            "notes"
+          ],
+          "owner": "Oskar",
+          "due": [
+            "Wednesday"
+          ]
+        },
+        {
+          "task": [
+            "update",
+            "pricing",
+            "page",
+            "if",
+            "nadia",
+            "approves"
+          ],
+          "owner": "Tali",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "announce",
+            "price",
+            "until",
+            "passes"
+          ],
+          "owner": "Tali",
+          "due": []
+        }
+      ],
+      "names": [
+        "Nadia",
+        "Oskar",
+        "Tali"
+      ],
+      "numbers": [
+        [
+          "22nd",
+          "twenty-second"
+        ],
+        [
+          "$9",
+          "9 dollars"
+        ],
+        [
+          "$15",
+          "15 dollars"
+        ]
+      ]
+    },
+    {
+      "id": "heldout2-street-festival",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 11.0,
+          "speaker": "Quinn",
+          "text": "Festival committee. We agreed to book the stage crew for May 18 if the council grants the permit, and Rhea will draft the volunteer rota."
+        },
+        {
+          "start": 12.0,
+          "end": 18.0,
+          "speaker": "Sami",
+          "text": "Correction: we book the stage crew for May 19, not May 18."
+        },
+        {
+          "start": 19.0,
+          "end": 23.0,
+          "speaker": "Rhea",
+          "text": "I'll draft the rota by Saturday."
+        },
+        {
+          "start": 24.0,
+          "end": 33.0,
+          "speaker": "Theo",
+          "text": "Festival committee. Logistics: each stall gets 2 power outlets, except the food trucks. The site has 30 picnic tables."
+        },
+        {
+          "start": 34.0,
+          "end": 40.0,
+          "speaker": "Quinn",
+          "text": "Theo signed up 18 volunteers last week. Rhea confirmed 24 stalls."
+        },
+        {
+          "start": 41.0,
+          "end": 49.0,
+          "speaker": "Sami",
+          "text": "Could someone check whether the park has shade tents? I'm just asking, it's not an action yet."
+        },
+        {
+          "start": 50.0,
+          "end": 59.0,
+          "speaker": "Theo",
+          "text": "I won't order the wristbands until the permit arrives, and I'll print the site maps after Rhea finishes the rota."
+        },
+        {
+          "start": 60.0,
+          "end": 66.0,
+          "speaker": "Quinn",
+          "text": "The insurance renewal is already done. We have not approved the fireworks."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "book",
+            "stage",
+            "crew",
+            "if",
+            "council",
+            "grants"
+          ],
+          "owner": null,
+          "due": [
+            "May 19",
+            "May 19th",
+            "May nineteenth"
+          ]
+        },
+        {
+          "task": [
+            "draft",
+            "rota"
+          ],
+          "owner": "Rhea",
+          "due": [
+            "Saturday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "order",
+            "wristbands",
+            "until",
+            "arrives"
+          ],
+          "owner": "Theo",
+          "due": []
+        },
+        {
+          "task": [
+            "print",
+            "site",
+            "maps",
+            "after",
+            "finishes"
+          ],
+          "owner": "Theo",
+          "due": []
+        }
+      ],
+      "names": [
+        "Quinn",
+        "Rhea",
+        "Sami",
+        "Theo"
+      ],
+      "numbers": [
+        [
+          "May 19",
+          "May nineteenth"
+        ],
+        [
+          "2",
+          "two"
+        ],
+        [
+          "30",
+          "thirty"
+        ],
+        [
+          "18",
+          "eighteen"
+        ],
+        [
+          "24",
+          "twenty-four"
+        ]
+      ]
+    }
+  ]
+}

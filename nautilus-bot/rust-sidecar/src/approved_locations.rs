@@ -15,6 +15,7 @@ pub const BUILTIN_BACKUP_LOCATION_ID: &str = "builtin-plainsong-backups";
 #[serde(rename_all = "snake_case")]
 pub enum ApprovedLocationPurpose {
     Export,
+    Notes,
     Backup,
     CloudBackup,
 }
@@ -106,7 +107,22 @@ impl ApprovedLocationRegistry {
             },
         };
         let mut file = self.load()?;
-        file.locations.retain(|entry| entry.purpose != purpose);
+        if purpose == ApprovedLocationPurpose::Notes {
+            if let Some(existing) = file
+                .locations
+                .iter()
+                .find(|entry| entry.purpose == purpose && entry.target == location.target)
+            {
+                return Ok(ApprovedLocationSummary {
+                    id: existing.id.clone(),
+                    label: existing.label.clone(),
+                    approved: true,
+                });
+            }
+        }
+        if purpose != ApprovedLocationPurpose::Notes {
+            file.locations.retain(|entry| entry.purpose != purpose);
+        }
         file.locations.push(location.clone());
         self.save(&file)?;
         Ok(ApprovedLocationSummary {
@@ -190,6 +206,20 @@ impl ApprovedLocationRegistry {
             ));
         };
         Ok((remote_name.clone(), folder.clone()))
+    }
+
+    /// Drops notes-folder approvals whose IDs are not in `keep`. Other
+    /// purposes are untouched.
+    pub fn retain_notes_locations(&self, keep: &std::collections::HashSet<String>) -> Result<()> {
+        let mut file = self.load()?;
+        let before = file.locations.len();
+        file.locations.retain(|entry| {
+            entry.purpose != ApprovedLocationPurpose::Notes || keep.contains(&entry.id)
+        });
+        if file.locations.len() == before {
+            return Ok(());
+        }
+        self.save(&file)
     }
 
     pub fn summary(&self, id: &str, purpose: ApprovedLocationPurpose) -> ApprovedLocationSummary {
@@ -419,5 +449,61 @@ mod tests {
             ("gdrive".to_string(), "PlainsongBackups".to_string())
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod note_publishing_tests {
+    use super::*;
+    #[test]
+    fn notes_approval_survives_export_reselection_and_reuses_the_same_folder() {
+        let dir = crate::test_fs::TempDir::new("publish-approval");
+        let root = dir.path().canonicalize().unwrap();
+        let folder = root.join("notes");
+        std::fs::create_dir(&folder).unwrap();
+        let other = root.join("exports");
+        std::fs::create_dir(&other).unwrap();
+        let registry = ApprovedLocationRegistry::new(root.join("approved.json"));
+        let notes = registry
+            .approve_filesystem(ApprovedLocationPurpose::Notes, &folder)
+            .unwrap();
+        let again = registry
+            .approve_filesystem(ApprovedLocationPurpose::Notes, &folder)
+            .unwrap();
+        assert_eq!(notes.id, again.id);
+        registry
+            .approve_filesystem(ApprovedLocationPurpose::Export, &other)
+            .unwrap();
+        assert_eq!(
+            registry
+                .resolve_filesystem(&notes.id, ApprovedLocationPurpose::Notes)
+                .unwrap(),
+            folder
+        );
+        assert!(registry
+            .resolve_filesystem(&notes.id, ApprovedLocationPurpose::Export)
+            .is_err());
+    }
+
+    #[test]
+    fn unused_notes_approvals_are_revoked_and_other_purposes_kept() {
+        let dir = crate::test_fs::TempDir::new("publish-prune");
+        let root = dir.path().canonicalize().unwrap();
+        let registry = ApprovedLocationRegistry::new(root.join("approved.json"));
+        let approve = |name: &str, purpose| {
+            let folder = root.join(name);
+            std::fs::create_dir(&folder).unwrap();
+            registry.approve_filesystem(purpose, &folder).unwrap().id
+        };
+        let current = approve("current", ApprovedLocationPurpose::Notes);
+        let unused = approve("unused", ApprovedLocationPurpose::Notes);
+        let export = approve("export", ApprovedLocationPurpose::Export);
+        registry
+            .retain_notes_locations(&[current.clone()].into())
+            .unwrap();
+        let resolve = |id: &str, purpose| registry.resolve_filesystem(id, purpose).is_ok();
+        assert!(resolve(&current, ApprovedLocationPurpose::Notes));
+        assert!(!resolve(&unused, ApprovedLocationPurpose::Notes));
+        assert!(resolve(&export, ApprovedLocationPurpose::Export));
     }
 }

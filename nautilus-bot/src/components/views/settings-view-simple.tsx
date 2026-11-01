@@ -1,3 +1,4 @@
+import { NotePublishSettingsSection } from "@/components/meetings/note-publish-settings";
 import {
   useCallback,
   useEffect,
@@ -9,7 +10,10 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { AsrProviderManager } from "@/components/asr-provider-manager";
-import { settingsErrorMessage } from "@/components/settings/settings-error-message";
+import {
+  settingsErrorMessage,
+  settingsSaveErrorMessage,
+} from "@/components/settings/settings-error-message";
 import {
   OptionSelect,
   SettingsOptionSelect,
@@ -25,21 +29,32 @@ import {
 import { SavedPromptManagerDialog } from "@/components/prompts/saved-prompt-manager-dialog";
 import { resolveSavedPrompts, type SavedPrompt } from "@/lib/saved-prompts";
 import { listen } from "@/lib/electron";
+import {
+  CHATGPT_PLAN_PROVIDER,
+  getChatGptPlanStatus,
+} from "@/lib/backend/chatgpt-plan";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
+  SettingsGroup,
   SettingsInput,
+  SettingsMore,
+  SettingsRow,
   SettingsSwitch,
+  settingAnchorId,
 } from "@/components/ui/settings-control";
 import { CalendarSettingsSection } from "@/components/meetings/calendar-settings-section";
-import { PlusSettingsSection } from "@/components/plus-settings-section";
 import { LocalToolsSection } from "@/components/local-tools-section";
 import { RememberedVoicesSection } from "@/components/remembered-voices-section";
+import { MeetingAudioStorage } from "@/components/settings/meeting-audio-storage";
+import { MeaningSearchSection } from "@/components/settings/meaning-search-section";
+import { NameSourcesSetting } from "@/components/settings/name-sources-setting";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import {
   MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
+  MEETING_MAX_RECORDING_MINUTES,
   resolveMeetingsSettings,
   resolveNotificationsSettings,
 } from "@/lib/settings-sections";
@@ -66,7 +81,8 @@ import {
   openPermissionSettings,
   repairCursorInsertPermissions,
   requestDictationPermissions,
-  saveSettings,
+  patchSettings as persistSettingsPatch,
+  setSavedPrompts,
   selectExportLocation,
   setProviderSecret,
   resetAppState,
@@ -94,11 +110,13 @@ import {
   listOllamaCloudModels,
   listOllamaModels,
 } from "@/lib/backend/ai";
+import { speakerModelName, speakerModelOptionLabel } from "@/lib/speaker-models";
+import { TurnedOffSpeakerModelFile } from "@/components/settings/turned-off-speaker-model-file";
 import {
   downloadDiarizationModel,
   downloadSileroVadModel,
   getAsrProviders,
-  isDiarizationModelAvailable,
+  getDiarizationModelPlan,
   listDiarizationModels,
   refreshAsrRuntimeProbes,
   isSileroVadModelDownloaded,
@@ -160,18 +178,21 @@ import {
   consumePendingSettingsTab,
   OPEN_SETTINGS_TAB_EVENT,
   requestMainView,
-  type SettingsTabId,
+  resolveSettingsSection,
+  type SettingsSectionId,
+  type SettingsTabRequest,
 } from "@/lib/navigation";
 import {
+  SETTINGS_SECTIONS,
+  searchSettings,
+  settingsSectionLabel,
+  type SettingsIndexEntry,
+} from "@/components/settings/settings-sections";
+import {
   AlertCircle,
-  Cloud,
-  Database,
-  Key,
-  Layers,
-  Lock,
   Mic,
   Monitor,
-  Shield,
+  Search,
   Sun,
   Moon,
   Loader2,
@@ -184,12 +205,16 @@ import { SupportBundlePanel } from "@/components/settings/support-bundle-panel";
 import { useProductReadinessStatus } from "@/features/readiness/product-readiness-context";
 import type { ReadinessAssessment } from "@/features/readiness/product-readiness";
 import { formatDateTime } from "@/lib/format-locale";
+import { describeMeetingAudio, MEETING_AUDIO_EXPLAINER } from "@/lib/meeting-audio-status";
 import { micErrorMessage, useMicLevel } from "@/hooks/use-mic-level";
 
-type TabId = SettingsTabId;
+import { applySettingsPatch, diffSettings, mergeSettingsPatches, type SettingsPatch } from "@/lib/settings-patch";
+
+type TabId = SettingsSectionId;
 type QueuedSettingsSave = {
   version: number;
   settings: Settings;
+  patch: SettingsPatch;
   waiters: Array<{
     resolve: () => void;
     reject: (error: unknown) => void;
@@ -202,6 +227,8 @@ type SettingsSaveScheduler = {
   pending: QueuedSettingsSave | null;
   timer: ReturnType<typeof setTimeout> | null;
   flushing: boolean;
+  inFlight: SettingsPatch | null;
+  failed: SettingsPatch;
 };
 
 type ShortcutFieldKey =
@@ -285,19 +312,6 @@ function normalizeProviderModelList(models: unknown): string[] {
   return Array.from(new Set(normalized));
 }
 
-function coerceProviderModelId(
-  currentModelId: string | null | undefined,
-  availableModels: string[],
-): string | null {
-  if (availableModels.length === 0) {
-    return currentModelId ?? null;
-  }
-  if (currentModelId && availableModels.includes(currentModelId)) {
-    return currentModelId;
-  }
-  return availableModels[0] ?? null;
-}
-
 async function withSettingsSectionTimeout<T>(
   section: string,
   task: Promise<T>,
@@ -318,55 +332,6 @@ async function withSettingsSectionTimeout<T>(
     }
   }
 }
-
-// Each summary says what you would come to the tab to do, in the words the
-// tab itself uses. A tab whose summary names a subsystem ("engine
-// diagnostics") tells a new reader nothing about whether their question is
-// answered inside it.
-const SETTINGS_TABS = [
-  {
-    id: "models" as TabId,
-    label: "Models",
-    summary: "Choose the speech engine that hears you and the AI service that writes for you",
-    icon: Layers,
-  },
-  {
-    id: "asr" as TabId,
-    label: "Transcription",
-    summary: "Microphones, languages, cleanup, and what to do when a capture fails",
-    icon: Mic,
-  },
-  {
-    id: "general" as TabId,
-    label: "General",
-    summary: "Theme, windows, notifications, calendar, meeting behaviour, and shortcuts",
-    icon: Monitor,
-  },
-  {
-    id: "security" as TabId,
-    label: "Privacy & Security",
-    summary: "Whether anything leaves this Mac, what macOS lets Plainsong do, and the vault",
-    icon: Shield,
-  },
-  {
-    id: "storage" as TabId,
-    label: "Storage",
-    summary: "Where exports go, what gets deleted and when, backups, and starting over",
-    icon: Database,
-  },
-  {
-    id: "ai" as TabId,
-    label: "AI & Keys",
-    summary: "Automatic summaries, saved prompts, API keys, and how search finds a meeting",
-    icon: Key,
-  },
-  {
-    id: "updates" as TabId,
-    label: "Updates",
-    summary: "Check for a new version and choose stable or beta releases",
-    icon: RefreshCw,
-  },
-] as const;
 
 function dictationLanguageLabel(value: string): string {
   return (
@@ -513,6 +478,21 @@ function describeRecordingEncryption(
   };
 }
 
+/**
+ * Who writes meeting summaries and who does AI cleanup, in one sentence,
+ * naming the destination once when both use the same one.
+ */
+function describeAiWriters(
+  meetingsProvider: string | undefined,
+  dictationProvider: string | undefined,
+): string {
+  const summaries = describeAnalysisDestination(meetingsProvider);
+  const cleanup = describeAnalysisDestination(dictationProvider);
+  return summaries === cleanup
+    ? `Summaries and AI cleanup both use ${summaries}. Both are chosen in Models.`
+    : `Summaries are written by ${summaries}, and AI cleanup by ${cleanup}. Both are chosen in Models.`;
+}
+
 function resolveDictationReadinessChip(
   readiness: ReadinessAssessment,
 ): ReadinessChipState {
@@ -539,7 +519,7 @@ function resolveDictationReadinessChip(
       : readiness.cause?.id === "cursor_insertion"
         ? "Text insertion"
         : readiness.cause?.id === "dictation_route"
-          ? "Dictation engine"
+          ? "Speech model"
           : "Dictation";
 
   return {
@@ -556,19 +536,24 @@ export function SettingsView() {
   const tabButtonRefs = useRef<Partial<Record<TabId, HTMLButtonElement | null>>>(
     {},
   );
-  const activeTabSummary =
-    SETTINGS_TABS.find((tab) => tab.id === activeTab)?.summary ?? "";
-  // Arrow keys move along the section row and open the section they land on
-  // (the tablist pattern); Tab leaves the row for the section's controls.
+  // Settings search, and the row a search result or deep link should land on
+  // once its section has rendered.
+  const [settingsQuery, setSettingsQuery] = useState("");
+  const [pendingFocus, setPendingFocus] = useState<string | null>(null);
+  const contentScrollRef = useRef<HTMLDivElement | null>(null);
+  // Up/down (and left/right) move along the section list and open the section
+  // they land on (the tablist pattern); Tab leaves the list for the section.
   const handleTabKeyDown = useCallback(
     (event: KeyboardEvent<HTMLButtonElement>) => {
-      const index = SETTINGS_TABS.findIndex((tab) => tab.id === activeTab);
-      const last = SETTINGS_TABS.length - 1;
+      const index = SETTINGS_SECTIONS.findIndex((tab) => tab.id === activeTab);
+      const last = SETTINGS_SECTIONS.length - 1;
       let nextIndex: number;
       switch (event.key) {
+        case "ArrowDown":
         case "ArrowRight":
           nextIndex = index === last ? 0 : index + 1;
           break;
+        case "ArrowUp":
         case "ArrowLeft":
           nextIndex = index === 0 ? last : index - 1;
           break;
@@ -582,7 +567,8 @@ export function SettingsView() {
           return;
       }
       event.preventDefault();
-      const nextTab = SETTINGS_TABS[nextIndex].id;
+      const nextTab = SETTINGS_SECTIONS[nextIndex].id;
+      setSettingsQuery("");
       setActiveTab(nextTab);
       tabButtonRefs.current[nextTab]?.focus();
     },
@@ -598,6 +584,7 @@ export function SettingsView() {
   );
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [settingsSaveError, setSettingsSaveError] = useState<string | null>(null);
   const [initialLoadFailed, setInitialLoadFailed] = useState(false);
   const [provider, setProvider] = useState("openai");
   const [apiKey, setApiKey] = useState("");
@@ -658,11 +645,19 @@ export function SettingsView() {
   const [ollamaAvailable, setOllamaAvailable] = useState<boolean | null>(null);
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaCloudModels, setOllamaCloudModels] = useState<string[]>([]);
-  const [diarizationAvailable, setDiarizationAvailable] = useState(false);
   const [diarizationDownloading, setDiarizationDownloading] = useState(false);
   const [diarizationModels, setDiarizationModels] = useState<
     DiarizationModelOption[]
   >([]);
+  // The model the next meeting will actually run (a downloaded stand-in
+  // when the selected one is missing; null when none is on this Mac), so the
+  // remembered-voices note describes what will happen, not what was picked.
+  const [diarizationRunModelId, setDiarizationRunModelId] = useState<
+    string | null | undefined
+  >(undefined);
+  // The model setup and meetings offer for download, which differs from the
+  // saved one only when the saved one is no longer offered.
+  const [diarizationPlanModelId, setDiarizationPlanModelId] = useState<string | undefined>(undefined);
   const [sileroVadAvailable, setSileroVadAvailable] = useState(false);
   const [sileroVadDownloading, setSileroVadDownloading] = useState(false);
   const micTest = useMicLevel();
@@ -678,6 +673,8 @@ export function SettingsView() {
     useState<SystemAudioCapability | null>(null);
   const [systemAudioTestLoading, setSystemAudioTestLoading] = useState(false);
   const [systemAudioTestStatus, setSystemAudioTestStatus] = useState<string | null>(null);
+  const [systemAudioCheckFailed, setSystemAudioCheckFailed] = useState(false);
+  const meetingAudio = describeMeetingAudio(systemAudioCapability, systemAudioCheckFailed);
   const micTestRecorderRef = useRef<MediaRecorder | null>(null);
   const micTestChunksRef = useRef<BlobPart[]>([]);
   const backupConfigLoadInFlightRef = useRef(false);
@@ -694,17 +691,17 @@ export function SettingsView() {
   const [capturingShortcut, setCapturingShortcut] =
     useState<ShortcutFieldKey | null>(null);
   const mountedRef = useRef(true);
+  const settingsRevisionRef = useRef(0);
   const saveSchedulerRef = useRef<SettingsSaveScheduler>({
     nextVersion: 0,
     latestAppliedVersion: 0,
     pending: null,
     timer: null,
     flushing: false,
+    inFlight: null,
+    failed: diffSettings({}, {}),
   });
-  // Tracks the last settings snapshot known to be on disk, so the
-  // settings-changed listener below can tell which draft sections still
-  // have unsaved local edits (and must not be clobbered by another writer's
-  // broadcast) versus which sections are safe to refresh from it.
+  // Canonical snapshots come from native broadcasts and completed writes.
   const persistedSettingsRef = useRef<Settings | null>(null);
 
   const settings = draftSettings;
@@ -793,24 +790,50 @@ export function SettingsView() {
         while (scheduler.pending) {
           const queued = scheduler.pending;
           scheduler.pending = null;
+          scheduler.inFlight = queued.patch;
 
           try {
-            await saveSettings(queued.settings);
+            const baselineBeforeSave = persistedSettingsRef.current;
+            await persistSettingsPatch(queued.patch);
+            if (mountedRef.current) {
+              setSettingsSaveError(null);
+            }
             if (queued.version >= scheduler.latestAppliedVersion) {
               scheduler.latestAppliedVersion = queued.version;
               if (mountedRef.current) {
-                setPersistedSettings(queued.settings);
-                applySecurityStatusFromSettings(queued.settings);
+                const committed = persistedSettingsRef.current !== baselineBeforeSave
+                  ? persistedSettingsRef.current ?? queued.settings
+                  : applySettingsPatch(baselineBeforeSave ?? queued.settings, queued.patch);
+                persistedSettingsRef.current = committed;
+                setPersistedSettings(committed);
+                applySecurityStatusFromSettings(committed);
+                scheduler.inFlight = null;
+                const pending = saveSchedulerRef.current.pending;
+                const remaining = mergeSettingsPatches(
+                  scheduler.failed,
+                  ...(pending ? [pending.patch] : []),
+                );
+                const draft = applySettingsPatch(committed, remaining);
+                latestSettingsRef.current = draft;
+                setDraftSettings(draft);
+                if (pending) pending.settings = draft;
               }
             }
             queued.waiters.forEach(({ resolve }) => resolve());
           } catch (e) {
+            // Other callbacks can enqueue while the native write is awaited.
+            const pending = saveSchedulerRef.current.pending;
+            if (pending) {
+              pending.patch = mergeSettingsPatches(queued.patch, pending.patch);
+            } else {
+              scheduler.failed = mergeSettingsPatches(scheduler.failed, queued.patch);
+            }
             queued.waiters.forEach(({ reject }) => reject(e));
             if (mountedRef.current) {
-              setError(
-                settingsErrorMessage(e, "Failed to save settings"),
-              );
+              setSettingsSaveError(settingsSaveErrorMessage(e));
             }
+          } finally {
+            scheduler.inFlight = null;
           }
         }
       } finally {
@@ -831,6 +854,15 @@ export function SettingsView() {
       awaitCompletion = false,
     ): Promise<void> | undefined => {
       const scheduler = saveSchedulerRef.current;
+      settingsRevisionRef.current += 1;
+      const previous = latestSettingsRef.current ?? persistedSettingsRef.current ?? next;
+      // Each edit is compared with the preceding optimistic draft. Comparing
+      // with disk would lose an explicit return to the original value.
+      const patch = diffSettings(
+        { ...previous, ai: undefined },
+        { ...next, ai: undefined },
+      );
+      latestSettingsRef.current = next;
       scheduler.nextVersion += 1;
       let waiter: QueuedSettingsSave["waiters"][number] | undefined;
       const completion = awaitCompletion
@@ -841,6 +873,11 @@ export function SettingsView() {
       scheduler.pending = {
         version: scheduler.nextVersion,
         settings: next,
+        patch: mergeSettingsPatches(
+          scheduler.failed,
+          ...(scheduler.pending ? [scheduler.pending.patch] : []),
+          patch,
+        ),
         // Replacing a debounced snapshot subsumes it. Its callers therefore
         // complete only when the newer snapshot has actually landed.
         waiters: [
@@ -849,6 +886,7 @@ export function SettingsView() {
         ],
       };
 
+      scheduler.failed = diffSettings({}, {});
       if (scheduler.timer) {
         clearTimeout(scheduler.timer);
       }
@@ -973,14 +1011,15 @@ export function SettingsView() {
       if (!nextShortcut) {
         return;
       }
-      if (!settings) {
+      const current = latestSettingsRef.current;
+      if (!current) {
         return;
       }
 
       const next: Settings = {
-        ...settings,
+        ...current,
         shortcuts: {
-          ...settings.shortcuts,
+          ...current.shortcuts,
           [field]: nextShortcut,
         },
       };
@@ -999,11 +1038,14 @@ export function SettingsView() {
   );
 
   const loadInitialSettings = useCallback(async () => {
+    const revision = ++settingsRevisionRef.current;
     setInitialLoadFailed(false);
     markSettingsPerf("settings-initial-load-start");
     try {
       const loaded = await getSettings();
-      if (mountedRef.current) {
+      if (mountedRef.current && revision === settingsRevisionRef.current) {
+        latestSettingsRef.current = loaded;
+        persistedSettingsRef.current = loaded;
         setDraftSettings(loaded);
         setPersistedSettings(loaded);
         setError(null);
@@ -1011,7 +1053,7 @@ export function SettingsView() {
       }
     } catch (loadError) {
       console.warn("Failed to load settings:", loadError);
-      if (mountedRef.current) {
+      if (mountedRef.current && revision === settingsRevisionRef.current) {
         setInitialLoadFailed(true);
       }
     }
@@ -1022,6 +1064,7 @@ export function SettingsView() {
     void loadInitialSettings();
     return () => {
       mountedRef.current = false;
+      settingsRevisionRef.current += 1;
       void flushPendingSettingsSave(true);
     };
   }, [flushPendingSettingsSave, loadInitialSettings]);
@@ -1030,13 +1073,8 @@ export function SettingsView() {
     persistedSettingsRef.current = persistedSettings;
   }, [persistedSettings]);
 
-  // Other writers (theme toggle, beta-channel switch, ASR route picker,
-  // dictation view, first-run wizard) each save a whole Settings object of
-  // their own. Without this, this view's debounced whole-object save could
-  // silently revert whatever they just changed (and vice versa). The sidecar
-  // broadcasts the full settings after every save; refresh any section that
-  // has no unsaved local edit (i.e. still matches the last snapshot we knew
-  // was on disk) rather than clobbering it.
+  // Refresh clean paths from native broadcasts while retaining explicit
+  // local edits, including writes that are in flight or failed.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
@@ -1045,48 +1083,19 @@ export function SettingsView() {
       if (!mountedRef.current) {
         return;
       }
+      settingsRevisionRef.current += 1;
       const incoming = event.payload;
-      const lastKnownPersisted = persistedSettingsRef.current;
-
-      const mergeKeepingPendingEdits = (prev: Settings): Settings => {
-        if (!lastKnownPersisted) {
-          // No baseline to diff pending edits against yet -- leave the draft
-          // alone rather than risk discarding an in-progress edit.
-          return prev;
-        }
-        const merged = { ...prev } as Record<string, unknown>;
-        const prevRecord = prev as unknown as Record<string, unknown>;
-        const lastPersistedRecord = lastKnownPersisted as unknown as Record<
-          string,
-          unknown
-        >;
-        const incomingRecord = incoming as unknown as Record<string, unknown>;
-        for (const key of Object.keys(incomingRecord)) {
-          const hasNoPendingEdit =
-            JSON.stringify(prevRecord[key]) ===
-            JSON.stringify(lastPersistedRecord[key]);
-          if (hasNoPendingEdit) {
-            merged[key] = incomingRecord[key];
-          }
-        }
-        return merged as unknown as Settings;
-      };
-
-      setDraftSettings((prevDraft) =>
-        prevDraft ? mergeKeepingPendingEdits(prevDraft) : incoming,
-      );
-      // A save may already be queued (debounced) with a snapshot taken
-      // before this broadcast arrived; merge it the same way so the flush
-      // that eventually fires doesn't re-clobber the sections we just
-      // refreshed with stale data from that snapshot.
       const scheduler = saveSchedulerRef.current;
-      if (scheduler.pending) {
-        scheduler.pending = {
-          version: scheduler.pending.version,
-          settings: mergeKeepingPendingEdits(scheduler.pending.settings),
-          waiters: scheduler.pending.waiters,
-        };
-      }
+      const dirty = mergeSettingsPatches(
+        scheduler.failed,
+        ...(scheduler.inFlight ? [scheduler.inFlight] : []),
+        ...(scheduler.pending ? [scheduler.pending.patch] : []),
+      );
+      const merged = applySettingsPatch(incoming, dirty);
+      latestSettingsRef.current = merged;
+      setDraftSettings(merged);
+      if (scheduler.pending) scheduler.pending.settings = merged;
+      persistedSettingsRef.current = incoming;
       setPersistedSettings(incoming);
     }).then((fn) => {
       if (cancelled) {
@@ -1144,7 +1153,10 @@ export function SettingsView() {
   useEffect(() => {
     let mounted = true;
     if (!settings) return;
-    if (!isRemoteAnalysisProvider(settings.privacy.meetingsAi.provider)) {
+    if (
+      !isRemoteAnalysisProvider(settings.privacy.meetingsAi.provider) ||
+      settings.privacy.meetingsAi.provider === CHATGPT_PLAN_PROVIDER
+    ) {
       setHasApiKey(false);
       return;
     }
@@ -1169,7 +1181,10 @@ export function SettingsView() {
 
   useEffect(() => {
     let mounted = true;
-    if (!isRemoteAnalysisProvider(provider)) {
+    if (
+      !isRemoteAnalysisProvider(provider) ||
+      provider === CHATGPT_PLAN_PROVIDER
+    ) {
       setKeyManagerHasApiKey(false);
       return;
     }
@@ -1191,20 +1206,25 @@ export function SettingsView() {
   }, [provider]);
 
   useEffect(() => {
+    const openRequest = (request: SettingsTabRequest) => {
+      const section = resolveSettingsSection(request.tab);
+      if (!SETTINGS_SECTIONS.some((tab) => tab.id === section)) {
+        return;
+      }
+      setSettingsQuery("");
+      setActiveTab(section);
+      setPendingFocus(request.focus ?? null);
+    };
     const pendingTab = consumePendingSettingsTab();
     if (pendingTab) {
-      setActiveTab(pendingTab);
+      openRequest(pendingTab);
     }
 
     const handleOpenSettingsTab = (event: Event) => {
-      const requestedTab = (
-        event as CustomEvent<{ tab?: SettingsTabId }>
-      ).detail?.tab;
-      if (
-        requestedTab &&
-        SETTINGS_TABS.some((tab) => tab.id === requestedTab)
-      ) {
-        setActiveTab(requestedTab);
+      const request = (event as CustomEvent<SettingsTabRequest | undefined>)
+        .detail;
+      if (request?.tab) {
+        openRequest(request);
       }
     };
 
@@ -1222,13 +1242,58 @@ export function SettingsView() {
 
   useEffect(() => {
     markSettingsPerf(`settings-tab-open:${activeTab}`);
-    // In a narrow window the section row scrolls sideways; keep the open
-    // section in view, including after a deep link opens one off-screen.
-    tabButtonRefs.current[activeTab]?.scrollIntoView({
-      block: "nearest",
-      inline: "nearest",
-    });
+    // A new section starts at its top, not wherever the last one was left.
+    contentScrollRef.current?.scrollTo?.({ top: 0 });
   }, [activeTab]);
+
+  // Bring a search result or deep-linked row into view once its section has
+  // rendered: open any "More options" it sits in, scroll to it, move focus
+  // to its control, and mark it for a moment. Some rows wait on a load
+  // (permissions, backups), so it looks again briefly before giving up.
+  useEffect(() => {
+    if (!pendingFocus) {
+      return;
+    }
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const reveal = () => {
+      const target = document.getElementById(settingAnchorId(pendingFocus));
+      if (!target) {
+        attempts += 1;
+        if (attempts < 10) {
+          timer = setTimeout(reveal, 100);
+        } else {
+          setPendingFocus(null);
+        }
+        return;
+      }
+      for (
+        let node: HTMLElement | null = target;
+        node;
+        node = node.parentElement
+      ) {
+        if (node instanceof HTMLDetailsElement) {
+          node.open = true;
+        }
+      }
+      target.scrollIntoView?.({ block: "center" });
+      const control =
+        target instanceof HTMLDetailsElement
+          ? target.querySelector<HTMLElement>("summary")
+          : target.querySelector<HTMLElement>(
+              'button:not([disabled]), [role="switch"], [role="combobox"], input:not([disabled]), textarea, summary',
+            );
+      control?.focus({ preventScroll: true });
+      target.classList.remove("setting-flash");
+      void target.offsetWidth;
+      target.classList.add("setting-flash");
+      setPendingFocus(null);
+    };
+    timer = setTimeout(reveal, 0);
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [pendingFocus, activeTab]);
 
   useEffect(() => {
     if (permissionDiagnostics) {
@@ -1349,7 +1414,7 @@ export function SettingsView() {
   }, []);
 
   useEffect(() => {
-    if (activeTab !== "security" || hasLoadedSecurityTab) {
+    if (activeTab !== "privacy" || hasLoadedSecurityTab) {
       return;
     }
 
@@ -1381,7 +1446,7 @@ export function SettingsView() {
   }, [activeTab, hasLoadedSecurityTab]);
 
   useEffect(() => {
-    if (activeTab !== "storage" || hasLoadedStorageTab) {
+    if (activeTab !== "privacy" || hasLoadedStorageTab) {
       return;
     }
 
@@ -1415,7 +1480,10 @@ export function SettingsView() {
   useEffect(() => {
     if (!settings) return;
     const meetingsProvider = settings.privacy.meetingsAi.provider;
-    if (isRemoteAnalysisProvider(meetingsProvider)) {
+    if (
+      isRemoteAnalysisProvider(meetingsProvider) &&
+      meetingsProvider !== CHATGPT_PLAN_PROVIDER
+    ) {
       setProvider(meetingsProvider);
     }
   }, [settings?.privacy.meetingsAi.provider]);
@@ -1438,6 +1506,10 @@ export function SettingsView() {
     setModelsLoading(true);
     try {
       switch (providerName) {
+        case CHATGPT_PLAN_PROVIDER: {
+          const status = await getChatGptPlanStatus();
+          return status.models.map((model) => model.slug);
+        }
         case "openai": {
           const models = normalizeProviderModelList(await listOpenAiModels());
           setOpenaiModels(models);
@@ -1488,21 +1560,26 @@ export function SettingsView() {
     return [];
   }, [settings?.privacy.remoteProcessingEnabled]);
 
+  const storedDiarizationModelId = settings?.transcription.diarizationModelId ?? "ecapa_tdnn_speaker";
+  // A saved model the picker no longer offers (ERes2NetV2, turned off while
+  // its license is unresolved) is never downloaded or run. Downloads and the
+  // remembered-voices note follow the model the sidecar offers in its place.
+  const storedDiarizationModelOffered =
+    diarizationModels.length === 0 ||
+    diarizationModels.some((model) => model.id === storedDiarizationModelId);
+  const selectedDiarizationModelId = storedDiarizationModelOffered
+    ? storedDiarizationModelId
+    : diarizationPlanModelId ?? "ecapa_tdnn_speaker";
+  const selectedDiarizationModel = diarizationModels.find(model => model.id === selectedDiarizationModelId);
+  const diarizationAvailable = selectedDiarizationModel?.installed === true;
+
   useEffect(() => {
     let mounted = true;
     const load = async () => {
-      const [avail, models] = await Promise.all([
-        withSettingsSectionTimeout(
-          "Diarization availability",
-          isDiarizationModelAvailable(),
-        ),
-        withSettingsSectionTimeout(
-          "Diarization model list",
-          listDiarizationModels(),
-        ).catch(() => [] as DiarizationModelOption[]),
-      ]);
+      const models = await withSettingsSectionTimeout(
+        "Diarization model list", listDiarizationModels(),
+      ).catch(() => [] as DiarizationModelOption[]);
       if (!mounted) return;
-      setDiarizationAvailable(avail);
       setDiarizationModels(models);
     };
     load();
@@ -1510,6 +1587,31 @@ export function SettingsView() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const plan = await withSettingsSectionTimeout(
+          "Speaker model plan",
+          getDiarizationModelPlan(),
+        );
+        if (mounted) {
+          setDiarizationRunModelId(plan ? plan.runModelId : undefined);
+          setDiarizationPlanModelId(plan?.selectedModelId);
+        }
+      } catch {
+        if (mounted) {
+          setDiarizationRunModelId(undefined);
+          setDiarizationPlanModelId(undefined);
+        }
+      }
+    };
+    void load();
+    return () => {
+      mounted = false;
+    };
+  }, [storedDiarizationModelId, diarizationModels]);
 
   useEffect(() => {
     let mounted = true;
@@ -1527,91 +1629,29 @@ export function SettingsView() {
     };
   }, []);
 
-  // Both tabs that can change an AI lane need the provider model lists: the
-  // Models screen renders the two lane pickers, and AI & Keys still names the
-  // destination of an automatic summary.
+  // Opening settings may inspect the local Ollama service. Cloud catalogs
+  // require choosing a provider, saving its key, or pressing Refresh models.
   useEffect(() => {
-    if (activeTab !== "ai" && activeTab !== "models") {
-      return;
-    }
+    if (activeTab !== "ai" && activeTab !== "models") return;
     let mounted = true;
     setModelsLoading(true);
-
-    const loadModels = async () => {
-      try {
-        const remoteEnabled = settings?.privacy.remoteProcessingEnabled === true;
-        const [
-          ollamaAvail,
-          ollamaList,
-          ollamaCloudList,
-          openaiList,
-          anthropicList,
-          geminiList,
-          deepseekList,
-        ] = await Promise.all([
-          getOllamaStatus(),
-          listOllamaModels().catch((e) => {
-            console.error("Ollama error:", e);
-            return [];
-          }),
-          remoteEnabled
-            ? hasProviderSecret("ollama-cloud")
-            .then((hasSecret) =>
-              hasSecret ? listOllamaCloudModels() : Promise.resolve([]),
-            )
-            .catch((e) => {
-              console.error("Ollama Cloud error:", e);
-              return [];
-            })
-            : Promise.resolve([]),
-          remoteEnabled ? listOpenAiModels().catch((e) => {
-            console.error("OpenAI error:", e);
-            return [];
-          }) : Promise.resolve([]),
-          remoteEnabled ? listAnthropicModels().catch((e) => {
-            console.error("Anthropic error:", e);
-            return [];
-          }) : Promise.resolve([]),
-          remoteEnabled ? listGeminiModels().catch((e) => {
-            console.error("Gemini error:", e);
-            return [];
-          }) : Promise.resolve([]),
-          remoteEnabled ? listDeepSeekModels().catch((e) => {
-            console.error("DeepSeek error:", e);
-            return [];
-          }) : Promise.resolve([]),
-        ]);
-
-        if (mounted) {
-          setOllamaAvailable(ollamaAvail);
-          setOllamaModels(normalizeProviderModelList(ollamaList));
-          setOllamaCloudModels(normalizeProviderModelList(ollamaCloudList));
-          setOpenaiModels(normalizeProviderModelList(openaiList));
-          setAnthropicModels(normalizeProviderModelList(anthropicList));
-          setGeminiModels(normalizeProviderModelList(geminiList));
-          setDeepseekModels(normalizeProviderModelList(deepseekList));
-          setModelsLoading(false);
-        }
-      } catch (error) {
-        console.error("Failed to load models:", error);
-        if (mounted) {
-          setOllamaAvailable(false);
-          setOllamaModels([]);
-          setOllamaCloudModels([]);
-          setOpenaiModels([]);
-          setAnthropicModels([]);
-          setGeminiModels([]);
-          setDeepseekModels([]);
-          setModelsLoading(false);
-        }
-      }
-    };
-
-    void loadModels();
-    return () => {
-      mounted = false;
-    };
-  }, [activeTab, settings?.privacy.remoteProcessingEnabled]);
+    void Promise.all([getOllamaStatus(), listOllamaModels()])
+      .then(([available, models]) => {
+        if (!mounted) return;
+        setOllamaAvailable(available);
+        setOllamaModels(normalizeProviderModelList(models));
+      })
+      .catch((error) => {
+        console.error("Failed to load local models:", error);
+        if (!mounted) return;
+        setOllamaAvailable(false);
+        setOllamaModels([]);
+      })
+      .finally(() => {
+        if (mounted) setModelsLoading(false);
+      });
+    return () => { mounted = false; };
+  }, [activeTab]);
 
   const updateSettings = useCallback(
     (
@@ -1623,9 +1663,9 @@ export function SettingsView() {
       // by an earlier commit runs between this call and the re-render. Setting
       // the ref here is what lets that effect see this edit instead of the
       // snapshot it closed over.
-      latestSettingsRef.current = next;
       setDraftSettings(next);
       setError(null);
+      setSettingsSaveError(null);
 
       if (options?.immediate) {
         queueSettingsSave(next, 0);
@@ -1637,41 +1677,28 @@ export function SettingsView() {
     [flushPendingSettingsSave, queueSettingsSave],
   );
 
-  /**
-   * Write the saved-prompt library and report whether it landed.
-   *
-   * Everything else on this view goes through `updateSettings`, which hands
-   * the write to the debounced scheduler and returns immediately -- it has no
-   * way to say a save failed, because by design nothing is waiting. That is
-   * right for a switch, whose failure the view's own error banner covers.
-   *
-   * It is wrong for this dialog. It takes `onPersist`'s answer as the truth
-   * about the write, and a `return true` written before any I/O told it a
-   * save had succeeded when the settings file was read-only or the disk was
-   * full: the row closed, the list looked saved, and it was not. So this
-   * uses the same scheduler as every other edit, but awaits this queued
-   * snapshot so the dialog can report the real result. Keeping it in the
-   * queue also means rapid prompt actions and other settings edits cannot
-   * issue overlapping whole-settings writes that complete out of order.
-   */
   const persistSavedPrompts = useCallback(
     async (next: readonly SavedPrompt[]): Promise<boolean> => {
       const current = latestSettingsRef.current;
       if (!current) return false;
-      const updated: Settings = {
-        ...current,
-        ai: { ...(current.ai ?? {}), savedPrompts: [...next] },
-      };
-
       setSavedPromptsSaveError(null);
-      latestSettingsRef.current = updated;
-      setDraftSettings(updated);
-      setError(null);
-
       try {
-        const completion = queueSettingsSave(updated, 0, true);
-        void flushPendingSettingsSave(true);
-        await completion;
+        const savedPrompts = await setSavedPrompts(next);
+        settingsRevisionRef.current += 1;
+        const ai = { savedPrompts };
+        const latest = latestSettingsRef.current;
+        if (latest) {
+          latestSettingsRef.current = { ...latest, ai };
+          setDraftSettings((draft) => draft ? { ...draft, ai } : draft);
+        }
+        const scheduler = saveSchedulerRef.current;
+        if (scheduler.pending) {
+          scheduler.pending.settings = { ...scheduler.pending.settings, ai };
+        }
+        if (persistedSettingsRef.current) {
+          persistedSettingsRef.current = { ...persistedSettingsRef.current, ai };
+          setPersistedSettings(persistedSettingsRef.current);
+        }
         return true;
       } catch (e) {
         const message =
@@ -1683,18 +1710,10 @@ export function SettingsView() {
         return false;
       }
     },
-    [flushPendingSettingsSave, queueSettingsSave],
+    [],
   );
 
-  // Change one field of the newest settings, for writes the user did not ask
-  // for (a background correction, not an edit). `updateSettings` takes a whole
-  // Settings object and hands it to the scheduler, where it *replaces* any
-  // save still waiting out its debounce -- so a whole-object write from an
-  // effect does not merely lose a race with a concurrent edit, it deletes that
-  // edit's save outright and the edit never reaches disk at all. Folding the
-  // one field into the queued write instead, and letting that write's own
-  // timer carry both, is the same discipline the settings-changed listener
-  // above uses on the same queue.
+  // Background corrections join the pending patch without restarting its timer.
   const patchSettings = useCallback(
     (applyPatch: (previous: Settings) => Settings) => {
       const current = latestSettingsRef.current;
@@ -1704,9 +1723,14 @@ export function SettingsView() {
 
       const scheduler = saveSchedulerRef.current;
       if (scheduler.pending) {
+        settingsRevisionRef.current += 1;
         scheduler.pending = {
           version: scheduler.pending.version,
           settings: applyPatch(scheduler.pending.settings),
+          patch: mergeSettingsPatches(
+            scheduler.pending.patch,
+            diffSettings(current, applyPatch(current)),
+          ),
           waiters: scheduler.pending.waiters,
         };
         latestSettingsRef.current = applyPatch(current);
@@ -1773,98 +1797,26 @@ export function SettingsView() {
         return;
       }
 
-      const cachedModels = getCachedModelsForProvider(providerName);
-      // A zero-setup provider takes no model id at all. Without this the
-      // previous provider's id (say `llama3.2`) rides along on the lane --
-      // the sidecar clears it on the next load, but the settings file and
-      // this screen would disagree until then.
-      const initialModelId = isZeroSetupAnalysisProvider(providerName)
-        ? null
-        : coerceProviderModelId(settings.privacy[lane].modelId, cachedModels);
+      // Model ids belong to one provider. Switching providers clears the old
+      // id and lets the new provider use its backend default until the reader
+      // explicitly chooses another model.
       const initialSettings = {
         ...settings,
         privacy: {
           ...settings.privacy,
-          [lane]: { provider: providerName, modelId: initialModelId },
+          [lane]: { provider: providerName, modelId: null },
         },
       };
 
       void updateSettings(initialSettings, { immediate: true });
-
-      const refreshedModels = await refreshModelsForProvider(providerName);
-      const refreshedModelId = coerceProviderModelId(
-        initialModelId,
-        refreshedModels,
-      );
-
-      if (refreshedModelId !== initialModelId) {
-        // Patch, do not rebuild from `initialSettings`. That snapshot predates
-        // the `await` above, and `queueSettingsSave` keeps a single pending
-        // slot that it REPLACES rather than merges — so a whole-object write
-        // from here would not merely lose a race with anything the user changed
-        // while the model list was loading, it would delete that queued save
-        // before it was ever attempted. Same defect the auto-pin effect had.
-        patchSettings((previous) => ({
-          ...previous,
-          privacy: {
-            ...previous.privacy,
-            [lane]: { ...previous.privacy[lane], modelId: refreshedModelId },
-          },
-        }));
-      }
+      await refreshModelsForProvider(providerName);
     },
     [
-      getCachedModelsForProvider,
-      patchSettings,
       refreshModelsForProvider,
       settings,
       updateSettings,
     ],
   );
-
-  // Pin each lane to a model the provider actually offers, so the picker's
-  // displayed value is the value that gets used. Nobody asked for this write,
-  // so it changes the one lane's `modelId` and nothing else — see
-  // `patchSettings`.
-  useEffect(() => {
-    if (!settings || (activeTab !== "ai" && activeTab !== "models")) {
-      return;
-    }
-
-    for (const lane of AI_LANE_KEYS) {
-      const current = latestSettingsRef.current;
-      if (!current) {
-        return;
-      }
-
-      const cachedModels = getCachedModelsForProvider(
-        current.privacy[lane].provider,
-      );
-      if (cachedModels.length === 0) {
-        continue;
-      }
-
-      const nextModelId = coerceProviderModelId(
-        current.privacy[lane].modelId,
-        cachedModels,
-      );
-      if (nextModelId === current.privacy[lane].modelId) {
-        continue;
-      }
-
-      patchSettings((previous) => ({
-        ...previous,
-        privacy: {
-          ...previous.privacy,
-          [lane]: { ...previous.privacy[lane], modelId: nextModelId },
-        },
-      }));
-      // One lane per pass: the draft is about to change, and correcting the
-      // other lane from the pre-write snapshot would undo what we just did.
-      // The re-run this write triggers picks the other lane up.
-      return;
-    }
-  }, [activeTab, getCachedModelsForProvider, patchSettings, settings]);
 
   useEffect(() => {
     if (!settings) {
@@ -1905,31 +1857,32 @@ export function SettingsView() {
   const refreshSystemAudioCapability = useCallback(async () => {
     try {
       setSystemAudioCapability(await getSystemAudioCapability());
+      setSystemAudioCheckFailed(false);
     } catch (systemAudioError) {
       console.warn("Failed to inspect system audio:", systemAudioError);
       setSystemAudioCapability(null);
+      setSystemAudioCheckFailed(true);
     }
   }, []);
 
   const runSystemAudioTest = useCallback(async () => {
     setSystemAudioTestLoading(true);
-    setSystemAudioTestStatus("Waiting for macOS, then listening for sound…");
+    setSystemAudioTestStatus("Checking the meeting audio. If macOS asks, choose Allow.");
     try {
       const result = await testSystemAudioCapture();
       setSystemAudioCapability(result.capability);
+      setSystemAudioCheckFailed(false);
       setSystemAudioTestStatus(
-        result.capability.ready
-          ? result.verificationMethod === "external_audio"
-            ? `Heard real audio through ${result.capability.routeDevice ?? "the current device"}.`
-            : `Heard the ${Math.round(result.expectedToneHz)} Hz test tone through ${result.capability.routeDevice ?? "the current device"}.`
-          : result.capability.actionableReason ??
-              "Nothing came through. Check the device and macOS privacy settings.",
+        result.capability.ready && result.verificationMethod === "external_audio"
+          ? `Heard real audio through ${result.capability.routeDevice ?? "the current device"}.`
+          : describeMeetingAudio(result.capability).sentence,
       );
     } catch (systemAudioError) {
+      setSystemAudioCheckFailed(true);
       setSystemAudioTestStatus(
         settingsErrorMessage(
           systemAudioError,
-          "The system audio test could not run. Try again.",
+          "The meeting audio check could not run. Try again.",
         ),
       );
     } finally {
@@ -1977,13 +1930,6 @@ export function SettingsView() {
     : hasUnsavedChanges
       ? "Unsaved changes"
       : "All changes saved";
-  const readyChipTone = (state: boolean | "neutral") =>
-    state === "neutral"
-      ? "border-border bg-muted/30 text-muted-foreground"
-      : state
-      ? "border-gold/30 bg-gold/10 text-gold-text"
-      : "border-rust/30 bg-rust/10 text-rust";
-
   const handleSettingsTextBlur = useCallback(() => {
     void flushPendingSettingsSave();
   }, [flushPendingSettingsSave]);
@@ -1999,13 +1945,11 @@ export function SettingsView() {
     [flushPendingSettingsSave],
   );
 
-  // useMicLevel releases the microphone itself on unmount.
   useEffect(() => {
     return () => {
       if (micTestPlaybackUrl) URL.revokeObjectURL(micTestPlaybackUrl);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [micTestPlaybackUrl]);
 
   useEffect(() => {
     void refreshAudioDevices();
@@ -2036,7 +1980,6 @@ export function SettingsView() {
     const stream = getMicTestStream();
     if (!stream) return;
     if (micTestPlaybackUrl) {
-      URL.revokeObjectURL(micTestPlaybackUrl);
       setMicTestPlaybackUrl(null);
     }
     micTestChunksRef.current = [];
@@ -2044,6 +1987,7 @@ export function SettingsView() {
     micTestRecorderRef.current = recorder;
     recorder.ondataavailable = (e) => micTestChunksRef.current.push(e.data);
     recorder.onstop = () => {
+      if (!mountedRef.current) return;
       const blob = new Blob(micTestChunksRef.current, { type: "audio/webm" });
       setMicTestPlaybackUrl(URL.createObjectURL(blob));
       setMicTestRecording(false);
@@ -2244,14 +2188,20 @@ export function SettingsView() {
     if (value === "cycleMode") return { kind: "cycleMode" };
     if (value === "cancel") return { kind: "cancel" };
     const behavior = current.kind === "dictation" ? current.behavior : "inherit";
-    if (value === "dictation") return { kind: "dictation", modeId: null, behavior };
-    return { kind: "dictation", modeId: value.slice("dictation:".length), behavior };
+    const submit =
+      current.kind === "dictation" && current.submitAfterInsert === true
+        ? { submitAfterInsert: true }
+        : {};
+    if (value === "dictation") return { kind: "dictation", modeId: null, behavior, ...submit };
+    return { kind: "dictation", modeId: value.slice("dictation:".length), behavior, ...submit };
   };
 
   const bindingTriggerTypeValue = (trigger: DictationBindingTrigger): string => {
     if (trigger.kind === "mouse") return `mouse:${trigger.button}`;
     const lone = trigger.accelerator.trim().toLowerCase();
     if (lone === "fn") return "modifier:Fn";
+    if (lone === "rightcommand") return "modifier:RightCommand";
+    if (lone === "rightoption") return "modifier:RightOption";
     return "keys";
   };
 
@@ -2263,8 +2213,8 @@ export function SettingsView() {
       const button = Number(value.slice("mouse:".length)) as 3 | 4 | 5;
       return { kind: "mouse", button, modifiers: [] };
     }
-    if (value === "modifier:Fn") {
-      return { kind: "key", accelerator: "Fn" };
+    if (["modifier:Fn", "modifier:RightCommand", "modifier:RightOption"].includes(value)) {
+      return { kind: "key", accelerator: value.slice("modifier:".length) };
     }
     // Back to keys: keep a recorded chord, otherwise leave it for the recorder.
     return current.kind === "key" && bindingTriggerTypeValue(current) === "keys"
@@ -2350,14 +2300,25 @@ export function SettingsView() {
     return (
       <div
         key={binding.id}
-        className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3"
+        className="flex flex-col gap-3 rounded-lg border border-border/60 p-3"
       >
-        <div className="flex flex-col gap-2 lg:flex-row lg:flex-wrap lg:items-center">
-          <span className="text-sm text-muted-foreground lg:w-24">{rowLabel}</span>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-sm font-medium">{rowLabel}</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 px-2.5 text-muted-foreground hover:text-foreground"
+            aria-label={`Remove ${rowLabel.toLowerCase()} binding`}
+            onClick={() => removeDictationBinding(binding.id)}
+          >
+            Remove
+          </Button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
           <OptionSelect
             aria-label={`${rowLabel} trigger type`}
             aria-describedby="dictation-bindings-description"
-            className="lg:w-auto lg:min-w-44"
+            className="h-9 w-auto min-w-40"
             value={triggerType}
             onValueChange={(value) =>
               updateDictationBinding(binding.id, {
@@ -2367,39 +2328,43 @@ export function SettingsView() {
           >
             <option value="keys">Keys</option>
             <option value="modifier:Fn">Fn on its own</option>
+            <option value="modifier:RightCommand">Right Command on its own</option>
+            <option value="modifier:RightOption">Right Option on its own</option>
             <option value="mouse:3">Middle mouse button</option>
             <option value="mouse:4">Mouse button 4</option>
             <option value="mouse:5">Mouse button 5</option>
           </OptionSelect>
-          <Input
-            value={isRecording ? "Listening..." : triggerText}
-            readOnly
-            aria-label={isPrimary ? "Dictation shortcut" : `${rowLabel} trigger`}
-            aria-invalid={issue ? true : undefined}
-            className={`h-9 w-40 text-center font-mono text-xs ${
-              isRecording
-                ? "border-primary ring-1 ring-primary"
-                : issue
-                  ? "border-destructive/60"
-                  : ""
-            }`}
-            onFocus={() => {
-              if (triggerIsRecordable) {
-                setRecordingBindingId(binding.id);
-              }
-            }}
-            onBlur={() => {
-              if (recordingBindingId === binding.id) {
-                setRecordingBindingId(null);
-              }
-            }}
-            onKeyDown={handleBindingRecorderKeyDown(binding.id)}
-            onMouseDown={handleBindingRecorderMouseDown(binding.id, triggerIsRecordable)}
-          />
+          <div className="w-36 shrink-0">
+            <Input
+              value={isRecording ? "Listening..." : triggerText}
+              readOnly
+              aria-label={isPrimary ? "Dictation shortcut" : `${rowLabel} trigger`}
+              aria-invalid={issue ? true : undefined}
+              className={`h-9 w-36 text-center font-mono text-xs ${
+                isRecording
+                  ? "border-primary ring-1 ring-primary"
+                  : issue
+                    ? "border-destructive/60"
+                    : ""
+              }`}
+              onFocus={() => {
+                if (triggerIsRecordable) {
+                  setRecordingBindingId(binding.id);
+                }
+              }}
+              onBlur={() => {
+                if (recordingBindingId === binding.id) {
+                  setRecordingBindingId(null);
+                }
+              }}
+              onKeyDown={handleBindingRecorderKeyDown(binding.id)}
+              onMouseDown={handleBindingRecorderMouseDown(binding.id, triggerIsRecordable)}
+            />
+          </div>
           <OptionSelect
             aria-label={`${rowLabel} action`}
             aria-describedby="dictation-bindings-description"
-            className="lg:w-auto lg:min-w-44"
+            className="h-9 w-auto min-w-40"
             value={bindingActionValue(binding.action)}
             onValueChange={(value) =>
               updateDictationBinding(binding.id, {
@@ -2425,7 +2390,7 @@ export function SettingsView() {
             <OptionSelect
               aria-label={`${rowLabel} behavior`}
               aria-describedby="dictation-bindings-description"
-              className="lg:w-auto lg:min-w-44"
+              className="h-9 w-auto min-w-40"
               value={binding.action.behavior}
               onValueChange={(value) =>
                 updateDictationBinding(binding.id, {
@@ -2448,26 +2413,61 @@ export function SettingsView() {
               <option value="hold" disabled={!nativeShortcutAvailable}>
                 {nativeShortcutAvailable
                   ? "Hold to record, release to stop"
-                  : "Hold to record (needs the native helper)"}
+                  : "Hold to record (needs Accessibility)"}
               </option>
             </OptionSelect>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-9 px-3"
-            aria-label={`Remove ${rowLabel.toLowerCase()} binding`}
-            onClick={() => removeDictationBinding(binding.id)}
-          >
-            Remove
-          </Button>
         </div>
-        {holdWithoutHelper && (
-          <p className="text-sm text-muted-foreground">
-            Hold needs the native shortcut helper, which is not running, so
-            this binding presses to start and presses again to stop until it
-            is. Grant Accessibility to Plainsong to get hold back.
-          </p>
+        {binding.action.kind === "dictation" && (
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5 accent-gold"
+              aria-label={`Press Return after inserting (${rowLabel})`}
+              aria-describedby={`${binding.id}-submit-description`}
+              checked={binding.action.submitAfterInsert === true}
+              onChange={(event) =>
+                updateDictationBinding(binding.id, {
+                  action: {
+                    ...(binding.action as Extract<
+                      DictationBindingAction,
+                      { kind: "dictation" }
+                    >),
+                    submitAfterInsert: event.target.checked,
+                  },
+                })
+              }
+            />
+            <span>
+              <span className="font-medium">Press Return after inserting</span>
+              <span
+                id={`${binding.id}-submit-description`}
+                className="block text-sm text-muted-foreground"
+              >
+                Presses Return once Plainsong confirms the text is in the same
+                field. In chat and AI prompt boxes this sends the message before
+                you can review it. Off by default. To send only sometimes, add a
+                second binding with this on.
+              </span>
+            </span>
+          </label>
+        )}
+        {holdWithoutHelper && !issue && (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <p className="text-sm text-muted-foreground">
+              Hold works once Accessibility is on for Plainsong. Until then,
+              this binding presses to start and presses again to stop.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              aria-label={`Open System Settings to turn on Accessibility for ${rowLabel.toLowerCase()} hold`}
+              onClick={() => void openPermissionSettings("accessibility")}
+            >
+              Open System Settings
+            </Button>
+          </div>
         )}
         {issue && (
           <div className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -2479,70 +2479,176 @@ export function SettingsView() {
     );
   };
 
+  // A saved per-binding `hold` uses the lock options too, so they show for
+  // any hold binding, not only when the shared behavior is hold.
+  const holdLockOptionsApply =
+    dictationShortcutBehavior === "hold_to_talk" ||
+    dictationBindings.some(
+      (binding) =>
+        binding.action.kind === "dictation" && binding.action.behavior === "hold",
+    );
+
+  // One-field writers, so each row below says what it changes and nothing
+  // else. They read the same render's `settings`, as every handler here does.
+  const updateTranscription = (patch: Partial<Settings["transcription"]>) =>
+    void updateSettings({
+      ...settings,
+      transcription: { ...settings.transcription, ...patch },
+    });
+  const updateUi = (patch: Partial<Settings["ui"]>) =>
+    void updateSettings({ ...settings, ui: { ...settings.ui, ...patch } });
+  const updateMeetings = (patch: Partial<typeof meetingsSettings>) =>
+    void updateSettings({
+      ...settings,
+      meetings: { ...meetingsSettings, ...patch },
+    });
+  const updateNotifications = (patch: Partial<typeof notificationsSettings>) =>
+    void updateSettings({
+      ...settings,
+      notifications: { ...notificationsSettings, ...patch },
+    });
+
+  const activeSection =
+    SETTINGS_SECTIONS.find((section) => section.id === activeTab) ??
+    SETTINGS_SECTIONS[0];
+  const searchResults = searchSettings(settingsQuery);
+  const searching = settingsQuery.trim().length > 0;
+  const openSearchResult = (entry: SettingsIndexEntry) => {
+    setSettingsQuery("");
+    setActiveTab(entry.section);
+    setPendingFocus(entry.sectionOnly ? null : entry.id);
+  };
+
+  // The microphone the whole app records from: the chosen one, or the
+  // system default when none is chosen. Only its Bluetooth warning shows.
+  const effectiveMicrophone =
+    currentAudioDevices.find((device) =>
+      appWideDeviceId ? device.deviceId === appWideDeviceId : device.isDefault,
+    ) ?? null;
+
+  const renderDictationShortcutBehavior = () => (
+    <>
+      <SettingsOptionSelect
+        settingId="shortcut-behavior"
+        label="How the dictation shortcut works"
+        description={dictationShortcutBehaviorHint}
+        selectClassName="@md:w-72"
+        value={dictationShortcutBehavior}
+        onChange={(value) => {
+          const behavior = value as DictationHotkeyBehavior;
+          updateTranscription({
+            dictationPushToTalk: behavior === "hold_to_talk",
+            dictationHandsFreeEnabled: behavior === "hands_free",
+          });
+        }}
+      >
+        <option value="toggle">
+          Press to start, press again to stop
+        </option>
+        {/* Always listed, so a saved hold-to-talk choice never shows
+            as an empty box while the key helper is down or starting. */}
+        <option value="hold_to_talk" disabled={!nativeShortcutAvailable}>
+          {nativeShortcutAvailable
+            ? "Hold to record, release to stop"
+            : "Hold to record, release to stop (needs Accessibility)"}
+        </option>
+        <option value="hands_free">
+          Start on its own when you speak
+        </option>
+      </SettingsOptionSelect>
+      {holdLockOptionsApply && (
+        <SettingsSwitch
+          label="Double-tap to lock"
+          description="In hold mode, two quick taps keep listening until you press again. Replaces single-tap locking while on, including for Fn."
+          checked={settings.transcription.dictationDoubleTapToLock === true}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationDoubleTapToLock: checked })
+          }
+        />
+      )}
+      {holdLockOptionsApply && (
+        <SettingsSwitch
+          label="Tap to lock"
+          description="A quick tap keeps listening without holding the key; tap again to finish. Holding still works."
+          checked={settings.transcription.dictationTapToLock !== false}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationTapToLock: checked })
+          }
+        />
+      )}
+    </>
+  );
+
   const renderShortcutsSection = () => (
-    <div className="border-t pt-4">
-      <div className="space-y-1">
-        <p className="section-heading">Keyboard shortcuts</p>
-        <p className="text-sm text-muted-foreground">
-          Click a field and press the keys you want. They work anywhere on the
-          Mac, not just in Plainsong.
-        </p>
-      </div>
-      <div className="mt-4 space-y-1">
-        <p className="text-sm font-medium">Dictation bindings</p>
-        <p id="dictation-bindings-description" className="text-sm text-muted-foreground">
-          Each binding can start dictation in whichever profile is selected or
-          in a named one, move to the next profile, or cancel a dictation in
-          progress. Mouse buttons and Fn on its own need the native shortcut
-          helper
-          {nativeShortcutAvailable ? " (running)" : " (not running)"}.
-        </p>
-      </div>
-      <div className="mt-3 grid gap-3">
-        {dictationBindings.map(renderDictationBindingRow)}
-        {dictationBindings.length === 0 && (
-          <p className="text-sm text-rust">
-            No dictation binding. Add one, or the hotkey stays off until Plainsong
-            restarts.
-          </p>
-        )}
-        <div className="flex flex-wrap gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={draftBinding !== null}
-            onClick={() => {
-              const id = `binding-${Date.now().toString(36)}`;
-              // Held locally, not saved: see `draftBinding`.
-              setDraftBinding({
-                id,
-                trigger: { kind: "key", accelerator: "" },
-                action: { kind: "dictation", modeId: null, behavior: "inherit" },
-              });
-              setRecordingBindingId(id);
-            }}
-          >
-            Add binding
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setDraftBinding(null);
-              saveDictationBindings([
-                {
-                  id: "primary",
-                  trigger: { kind: "key", accelerator: defaultDictationShortcut() },
+    <div className="settings-section">
+      <SettingsGroup title="Starting and stopping">
+        {renderDictationShortcutBehavior()}
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Dictation shortcuts"
+        settingId="dictation-bindings"
+        descriptionId="dictation-bindings-description"
+        description={
+          <>
+            Each one starts dictation in the selected profile or a named one,
+            moves to the next profile, or cancels.{" "}
+            {nativeShortcutAvailable
+              ? "Mouse buttons, Fn and right-side modifier keys on their own work too."
+              : "Mouse buttons, Fn and right-side modifier keys on their own work once Accessibility is on for Plainsong."}
+          </>
+        }
+      >
+        <div className="grid gap-3 py-3.5">
+          {dictationBindings.map(renderDictationBindingRow)}
+          {dictationBindings.length === 0 && (
+            <p className="text-sm text-rust">
+              No dictation shortcut. Add one or choose Reset to default.
+            </p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={draftBinding !== null}
+              onClick={() => {
+                const id = `binding-${Date.now().toString(36)}`;
+                // Held locally, not saved: see `draftBinding`.
+                setDraftBinding({
+                  id,
+                  trigger: { kind: "key", accelerator: "" },
                   action: { kind: "dictation", modeId: null, behavior: "inherit" },
-                },
-              ]);
-            }}
-          >
-            Reset to default
-          </Button>
+                });
+                setRecordingBindingId(id);
+              }}
+            >
+              Add binding
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setDraftBinding(null);
+                saveDictationBindings([
+                  {
+                    id: "primary",
+                    trigger: { kind: "key", accelerator: defaultDictationShortcut() },
+                    action: { kind: "dictation", modeId: null, behavior: "inherit" },
+                  },
+                ]);
+              }}
+            >
+              Reset to default
+            </Button>
+          </div>
         </div>
-      </div>
-      <div className="mt-4 grid gap-3">
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="Other shortcuts"
+        settingId="other-shortcuts"
+        description="Get the last result back, or bring Plainsong forward."
+      >
         {SHORTCUT_FIELD_CONFIG.filter(({ key }) => key !== "toggleDictation").map(({ key, label }) => {
           const currentVal = settings.shortcuts[key]
             ? formatShortcutForDisplay(settings.shortcuts[key])
@@ -2550,36 +2656,37 @@ export function SettingsView() {
           const isCapturing = capturingShortcut === key;
           const conflict = shortcutConflictsByField.get(key);
           return (
-            <div
-              key={key}
-              className="flex flex-col gap-2 rounded-2xl border border-border/60 bg-muted/20 px-3 py-3"
-            >
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <span className="text-sm text-muted-foreground">{label}</span>
-                <div className="flex items-center gap-2">
-                  <Input
-                    value={isCapturing ? "Listening..." : currentVal}
-                    readOnly
-                    aria-label={`${label} shortcut`}
-                    aria-invalid={conflict ? true : undefined}
-                    className={`h-9 w-36 text-center font-mono text-xs ${isCapturing ? "border-primary ring-1 ring-primary" : conflict ? "border-destructive/60" : ""}`}
-                    onFocus={() => setCapturingShortcut(key)}
-                    onBlur={() => {
-                      if (capturingShortcut === key) {
-                        setCapturingShortcut(null);
-                      }
-                    }}
-                    onKeyDown={handleShortcutKeyDown(key)}
-                  />
+            <div key={key} className="py-3">
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-sm font-medium">{label}</span>
+                <div className="flex items-center gap-1">
+                  <div className="w-36 shrink-0">
+                    <Input
+                      value={isCapturing ? "Listening..." : currentVal}
+                      readOnly
+                      aria-label={`${label} shortcut`}
+                      aria-invalid={conflict ? true : undefined}
+                      className={`h-9 w-36 text-center font-mono text-xs ${isCapturing ? "border-primary ring-1 ring-primary" : conflict ? "border-destructive/60" : ""}`}
+                      onFocus={() => setCapturingShortcut(key)}
+                      onBlur={() => {
+                        if (capturingShortcut === key) {
+                          setCapturingShortcut(null);
+                        }
+                      }}
+                      onKeyDown={handleShortcutKeyDown(key)}
+                    />
+                  </div>
                   <Button
                     variant="ghost"
                     size="sm"
                     className="h-9 px-3"
                     aria-label={`Clear ${label} shortcut`}
                     onClick={() => {
+                      const current = latestSettingsRef.current;
+                      if (!current) return;
                       const next: Settings = {
-                        ...settings,
-                        shortcuts: { ...settings.shortcuts, [key]: "" },
+                        ...current,
+                        shortcuts: { ...current.shortcuts, [key]: "" },
                       };
                       setDraftSettings(next);
                       queueSettingsSave(next, 0);
@@ -2590,7 +2697,7 @@ export function SettingsView() {
                 </div>
               </div>
               {conflict && (
-                <div className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                <div className="mt-2 flex items-start gap-2 rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   <span>
                     Same keys as {conflict.conflictsWith} — only one of them
@@ -2601,519 +2708,149 @@ export function SettingsView() {
             </div>
           );
         })}
-      </div>
-      <p className="mt-3 text-sm text-muted-foreground">
-        Shortcuts save and take effect as soon as you press them.
-      </p>
+      </SettingsGroup>
     </div>
   );
 
-  const renderSharedDictationControls = (options?: {
-    includeCoreControls?: boolean;
-    includeHotkeyBehavior?: boolean;
-    includeMeetingAutoName?: boolean;
-    includeAudioTuning?: boolean;
-    includePermissions?: boolean;
-    includeKeyManager?: boolean;
-    includeMemory?: boolean;
-  }) => {
-    const {
-      includeCoreControls = true,
-      includeHotkeyBehavior = true,
-      includeMeetingAutoName = false,
-      includeAudioTuning = false,
-      includePermissions = false,
-      includeKeyManager = false,
-      includeMemory = false,
-    } = options ?? {};
-
-    return (
-      <div className="space-y-5">
-        {includeHotkeyBehavior && (
-          <div className="space-y-2">
-            <Label>How the dictation shortcut works</Label>
-            <p
-              id="dictation-shortcut-behavior-description"
-              className="text-sm text-muted-foreground"
+  const renderGeneralSection = () => (
+    <div className="settings-section">
+      <SettingsGroup title="Appearance and window">
+        <SettingsRow
+          settingId="appearance"
+          label="Appearance"
+          labelId="theme-label"
+          description="System follows your Mac's light or dark setting."
+          control={
+            <div
+              role="group"
+              aria-labelledby="theme-label"
+              className="inline-flex gap-0.5 rounded-lg border border-border/80 p-0.5"
             >
-              {dictationShortcutBehaviorHint}
-            </p>
-            <OptionSelect
-              aria-label="How the dictation shortcut works"
-              aria-describedby="dictation-shortcut-behavior-description"
-              value={dictationShortcutBehavior}
-              onValueChange={(value) => {
-                if (!settings) {
-                  return;
-                }
-                const behavior = value as DictationHotkeyBehavior;
-                updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationPushToTalk: behavior === "hold_to_talk",
-                    dictationHandsFreeEnabled: behavior === "hands_free",
-                  },
-                });
-              }}
-            >
-              <option value="toggle">
-                Press to start, press again to stop
-              </option>
-              {/* Always listed, so a saved hold-to-talk choice never shows
-                  as an empty box while the key helper is down or starting. */}
-              <option value="hold_to_talk" disabled={!nativeShortcutAvailable}>
-                {nativeShortcutAvailable
-                  ? "Hold to record, release to stop"
-                  : "Hold to record, release to stop (needs the key helper)"}
-              </option>
-              <option value="hands_free">
-                Start on its own when you speak
-              </option>
-            </OptionSelect>
-            {dictationShortcutBehavior === "hold_to_talk" && (
-              <SettingsSwitch
-                className="pt-2 pb-0"
-                label="Tap to lock"
-                description="A quick tap keeps listening without holding the key; tap again to finish. Holding still works as before."
-                checked={settings.transcription.dictationTapToLock !== false}
-                onCheckedChange={(checked) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationTapToLock: checked,
-                    },
-                  })
-                }
-              />
-            )}
-          </div>
-        )}
-
-        {includeCoreControls && (
-          <>
-            <SettingsSwitch
-              className="py-0"
-              label="Remove filler words"
-              description="Drops um and uh, repeated words like “the the”, and corrections like “Tuesday, no wait, Wednesday” on this Mac. Anything unclear is left as you said it."
-              checked={settings.transcription.dictationRemoveDisfluencies ?? true}
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationRemoveDisfluencies: checked,
-                  },
-                })
-              }
-            />
-
-            <SettingsSwitch
-              className="py-0"
-              label="Match surrounding text"
-              description="When you dictate into the middle of a sentence, adds the space and keeps lowercase, so the words read as part of it. Reads only the characters next to the cursor, and never keeps them."
-              checked={settings.transcription.dictationMatchSurroundingText ?? true}
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationMatchSurroundingText: checked,
-                  },
-                })
-              }
-            />
-
-            <SettingsSwitch
-              className="py-0"
-              label="Smart Format"
-              description="Tidy up punctuation, grammar, and layout before the text is pasted, using the AI service set in AI & Keys."
-              checked={settings.transcription.dictationAiFormatting}
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationAiFormatting: checked,
-                  },
-                })
-              }
-            />
-
-            <SettingsSwitch
-              className="py-0"
-              label="Translate to English"
-              description={
-                translateAvailability.enabled
-                  ? `Applies to the built-in profiles; a saved profile has its own switch for this. ${translateAvailability.description}`
-                  : translateAvailability.description
-              }
-              checked={
-                translateAvailability.enabled &&
-                Boolean(settings.transcription.dictationTranslateToEnglish)
-              }
-              disabled={!translateAvailability.enabled}
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationTranslateToEnglish: checked,
-                  },
-                })
-              }
-            />
-
-            <SettingsSwitch
-              className="py-0"
-              label="Spoken commands"
-              description={'Say things like "command undo that" or "command uppercase selection" and Plainsong acts on them instead of typing them.'}
-              checked={
-                settings.transcription.dictationCommandModeEnabled ?? false
-              }
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationCommandModeEnabled: checked,
-                  },
-                })
-              }
-            />
-
-            <SettingsInput
-              label="The word that starts a spoken command"
-              description="Say this word and Plainsong treats what follows as an instruction instead of typing it. Pick something you would not say by accident — the word itself is never inserted."
-              value={
-                settings.transcription.dictationCommandPrefix ?? "command"
-              }
-              onChange={(value) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationCommandPrefix: value,
-                  },
-                })
-              }
-            />
-
-            <SettingsSwitch
-              className="py-0"
-              label="Snippets"
-              description="Replace saved abbreviations with the full text you set for them."
-              checked={
-                settings.transcription.dictationSnippetsEnabled ?? true
-              }
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationSnippetsEnabled: checked,
-                  },
-                })
-              }
-            />
-
-            <SettingsSwitch
-              className="py-0"
-              label="Learn from corrections you make in Plainsong"
-              description="When you fix a word or short phrase in a result here, remember it for next time."
-              checked={
-                settings.transcription.dictationAutoLearnCorrections ?? true
-              }
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationAutoLearnCorrections: checked,
-                  },
-                })
-              }
-            />
-
-            <SettingsSwitch
-              className="py-0"
-              label="Learn from corrections you make in other apps"
-              description="Off by default. Plainsong re-reads the one field it just typed into, only in that app, only for the 8 seconds after the insert. It compares that text with what it typed, on this machine. The only thing written down is the word-level changes it finds — never the sentence they came out of — held for your review under Dictation > Corrections, and deleted within a week if you don't approve them."
-              checked={
-                settings.transcription
-                  .dictationLearnFromExternalCorrections ?? false
-              }
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationLearnFromExternalCorrections: checked,
-                  },
-                })
-              }
-            />
-
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <p className="text-sm text-muted-foreground">
-                Word list, snippets, where text gets inserted, and your own
-                dictation profiles live in Dictation.
-              </p>
-              <Button
-                variant="secondary"
-                onClick={() => requestMainView("dictation")}
-              >
-                Open Dictation
-              </Button>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Your own Smart Format instructions</Label>
-              <Textarea
-                placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
-                value={settings.transcription.dictationCustomPrompt ?? ""}
-                onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      dictationCustomPrompt: e.target.value,
-                    },
-                  })
-                }
-                className="min-h-[96px]"
-              />
-              <p className="text-sm text-muted-foreground">
-                Replaces the built-in instructions. Plainsong still tells it
-                which app you are typing into.
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Your own meeting summary instructions</Label>
-              <Textarea
-                placeholder="e.g. Summarize the meeting and list action items..."
-                value={settings.transcription.meetingCustomPrompt ?? ""}
-                onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
-                  void updateSettings({
-                    ...settings,
-                    transcription: {
-                      ...settings.transcription,
-                      meetingCustomPrompt: e.target.value,
-                    },
-                  })
-                }
-                className="min-h-[96px]"
-              />
-              <p className="text-sm text-muted-foreground">
-                Replaces the built-in summary instructions.
-              </p>
-            </div>
-
-            {includeMeetingAutoName && (
-              <>
-                <SettingsSwitch
-                  className="py-0"
-                  label="Name meetings for me"
-                  description="Sends each finished transcript to the AI service that writes your summaries and uses what comes back as the meeting's title. With it off, a meeting keeps the name you gave it or the time it started."
-                  checked={
-                    settings.transcription.meetingAutoNameEnabled ?? true
-                  }
-                  onCheckedChange={(checked) =>
-                    void updateSettings({
-                      ...settings,
-                      transcription: {
-                        ...settings.transcription,
-                        meetingAutoNameEnabled: checked,
-                      },
-                    })
-                  }
-                />
-                <SettingsInput
-                  label="AI model used for those titles"
-                  description="A title is a few words, so a smaller and cheaper model than your summary one is usually enough. Leave it empty and the summary model writes them."
-                  placeholder="Leave empty to use the summary model"
-                  value={settings.transcription.meetingAutoNameModel ?? ""}
-                  onBlur={handleSettingsTextBlur}
-                  onKeyDown={handleSettingsTextKeyDown}
-                  onChange={(value) =>
-                    void updateSettings({
-                      ...settings,
-                      transcription: {
-                        ...settings.transcription,
-                        meetingAutoNameModel: value.trim()
-                          ? value.trim()
-                          : null,
-                      },
-                    })
-                  }
-                />
-              </>
-            )}
-
-            <SettingsSwitch
-              className="py-0"
-              label="Also copy dictated text to the clipboard"
-              description="So you can paste it again yourself."
-              checked={
-                settings.transcription.dictationCopyToClipboard ?? false
-              }
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationCopyToClipboard: checked,
-                  },
-                })
-              }
-            />
-          </>
-        )}
-
-        {includeAudioTuning && (
-          <>
-            <SettingsSwitch
-              className="py-0"
-              label="Skip silence"
-              description="Leave the quiet stretches out of what gets transcribed."
-              checked={settings.transcription.silenceSkipEnabled}
-              onCheckedChange={(checked) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    silenceSkipEnabled: checked,
-                  },
-                })
-              }
-            />
-
-            {/* The VAD backend drives dictation auto-stop-on-silence and
-                hands-free auto-start (not the recording silence-timeout
-                toggle above), so show the picker whenever either of those
-                features is in use. */}
-            {(settings.transcription.dictationHandsFreeEnabled ||
-              (settings.transcription.dictationSilenceTimeoutSeconds ?? 0) >
-                0) && (
-              <div className="space-y-3 border-t pt-4">
-                <div className="space-y-0.5">
-                  <Label>How Plainsong decides you are speaking</Label>
-                  <p className="text-sm text-muted-foreground">
-                    Loudness is the default — nothing to download, and it works
-                    well in a quiet room. Silero is a small speech-detection
-                    model that holds up better in a noisy one; it needs a
-                    one-time 2 MB download.
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    className={`rounded-full border px-3 py-1.5 text-sm transition-colors ${
-                      (settings.transcription.dictationVadBackend ??
-                        "energy_threshold") === "energy_threshold"
-                        ? "border-rust/40 bg-rust/8 text-rust"
-                        : "border-border bg-muted hover:bg-muted/80"
-                    }`}
-                    onClick={() =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          dictationVadBackend: "energy_threshold",
-                        },
-                      })
-                    }
-                  >
-                    Loudness
-                  </button>
-                  {sileroVadAvailable ? (
-                    <button
-                      type="button"
-                      className={`rounded-full border px-3 py-1.5 text-sm transition-colors ${
-                        settings.transcription.dictationVadBackend ===
-                        "silero"
-                          ? "border-rust/40 bg-rust/8 text-rust"
-                          : "border-border bg-muted hover:bg-muted/80"
-                      }`}
-                      onClick={() =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: {
-                            ...settings.transcription,
-                            dictationVadBackend: "silero",
-                          },
-                        })
-                      }
-                    >
-                      Silero
-                    </button>
-                  ) : (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={sileroVadDownloading}
-                      onClick={async () => {
-                        setSileroVadDownloading(true);
-                        try {
-                          await downloadSileroVadModel();
-                          setSileroVadAvailable(true);
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              dictationVadBackend: "silero",
-                            },
-                          });
-                        } catch (e) {
-                          const msg = settingsErrorMessage(
-                            e,
-                            "Plainsong could not download the model.",
-                          );
-                          setError(`Download failed: ${msg}`);
-                        } finally {
-                          setSileroVadDownloading(false);
-                        }
-                      }}
-                    >
-                      {sileroVadDownloading ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Downloading…
-                        </>
-                      ) : (
-                        <>
-                          <Download className="mr-2 h-4 w-4" />
-                          Download Silero (2 MB)
-                        </>
-                      )}
-                    </Button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div className="border-t pt-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="section-heading">Microphone test</p>
-                  <p className="text-sm text-muted-foreground">
-                    Hear yourself back and check the level.
-                  </p>
-                </div>
+              {(
+                [
+                  { value: "light", label: "Light", icon: Sun },
+                  { value: "dark", label: "Dark", icon: Moon },
+                  { value: "system", label: "System", icon: Monitor },
+                ] as const
+              ).map((option) => (
                 <Button
-                  variant={micTestActive ? "destructive" : "outline"}
+                  key={option.value}
+                  variant={theme === option.value ? "active" : "ghost"}
                   size="sm"
-                  onClick={() =>
-                    micTestActive ? stopMicTest() : void startMicTest()
-                  }
+                  aria-pressed={theme === option.value}
+                  onClick={() => setTheme(option.value)}
+                  className="h-8 gap-1.5 px-2.5"
                 >
-                  <Mic className="mr-1.5 h-3.5 w-3.5" />
-                  {micTestActive ? "Stop" : "Start"}
+                  <option.icon aria-hidden="true" className="h-3.5 w-3.5" />
+                  {option.label}
                 </Button>
-              </div>
+              ))}
+            </div>
+          }
+        />
+        <SettingsSwitch
+          settingId="menu-bar"
+          label="Keep running in the menu bar"
+          description="Closing the window leaves Plainsong in the menu bar, so shortcuts and recording keep working."
+          checked={settings.ui.minimizeToTray}
+          // The setting travels on `settings-changed`, which the main
+          // process already listens for.
+          onCheckedChange={(checked) => updateUi({ minimizeToTray: checked })}
+        />
+        <SettingsSwitch
+          settingId="always-on-top"
+          label="Keep the window on top"
+          description="Keeps the Plainsong window above other apps."
+          checked={settings.ui.alwaysOnTop}
+          onCheckedChange={(checked) => updateUi({ alwaysOnTop: checked })}
+        />
+      </SettingsGroup>
 
+      <SettingsGroup title="Microphone and language">
+        <SettingsRow
+          settingId="microphone"
+          label="Microphone"
+          descriptionId="app-wide-microphone-description"
+          description="Used for dictation and meetings."
+          control={
+            <>
+              <OptionSelect
+                aria-label="App-wide microphone"
+                className="w-56"
+                aria-describedby="app-wide-microphone-description"
+                value={appWideDeviceId}
+                onValueChange={(value) => {
+                  const nextDevice =
+                    resolveAudioDevicePreference(
+                      value || null,
+                    );
+                  void updateSettings({
+                    ...settings,
+                    audio: {
+                      ...settings.audio,
+                      preferredInputDevice: nextDevice,
+                    },
+                  });
+                }}
+              >
+                <option value="">
+                  System default microphone
+                </option>
+                {currentAudioDevices.map((device) => (
+                  <option
+                    key={device.deviceId}
+                    value={device.deviceId}
+                  >
+                    {renderDeviceOptionLabel(device)}
+                  </option>
+                ))}
+                {appWideDeviceId &&
+                !currentAudioDevices.some((device) => device.deviceId === appWideDeviceId) ? (
+                  <option value={appWideDeviceId}>
+                    {`${settings.audio.preferredInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                  </option>
+                ) : null}
+              </OptionSelect>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-9 w-9"
+                aria-label="Refresh the list of microphones"
+                title="Refresh the list of microphones"
+                onClick={() => void refreshAudioDevices()}
+              >
+                <RefreshCw aria-hidden="true" className="h-4 w-4" />
+              </Button>
+            </>
+          }
+        >
+          {effectiveMicrophone?.isBluetoothLike ? (
+            <p className="text-sm text-rust">
+              Bluetooth headset mics can dull your audio while you dictate. A
+              built-in or USB mic usually sounds cleaner.
+            </p>
+          ) : null}
+        </SettingsRow>
+
+        <SettingsRow
+          settingId="microphone-test"
+          label="Test your microphone"
+          description="Hear yourself back and check the level."
+          control={
+            <Button
+              variant={micTestActive ? "destructive" : "outline"}
+              size="sm"
+              onClick={() =>
+                micTestActive ? stopMicTest() : void startMicTest()
+              }
+            >
+              <Mic aria-hidden="true" className="mr-1.5 h-3.5 w-3.5" />
+              {micTestActive ? "Stop" : "Start"}
+            </Button>
+          }
+        >
+          {micTest.error || micTestActive ? (
+            <div>
               {micTest.error && !micTestActive && (
                 // Mic failure is exactly what this test exists to diagnose,
                 // so it says which failure it was.
@@ -3182,2456 +2919,1913 @@ export function SettingsView() {
                 </>
               )}
             </div>
-          </>
-        )}
+          ) : null}
+        </SettingsRow>
 
-        {includePermissions && (
-          <>
-            <SettingsSwitch
-              className="py-0"
-              label="Ask macOS for permission when needed"
-              description="Requests microphone access before dictation starts, and speech recognition only if you have chosen Apple Speech."
-              checked={
-                settings.transcription.dictationAutoRequestPermissions ?? true
+        <SettingsMore
+          settingId="microphone-overrides"
+          label="Use a different microphone for dictation or meetings"
+        >
+          <SettingsRow
+            label="Dictation microphone"
+            descriptionId="dictation-microphone-description"
+            description="A headset mic for dictation, the room for meetings."
+            control={
+              <>
+                <OptionSelect
+                  aria-label="Dictation microphone override"
+                  className="w-52"
+                  aria-describedby="dictation-microphone-description"
+                  disabled={
+                    !(
+                      settings.audio
+                        .dictationInputOverrideEnabled ?? false
+                    )
+                  }
+                  value={dictationDeviceId}
+                  onValueChange={(value) => {
+                    const nextDevice =
+                      resolveAudioDevicePreference(
+                        value || null,
+                      );
+                    void updateSettings({
+                      ...settings,
+                      audio: {
+                        ...settings.audio,
+                        dictationInputDevice: nextDevice,
+                      },
+                    });
+                  }}
+                >
+                  <option value="">
+                    Use the whole-app microphone
+                  </option>
+                  {currentAudioDevices.map((device) => (
+                    <option
+                      key={`dictation-${device.deviceId}`}
+                      value={device.deviceId}
+                    >
+                      {renderDeviceOptionLabel(device)}
+                    </option>
+                  ))}
+                  {dictationDeviceId &&
+                  !currentAudioDevices.some((device) => device.deviceId === dictationDeviceId) ? (
+                    <option value={dictationDeviceId}>
+                      {`${settings.audio.dictationInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                    </option>
+                  ) : null}
+                </OptionSelect>
+                <Switch
+                  aria-label="Use a different microphone for dictation"
+                  aria-describedby="dictation-microphone-description"
+                  checked={
+                    settings.audio
+                      .dictationInputOverrideEnabled ?? false
+                  }
+                  onCheckedChange={(checked) =>
+                    void updateSettings({
+                      ...settings,
+                      audio: {
+                        ...settings.audio,
+                        dictationInputOverrideEnabled: checked,
+                        dictationInputDevice: checked
+                          ? (settings.audio
+                              .dictationInputDevice ??
+                            settings.audio
+                              .preferredInputDevice ??
+                            null)
+                          : null,
+                      },
+                    })
+                  }
+                />
+              </>
+            }
+          />
+          <SettingsRow
+            label="Meeting microphone"
+            descriptionId="meeting-microphone-description"
+            description="Record meetings through a different mic from dictation."
+            control={
+              <>
+                <OptionSelect
+                  aria-label="Meeting microphone override"
+                  className="w-52"
+                  aria-describedby="meeting-microphone-description"
+                  disabled={
+                    !(
+                      settings.audio
+                        .meetingInputOverrideEnabled ?? false
+                    )
+                  }
+                  value={meetingDeviceId}
+                  onValueChange={(value) => {
+                    const nextDevice =
+                      resolveAudioDevicePreference(
+                        value || null,
+                      );
+                    void updateSettings({
+                      ...settings,
+                      audio: {
+                        ...settings.audio,
+                        meetingInputDevice: nextDevice,
+                      },
+                    });
+                  }}
+                >
+                  <option value="">
+                    Use the whole-app microphone
+                  </option>
+                  {currentAudioDevices.map((device) => (
+                    <option
+                      key={`meeting-${device.deviceId}`}
+                      value={device.deviceId}
+                    >
+                      {renderDeviceOptionLabel(device)}
+                    </option>
+                  ))}
+                  {meetingDeviceId &&
+                  !currentAudioDevices.some((device) => device.deviceId === meetingDeviceId) ? (
+                    <option value={meetingDeviceId}>
+                      {`${settings.audio.meetingInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
+                    </option>
+                  ) : null}
+                </OptionSelect>
+                <Switch
+                  aria-label="Use a different microphone for meetings"
+                  aria-describedby="meeting-microphone-description"
+                  checked={
+                    settings.audio
+                      .meetingInputOverrideEnabled ?? false
+                  }
+                  onCheckedChange={(checked) =>
+                    void updateSettings({
+                      ...settings,
+                      audio: {
+                        ...settings.audio,
+                        meetingInputOverrideEnabled: checked,
+                        meetingInputDevice: checked
+                          ? (settings.audio
+                              .meetingInputDevice ??
+                            settings.audio
+                              .preferredInputDevice ??
+                            null)
+                          : null,
+                      },
+                    })
+                  }
+                />
+              </>
+            }
+          />
+        </SettingsMore>
+        <SettingsOptionSelect
+          settingId="language"
+          label="Language you speak"
+          description="Dictation and meetings are transcribed in this language. Auto-detect lets the speech model decide each time."
+          value={settings.transcription.language ?? ""}
+          onChange={(value) => updateTranscription({ language: value || null })}
+        >
+          <option value="">Auto-detect</option>
+          {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </SettingsOptionSelect>
+        {!settings.transcription.language ? (
+          <SettingsMore
+            settingId="dictation-languages"
+            label="Languages you dictate in"
+            hint={
+              dictationActiveLanguages.length === 0
+                ? "Any language"
+                : dictationActiveLanguages.map(dictationLanguageLabel).join(", ")
+            }
+          >
+          <SettingsRow
+            label="Narrow auto-detect"
+            description="Pick one to always dictate in it, or a few for auto-detect to choose between."
+          >
+            <div className="flex flex-wrap gap-2">
+              {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map(
+                (option) => {
+                  const selected =
+                    dictationActiveLanguages.includes(
+                      option.value,
+                    );
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={selected}
+                      aria-label={`Dictate in ${option.label}`}
+                      className={`rounded-full border px-3 py-1 text-sm transition-colors ${
+                        selected
+                          ? "border-foreground bg-foreground text-background"
+                          : "border-border bg-background text-muted-foreground hover:text-foreground"
+                      }`}
+                      onClick={() => {
+                        const nextActiveLanguages = selected
+                          ? dictationActiveLanguages.filter(
+                              (language) =>
+                                language !== option.value,
+                            )
+                          : [
+                              ...dictationActiveLanguages,
+                              option.value,
+                            ];
+                        void updateSettings({
+                          ...settings,
+                          transcription: {
+                            ...settings.transcription,
+                            dictationActiveLanguages:
+                              normalizeActiveLanguageSet(
+                                nextActiveLanguages,
+                              ),
+                          },
+                        });
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                },
+              )}
+            </div>
+            <p className="mt-3 text-sm text-muted-foreground">
+              {dictationActiveLanguages.length === 0
+                ? "Nothing picked, so auto-detect considers every language."
+                : dictationActiveLanguages.length === 1
+                  ? `Dictation will always use ${dictationLanguageLabel(dictationActiveLanguages[0])}.`
+                  : `Dictation will choose between ${dictationActiveLanguages
+                      .map(dictationLanguageLabel)
+                      .join(", ")}.`}
+            </p>
+          </SettingsRow>
+          </SettingsMore>
+        ) : null}
+      </SettingsGroup>
+
+      <SettingsGroup title="Updates and setup">
+        <UpdateStatusWidget />
+        <BetaChannelToggle />
+        <SettingsRow
+          settingId="setup"
+          label="Setup guide"
+          description="Walk through permissions, speech models and meetings again."
+          control={
+            <>
+              <Button variant="ghost" size="sm" onClick={() => requestMainView("setup")}>
+                Open Setup
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => requestOnboarding("full")}>
+                Run setup again
+              </Button>
+            </>
+          }
+        />
+      </SettingsGroup>
+    </div>
+  );
+
+  const renderDictationSection = () => (
+    <div className="settings-section">
+      <SettingsGroup title="While you dictate">
+        <SettingsSwitch
+          settingId="dictation-pill"
+          label="Show the dictation pill"
+          description="A small window with the level, your words as they arrive, and why an insert failed."
+          checked={settings.ui.showDictationPopup}
+          onCheckedChange={(checked) => updateUi({ showDictationPopup: checked })}
+        />
+        <SettingsOptionSelect
+          settingId="pill-size"
+          label="Pill size"
+          description="How big the dictation pill is on screen."
+          selectClassName="@md:w-40"
+          value={settings.ui.dictationPillSize ?? "default"}
+          onChange={(value) =>
+            updateUi({
+              dictationPillSize: value as NonNullable<Settings["ui"]["dictationPillSize"]>,
+            })
+          }
+        >
+          <option value="small">Small</option>
+          <option value="default">Default</option>
+          <option value="large">Large</option>
+          <option value="xlarge">Extra large</option>
+        </SettingsOptionSelect>
+        <SettingsOptionSelect
+          settingId="pill-position"
+          label="Pill position"
+          description="Bottom center, or docked to a screen edge. Dragging it near an edge docks it too."
+          selectClassName="@md:w-40"
+          value={settings.ui.dictationPillDock ?? "bottom"}
+          onChange={(value) =>
+            updateUi({
+              dictationPillDock: value as NonNullable<Settings["ui"]["dictationPillDock"]>,
+            })
+          }
+        >
+          <option value="bottom">Bottom center</option>
+          <option value="left">Left edge</option>
+          <option value="right">Right edge</option>
+        </SettingsOptionSelect>
+        <SettingsSwitch
+          settingId="dictation-sounds"
+          label="Dictation sounds"
+          description="A soft tick when the mic goes live, a pop when your words land, and a low tone if a dictation fails."
+          checked={settings.ui.dictationSounds !== false}
+          onCheckedChange={(checked) => updateUi({ dictationSounds: checked })}
+        />
+        <SettingsSwitch
+          settingId="mute-media"
+          label="Mute other audio while dictating"
+          description="Silences music, calls and alerts while the mic is live, then turns back on only what Plainsong muted."
+          checked={settings.ui.muteMediaWhileDictating === true}
+          onCheckedChange={(checked) => updateUi({ muteMediaWhileDictating: checked })}
+        />
+        <SettingsSwitch
+          settingId="dictation-failure-notifications"
+          label="Notify me when a dictation fails"
+          description="A macOS notification when an insert is refused or fails while the pill is hidden."
+          checked={notificationsSettings.dictationFailures}
+          onCheckedChange={(checked) =>
+            updateNotifications({ dictationFailures: checked })
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup title="Your words">
+        <SettingsSwitch
+          settingId="remove-fillers"
+          label="Remove filler words"
+          description="Drops um and uh, repeated words, and spoken corrections like “Tuesday, no wait, Wednesday”, on this Mac. Anything unclear stays as you said it."
+          checked={settings.transcription.dictationRemoveDisfluencies ?? true}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationRemoveDisfluencies: checked })
+          }
+        />
+        <SettingsSwitch
+          settingId="ai-cleanup"
+          label="AI cleanup"
+          description="Tidies punctuation, grammar and layout before the text is inserted, using the text model chosen in Models. A cloud service only gets your words if Privacy & data allows it."
+          checked={settings.transcription.dictationAiFormatting}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationAiFormatting: checked })
+          }
+        />
+        <SettingsSwitch
+          settingId="nearby-spelling"
+          label="Spell names from nearby text"
+          description="Use text on screen near where you're typing to spell names correctly. Stays on this Mac."
+          checked={settings.transcription.dictationNearbySpelling ?? false}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationNearbySpelling: checked })
+          }
+        />
+        <NameSourcesSetting
+          calendarEnabled={settings.transcription.dictationCalendarNames ?? false}
+          contactsEnabled={settings.transcription.dictationContactNames ?? false}
+          onCalendarChange={(enabled) => updateTranscription({ dictationCalendarNames: enabled })}
+          onContactsChange={(enabled) => updateTranscription({ dictationContactNames: enabled })}
+        />
+        <SettingsSwitch
+          settingId="match-surrounding"
+          label="Match surrounding text"
+          description="Mid-sentence, adds the space and keeps lowercase, and spells names the way the field already does. Password fields are skipped, and nothing it reads is kept or sent."
+          checked={settings.transcription.dictationMatchSurroundingText ?? true}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationMatchSurroundingText: checked })
+          }
+        />
+        <SettingsSwitch
+          settingId="translate"
+          label="Translate to English"
+          description={
+            translateAvailability.enabled
+              ? `For the built-in profiles; a saved profile has its own switch. ${translateAvailability.description}`
+              : translateAvailability.description
+          }
+          checked={
+            translateAvailability.enabled &&
+            Boolean(settings.transcription.dictationTranslateToEnglish)
+          }
+          disabled={!translateAvailability.enabled}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationTranslateToEnglish: checked })
+          }
+        />
+        <SettingsSwitch
+          settingId="copy-to-clipboard"
+          label="Also copy to the clipboard"
+          description="Leaves each result on the clipboard so you can paste it again yourself."
+          checked={settings.transcription.dictationCopyToClipboard ?? false}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationCopyToClipboard: checked })
+          }
+        />
+        <SettingsMore
+          label="More dictation options"
+          hint="Spoken commands, snippets, corrections, instructions"
+        >
+          <SettingsSwitch
+            settingId="spoken-commands"
+            label="Spoken commands"
+            description={'Say “command undo that” or “command uppercase selection” and Plainsong acts on it instead of typing it.'}
+            checked={settings.transcription.dictationCommandModeEnabled ?? false}
+            onCheckedChange={(checked) =>
+              updateTranscription({ dictationCommandModeEnabled: checked })
+            }
+          />
+          <SettingsInput
+            settingId="command-word"
+            label="Command word"
+            description="Starts a spoken command. Pick a word you would not say by accident; it is never inserted."
+            inputClassName="@md:w-40"
+            value={settings.transcription.dictationCommandPrefix ?? "command"}
+            onChange={(value) => updateTranscription({ dictationCommandPrefix: value })}
+          />
+          <SettingsSwitch
+            settingId="snippets"
+            label="Snippets"
+            description="Replaces saved abbreviations with the full text you set for them."
+            checked={settings.transcription.dictationSnippetsEnabled ?? true}
+            onCheckedChange={(checked) =>
+              updateTranscription({ dictationSnippetsEnabled: checked })
+            }
+          />
+          <SettingsSwitch
+            settingId="learn-in-plainsong"
+            label="Suggest corrections from edits in Plainsong"
+            description="Suggests dictionary entries when you fix a word or short phrase here. Review them under Dictation > Corrections."
+            checked={settings.transcription.dictationAutoLearnCorrections ?? true}
+            onCheckedChange={(checked) =>
+              updateTranscription({ dictationAutoLearnCorrections: checked })
+            }
+          />
+          <SettingsSwitch
+            settingId="learn-other-apps"
+            label="Learn from corrections you make in other apps"
+            description="Off by default. For 8 seconds after an insert, Plainsong re-reads that one field on this Mac and keeps only the word-level changes, never the sentence, for your review under Dictation > Corrections. Unapproved changes are deleted within a week."
+            checked={
+              settings.transcription.dictationLearnFromExternalCorrections ?? false
+            }
+            onCheckedChange={(checked) =>
+              updateTranscription({ dictationLearnFromExternalCorrections: checked })
+            }
+          />
+          <SettingsRow
+            settingId="cleanup-instructions"
+            label="Your own AI cleanup instructions"
+            description="Replaces the built-in instructions. Plainsong still tells it which app you are typing into."
+          >
+            <Textarea
+              aria-label="Your own AI cleanup instructions"
+              placeholder="e.g. Format as an email, fix grammar, make it sound professional..."
+              value={settings.transcription.dictationCustomPrompt ?? ""}
+              onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+                updateTranscription({ dictationCustomPrompt: e.target.value })
               }
+              className="min-h-[88px]"
+            />
+          </SettingsRow>
+        </SettingsMore>
+      </SettingsGroup>
+
+      <SettingsGroup title="Profiles and setup">
+        <SettingsRow
+          settingId="dictation-page"
+          label="Word list, snippets and profiles"
+          description="These live on the Dictation page, with where text gets inserted."
+          control={
+            <Button variant="outline" size="sm" onClick={() => requestMainView("dictation")}>
+              Open Dictation
+            </Button>
+          }
+        />
+        <SettingsRow
+          settingId="fix-dictation"
+          label="Fix dictation setup"
+          description="Checks the microphone, permissions and speech model, one step at a time."
+          control={
+            <Button variant="outline" size="sm" onClick={() => requestOnboarding("dictation")}>
+              Fix dictation setup
+            </Button>
+          }
+        />
+      </SettingsGroup>
+    </div>
+  );
+
+  const renderMeetingsSection = () => (
+    <div className="settings-section">
+      <NotePublishSettingsSection />
+      <SettingsGroup title="Recording">
+        <SettingsRow
+          settingId="system-audio"
+          label="Mac audio"
+          description={MEETING_AUDIO_EXPLAINER}
+          control={
+            <div className="flex shrink-0 flex-wrap gap-2">
+              {/* Denied: only System Settings can fix it, so that comes
+                  first, and the check becomes "Check again" for the return. */}
+              {meetingAudio.action === "open_settings" ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void openPermissionSettings("system_audio")}
+                >
+                  Open System Settings
+                </Button>
+              ) : null}
+              <Button
+                variant={meetingAudio.action === "open_settings" ? "ghost" : "outline"}
+                size="sm"
+                disabled={
+                  systemAudioTestLoading ||
+                  (systemAudioCapability === null && !systemAudioCheckFailed) ||
+                  systemAudioCapability?.backend === "none"
+                }
+                onClick={() => void runSystemAudioTest()}
+              >
+                {systemAudioTestLoading ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : null}
+                {systemAudioCheckFailed ? "Retry" : meetingAudio.action === "allow"
+                  ? meetingAudio.actionLabel
+                  : meetingAudio.action === "open_settings"
+                    ? "Check again"
+                    : "Check meeting audio"}
+              </Button>
+            </div>
+          }
+        >
+          {/* Status first, in the calm voice unless something is wrong:
+              "needs your OK" is the normal first-run state, not an error. */}
+          <p
+            role={systemAudioCheckFailed ? "alert" : "status"}
+            className={`flex items-start gap-2 text-sm leading-5 ${
+              meetingAudio.tone === "ready"
+                ? "text-gold-text"
+                : meetingAudio.tone === "problem"
+                  ? "text-rust"
+                  : "text-muted-foreground"
+            }`}
+          >
+            <span
+              aria-hidden="true"
+              className={`mt-1.5 ${
+                meetingAudio.tone === "ready"
+                  ? "neume neume-lit"
+                  : meetingAudio.tone === "problem"
+                    ? "neume neume-rust"
+                    : "neume neume-hollow"
+              }`}
+            />
+            <span>{meetingAudio.sentence}</span>
+          </p>
+          {/* The built-in route's sentences already say the check is silent;
+              a routing app's failure reason does not say to play sound. */}
+          {meetingAudio.action === "check" &&
+          systemAudioCapability?.backend === "virtual_loopback" &&
+          systemAudioCapability.reason ? (
+            <p className="text-sm leading-5 text-muted-foreground">
+              The check passes once Plainsong hears real sound through that
+              device, so play something while it runs.
+            </p>
+          ) : null}
+          {systemAudioTestStatus && systemAudioTestStatus !== meetingAudio.sentence ? (
+            <p
+              className={`text-sm ${meetingAudio.tone === "ready" ? "text-gold-text" : "text-muted-foreground"}`}
+              role="status"
+            >
+              {systemAudioTestStatus}
+            </p>
+          ) : null}
+        </SettingsRow>
+        <SettingsSwitch
+          settingId="call-detection"
+          label="Offer to record a call it notices"
+          description="Looks for a call in Zoom, Teams, Google Meet, Webex, FaceTime, Slack or Discord every few seconds, on this Mac only. Google Meet also needs Accessibility."
+          checked={meetingsSettings.callDetectionEnabled}
+          onCheckedChange={(checked) => updateMeetings({ callDetectionEnabled: checked })}
+        />
+        <SettingsSwitch
+          settingId="meeting-window"
+          label="Show the meeting window"
+          description="A small window with the timer, pause and stop, so you never have to switch back to Plainsong."
+          checked={settings.ui.showRecordingPopup}
+          onCheckedChange={(checked) => updateUi({ showRecordingPopup: checked })}
+        />
+        <SettingsSwitch
+          settingId="meeting-notifications"
+          label="Meeting notifications"
+          description="When a meeting starts or stops, and when its transcript and notes are ready or fail."
+          checked={notificationsSettings.meetingEvents}
+          onCheckedChange={(checked) => updateNotifications({ meetingEvents: checked })}
+        />
+        <SettingsRow
+          settingId="setup-meetings"
+          label="Set up meetings"
+          description="Walks through the other side of the call, speakers and the meeting speech model."
+          control={
+            <Button variant="outline" size="sm" onClick={() => requestOnboarding("meetings")}>
+              Set up meetings
+            </Button>
+          }
+        />
+      </SettingsGroup>
+
+      {/* Before access: the same Connect card as the Meetings header (asks
+          macOS only on its click, reports the answer, offers System Settings
+          when refused). After: where a granted calendar gets narrowed or
+          switched back off. */}
+      <div id="setting-calendar">
+        <CalendarSettingsSection />
+      </div>
+
+      <SettingsGroup title="Speakers">
+        <SettingsRow
+          settingId="speakers"
+          label="Tell speakers apart"
+          labelId="separate-speakers-label"
+          descriptionId="separate-speakers-description"
+          description="Splits each transcript by who was talking, using the speaker model below."
+          control={
+            diarizationAvailable ? (
+              <Switch
+                aria-labelledby="separate-speakers-label"
+                aria-describedby="separate-speakers-description"
+                checked={settings.transcription.enableDiarization}
+                onCheckedChange={(checked) =>
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      enableDiarization: checked,
+                    },
+                  })
+                }
+              />
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={diarizationDownloading}
+                onClick={async () => {
+                  setDiarizationDownloading(true);
+                  try {
+                    const modelId = selectedDiarizationModelId;
+                    await downloadDiarizationModel(modelId);
+                    // Refresh model list to show installed status
+                    const models = await listDiarizationModels();
+                    setDiarizationModels(models);
+                  } catch (e) {
+                    const msg = settingsErrorMessage(
+                      e,
+                      "Plainsong could not download the model.",
+                    );
+                    setError(`Download failed: ${msg}`);
+                  } finally {
+                    setDiarizationDownloading(false);
+                  }
+                }}
+              >
+                {diarizationDownloading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Downloading…
+                  </>
+                ) : (
+                  <>
+                    <Download className="mr-2 h-4 w-4" />
+                    {selectedDiarizationModel?.downloadSize
+                      ? `Download speaker model (${selectedDiarizationModel.downloadSize})`
+                      : "Download speaker model"}
+                  </>
+                )}
+              </Button>
+            )
+          }
+        />
+        {diarizationModels.length > 0 ? (
+          <SettingsOptionSelect
+            settingId="speaker-model"
+            label="Speaker model"
+            disabled={diarizationDownloading}
+            description="Each model keeps its own remembered voices: a voice remembered with one is not recognized by another."
+            value={storedDiarizationModelId}
+            onChange={(value) =>
+              void updateSettings({
+                ...settings,
+                transcription: {
+                  ...settings.transcription,
+                  diarizationModelId: value,
+                },
+              })
+            }
+            footnote={(() => {
+              if (!storedDiarizationModelOffered) {
+                const savedName =
+                  speakerModelName(storedDiarizationModelId) ?? "The saved speaker model";
+                const runName =
+                  diarizationRunModelId === null
+                    ? null
+                    : (diarizationRunModelId && speakerModelName(diarizationRunModelId)) ||
+                      "another speaker model on this Mac";
+                return (
+                  <p className="text-sm text-muted-foreground">
+                    {runName === null
+                      ? `${savedName} is no longer offered, and no other speaker model is downloaded. Download one above, or choose one here.`
+                      : `${savedName} is no longer offered, so meetings use ${runName}. Choose a model here to replace it.`}
+                  </p>
+                );
+              }
+              const selectedModel = diarizationModels.find(
+                (m) => m.id === storedDiarizationModelId,
+              );
+              if (selectedModel) {
+                return (
+                  <div className="space-y-1 text-sm text-muted-foreground">
+                    <p>{selectedModel.description}</p>
+                    {!selectedModel.installed && (
+                      <p className="text-rust">
+                        Not downloaded yet. Use Download speaker
+                        model above.
+                      </p>
+                    )}
+                  </div>
+                );
+              }
+              return null;
+            })()}
+          >
+            {storedDiarizationModelOffered ? null : (
+              <option value={storedDiarizationModelId} disabled>
+                {`${speakerModelName(storedDiarizationModelId) ?? storedDiarizationModelId} (no longer offered)`}
+              </option>
+            )}
+            {diarizationModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {speakerModelOptionLabel(model)}
+              </option>
+            ))}
+          </SettingsOptionSelect>
+        ) : null}
+        <TurnedOffSpeakerModelFile />
+      </SettingsGroup>
+
+      <RememberedVoicesSection
+        activeModelId={selectedDiarizationModelId}
+        runModelId={diarizationRunModelId}
+        modelLabels={Object.fromEntries(
+          diarizationModels.map((model) => [model.id, model.label]),
+        )}
+        rememberVoices={meetingsSettings.rememberVoices}
+        autoApplyConfidentVoices={
+          meetingsSettings.autoApplyConfidentVoices
+        }
+        onRememberVoicesChange={(checked) =>
+          void updateSettings({
+            ...settings,
+            meetings: {
+              ...meetingsSettings,
+              rememberVoices: checked,
+              // Auto-apply refines remembering, so turning
+              // remembering off takes it with it. This mirrors
+              // `normalize_loaded_meetings_settings` in
+              // settings.rs rather than leaving the file in a
+              // state the sidecar would normalize behind us.
+              autoApplyConfidentVoices: checked
+                ? meetingsSettings.autoApplyConfidentVoices
+                : false,
+            },
+          })
+        }
+        onAutoApplyChange={(checked) =>
+          void updateSettings({
+            ...settings,
+            meetings: {
+              ...meetingsSettings,
+              autoApplyConfidentVoices: checked,
+            },
+          })
+        }
+      />
+
+      <SettingsGroup title="After a meeting">
+        <SettingsSwitch
+          settingId="auto-summary"
+          label="Summarize every meeting automatically"
+          description={
+            !settings.transcription.enableAutoAnalysis
+              ? "Meetings are summarized only when you ask for it from the meeting itself."
+              : isRemoteAnalysisProvider(
+                    settings.privacy.meetingsAi.provider,
+                  ) && !settings.privacy.remoteProcessingEnabled
+                ? `Every finished meeting would go to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}, but cloud AI is turned off — so no summary is written.`
+                : `Every finished meeting transcript goes to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)} for a summary and action items, without asking first.`
+          }
+          checked={settings.transcription.enableAutoAnalysis}
+          onCheckedChange={(checked) =>
+            void updateSettings({
+              ...settings,
+              transcription: {
+                ...settings.transcription,
+                enableAutoAnalysis: checked,
+              },
+            })
+          }
+        />
+        <SettingsSwitch
+          settingId="auto-name"
+          label="Name meetings for me"
+          description="Sends each finished transcript to the service that writes your summaries and uses its answer as the title. Off, a meeting keeps your name for it or its start time."
+          checked={settings.transcription.meetingAutoNameEnabled ?? true}
+          onCheckedChange={(checked) =>
+            updateTranscription({ meetingAutoNameEnabled: checked })
+          }
+        />
+        <SettingsMore
+          label="More meeting options"
+          hint="Auto-stop, length limit, titles, instructions"
+        >
+          <SettingsSwitch
+            settingId="stop-on-call-quit"
+            label="Stop when the call app quits"
+            description="A meeting recorded with a detected call ends when that app quits or its call window closes. The audio is saved as usual."
+            checked={meetingsSettings.autoStopWhenCallAppQuits}
+            onCheckedChange={(checked) =>
+              updateMeetings({ autoStopWhenCallAppQuits: checked })
+            }
+          />
+          <SettingsRow
+            settingId="stop-after-silence"
+            label={
+              <label htmlFor="meeting-auto-stop-silence-minutes">
+                Stop after minutes of silence
+              </label>
+            }
+            descriptionId="meeting-auto-stop-silence-description"
+            description="Stops and saves a meeting after this long with nothing audible. 0 turns it off; paused time does not count."
+            control={
+              <div className="w-24 shrink-0">
+                <Input
+                  id="meeting-auto-stop-silence-minutes"
+                  type="number"
+                  min={0}
+                  max={MEETING_AUTO_STOP_SILENCE_MINUTES_MAX}
+                  className="h-9"
+                  value={meetingsSettings.autoStopAfterSilenceMinutes}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value);
+                    const next = Number.isFinite(raw)
+                      ? Math.min(
+                          Math.max(0, Math.round(raw)),
+                          MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
+                        )
+                      : meetingsSettings.autoStopAfterSilenceMinutes;
+                    void updateSettings({
+                      ...settings,
+                      meetings: {
+                        ...meetingsSettings,
+                        autoStopAfterSilenceMinutes: next,
+                      },
+                    });
+                  }}
+                />
+              </div>
+            }
+          />
+          <SettingsRow
+            settingId="max-length"
+            label={
+              <label htmlFor="meeting-max-recording-minutes">
+                Longest meeting, in minutes
+              </label>
+            }
+            descriptionId="meeting-max-recording-minutes-description"
+            description="Counts recorded time, not pauses. Plainsong warns you before it stops, and the audio is saved and transcribed as usual. 0 means no limit."
+            control={
+              <div className="w-24 shrink-0">
+                <Input
+                  id="meeting-max-recording-minutes"
+                  aria-describedby="meeting-max-recording-minutes-description"
+                  type="number"
+                  min={0}
+                  max={MEETING_MAX_RECORDING_MINUTES}
+                  step={1}
+                  className="h-9"
+                  value={meetingsSettings.maxRecordingMinutes}
+                  onChange={(e) => {
+                    const next = resolveMeetingsSettings({
+                      meetings: { ...meetingsSettings, maxRecordingMinutes: Number(e.target.value) },
+                    });
+                    void updateSettings({ ...settings, meetings: next });
+                  }}
+                />
+              </div>
+            }
+          />
+          <SettingsSwitch
+            settingId="cloud-speakers"
+            label="Keep speaker labels from cloud services"
+            description="When Deepgram or Gemini transcribes a meeting, keep their speakers instead of separating voices again on this Mac. Speech models on this Mac return no labels, so this only matters for those two."
+            checked={meetingsSettings.preferProviderDiarization}
+            onCheckedChange={(checked) =>
+              updateMeetings({ preferProviderDiarization: checked })
+            }
+          />
+          <SettingsInput
+            settingId="title-model"
+            label="AI model for meeting titles"
+            description="A title is a few words, so a smaller model is usually enough. Leave it empty to use the summary model."
+            placeholder="Same as summaries"
+            value={settings.transcription.meetingAutoNameModel ?? ""}
+            onBlur={handleSettingsTextBlur}
+            onKeyDown={handleSettingsTextKeyDown}
+            onChange={(value) =>
+              updateTranscription({
+                meetingAutoNameModel: value.trim() ? value.trim() : null,
+              })
+            }
+          />
+          <SettingsRow
+            settingId="summary-instructions"
+            label="Your own summary instructions"
+            description="Replaces the built-in summary instructions."
+          >
+            <Textarea
+              aria-label="Your own meeting summary instructions"
+              placeholder="e.g. Summarize the meeting and list action items..."
+              value={settings.transcription.meetingCustomPrompt ?? ""}
+              onChange={(e: ChangeEvent<HTMLTextAreaElement>) =>
+                updateTranscription({ meetingCustomPrompt: e.target.value })
+              }
+              className="min-h-[88px]"
+            />
+          </SettingsRow>
+        </SettingsMore>
+      </SettingsGroup>
+    </div>
+  );
+
+  const renderSearchAndAiSection = () => (
+    <div className="settings-section">
+      <SettingsGroup title="AI services">
+        {/* Which model writes them is chosen in Models. A second copy of
+            those pickers here would be two controls for one pair of keys. */}
+        <SettingsRow
+          settingId="ai-writers"
+          label="Who writes for you"
+          description={describeAiWriters(
+            settings.privacy.meetingsAi.provider,
+            settings.privacy.dictationAi.provider,
+          )}
+          control={
+            <Button variant="outline" size="sm" onClick={() => setActiveTab("models")}>
+              Open Models
+            </Button>
+          }
+        />
+        {/* The switch itself lives on Privacy & data, and only there. */}
+        <SettingsRow
+          label={
+            <span className="flex items-center gap-2">
+              <span
+                aria-hidden="true"
+                className={
+                  settings.privacy.remoteProcessingEnabled
+                    ? "neume neume-lit"
+                    : "neume neume-hollow"
+                }
+              />
+              {settings.privacy.remoteProcessingEnabled
+                ? "Cloud AI is allowed"
+                : "Cloud AI is off"}
+            </span>
+          }
+          description={
+            settings.privacy.remoteProcessingEnabled
+              ? "Any service you pick in Models may receive your transcripts. Turn it off under Privacy & data."
+              : "Only models on this Mac may receive meeting transcripts, dictated text, or captured app context. Every cloud service is refused until you allow it under Privacy & data."
+          }
+          control={
+            <Button variant="outline" size="sm" onClick={() => setActiveTab("privacy")}>
+              Open Privacy &amp; data
+            </Button>
+          }
+        />
+        {AI_LANE_KEYS.some(
+          (lane) => settings.privacy[lane].provider === "ollama",
+        ) && (
+          <SettingsRow
+            label={
+              <span className="flex items-center gap-2">
+                <span
+                  aria-hidden="true"
+                  className={
+                    ollamaAvailable
+                      ? "neume neume-lit"
+                      : "neume neume-hollow"
+                  }
+                />
+                {ollamaAvailable === null
+                  ? "Looking for Ollama on this Mac…"
+                  : ollamaAvailable
+                    ? "Ollama is running on this Mac"
+                    : "Ollama is not running on this Mac"}
+              </span>
+            }
+            description={
+              ollamaModels.length > 0
+                ? `Installed models: ${ollamaModels.join(", ")}`
+                : "No models installed yet."
+            }
+          />
+        )}
+        {/* The prompt library the "/" picker offers in a meeting's chat and
+            in "Ask your meetings". Managed here and from the picker's own
+            footer -- same dialog, same settings key. */}
+        <SettingsRow
+          settingId="saved-prompts"
+          label="Saved prompts"
+          description={`${resolveSavedPrompts(settings.ai?.savedPrompts).filter((prompt) => !prompt.hidden).length} prompts you can pick with "/" in a meeting's chat or in "Ask your meetings". Stored in your settings on this Mac.`}
+          control={
+            <Button variant="outline" size="sm" onClick={() => setSavedPromptsOpen(true)}>
+              Manage prompts
+            </Button>
+          }
+        />
+        <SavedPromptManagerDialog
+          open={savedPromptsOpen}
+          onOpenChange={setSavedPromptsOpen}
+          prompts={resolveSavedPrompts(settings.ai?.savedPrompts)}
+          onPersist={persistSavedPrompts}
+          saveError={savedPromptsSaveError}
+        />
+      </SettingsGroup>
+
+      <SettingsGroup
+        title="API keys"
+        settingId="api-keys"
+        descriptionId="api-key-service-description"
+        description="Keys are kept in the macOS keychain. Picking a service here only edits its key; which service Plainsong uses is chosen in Models."
+      >
+        <div className="space-y-3 py-3.5">
+          <div className="flex items-center gap-2">
+            <OptionSelect
+              aria-label="API key service"
+              aria-describedby="api-key-service-description"
+              value={provider}
+              onValueChange={(value) => {
+                // This only chooses which provider's credential is being
+                // viewed/edited below -- it must not rewrite the default
+                // analysis provider (settings.privacy.meetingsAi.provider), which
+                // has its own selector on the AI tab.
+                setProvider(value);
+                void refreshModelsForProvider(value);
+              }}
+              className="flex-1"
+            >
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="ollama-cloud">Ollama Cloud</option>
+              {/* Transcription-only services. They belong here because
+                  every cloud ASR route's setup copy says "Settings > Search
+                  & AI > API keys", and because the packaged app strips API keys from
+                  the sidecar's environment (electron/ipc-bridge.ts's
+                  buildSidecarEnv), so the keychain is the only way a key
+                  can reach them. They have no model catalogue endpoint;
+                  the ASR model is chosen on the Models screen. */}
+              <option value="deepgram">Deepgram (transcription)</option>
+              <option value="mistral">Mistral (transcription)</option>
+              <option value="xai">xAI Grok (transcription)</option>
+              <option value="elevenlabs">ElevenLabs (transcription)</option>
+              <option value="groq">Groq (transcription)</option>
+              <option value="cohere">Cohere (transcription)</option>
+            </OptionSelect>
+            <Button
+              variant="outline"
+              size="sm"
+              title="Refresh model list"
+              aria-label="Save the key and refresh the model list"
+              onClick={async () => {
+                if (apiKey.trim()) {
+                  setSavingApiKey(true);
+                  try {
+                    await setProviderSecret(provider, apiKey.trim());
+                    setApiKey("");
+                    setKeyManagerHasApiKey(true);
+                    if (provider === settings.privacy.meetingsAi.provider) {
+                      setHasApiKey(true);
+                    }
+                  } catch (e) {
+                    toast(
+                      `Failed to save key: ${settingsErrorMessage(e, "Plainsong could not store it.")}`,
+                      'error',
+                    );
+                  } finally {
+                    setSavingApiKey(false);
+                  }
+                }
+                void refreshModelsForProvider(provider);
+              }}
+              disabled={modelsLoading || savingApiKey}
+            >
+              {modelsLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
+          {!settings.privacy.remoteProcessingEnabled ? (
+            <p className="text-sm text-muted-foreground">
+              Cloud AI is turned off, so saved keys are not used for
+              summaries, answers, or action items.
+            </p>
+          ) : null}
+          {settings.privacy.remoteProcessingEnabled &&
+          isRemoteAnalysisProvider(settings.privacy.meetingsAi.provider) &&
+          settings.privacy.meetingsAi.provider !== CHATGPT_PLAN_PROVIDER &&
+          !hasApiKey ? (
+            <p className="text-sm text-rust">
+              No key saved for{" "}
+              {describeAnalysisDestination(settings.privacy.meetingsAi.provider)},
+              the service picked under “Who writes summaries, answers, and
+              actions” — summaries and answers will fail until you add one.
+            </p>
+          ) : null}
+
+          <Label htmlFor="provider-api-key">Key</Label>
+          <Input
+            id="provider-api-key"
+            type="password"
+            placeholder={
+              keyManagerHasApiKey
+                ? "A key is saved — type a new one to replace it"
+                : "Paste the key here"
+            }
+            value={apiKey}
+            onChange={(e: ChangeEvent<HTMLInputElement>) =>
+              setApiKey(e.target.value)
+            }
+            onKeyDown={async (e) => {
+              if (e.key === "Enter" && apiKey.trim()) {
+                e.preventDefault();
+                if (savingApiKey) return;
+
+                setSavingApiKey(true);
+                setError(null);
+                try {
+                  await setProviderSecret(provider, apiKey.trim());
+                  setApiKey("");
+                  setKeyManagerHasApiKey(true);
+                  if (provider === settings.privacy.meetingsAi.provider) {
+                    setHasApiKey(true);
+                  }
+                  await refreshModelsForProvider(provider);
+                } catch (e) {
+                  setError(
+                    settingsErrorMessage(e, "Failed to save API key"),
+                  );
+                } finally {
+                  setSavingApiKey(false);
+                }
+              }
+            }}
+          />
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={async () => {
+                if (!apiKey.trim()) return;
+                setSavingApiKey(true);
+                setError(null);
+                try {
+                  await setProviderSecret(provider, apiKey.trim());
+                  setApiKey("");
+                  setKeyManagerHasApiKey(true);
+                  if (provider === settings.privacy.meetingsAi.provider) {
+                    setHasApiKey(true);
+                  }
+                  await refreshModelsForProvider(provider);
+                } catch (e) {
+                  setError(
+                    settingsErrorMessage(e, "Failed to save API key"),
+                  );
+                } finally {
+                  setSavingApiKey(false);
+                }
+              }}
+              disabled={savingApiKey || !apiKey.trim()}
+            >
+              {savingApiKey ? "Saving…" : "Save key"}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={async () => {
+                setSavingApiKey(true);
+                setError(null);
+                try {
+                  await clearProviderSecret(provider);
+                  setApiKey("");
+                  setKeyManagerHasApiKey(false);
+                  if (provider === settings.privacy.meetingsAi.provider) {
+                    setHasApiKey(false);
+                  }
+                } catch (e) {
+                  setError(
+                    settingsErrorMessage(e, "Failed to clear API key"),
+                  );
+                } finally {
+                  setSavingApiKey(false);
+                }
+              }}
+              disabled={savingApiKey}
+            >
+              Remove key
+            </Button>
+            {keyManagerHasApiKey && (
+              <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                <span aria-hidden="true" className="neume neume-lit" />
+                Saved in the keychain
+              </span>
+            )}
+          </div>
+        </div>
+        <SettingsMore settingId="cloud-check" label="Check cloud setup" hint="Names whatever a cloud summary is missing">
+          <div className="space-y-2 py-3">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                onClick={async () => {
+                  setError(null);
+                  const checks: string[] = [];
+                  if (!settings.privacy.remoteProcessingEnabled) {
+                    checks.push(
+                      "Cloud AI for summaries and answers is off.",
+                    );
+                  }
+                  if (
+                    isRemoteAnalysisProvider(
+                      settings.privacy.meetingsAi.provider,
+                    ) &&
+                    settings.privacy.meetingsAi.provider !== CHATGPT_PLAN_PROVIDER
+                  ) {
+                    const keyPresent = await hasProviderSecret(
+                      settings.privacy.meetingsAi.provider,
+                    );
+                    if (!keyPresent) {
+                      checks.push(
+                        `No key saved for ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}.`,
+                      );
+                    }
+                  }
+                  if (checks.length === 0) {
+                    setCloudReadinessMessage("Everything is in place.");
+                  } else {
+                    setCloudReadinessMessage(checks.join(" "));
+                  }
+                }}
+              >
+                Check
+              </Button>
+              {!settings.privacy.remoteProcessingEnabled && (
+                <Button
+                  onClick={async () => {
+                    const confirmed = window.confirm(
+                      "Allow cloud AI to receive meeting transcripts and dictated text, including captured app context, for summaries, answers, and writing assistance?",
+                    );
+                    if (!confirmed) {
+                      return;
+                    }
+                    updateSettings(
+                      {
+                        ...settings,
+                        privacy: {
+                          ...settings.privacy,
+                          remoteProcessingEnabled: true,
+                        },
+                      },
+                      { immediate: true },
+                    );
+                    setCloudReadinessMessage("Turned on. Check again.");
+                  }}
+                >
+                  Allow it
+                </Button>
+              )}
+            </div>
+            {cloudReadinessMessage ? (
+              <p className="text-sm text-muted-foreground">
+                {cloudReadinessMessage}
+              </p>
+            ) : null}
+          </div>
+        </SettingsMore>
+      </SettingsGroup>
+
+
+      <SettingsGroup
+        title="Search"
+        settingId="search"
+        description="How Plainsong looks through past recordings when you search or ask a question."
+      >
+        <MeaningSearchSection
+          transcription={settings.transcription}
+          onChange={(patch) =>
+            void updateSettings({
+              ...settings,
+              transcription: { ...settings.transcription, ...patch },
+            })
+          }
+        />
+      </SettingsGroup>
+    </div>
+  );
+
+  const renderPrivacySection = () => (
+    <div className="settings-section">
+      <SettingsGroup title="Cloud">
+        <SettingsRow
+          settingId="cloud-ai"
+          label="Allow cloud AI processing"
+          descriptionId="remote-processing-description"
+          description="Lets the AI service chosen in Models receive meeting transcripts and dictated text for summaries, answers, AI cleanup and Power Rewrite. Dictation can also send selected text, nearby app text and the app's name. The service may bill you. Speech models are chosen separately."
+          control={
+            <Switch
+              aria-label="Allow cloud AI processing"
+              aria-describedby="remote-processing-description"
+              checked={settings.privacy.remoteProcessingEnabled}
               onCheckedChange={(checked) =>
                 void updateSettings({
                   ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    dictationAutoRequestPermissions: checked,
+                  privacy: {
+                    ...settings.privacy,
+                    remoteProcessingEnabled: checked,
                   },
                 })
               }
             />
+          }
+        />
+      </SettingsGroup>
 
-            <div className="space-y-3 border-t pt-4">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                <div>
-                  <p className="section-heading">macOS permissions</p>
-                  <p className="text-sm text-muted-foreground">
-                    What Plainsong is currently allowed to do on this Mac.
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={async () => {
-                      await refreshAsrRuntimeProbes();
-                      const [diagnostics, providers] = await Promise.all([
-                        getPermissionDiagnostics(),
-                        getAsrProviders().catch(() => []),
-                      ]);
-                      setPermissionDiagnostics(diagnostics);
-                      setAsrProviders(providers);
-                      void reapplyGlobalShortcuts();
-                    }}
-                  >
-                    Check again
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={async () => {
-                      const diagnostics = await requestDictationPermissions();
-                      setPermissionDiagnostics(diagnostics);
-                      setAsrProviders(await getAsrProviders().catch(() => []));
-                      void reapplyGlobalShortcuts();
-                    }}
-                  >
-                    Ask for the missing ones
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={async () => {
-                      const diagnostics = await repairCursorInsertPermissions();
-                      setPermissionDiagnostics(diagnostics);
-                      void reapplyGlobalShortcuts();
-                    }}
-                  >
-                    Repair text insertion
-                  </Button>
-                </div>
-              </div>
-              {permissionDiagnostics && (
-                <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-                  {[
-                    {
-                      label: "Microphone",
-                      ready: microphonePermissionReady,
-                      action: () => void openPermissionSettings("microphone"),
-                      offLabel: "Not allowed yet",
-                    },
-                    {
-                      label: "Speech recognition",
-                      ready: permissionDiagnostics.speechRecognitionReady,
-                      action: () => void openPermissionSettings("speech"),
-                      offLabel: "Not allowed yet",
-                    },
-                    {
-                      label: "Accessibility",
-                      ready: permissionDiagnostics.accessibilityReady,
-                      action: () =>
-                        void openPermissionSettings("accessibility"),
-                      offLabel: "Not allowed yet",
-                    },
-                    {
-                      label: "Typing into other apps",
-                      ready: permissionDiagnostics.postEventReady,
-                      action: () =>
-                        void openPermissionSettings("accessibility"),
-                      offLabel: "Not allowed yet",
-                    },
-                  ].map((item) => (
-                    <div
-                      key={item.label}
-                      className="rounded-2xl border border-border/60 bg-muted/20 p-3 text-sm"
+      <SettingsGroup
+        title="macOS permissions"
+        settingId="permissions"
+        description="What Plainsong is currently allowed to do on this Mac."
+      >
+        <SettingsSwitch
+          settingId="ask-permissions"
+          label="Ask macOS for permission when needed"
+          description="Requests microphone access before dictation starts, and speech recognition only if you chose Apple Speech."
+          checked={settings.transcription.dictationAutoRequestPermissions ?? true}
+          onCheckedChange={(checked) =>
+            updateTranscription({ dictationAutoRequestPermissions: checked })
+          }
+        />
+        {permissionDiagnostics && (
+          <>
+              {[
+                {
+                  label: "Microphone",
+                  ready: microphonePermissionReady,
+                  action: () => void openPermissionSettings("microphone"),
+                  offLabel: "Not allowed yet",
+                },
+                {
+                  label: "Speech recognition",
+                  ready: permissionDiagnostics.speechRecognitionReady,
+                  action: () => void openPermissionSettings("speech"),
+                  // Only Apple Speech reads it, so its absence is not a fault.
+                  offLabel: "Not allowed",
+                  optional: true,
+                  note: "Only Apple Speech needs this permission. It supports meetings on macOS 26 or later. Recognition stays on this Mac, with server fallback off.",
+                },
+                {
+                  label: "Accessibility",
+                  ready: permissionDiagnostics.accessibilityReady,
+                  action: () =>
+                    void openPermissionSettings("accessibility"),
+                  offLabel: "Not allowed yet",
+                },
+                {
+                  label: "Typing when paste is blocked",
+                  ready: permissionDiagnostics.postEventReady,
+                  action: () =>
+                    void openPermissionSettings("accessibility"),
+                  offLabel: "Not allowed yet",
+                  note: "Turned on by the same Accessibility switch. If this stays \"Not allowed yet\", quit and reopen Plainsong.",
+                },
+              ].map((item) => (
+                <div
+                  key={item.label}
+                  className="flex items-start justify-between gap-6 py-3"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <p className="text-sm font-medium leading-5">{item.label}</p>
+                    <p
+                      className={`flex items-center gap-1.5 text-sm ${
+                        item.ready
+                          ? "text-gold-text"
+                          : "optional" in item
+                            ? "text-muted-foreground"
+                            : "text-rust"
+                      }`}
                     >
-                      <p className="font-medium">{item.label}</p>
-                      <p
-                        className={`flex items-center gap-1.5 ${
-                          item.ready ? "text-gold-text" : "text-rust"
-                        }`}
-                      >
-                        <span
-                          aria-hidden="true"
-                          className={
-                            item.ready
-                              ? "neume neume-lit"
+                      <span
+                        aria-hidden="true"
+                        className={
+                          item.ready
+                            ? "neume neume-lit"
+                            : "optional" in item
+                              ? "neume neume-hollow"
                               : "neume neume-rust"
-                          }
-                        />
-                        {item.ready ? "Allowed" : item.offLabel}
-                      </p>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="mt-1 h-auto px-0 text-sm font-normal text-muted-foreground hover:text-foreground"
-                        onClick={item.action}
-                      >
-                        Open System Settings
-                      </Button>
-                    </div>
-                  ))}
+                        }
+                      />
+                      {item.ready ? "Allowed" : item.offLabel}
+                    </p>
+                    {(!item.ready || "optional" in item) && "note" in item ? (
+                      <p className="text-sm text-muted-foreground">{item.note}</p>
+                    ) : null}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    aria-label={`Open System Settings for ${item.label}`}
+                    onClick={item.action}
+                  >
+                    Open System Settings
+                  </Button>
                 </div>
-              )}
-              {permissionDiagnostics && (
-                <p className="text-sm text-muted-foreground">
-                  Speech recognition is the permission macOS asks for before
-                  it will transcribe on this Mac. It is Plainsong&apos;s record
-                  of your consent to on-device processing, not permission to
-                  use a server: the Apple Speech route runs with Apple&apos;s
-                  server fallback off, and every other route ignores this
-                  permission entirely.
-                </p>
-              )}
-              {permissionDiagnostics?.notes?.length ? (
-                <div className="space-y-1 text-sm text-muted-foreground">
-                  {permissionDiagnostics.notes.map((note) => (
-                    <p key={note}>{note}</p>
-                  ))}
-                </div>
-              ) : null}
-            </div>
+              ))}
           </>
         )}
+        <div className="space-y-3 py-3.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                await refreshAsrRuntimeProbes();
+                const [diagnostics, providers] = await Promise.all([
+                  getPermissionDiagnostics(),
+                  getAsrProviders().catch(() => []),
+                ]);
+                setPermissionDiagnostics(diagnostics);
+                setAsrProviders(providers);
+                void reapplyGlobalShortcuts();
+              }}
+            >
+              Check again
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                const diagnostics = await requestDictationPermissions();
+                setPermissionDiagnostics(diagnostics);
+                setAsrProviders(await getAsrProviders().catch(() => []));
+                void reapplyGlobalShortcuts();
+              }}
+            >
+              Ask for the missing ones
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                const diagnostics = await repairCursorInsertPermissions();
+                setPermissionDiagnostics(diagnostics);
+                void reapplyGlobalShortcuts();
+              }}
+            >
+              Repair text insertion
+            </Button>
+          </div>
+          {permissionDiagnostics?.notes?.length ? (
+            <div className="space-y-1 text-sm text-muted-foreground">
+              {permissionDiagnostics.notes.map((note) => (
+                <p key={note}>{note}</p>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </SettingsGroup>
 
-        {includeKeyManager && (
-          <>
-            <div className="space-y-2 border-t pt-4">
-              <p className="section-heading">API keys</p>
-              <p id="api-key-service-description" className="text-sm text-muted-foreground">
-                Keys are held in the macOS keychain. Pick a service to add,
-                replace, or remove its key. Picking one here does not make
-                Plainsong use it — that is chosen in Models.
-              </p>
-              <div className="flex items-center gap-2">
-                <OptionSelect
-                  aria-label="API key service"
-                  aria-describedby="api-key-service-description"
-                  value={provider}
-                  onValueChange={(value) => {
-                    // This only chooses which provider's credential is being
-                    // viewed/edited below -- it must not rewrite the default
-                    // analysis provider (settings.privacy.meetingsAi.provider), which
-                    // has its own selector on the AI tab.
-                    setProvider(value);
-                    void refreshModelsForProvider(value);
-                  }}
-                  className="flex-1"
-                >
-                  <option value="openai">OpenAI</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="gemini">Google Gemini</option>
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="ollama-cloud">Ollama Cloud</option>
-                  {/* Transcription-only services. They belong here because
-                      every cloud ASR route's setup copy says "Settings → API
-                      Keys", and because the packaged app strips API keys from
-                      the sidecar's environment (electron/ipc-bridge.ts's
-                      buildSidecarEnv), so the keychain is the only way a key
-                      can reach them. They have no model catalogue endpoint;
-                      the ASR model is chosen on the Models screen. */}
-                  <option value="deepgram">Deepgram (transcription)</option>
-                  <option value="mistral">Mistral (transcription)</option>
-                  <option value="xai">xAI Grok (transcription)</option>
-                  <option value="elevenlabs">ElevenLabs (transcription)</option>
-                  <option value="groq">Groq (transcription)</option>
-                  <option value="cohere">Cohere (transcription)</option>
-                </OptionSelect>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  title="Refresh model list"
-                  onClick={async () => {
-                    if (apiKey.trim()) {
-                      setSavingApiKey(true);
-                      try {
-                        await setProviderSecret(provider, apiKey.trim());
-                        setApiKey("");
-                        setKeyManagerHasApiKey(true);
-                        if (provider === settings.privacy.meetingsAi.provider) {
-                          setHasApiKey(true);
-                        }
-                      } catch (e) {
-                        toast(
-                          `Failed to save key: ${settingsErrorMessage(e, "Plainsong could not store it.")}`,
-                          'error',
-                        );
-                      } finally {
-                        setSavingApiKey(false);
-                      }
-                    }
-                    void refreshModelsForProvider(provider);
-                  }}
-                  disabled={modelsLoading || savingApiKey}
-                >
-                  {modelsLoading ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="h-4 w-4" />
-                  )}
-                </Button>
-              </div>
-              {!settings.privacy.remoteProcessingEnabled ? (
-                <p className="text-sm text-rust">
-                  Cloud AI is turned off, so saved keys are not used for
-                  summaries, answers, or action items.
-                </p>
-              ) : null}
-              {settings.privacy.remoteProcessingEnabled &&
-              isRemoteAnalysisProvider(settings.privacy.meetingsAi.provider) &&
-              !hasApiKey ? (
-                <p className="text-sm text-rust">
-                  No key saved for{" "}
-                  {describeAnalysisDestination(settings.privacy.meetingsAi.provider)},
-                  the service picked under “Who writes summaries, answers, and
-                  actions” — summaries and answers will fail until you add one.
-                </p>
-              ) : null}
+      <SettingsGroup
+        title="Keep and delete"
 
-              <Label htmlFor="provider-api-key">Key</Label>
-              <Input
-                id="provider-api-key"
-                type="password"
-                placeholder={
-                  keyManagerHasApiKey
-                    ? "A key is saved — type a new one to replace it"
-                    : "Paste the key here"
-                }
-                value={apiKey}
-                onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                  setApiKey(e.target.value)
-                }
-                onKeyDown={async (e) => {
-                  if (e.key === "Enter" && apiKey.trim()) {
-                    e.preventDefault();
-                    if (savingApiKey) return;
-
-                    setSavingApiKey(true);
-                    setError(null);
-                    try {
-                      await setProviderSecret(provider, apiKey.trim());
-                      setApiKey("");
-                      setKeyManagerHasApiKey(true);
-                      if (provider === settings.privacy.meetingsAi.provider) {
-                        setHasApiKey(true);
-                      }
-                      await refreshModelsForProvider(provider);
-                    } catch (e) {
-                      setError(
-                        settingsErrorMessage(e, "Failed to save API key"),
-                      );
-                    } finally {
-                      setSavingApiKey(false);
-                    }
-                  }
+      >
+        <SettingsOptionSelect
+          settingId="retention"
+          label="Auto-delete dictations"
+          description="Deletes a whole dictation once it is this old: the text in History and any audio kept for it. The same setting appears in Dictation."
+          value={
+            settings.transcription.dictationRetentionPreset ??
+            "never"
+          }
+          onChange={(value) =>
+            void updateSettings({
+              ...settings,
+              transcription: {
+                ...settings.transcription,
+                dictationRetentionPreset: value as "custom" | "immediate" | "24h" | "72h" | "never",
+              },
+            })
+          }
+          footnote={
+            (settings.transcription.dictationRetentionPreset ??
+              "never") === "custom" ? (
+              <SettingsInput
+                className="pt-2"
+                label="Custom retention hours"
+                description="How many hours a dictation survives before it is deleted. The clock starts when it was captured."
+                type="number"
+                min={1}
+                value={String(
+                  settings.transcription
+                    .dictationRetentionCustomHours ?? 24,
+                )}
+                onBlur={handleSettingsTextBlur}
+                onKeyDown={handleSettingsTextKeyDown}
+                onChange={(value) => {
+                  const nextHours = Math.max(
+                    1,
+                    Number(value) || 1,
+                  );
+                  void updateSettings({
+                    ...settings,
+                    transcription: {
+                      ...settings.transcription,
+                      dictationRetentionCustomHours: nextHours,
+                    },
+                  });
                 }}
               />
-              <div className="flex items-center gap-2">
-                <Button
-                  onClick={async () => {
-                    if (!apiKey.trim()) return;
-                    setSavingApiKey(true);
-                    setError(null);
-                    try {
-                      await setProviderSecret(provider, apiKey.trim());
-                      setApiKey("");
-                      setKeyManagerHasApiKey(true);
-                      if (provider === settings.privacy.meetingsAi.provider) {
-                        setHasApiKey(true);
-                      }
-                      await refreshModelsForProvider(provider);
-                    } catch (e) {
-                      setError(
-                        settingsErrorMessage(e, "Failed to save API key"),
-                      );
-                    } finally {
-                      setSavingApiKey(false);
-                    }
-                  }}
-                  disabled={savingApiKey || !apiKey.trim()}
-                >
-                  {savingApiKey ? "Saving…" : "Save key"}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={async () => {
-                    setSavingApiKey(true);
-                    setError(null);
-                    try {
-                      await clearProviderSecret(provider);
-                      setApiKey("");
-                      setKeyManagerHasApiKey(false);
-                      if (provider === settings.privacy.meetingsAi.provider) {
-                        setHasApiKey(false);
-                      }
-                    } catch (e) {
-                      setError(
-                        settingsErrorMessage(e, "Failed to clear API key"),
-                      );
-                    } finally {
-                      setSavingApiKey(false);
-                    }
-                  }}
-                  disabled={savingApiKey}
-                >
-                  Remove key
-                </Button>
-                {keyManagerHasApiKey && (
-                  <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                    <span aria-hidden="true" className="neume neume-lit" />
-                    Saved in the keychain
-                  </span>
-                )}
-              </div>
-            </div>
+            ) : null
+          }
+        >
+          <option value="immediate">Immediately</option>
+          <option value="24h">After 24 hours</option>
+          <option value="72h">After 72 hours</option>
+          <option value="never">Never</option>
+          <option value="custom">Custom</option>
+        </SettingsOptionSelect>
 
-            <div className="space-y-2 border-t pt-4">
-              <p className="section-heading">Cloud readiness</p>
-              <p className="text-sm text-muted-foreground">
-                Checks the two things a cloud summary needs — the permission
-                and a saved key — and names whichever is missing.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  variant="outline"
-                  onClick={async () => {
-                    setError(null);
-                    const checks: string[] = [];
-                    if (!settings.privacy.remoteProcessingEnabled) {
-                      checks.push(
-                        "Cloud AI for summaries and answers is off.",
-                      );
-                    }
-                    if (
-                      isRemoteAnalysisProvider(
-                        settings.privacy.meetingsAi.provider,
-                      )
-                    ) {
-                      const keyPresent = await hasProviderSecret(
-                        settings.privacy.meetingsAi.provider,
-                      );
-                      if (!keyPresent) {
-                        checks.push(
-                          `No key saved for ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}.`,
-                        );
-                      }
-                    }
-                    if (checks.length === 0) {
-                      setCloudReadinessMessage("Everything is in place.");
-                    } else {
-                      setCloudReadinessMessage(checks.join(" "));
-                    }
-                  }}
-                >
-                  Check
-                </Button>
-                {!settings.privacy.remoteProcessingEnabled && (
-                  <Button
-                    onClick={async () => {
-                      const confirmed = window.confirm(
-                        "Allow cloud AI to receive meeting transcripts and dictated text, including captured app context, for summaries, answers, and writing assistance?",
-                      );
-                      if (!confirmed) {
-                        return;
-                      }
-                      updateSettings(
-                        {
-                          ...settings,
-                          privacy: {
-                            ...settings.privacy,
-                            remoteProcessingEnabled: true,
-                          },
-                        },
-                        { immediate: true },
-                      );
-                      setCloudReadinessMessage("Turned on. Check again.");
-                    }}
-                  >
-                    Allow it
-                  </Button>
-                )}
-              </div>
-              {cloudReadinessMessage ? (
-                <p className="text-sm text-muted-foreground">
-                  {cloudReadinessMessage}
-                </p>
-              ) : null}
-            </div>
-          </>
-        )}
+        <MeetingAudioStorage
+          transcription={settings.transcription}
+          onChange={(patch) => updateSettings({
+            ...settings,
+            transcription: { ...settings.transcription, ...patch },
+          }, { immediate: true })}
+        />
+      </SettingsGroup>
 
-        {includeMemory && (
-          <div className="space-y-4 border-t pt-4">
-            <div className="space-y-1">
-              <p className="flex items-center gap-2 section-heading">
-                <Database className="h-4 w-4 text-muted-foreground" />
-                Searching your transcripts
-              </p>
-              <p className="text-sm text-muted-foreground">
-                How Plainsong looks through past recordings when you ask it a
-                question.
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => requestMainView("dashboard")}
-              >
-                Open Memory
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => requestMainView("recordings")}
-              >
-                Open Meetings
-              </Button>
-            </div>
-
-            <SettingsOptionSelect
-              label="How search finds a meeting"
-              description="Word matching only finds a meeting that used the words you typed. Meaning matching also finds one that said the same thing differently, but it needs Ollama running on this Mac and an index that has to be built first."
-              value={settings.transcription.memorySearchMode}
-              onChange={(value) =>
-                void updateSettings({
-                  ...settings,
-                  transcription: {
-                    ...settings.transcription,
-                    memorySearchMode: value as "fts" | "ollama_embeddings",
-                  },
-                })
-              }
-            >
-              <option value="fts">
-                Match the words you type — built in, nothing to set up
-              </option>
-              <option value="ollama_embeddings">
-                Match the meaning as well — needs Ollama on this Mac
-              </option>
-            </SettingsOptionSelect>
-
-            {settings.transcription.memorySearchMode ===
-              "ollama_embeddings" && (
-              <>
-                <div className="space-y-2">
-                  <Label htmlFor="embedding-model">
-                    Ollama model used for meaning matching
-                  </Label>
-                  <p id="embedding-model-description" className="text-sm text-muted-foreground">
-                    The model that turns your transcripts into the numbers
-                    search compares. Changing it invalidates the index, so
-                    rebuild it below afterwards or search finds nothing.
-                  </p>
-                  <Input
-                    id="embedding-model"
-                    aria-describedby="embedding-model-description"
-                    value={settings.transcription.embeddingModel}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                      void updateSettings({
-                        ...settings,
-                        transcription: {
-                          ...settings.transcription,
-                          embeddingModel: e.target.value,
-                        },
-                      })
-                    }
-                    placeholder="nomic-embed-text"
-                    className="font-mono text-sm"
-                  />
-                  <p className="text-sm text-muted-foreground">
-                    Install it first with{" "}
-                    <code className="rounded bg-muted px-1">
-                      ollama pull nomic-embed-text
-                    </code>{" "}
-                    in Terminal.
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between gap-4">
-                  <div className="space-y-0.5">
-                    <p className="text-sm font-medium">Rebuild the index</p>
-                    <p className="text-sm text-muted-foreground">
-                      Re-reads every transcript you already have. Needed after
-                      changing the model above.
-                    </p>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      void (async () => {
-                        try {
-                          const { reindexEmbeddings } =
-                            await import("@/lib/backend");
-                          const result = await reindexEmbeddings();
-                          toast(
-                            `Indexed ${result.segments} segments from ${result.recordings} recordings${result.errors > 0 ? ` (${result.errors} errors)` : ""}`,
-                            result.errors > 0 ? "error" : "success",
-                          );
-                        } catch (err) {
-                          toast(
-                            settingsErrorMessage(
-                              err,
-                              "Plainsong could not rebuild the index.",
-                            ),
-                            "error",
-                          );
-                        }
-                      })();
-                    }}
-                  >
-                    <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-                    Rebuild
-                  </Button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  return (
-    <div className="flex h-full min-h-0 flex-col bg-background">
-      <div className="border-b border-border/60 bg-background/85 backdrop-blur">
-        <div className="mx-auto flex max-w-[1680px] flex-col gap-4 px-4 py-5 sm:px-6">
-          <div className="flex flex-wrap items-end justify-between gap-4">
-            <div>
-              {/* The eyebrow names the *area*, never the page. An eyebrow
-                  reading SETTINGS directly above an h1 reading Settings is the
-                  same word twice in two registers, which is the redundancy the
-                  rubric budget exists to prevent — the same reason Home is
-                  WORKSPACE and Projects is LIBRARY rather than HOME and
-                  PROJECTS. */}
-              <p className="rubric mb-1.5">PREFERENCES</p>
-              <h1 className="font-serif text-2xl font-semibold tracking-tight sm:text-3xl">
-                Settings
-              </h1>
-              <p className="mt-1 text-sm text-muted-foreground sm:text-base">
-                How Plainsong listens, writes, and what it keeps.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2 text-sm">
-              <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 font-medium text-foreground">
-                {saveStateLabel}
-              </div>
-              <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                Summaries{" "}
-                <span className="ml-1 font-medium text-foreground">
-                  {settings.privacy.remoteProcessingEnabled
-                    ? "In the cloud"
-                    : "On this Mac only"}
-                </span>
-              </div>
-              <div className="rounded-full border border-border/70 bg-background px-3 py-1.5 text-muted-foreground">
-                Microphone{" "}
-                <span className="ml-1 font-medium text-foreground">
-                  {settings.audio.preferredInputDevice?.deviceName ??
-                    "System default"}
-                </span>
-              </div>
-            </div>
-          </div>
-          {/* One slim row of sections. It lives in the header, outside the
-              scroller, so it stays put while a long tab scrolls, and the
-              settings themselves start right under it instead of under a
-              grid of tiles. */}
-          <div
-            role="tablist"
-            aria-label="Settings sections"
-            className="-mx-1 flex gap-0.5 overflow-x-auto px-1 pb-0.5 [scrollbar-width:none] lg:gap-1"
-          >
-            {SETTINGS_TABS.map((tab) => {
-              const selected = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  ref={(element) => {
-                    tabButtonRefs.current[tab.id] = element;
-                  }}
-                  type="button"
-                  role="tab"
-                  id={`settings-tab-${tab.id}`}
-                  aria-selected={selected}
-                  aria-controls="settings-tab-panel"
-                  tabIndex={selected ? 0 : -1}
-                  onClick={() => setActiveTab(tab.id)}
-                  onKeyDown={handleTabKeyDown}
-                  className={`flex shrink-0 items-center gap-2 rounded-full px-2 py-1.5 text-[13px] font-medium transition-colors lg:px-3 lg:text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                    selected
-                      ? "bg-foreground text-background"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }`}
-                >
-                  <tab.icon className="hidden h-4 w-4 xl:block" aria-hidden="true" />
-                  {tab.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-y-auto overflow-x-hidden">
-        <div className="mx-auto max-w-[1680px] p-4 sm:p-6">
-          <div className="min-w-0 space-y-4 sm:space-y-5">
-            {error && (
-              <div className="flex items-center gap-2 rounded-2xl border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
-                <AlertCircle className="h-4 w-4" />
-                {error}
-              </div>
-            )}
-
-            <div className="flex flex-wrap items-center gap-2 px-1">
-              <span
-                className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm font-medium ${readyChipTone(dictationReadinessChip.tone)}`}
-              >
-                <span>{dictationReadinessChip.label}</span>
-                <span aria-hidden="true">·</span>
-                <span>{dictationReadinessChip.status}</span>
+      <SettingsGroup title="Files">
+        <SettingsRow
+          settingId="export-folder"
+          label="Export folder"
+          description={
+            <>
+              <span className="font-medium text-foreground">
+                {settings.privacy.exportLocationLabel ?? "Standard export folders"}
               </span>
-            </div>
-
-            <section
-              id="settings-tab-panel"
-              role="tabpanel"
-              aria-labelledby={`settings-tab-${activeTab}`}
-              className="overflow-hidden rounded-[24px] border border-border bg-card shadow-sm"
+              {" · "}
+              {settings.privacy.exportLocationApproved
+                ? "approved through the macOS folder picker."
+                : settings.privacy.exportLocationLabel
+                  ? "this older location needs to be chosen again."
+                  : "exports go only to standard folders Plainsong approved."}
+            </>
+          }
+          control={
+            <Button
+              type="button"
+              variant="outline"
+              onClick={async () => {
+                setError(null);
+                try {
+                  const selected = await selectExportLocation();
+                  if (!selected) return;
+                  const current = latestSettingsRef.current;
+                  if (!current) return;
+                  updateSettings(
+                    {
+                      ...current,
+                      privacy: {
+                        ...current.privacy,
+                        exportRoot: null,
+                        exportLocationId: selected.id,
+                        exportLocationLabel: selected.label,
+                        exportLocationApproved: selected.approved,
+                      },
+                    },
+                    { immediate: true },
+                  );
+                } catch (error) {
+                  setError(
+                    settingsErrorMessage(error, "Could not approve the export folder"),
+                  );
+                }
+              }}
             >
-              {/* Keyed on the tab so each switch replays a short fade; the
-                  reduced-motion variant drops it. */}
-              <div
-                key={activeTab}
-                className="space-y-6 px-4 py-5 animate-in fade-in-0 duration-150 motion-reduce:animate-none sm:px-6 sm:py-6"
-              >
-                <p className="text-sm text-muted-foreground">
-                  {activeTabSummary}
+              Choose export folder
+            </Button>
+          }
+        />
+        <SettingsMore
+          settingId="backups"
+          label="Backups"
+          hint="Made only when you ask"
+        >
+          <div className="pb-2">
+            {backupConfigLoading && !backupConfig && (
+              <p className="py-3 text-sm text-muted-foreground">
+                Loading backup settings…
+              </p>
+            )}
+
+            {backupConfig && (
+              <>
+                <p className="py-2 text-sm leading-5 text-muted-foreground">
+                  Nothing is backed up or uploaded on its own — a copy is made
+                  only when you press a button here. This version cannot
+                  restore full backups from or into a vault-encrypted
+                  database; settings snapshots restore preferences only.
                 </p>
-                {activeTab === "models" && (
-                  <ModelsScreen
-                    settings={settings}
-                    onPatchSettings={patchSettings}
-                    aiModelsForProvider={getCachedModelsForProvider}
-                    aiModelsLoading={modelsLoading}
-                    onAiProviderChange={(lane, providerName) =>
-                      void updateAnalysisProvider(lane, providerName)
-                    }
-                    onAiModelChange={updateAnalysisModel}
-                    onOpenKeySettings={() => setActiveTab("ai")}
-                    onOpenDiagnostics={() => setActiveTab("asr")}
-                  />
-                )}
-
-                {activeTab === "asr" && (
-                  <div className="space-y-5">
-                    <div className="space-y-3">
-                      <AsrProviderManager />
-                    </div>
-
-                    <div className="border-t pt-5 text-foreground">
-                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div>
-                          <p className="section-heading">Microphones</p>
-                          <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground">
-                            Pick one microphone for the whole app, then give
-                            dictation or meetings their own if you need to.
-                          </p>
-                        </div>
+                <div className="settings-rows">
+                  <SettingsRow
+                    label="Full backup"
+                    description={`${latestFullBackup ? `Latest: ${formatDateTime(latestFullBackup.timestamp)} · ${latestFullBackup.itemsCount} items.` : "None yet."} Everything, including recordings and transcripts.`}
+                    control={
+                      <>
                         <Button
-                          variant="outline"
                           size="sm"
-                          onClick={() => void refreshAudioDevices()}
-                        >
-                          <RefreshCw className="mr-2 h-4 w-4" />
-                          Refresh devices
-                        </Button>
-                      </div>
-
-                      <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                        <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
-                          <div>
-                            <p className="section-heading">Whole app</p>
-                            <p
-                              id="app-wide-microphone-description"
-                              className="mt-1 text-sm text-muted-foreground"
-                            >
-                              The microphone every capture uses unless one of
-                              the overrides beside it is switched on.
-                            </p>
-                          </div>
-                          <OptionSelect
-                            aria-label="App-wide microphone"
-                            aria-describedby="app-wide-microphone-description"
-                            value={appWideDeviceId}
-                            onValueChange={(value) => {
-                              const nextDevice =
-                                resolveAudioDevicePreference(
-                                  value || null,
-                                );
-                              void updateSettings({
-                                ...settings,
-                                audio: {
-                                  ...settings.audio,
-                                  preferredInputDevice: nextDevice,
-                                },
-                              });
-                            }}
-                          >
-                            <option value="">
-                              System default microphone
-                            </option>
-                            {currentAudioDevices.map((device) => (
-                              <option
-                                key={device.deviceId}
-                                value={device.deviceId}
-                              >
-                                {renderDeviceOptionLabel(device)}
-                              </option>
-                            ))}
-                            {appWideDeviceId &&
-                            !currentAudioDevices.some((device) => device.deviceId === appWideDeviceId) ? (
-                              <option value={appWideDeviceId}>
-                                {`${settings.audio.preferredInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
-                              </option>
-                            ) : null}
-                          </OptionSelect>
-                        </div>
-
-                        <div className="space-y-3 rounded-2xl border border-border bg-background p-4">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="section-heading">
-                                Dictation only
-                              </p>
-                              <p
-                                id="dictation-microphone-description"
-                                className="mt-1 text-sm text-muted-foreground"
-                              >
-                                Switch this on to dictate through a different
-                                microphone from the one meetings use — a
-                                headset mic for dictation, the room for
-                                meetings.
-                              </p>
-                            </div>
-                            <Switch
-                              aria-label="Use a different microphone for dictation"
-                              aria-describedby="dictation-microphone-description"
-                              checked={
-                                settings.audio
-                                  .dictationInputOverrideEnabled ?? false
-                              }
-                              onCheckedChange={(checked) =>
-                                void updateSettings({
-                                  ...settings,
-                                  audio: {
-                                    ...settings.audio,
-                                    dictationInputOverrideEnabled: checked,
-                                    dictationInputDevice: checked
-                                      ? (settings.audio
-                                          .dictationInputDevice ??
-                                        settings.audio
-                                          .preferredInputDevice ??
-                                        null)
-                                      : null,
-                                  },
-                                })
-                              }
-                            />
-                          </div>
-                          <OptionSelect
-                            aria-label="Dictation microphone override"
-                            aria-describedby="dictation-microphone-description"
-                            disabled={
-                              !(
-                                settings.audio
-                                  .dictationInputOverrideEnabled ?? false
-                              )
-                            }
-                            value={dictationDeviceId}
-                            onValueChange={(value) => {
-                              const nextDevice =
-                                resolveAudioDevicePreference(
-                                  value || null,
-                                );
-                              void updateSettings({
-                                ...settings,
-                                audio: {
-                                  ...settings.audio,
-                                  dictationInputDevice: nextDevice,
-                                },
-                              });
-                            }}
-                          >
-                            <option value="">
-                              Use the whole-app microphone
-                            </option>
-                            {currentAudioDevices.map((device) => (
-                              <option
-                                key={`dictation-${device.deviceId}`}
-                                value={device.deviceId}
-                              >
-                                {renderDeviceOptionLabel(device)}
-                              </option>
-                            ))}
-                            {dictationDeviceId &&
-                            !currentAudioDevices.some((device) => device.deviceId === dictationDeviceId) ? (
-                              <option value={dictationDeviceId}>
-                                {`${settings.audio.dictationInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
-                              </option>
-                            ) : null}
-                          </OptionSelect>
-                        </div>
-
-                        <div className="space-y-3 rounded-2xl border border-border bg-background p-4 md:col-span-2 xl:col-span-1">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="section-heading">
-                                Meetings only
-                              </p>
-                              <p
-                                id="meeting-microphone-description"
-                                className="mt-1 text-sm text-muted-foreground"
-                              >
-                                Switch this on to record meetings through a
-                                different microphone from the one dictation
-                                uses.
-                              </p>
-                            </div>
-                            <Switch
-                              aria-label="Use a different microphone for meetings"
-                              aria-describedby="meeting-microphone-description"
-                              checked={
-                                settings.audio
-                                  .meetingInputOverrideEnabled ?? false
-                              }
-                              onCheckedChange={(checked) =>
-                                void updateSettings({
-                                  ...settings,
-                                  audio: {
-                                    ...settings.audio,
-                                    meetingInputOverrideEnabled: checked,
-                                    meetingInputDevice: checked
-                                      ? (settings.audio
-                                          .meetingInputDevice ??
-                                        settings.audio
-                                          .preferredInputDevice ??
-                                        null)
-                                      : null,
-                                  },
-                                })
-                              }
-                            />
-                          </div>
-                          <OptionSelect
-                            aria-label="Meeting microphone override"
-                            aria-describedby="meeting-microphone-description"
-                            disabled={
-                              !(
-                                settings.audio
-                                  .meetingInputOverrideEnabled ?? false
-                              )
-                            }
-                            value={meetingDeviceId}
-                            onValueChange={(value) => {
-                              const nextDevice =
-                                resolveAudioDevicePreference(
-                                  value || null,
-                                );
-                              void updateSettings({
-                                ...settings,
-                                audio: {
-                                  ...settings.audio,
-                                  meetingInputDevice: nextDevice,
-                                },
-                              });
-                            }}
-                          >
-                            <option value="">
-                              Use the whole-app microphone
-                            </option>
-                            {currentAudioDevices.map((device) => (
-                              <option
-                                key={`meeting-${device.deviceId}`}
-                                value={device.deviceId}
-                              >
-                                {renderDeviceOptionLabel(device)}
-                              </option>
-                            ))}
-                            {meetingDeviceId &&
-                            !currentAudioDevices.some((device) => device.deviceId === meetingDeviceId) ? (
-                              <option value={meetingDeviceId}>
-                                {`${settings.audio.meetingInputDevice?.deviceName ?? "Saved microphone"} (not connected)`}
-                              </option>
-                            ) : null}
-                          </OptionSelect>
-                        </div>
-                      </div>
-
-                      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {currentAudioDevices.map((device) => (
-                          <div
-                            key={`card-${device.deviceId}`}
-                            className="rounded-2xl border border-border/60 bg-foreground/[0.03] p-4"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div>
-                                <p className="text-sm font-medium text-foreground">
-                                  {device.deviceName}
-                                </p>
-                                <p className="mt-1 text-xs text-muted-foreground">
-                                  {deviceTransportLabel(device)}
-                                  {device.channelCount
-                                    ? ` - ${device.channelCount} ch`
-                                    : ""}
-                                  {device.sampleRate
-                                    ? ` - ${device.sampleRate} Hz`
-                                    : ""}
-                                </p>
-                              </div>
-                              {device.isDefault ? (
-                                <span className="rounded-full border border-gold/30 bg-gold/10 px-2 py-0.5 text-xs font-medium uppercase tracking-[0.18em] text-gold-text">
-                                  Default
-                                </span>
-                              ) : null}
-                            </div>
-                            {device.isBluetoothLike ? (
-                              <p className="mt-3 text-sm leading-5 text-rust">
-                                Bluetooth headset mics can dull your audio
-                                while you dictate. Built-in or USB mics
-                                usually sound cleaner.
-                              </p>
-                            ) : null}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="border-t pt-5 text-foreground">
-                      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                        <div className="max-w-2xl">
-                          <p className="section-heading">
-                            Recording what your Mac plays
-                          </p>
-                          {systemAudioCapability === null ? (
-                            <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                              Checking how this Mac can capture its own
-                              audio…
-                            </p>
-                          ) : systemAudioCapability.ready ? (
-                            <p className="mt-1 text-sm leading-6 text-gold-text">
-                              Verified through {systemAudioCapability.backend === "core_audio_process_tap" ? "macOS itself" : "a loopback device"}
-                              {systemAudioCapability.routeDevice ? ` on ${systemAudioCapability.routeDevice}` : ""}
-                              {systemAudioCapability.nativeSampleRate && systemAudioCapability.nativeChannels
-                                ? ` · ${systemAudioCapability.nativeSampleRate} Hz / ${systemAudioCapability.nativeChannels} ch`
-                                : ""}
-                              .
-                            </p>
-                          ) : systemAudioCapability.backend !== "none" ? (
-                            <p className="mt-1 text-sm leading-6 text-rust">
-                              There is a way to capture it, but Plainsong
-                              has not yet confirmed macOS permission and
-                              real sound coming through. Run the test.
-                            </p>
-                          ) : (
-                            <p className="mt-1 text-sm leading-6 text-rust">
-                              Nothing on this Mac can capture it yet.
-                              Devices that both play and record are skipped,
-                              because using one could pick up your
-                              microphone as well.
-                            </p>
-                          )}
-                          {systemAudioCapability?.actionableReason ? (
-                            <p className="mt-2 text-sm leading-5 text-muted-foreground">
-                              {systemAudioCapability.actionableReason}
-                            </p>
-                          ) : null}
-                          <p className="mt-2 text-sm leading-5 text-muted-foreground">
-                            The test asks macOS for permission the first
-                            time, then checks that real sound arrived — not
-                            just that a connection opened. Through macOS it
-                            plays a brief quiet tone; through a loopback
-                            device, play something audible while it runs.
-                          </p>
-                        </div>
-                        <div className="flex shrink-0 flex-wrap gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={
-                              systemAudioTestLoading ||
-                              systemAudioCapability === null ||
-                              systemAudioCapability.backend === "none"
-                            }
-                            onClick={() => void runSystemAudioTest()}
-                          >
-                            {systemAudioTestLoading ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : null}
-                            Run the test
-                          </Button>
-                          {systemAudioCapability?.backend === "core_audio_process_tap" &&
-                          !systemAudioCapability.ready ? (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => void openPermissionSettings("system_audio")}
-                            >
-                              Open privacy settings
-                            </Button>
-                          ) : null}
-                        </div>
-                      </div>
-                      {systemAudioTestStatus ? (
-                        <p
-                          className={`mt-3 text-sm ${systemAudioCapability?.ready ? "text-gold-text" : "text-muted-foreground"}`}
-                          role="status"
-                        >
-                          {systemAudioTestStatus}
-                        </p>
-                      ) : null}
-                    </div>
-
-                    <div className="h-px bg-border" />
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label id="separate-speakers-label">Separate speakers</Label>
-                        <p
-                          id="separate-speakers-description"
-                          className="text-sm text-muted-foreground"
-                        >
-                          Once a recording is transcribed, splits the text up
-                          by who was talking, so a transcript reads as a
-                          conversation rather than one block. It needs a 25 MB
-                          speaker separation model on this Mac, and it runs
-                          after the transcript, never during.
-                        </p>
-                      </div>
-                      {diarizationAvailable ? (
-                        <Switch
-                          aria-labelledby="separate-speakers-label"
-                          aria-describedby="separate-speakers-description"
-                          checked={settings.transcription.enableDiarization}
-                          onCheckedChange={(checked) =>
-                            void updateSettings({
-                              ...settings,
-                              transcription: {
-                                ...settings.transcription,
-                                enableDiarization: checked,
-                              },
-                            })
-                          }
-                        />
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={diarizationDownloading}
+                          disabled={backupBusy}
                           onClick={async () => {
-                            setDiarizationDownloading(true);
-                            try {
-                              const modelId =
-                                settings.transcription.diarizationModelId;
-                              await downloadDiarizationModel(modelId);
-                              setDiarizationAvailable(true);
-                              // Refresh model list to show installed status
-                              const models = await listDiarizationModels();
-                              setDiarizationModels(models);
-                              updateSettings({
-                                ...settings,
-                                transcription: {
-                                  ...settings.transcription,
-                                  enableDiarization: true,
-                                },
-                              });
-                            } catch (e) {
-                              const msg = settingsErrorMessage(
-                                e,
-                                "Plainsong could not download the model.",
-                              );
-                              setError(`Download failed: ${msg}`);
-                            } finally {
-                              setDiarizationDownloading(false);
-                            }
-                          }}
-                        >
-                          {diarizationDownloading ? (
-                            <>
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                              Downloading…
-                            </>
-                          ) : (
-                            <>
-                              <Download className="mr-2 h-4 w-4" />
-                              Download Model (~25MB)
-                            </>
-                          )}
-                        </Button>
-                      )}
-                    </div>
-
-                    {diarizationAvailable &&
-                    settings.transcription.enableDiarization &&
-                    diarizationModels.length > 0 ? (
-                      <SettingsOptionSelect
-                        label="Speaker separation model"
-                        description="Which model decides that two stretches of a recording are the same voice. Every voice signature is tied to the model that made it, so changing this means remembered voices stop matching and the next meeting starts fresh."
-                        value={
-                          settings.transcription.diarizationModelId ??
-                          "ecapa_tdnn_speaker"
-                        }
-                        onChange={(value) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              diarizationModelId: value,
-                            },
-                          })
-                        }
-                        footnote={(() => {
-                          const selectedModel = diarizationModels.find(
-                            (m) =>
-                              m.id ===
-                              (settings.transcription.diarizationModelId ??
-                                "ecapa_tdnn_speaker"),
-                          );
-                          if (selectedModel && !selectedModel.installed) {
-                            return (
-                              <p className="text-sm text-rust">
-                                This one is not on this Mac yet, so speakers
-                                will not be separated until you press Download
-                                Model above.
-                              </p>
-                            );
-                          }
-                          return null;
-                        })()}
-                      >
-                        {diarizationModels.map((model) => (
-                          <option key={model.id} value={model.id}>
-                            {model.label}
-                            {model.installed ? "" : " (not downloaded)"} —{" "}
-                            {model.description}
-                          </option>
-                        ))}
-                      </SettingsOptionSelect>
-                    ) : null}
-
-                    <div className="space-y-2">
-                      <Label htmlFor="transcription-language">Transcription language</Label>
-                      <p id="transcription-language-description" className="text-sm text-muted-foreground">
-                        The language both dictation and meetings are
-                        transcribed as. Pick one and every recording is treated
-                        as that language, even when it is not; auto-detect lets
-                        the speech engine decide per recording, narrowed by the
-                        list below.
-                      </p>
-                      <OptionSelect
-                        id="transcription-language"
-                        aria-describedby="transcription-language-description"
-                        value={settings.transcription.language ?? ""}
-                        onValueChange={(value) =>
-                          void updateSettings({
-                            ...settings,
-                            transcription: {
-                              ...settings.transcription,
-                              language: value || null,
-                            },
-                          })
-                        }
-                      >
-                        <option value="">Auto-detect</option>
-                        <option value="en">English</option>
-                        <option value="es">Spanish</option>
-                        <option value="fr">French</option>
-                        <option value="de">German</option>
-                        <option value="it">Italian</option>
-                        <option value="pt">Portuguese</option>
-                        <option value="ja">Japanese</option>
-                        <option value="ko">Korean</option>
-                        <option value="zh">Chinese</option>
-                        <option value="ru">Russian</option>
-                        <option value="ar">Arabic</option>
-                        <option value="hi">Hindi</option>
-                      </OptionSelect>
-                      <div className="border-t pt-4">
-                        <p className="section-heading">
-                          Languages you dictate in
-                        </p>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          Only matters while the setting above is on
-                          auto-detect. Pick one language to always use it,
-                          or a few to narrow what auto-detect chooses from.
-                        </p>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          {DICTATION_ACTIVE_LANGUAGE_OPTIONS.map(
-                            (option) => {
-                              const selected =
-                                dictationActiveLanguages.includes(
-                                  option.value,
-                                );
-                              return (
-                                <button
-                                  key={option.value}
-                                  type="button"
-                                  aria-pressed={selected}
-                                  aria-label={`Dictate in ${option.label}`}
-                                  className={`rounded-full border px-3 py-1 text-sm transition-colors ${
-                                    selected
-                                      ? "border-foreground bg-foreground text-background"
-                                      : "border-border bg-background text-muted-foreground hover:text-foreground"
-                                  }`}
-                                  onClick={() => {
-                                    const nextActiveLanguages = selected
-                                      ? dictationActiveLanguages.filter(
-                                          (language) =>
-                                            language !== option.value,
-                                        )
-                                      : [
-                                          ...dictationActiveLanguages,
-                                          option.value,
-                                        ];
-                                    void updateSettings({
-                                      ...settings,
-                                      transcription: {
-                                        ...settings.transcription,
-                                        dictationActiveLanguages:
-                                          normalizeActiveLanguageSet(
-                                            nextActiveLanguages,
-                                          ),
-                                      },
-                                    });
-                                  }}
-                                >
-                                  {option.label}
-                                </button>
-                              );
-                            },
-                          )}
-                        </div>
-                        <p className="mt-3 text-sm text-muted-foreground">
-                          {dictationActiveLanguages.length === 0
-                            ? "Nothing picked, so auto-detect considers every language."
-                            : dictationActiveLanguages.length === 1
-                              ? `Dictation will always use ${dictationLanguageLabel(dictationActiveLanguages[0])}.`
-                              : `Dictation will choose between ${dictationActiveLanguages
-                                  .map(dictationLanguageLabel)
-                                  .join(", ")}.`}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="space-y-5 border-t pt-4">
-                      <div className="space-y-1">
-                        <p className="section-heading">
-                          Advanced: what happens to the words
-                        </p>
-                        <p className="text-sm text-muted-foreground">
-                          Cleanup, spoken commands, meeting titles and the
-                          audio tuning behind them.
-                        </p>
-                      </div>
-                      {renderSharedDictationControls({
-                        includeMeetingAutoName: true,
-                        includeAudioTuning: true,
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {activeTab === "general" && (
-                  <div className="space-y-5">
-                    <div className="space-y-2">
-                      <Label id="theme-label">Theme</Label>
-                      <p className="text-sm text-muted-foreground">
-                        Light is the vellum page, dark is the candle-lit one.
-                        System follows your Mac&apos;s appearance setting and
-                        changes with it.
-                      </p>
-                      <div
-                        className="flex gap-2"
-                        role="group"
-                        aria-labelledby="theme-label"
-                      >
-                        <Button
-                          variant={
-                            theme === "light" ? "default" : "outline"
-                          }
-                          size="sm"
-                          onClick={() => setTheme("light")}
-                          className="flex items-center gap-2"
-                        >
-                          <Sun className="h-4 w-4" />
-                          Light
-                        </Button>
-                        <Button
-                          variant={theme === "dark" ? "default" : "outline"}
-                          size="sm"
-                          onClick={() => setTheme("dark")}
-                          className="flex items-center gap-2"
-                        >
-                          <Moon className="h-4 w-4" />
-                          Dark
-                        </Button>
-                        <Button
-                          variant={
-                            theme === "system" ? "default" : "outline"
-                          }
-                          size="sm"
-                          onClick={() => setTheme("system")}
-                          className="flex items-center gap-2"
-                        >
-                          <Monitor className="h-4 w-4" />
-                          System
-                        </Button>
-                      </div>
-                    </div>
-
-                    <SettingsSwitch
-                      className="py-0"
-                      label="Keep running after close"
-                      description="Closing the window leaves Plainsong running in the menu bar, so shortcuts and recording keep working."
-                      checked={settings.ui.minimizeToTray}
-                      // The setting travels on `settings-changed`, which the
-                      // main process already listens for. The extra
-                      // `app:set_minimize_to_tray` call this used to make lost
-                      // its handler and could only ever reject into an empty
-                      // catch.
-                      onCheckedChange={(checked) => {
-                        void updateSettings({
-                          ...settings,
-                          ui: { ...settings.ui, minimizeToTray: checked },
-                        });
-                      }}
-                    />
-
-                    <SettingsSwitch
-                      className="py-0"
-                      label="Always on top"
-                      description="Keep the window above other applications."
-                      checked={settings.ui.alwaysOnTop}
-                      onCheckedChange={(checked) =>
-                        void updateSettings({
-                          ...settings,
-                          ui: { ...settings.ui, alwaysOnTop: checked },
-                        })
-                      }
-                    />
-
-                    {/* Renders nothing until macOS has granted calendar
-                        access — including its own heading and rule, so an
-                        unconnected calendar leaves no empty section behind.
-                        The ask lives on the Meetings view, next to the thing
-                        it improves; this is only where a granted calendar gets
-                        narrowed or switched back off. */}
-                    <CalendarSettingsSection />
-
-                    {/* Plainsong Plus is not launched: this renders nothing
-                        unless the sidecar was built with it. */}
-                    <PlusSettingsSection />
-
-                    <div className="pt-4 border-t space-y-4">
-                      <div className="space-y-1">
-                        <p className="section-heading">Mini windows</p>
-                        <p className="text-sm text-muted-foreground">
-                          Small floating windows that stay on screen while
-                          Plainsong is recording or working.
-                        </p>
-                      </div>
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="While dictating"
-                        description="Shows the level, the words as they arrive, and why an insert failed. With it off, a failed dictation is only reported by the notification below."
-                        checked={settings.ui.showDictationPopup}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: {
-                              ...settings.ui,
-                              showDictationPopup: checked,
-                            },
-                          })
-                        }
-                      />
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="While recording a meeting"
-                        description="Shows that a meeting is being recorded, for how long, and gives you stop and pause without switching back to Plainsong."
-                        checked={settings.ui.showRecordingPopup}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: {
-                              ...settings.ui,
-                              showRecordingPopup: checked,
-                            },
-                          })
-                        }
-                      />
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="Dictation sounds"
-                        description="A soft tick when the microphone goes live, a pop when your words land, and a low tone if a dictation fails, so you never have to look."
-                        checked={settings.ui.dictationSounds !== false}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: {
-                              ...settings.ui,
-                              dictationSounds: checked,
-                            },
-                          })
-                        }
-                      />
-
-                      <SettingsOptionSelect
-                        label="Dictation pill size"
-                        description="How big the dictation pill is on screen."
-                        value={settings.ui.dictationPillSize ?? "default"}
-                        onChange={(value) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: {
-                              ...settings.ui,
-                              dictationPillSize: value as NonNullable<Settings["ui"]["dictationPillSize"]>,
-                            },
-                          })
-                        }
-                      >
-                        <option value="small">Small</option>
-                        <option value="default">Default</option>
-                        <option value="large">Large</option>
-                        <option value="xlarge">Extra large</option>
-                      </SettingsOptionSelect>
-
-                      <SettingsOptionSelect
-                        label="Dictation pill position"
-                        description="Bottom center, or docked to the left or right edge of the screen. Dragging the pill near an edge docks it there too."
-                        value={settings.ui.dictationPillDock ?? "bottom"}
-                        onChange={(value) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: {
-                              ...settings.ui,
-                              dictationPillDock: value as NonNullable<Settings["ui"]["dictationPillDock"]>,
-                            },
-                          })
-                        }
-                      >
-                        <option value="bottom">Bottom center</option>
-                        <option value="left">Left edge</option>
-                        <option value="right">Right edge</option>
-                      </SettingsOptionSelect>
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="Mute other audio while dictating"
-                        description="Silences music and videos while the microphone is live, then turns them back on. Plainsong only restores audio it muted itself."
-                        checked={settings.ui.muteMediaWhileDictating === true}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            ui: {
-                              ...settings.ui,
-                              muteMediaWhileDictating: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="pt-4 border-t space-y-4">
-                      <div className="space-y-1">
-                        <p className="section-heading">Notifications</p>
-                        <p className="text-sm text-muted-foreground">
-                          macOS notifications, one sentence each. Clicking one
-                          opens the meeting or the dictation it is about.
-                        </p>
-                      </div>
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="Meeting events"
-                        description="When a meeting starts, stops, or stops on its own, and when its transcript and notes are ready or fail."
-                        checked={notificationsSettings.meetingEvents}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            notifications: {
-                              ...notificationsSettings,
-                              meetingEvents: checked,
-                            },
-                          })
-                        }
-                      />
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="Dictation problems while the mini window is hidden"
-                        description="A dictation that was refused or could not be inserted. The mini window already says so when it is on screen."
-                        checked={notificationsSettings.dictationFailures}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            notifications: {
-                              ...notificationsSettings,
-                              dictationFailures: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="pt-4 border-t space-y-4">
-                      <div className="space-y-1">
-                        <p className="section-heading">Meetings</p>
-                        <p className="text-sm text-muted-foreground">
-                          What Plainsong does around a meeting without being
-                          asked. It never starts recording on its own.
-                        </p>
-                      </div>
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="Offer to record a call it notices"
-                        description="Checks which apps are running on this Mac every few seconds — Zoom, Microsoft Teams, Google Meet in a browser, Webex, FaceTime, Slack, Discord — and offers to record when one has a call in progress. Local only; nothing is sent anywhere. Google Meet needs Accessibility access to read the browser window's title."
-                        checked={meetingsSettings.callDetectionEnabled}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            meetings: {
-                              ...meetingsSettings,
-                              callDetectionEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="Keep the speakers a cloud service sends back"
-                        description="Deepgram and Gemini return speaker labels with the transcript. When one of them transcribes a meeting, Plainsong keeps its speakers instead of separating the voices again on this Mac. Turn this off to always separate them here. No speech engine that runs on this Mac returns speaker labels, so this changes nothing while you transcribe here."
-                        checked={meetingsSettings.preferProviderDiarization}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            meetings: {
-                              ...meetingsSettings,
-                              preferProviderDiarization: checked,
-                            },
-                          })
-                        }
-                      />
-
-                      <SettingsSwitch
-                        className="py-0"
-                        label="Stop the meeting when the call app quits"
-                        description="A meeting recorded alongside a detected call ends when that app quits or its call window closes. The audio is saved and transcribed as usual."
-                        checked={meetingsSettings.autoStopWhenCallAppQuits}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            meetings: {
-                              ...meetingsSettings,
-                              autoStopWhenCallAppQuits: checked,
-                            },
-                          })
-                        }
-                      />
-
-                      <div className="space-y-2">
-                        <Label htmlFor="meeting-auto-stop-silence-minutes">
-                          Stop the meeting after minutes of silence
-                        </Label>
-                        <p className="text-sm text-muted-foreground">
-                          When nothing audible has come from any captured
-                          source for this long, the meeting stops and is
-                          saved. 0 turns this off. Paused time does not count.
-                        </p>
-                        <Input
-                          id="meeting-auto-stop-silence-minutes"
-                          type="number"
-                          min={0}
-                          max={MEETING_AUTO_STOP_SILENCE_MINUTES_MAX}
-                          className="w-32"
-                          value={meetingsSettings.autoStopAfterSilenceMinutes}
-                          onChange={(e) => {
-                            const raw = Number(e.target.value);
-                            const next = Number.isFinite(raw)
-                              ? Math.min(
-                                  Math.max(0, Math.round(raw)),
-                                  MEETING_AUTO_STOP_SILENCE_MINUTES_MAX,
-                                )
-                              : meetingsSettings.autoStopAfterSilenceMinutes;
-                            void updateSettings({
-                              ...settings,
-                              meetings: {
-                                ...meetingsSettings,
-                                autoStopAfterSilenceMinutes: next,
-                              },
-                            });
-                          }}
-                        />
-                      </div>
-
-                      <RememberedVoicesSection
-                        rememberVoices={meetingsSettings.rememberVoices}
-                        autoApplyConfidentVoices={
-                          meetingsSettings.autoApplyConfidentVoices
-                        }
-                        onRememberVoicesChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            meetings: {
-                              ...meetingsSettings,
-                              rememberVoices: checked,
-                              // Auto-apply refines remembering, so turning
-                              // remembering off takes it with it. This mirrors
-                              // `normalize_loaded_meetings_settings` in
-                              // settings.rs rather than leaving the file in a
-                              // state the sidecar would normalize behind us.
-                              autoApplyConfidentVoices: checked
-                                ? meetingsSettings.autoApplyConfidentVoices
-                                : false,
-                            },
-                          })
-                        }
-                        onAutoApplyChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            meetings: {
-                              ...meetingsSettings,
-                              autoApplyConfidentVoices: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-                    <LocalToolsSection
-                      enabled={settings.automation?.localToolsEnabled ?? false}
-                      onEnabledChange={(checked) =>
-                        void updateSettings({
-                          ...settings,
-                          automation: {
-                            ...settings.automation,
-                            localToolsEnabled: checked,
-                          },
-                        })
-                      }
-                    />
-
-                    <div className="pt-4 border-t space-y-5">
-                      <div className="space-y-1">
-                        <p className="section-heading">
-                          Advanced: keyboard shortcuts
-                        </p>
-                        <p className="text-sm text-muted-foreground">
-                          Every key and mouse button that reaches Plainsong
-                          from another app.
-                        </p>
-                      </div>
-                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <p className="text-sm text-muted-foreground">
-                          Smart Format, prompts, and audio behavior are set in
-                          Transcription.
-                        </p>
-                        <Button
-                          variant="secondary"
-                          onClick={() => setActiveTab("asr")}
-                        >
-                          Open Transcription
-                        </Button>
-                      </div>
-
-                      {renderShortcutsSection()}
-                    </div>
-                  </div>
-                )}
-
-                {activeTab === "security" && (
-                  <div className="space-y-5">
-                    {/* The vault-initialized bit only says a migration
-                        once ran. Capture writes a plain WAV either way, so
-                        report the count of files that are actually
-                        encrypted and say plainly that new recordings are
-                        not. */}
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-0.5">
-                        <Label className="flex items-center gap-2">
-                          <Lock className="h-4 w-4" />
-                          Recordings on disk
-                        </Label>
-                        <p className="text-sm text-muted-foreground">
-                          {recordingEncryptionSummary.description}
-                        </p>
-                      </div>
-                      <span
-                        className={`shrink-0 rounded-full border px-2.5 py-1 text-sm ${
-                          recordingEncryptionSummary.allEncrypted
-                            ? "border-gold/30 bg-gold/10 text-gold-text"
-                            : "border-rust/40 bg-rust/8 text-rust"
-                        }`}
-                      >
-                        {recordingEncryptionSummary.chip}
-                      </span>
-                    </div>
-
-                    <div className="border-t pt-4">
-                      <p className="section-heading">Apple Speech</p>
-                      <p className="mt-1 text-sm text-muted-foreground">
-                        Optional, and only ever used for dictation — never for
-                        meetings, and never swapped in for the engine you
-                        chose. Plainsong requires Apple's on-device
-                        recognition and turns off its fall back to Apple's
-                        servers.
-                      </p>
-                    </div>
-
-                    <div className="flex items-center justify-between">
-                      <div className="space-y-0.5">
-                        <Label className="flex items-center gap-2">
-                          <Cloud className="h-4 w-4" />
-                          Allow cloud AI processing
-                        </Label>
-                        <p
-                          id="remote-processing-description"
-                          className="text-sm text-muted-foreground"
-                        >
-                          Allows the service selected in Models to receive
-                          meeting transcripts and dictated text for summaries,
-                          answers, action items, Smart Format, and Power
-                          Rewrite. Dictation requests may also include captured
-                          selected text or app context and the destination app's
-                          name. The service may bill you. Speech engines are a
-                          separate choice and this does not affect them.
-                        </p>
-                      </div>
-                      <Switch
-                        aria-label="Allow cloud AI processing"
-                        aria-describedby="remote-processing-description"
-                        checked={settings.privacy.remoteProcessingEnabled}
-                        onCheckedChange={(checked) =>
-                          void updateSettings({
-                            ...settings,
-                            privacy: {
-                              ...settings.privacy,
-                              remoteProcessingEnabled: checked,
-                            },
-                          })
-                        }
-                      />
-                    </div>
-
-                    <div className="pt-4 border-t space-y-5">
-                      <div className="space-y-1">
-                        <p className="section-heading">
-                          Advanced: permissions and diagnostics
-                        </p>
-                        <p className="text-sm text-muted-foreground">
-                          What macOS currently lets Plainsong do, a redacted
-                          log bundle, and the vault.
-                        </p>
-                      </div>
-                        {renderSharedDictationControls({
-                          includeCoreControls: false,
-                          includeHotkeyBehavior: false,
-                          includePermissions: true,
-                        })}
-
-                        <SupportBundlePanel />
-
-                        <div className="space-y-2">
-                          <p className="section-heading">Vault</p>
-                          <p id="vault-password-description" className="text-sm text-muted-foreground">
-                            The vault encrypts recordings already saved on this
-                            Mac. Enter its password to unlock it, or to encrypt
-                            what is on disk now. New recordings are written
-                            unencrypted either way, and there is no recovery if
-                            you lose the password.
-                          </p>
-                          <Label htmlFor="vault-password">Password</Label>
-                          <Input
-                            id="vault-password"
-                            aria-describedby="vault-password-description"
-                            type="password"
-                            placeholder="Vault password"
-                            value={vaultPassword}
-                            onChange={(e: ChangeEvent<HTMLInputElement>) =>
-                              setVaultPassword(e.target.value)
-                            }
-                          />
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              variant="outline"
-                              disabled={!vaultPassword.trim()}
-                              onClick={async () => {
-                                setError(null);
-                                try {
-                                  await unlockVault(vaultPassword.trim());
-                                  setVaultPassword("");
-                                  setSecurityStatus(
-                                    await getSecurityStatus(),
-                                  );
-                                } catch (e) {
-                                  setError(
-                                    settingsErrorMessage(e, "Failed to unlock vault"),
-                                  );
-                                }
-                              }}
-                            >
-                              Unlock vault
-                            </Button>
-                            <Button
-                              variant="outline"
-                              onClick={async () => {
-                                setError(null);
-                                try {
-                                  await lockVault();
-                                  setSecurityStatus(
-                                    await getSecurityStatus(),
-                                  );
-                                } catch (e) {
-                                  setError(
-                                    settingsErrorMessage(e, "Failed to lock vault"),
-                                  );
-                                }
-                              }}
-                            >
-                              Lock vault
-                            </Button>
-                            <Button
-                              disabled={!vaultPassword.trim()}
-                              onClick={async () => {
-                                setError(null);
-                                try {
-                                  await migrateToEncryptedStorage(
-                                    vaultPassword.trim(),
-                                  );
-                                  setVaultPassword("");
-                                  setSecurityStatus(
-                                    await getSecurityStatus(),
-                                  );
-                                } catch (e) {
-                                  setError(
-                                    settingsErrorMessage(e, "Failed to migrate to encrypted storage"),
-                                  );
-                                }
-                              }}
-                            >
-                              Encrypt what is on disk now
-                            </Button>
-                          </div>
-                          {securityStatus ? (
-                            <div className="mt-2 space-y-1 text-sm text-muted-foreground">
-                              {[
-                                {
-                                  label: "Vault set up",
-                                  on: securityStatus.vaultInitialized,
-                                },
-                                {
-                                  label: "Vault unlocked",
-                                  on: securityStatus.vaultUnlocked,
-                                },
-                                {
-                                  label: "Database encrypted",
-                                  on: securityStatus.databaseEncrypted,
-                                },
-                              ].map((row) => (
-                                <p
-                                  key={row.label}
-                                  className="flex items-center gap-2"
-                                >
-                                  <span
-                                    aria-hidden="true"
-                                    className={
-                                      row.on
-                                        ? "neume neume-lit"
-                                        : "neume neume-hollow"
-                                    }
-                                  />
-                                  {row.label}:{" "}
-                                  <span className="font-medium text-foreground">
-                                    {row.on ? "yes" : "no"}
-                                  </span>
-                                </p>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-                  </div>
-                )}
-
-                {activeTab === "storage" && (
-                  <div className="space-y-5">
-                    <div className="space-y-2">
-                      <Label>Approved export folder</Label>
-                      <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/20 p-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium">
-                            {settings.privacy.exportLocationLabel ??
-                              "Standard export folders"}
-                          </p>
-                          <p className="text-xs text-muted-foreground">
-                            {settings.privacy.exportLocationApproved
-                              ? "Approved through the macOS folder picker"
-                              : settings.privacy.exportLocationLabel
-                                ? "This legacy location needs to be selected again"
-                                : "Exports are limited to Plainsong-approved standard folders"}
-                          </p>
-                        </div>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          onClick={async () => {
+                            setBackupBusy(true);
+                            setBackupStatus(null);
                             setError(null);
                             try {
-                              const selected = await selectExportLocation();
-                              if (!selected) return;
-                              const current = latestSettingsRef.current;
-                              if (!current) return;
-                              updateSettings(
-                                {
-                                  ...current,
-                                  privacy: {
-                                    ...current.privacy,
-                                    exportRoot: null,
-                                    exportLocationId: selected.id,
-                                    exportLocationLabel: selected.label,
-                                    exportLocationApproved: selected.approved,
-                                  },
-                                },
-                                { immediate: true },
+                              await saveBackupConfig(backupConfig);
+                              const info = await createBackupDefault();
+                              setBackupStatus(
+                                `Backup created: ${info.id}`,
                               );
-                            } catch (error) {
+                              await refreshBackups();
+                            } catch (e) {
                               setError(
-                                settingsErrorMessage(error, "Could not approve the export folder"),
+                                settingsErrorMessage(e, "Backup failed"),
                               );
+                            } finally {
+                              setBackupBusy(false);
                             }
                           }}
                         >
-                          Choose export folder
+                          Back up everything
                         </Button>
-                      </div>
-                      <p className="text-sm text-muted-foreground">
-                        Plainsong stores the folder privately. The interface
-                        receives only an approval ID and this short label.
-                      </p>
-                    </div>
-
-                    <div className="h-px bg-border" />
-
-                    {/* The same setting also stands in Dictation, beside
-                        "Keep dictation audio". Both say so, because two
-                        identical controls a reader cannot connect is the thing
-                        that made this screen confusing. */}
-                    <SettingsOptionSelect
-                      label="Auto-delete dictation recordings"
-                      description="Deletes the whole dictation once it is this old — the text in History and any audio kept for it. The same setting appears in Dictation; changing it in either place changes both."
-                      value={
-                        settings.transcription.dictationRetentionPreset ??
-                        "never"
-                      }
-                      onChange={(value) =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: {
-                            ...settings.transcription,
-                            dictationRetentionPreset: value as "custom" | "immediate" | "24h" | "72h" | "never",
-                          },
-                        })
-                      }
-                      footnote={
-                        (settings.transcription.dictationRetentionPreset ??
-                          "never") === "custom" ? (
-                          <SettingsInput
-                            className="pt-2"
-                            label="Custom retention hours"
-                            description="How many hours a dictation survives before it is deleted. The clock starts when it was captured."
-                            type="number"
-                            min={1}
-                            value={String(
-                              settings.transcription
-                                .dictationRetentionCustomHours ?? 24,
-                            )}
-                            onBlur={handleSettingsTextBlur}
-                            onKeyDown={handleSettingsTextKeyDown}
-                            onChange={(value) => {
-                              const nextHours = Math.max(
-                                1,
-                                Number(value) || 1,
+                      </>
+                    }
+                  />
+                  <SettingsRow
+                    label="Settings snapshot"
+                    description={`${latestSettingsSnapshot ? `Latest: ${formatDateTime(latestSettingsSnapshot.timestamp)} · ${latestSettingsSnapshot.itemsCount} items.` : "None yet."} Settings and shortcuts only — no recordings or transcripts.`}
+                    control={
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={
+                            backupBusy ||
+                            !latestSettingsSnapshot ||
+                            hasUnsavedChanges
+                          }
+                          onClick={async () => {
+                            if (!latestSettingsSnapshot) return;
+                            // Overwrites every preference at once, so it asks.
+                            if (
+                              !window.confirm(
+                                `Replace your current settings with the snapshot from ${formatDateTime(latestSettingsSnapshot.timestamp)}? Recordings and transcripts are not touched.`,
+                              )
+                            ) {
+                              return;
+                            }
+                            setBackupBusy(true);
+                            setBackupStatus(null);
+                            setError(null);
+                            try {
+                              await restoreBackupDefault(
+                                latestSettingsSnapshot.id,
                               );
-                              void updateSettings({
-                                ...settings,
-                                transcription: {
-                                  ...settings.transcription,
-                                  dictationRetentionCustomHours: nextHours,
-                                },
-                              });
-                            }}
-                          />
-                        ) : null
-                      }
-                    >
-                      <option value="immediate">Immediately</option>
-                      <option value="24h">After 24 hours</option>
-                      <option value="72h">After 72 hours</option>
-                      <option value="never">Never</option>
-                      <option value="custom">Custom</option>
-                    </SettingsOptionSelect>
-
-                    <SettingsOptionSelect
-                      label="Meeting audio"
-                      description="Whether a meeting keeps its sound file after the transcript is written. The transcript and the notes stay either way; deleting the audio means that meeting can never be transcribed again with another speech engine."
-                      value={
-                        settings.transcription.meetingAudioStorageMode ??
-                        "always"
-                      }
-                      onChange={(value) =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: {
-                            ...settings.transcription,
-                            meetingAudioStorageMode: value as "always" | "transcript_only",
-                          },
-                        })
-                      }
-                    >
-                      <option value="always">Keep it</option>
-                      <option value="transcript_only">
-                        Delete it once the transcript is ready
-                      </option>
-                    </SettingsOptionSelect>
-
-                    <SettingsOptionSelect
-                      label="Auto-delete meeting data"
-                      description="How old a meeting has to get before Plainsong cleans it up. What it removes at that point is the next setting."
-                      value={
-                        settings.transcription.meetingRetentionPreset ??
-                        "never"
-                      }
-                      onChange={(value) =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: {
-                            ...settings.transcription,
-                            meetingRetentionPreset: value as "custom" | "never" | "1m" | "2m" | "3m",
-                          },
-                        })
-                      }
-                      footnote={
-                        (settings.transcription.meetingRetentionPreset ??
-                          "never") === "custom" ? (
-                          <SettingsInput
-                            className="pt-2"
-                            label="Custom retention months"
-                            description="How many months a meeting survives before the cleanup below runs on it."
-                            type="number"
-                            min={1}
-                            value={String(
-                              settings.transcription
-                                .meetingRetentionCustomMonths ?? 1,
-                            )}
-                            onBlur={handleSettingsTextBlur}
-                            onKeyDown={handleSettingsTextKeyDown}
-                            onChange={(value) => {
-                              const nextMonths = Math.max(
-                                1,
-                                Number(value) || 1,
+                              const restored = await getSettings();
+                              setDraftSettings(restored);
+                              setPersistedSettings(restored);
+                              setBackupStatus(
+                                `Restored settings snapshot ${latestSettingsSnapshot.id}.`,
                               );
-                              void updateSettings({
-                                ...settings,
-                                transcription: {
-                                  ...settings.transcription,
-                                  meetingRetentionCustomMonths: nextMonths,
-                                },
-                              });
-                            }}
-                          />
-                        ) : null
-                      }
-                    >
-                      <option value="1m">After 1 month</option>
-                      <option value="2m">After 2 months</option>
-                      <option value="3m">After 3 months</option>
-                      <option value="never">Never</option>
-                      <option value="custom">Custom</option>
-                    </SettingsOptionSelect>
-
-                    <SettingsOptionSelect
-                      label="When a meeting is auto-deleted, remove"
-                      description="The audio only leaves the transcript, the notes and the meeting in your library. The audio and the transcript takes the whole meeting; nothing about it survives."
-                      value={
-                        settings.transcription
-                          .meetingRetentionDeleteMode ?? "audio_only"
-                      }
-                      onChange={(value) =>
-                        void updateSettings({
-                          ...settings,
-                          transcription: {
-                            ...settings.transcription,
-                            meetingRetentionDeleteMode: value as "audio_only" | "audio_and_transcript",
-                          },
-                        })
-                      }
-                    >
-                      <option value="audio_only">The audio only</option>
-                      <option value="audio_and_transcript">
-                        The audio and the transcript
-                      </option>
-                    </SettingsOptionSelect>
-
-                    <div className="border-t pt-4 space-y-3">
-                      <div className="space-y-1">
-                        <p className="section-heading">Setup</p>
-                        <p className="text-sm text-muted-foreground">
-                          Walk through permissions, models, and meeting
-                          capture again. Plainsong also opens this on its own
-                          when dictation cannot run — a revoked permission, a
-                          deleted model — whether or not you have been through
-                          it before.
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="secondary"
-                          onClick={() => requestMainView("setup")}
+                            } catch (e) {
+                              setError(
+                                settingsErrorMessage(e, "Settings snapshot restore failed"),
+                              );
+                            } finally {
+                              setBackupBusy(false);
+                            }
+                          }}
                         >
-                          Open Setup
+                          Restore latest snapshot
                         </Button>
                         <Button
+                          size="sm"
                           variant="outline"
-                          onClick={() => requestOnboarding("full")}
+                          disabled={backupBusy}
+                          onClick={async () => {
+                            setBackupBusy(true);
+                            setBackupStatus(null);
+                            setError(null);
+                            try {
+                              await saveBackupConfig(backupConfig);
+                              const info =
+                                await createSettingsBackupDefault();
+                              setBackupStatus(
+                                `Settings snapshot created: ${info.id}`,
+                              );
+                              await refreshBackups();
+                            } catch (e) {
+                              setError(
+                                settingsErrorMessage(e, "Settings snapshot failed"),
+                              );
+                            } finally {
+                              setBackupBusy(false);
+                            }
+                          }}
                         >
-                          Show setup again
+                          Snapshot settings
                         </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() => requestOnboarding("dictation")}
-                        >
-                          Fix dictation setup
-                        </Button>
-                        <Button
-                          variant="outline"
-                          onClick={() => requestOnboarding("meetings")}
-                        >
-                          Set up meetings
-                        </Button>
-                      </div>
-                    </div>
-
-                    <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 space-y-3">
-                      <div className="space-y-1">
-                        <Label className="text-destructive">
-                          Reset app data
-                        </Label>
-                        <p className="text-sm text-muted-foreground">
-                          Deletes every recording, transcript, project, and
-                          saved API key on this Mac. Speech models you have
-                          downloaded are kept.
-                        </p>
-                      </div>
-                      <Button
-                        variant="destructive"
-                        disabled={resettingApp}
-                        onClick={() => {
-                          setResetPhrase("");
-                          setShowResetDialog(true);
-                        }}
-                      >
-                        {resettingApp ? (
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        ) : null}
-                        Reset everything on this device
-                      </Button>
-                      <p className="text-sm text-muted-foreground">
-                        Setup runs again the next time you open Plainsong.
+                      </>
+                    }
+                  >
+                    {hasUnsavedChanges ? (
+                      <p className="text-sm text-rust">
+                        Save or discard your settings edits before
+                        restoring a snapshot.
                       </p>
-                    </div>
-
-                    <Dialog
-                      open={showResetDialog}
-                      onOpenChange={setShowResetDialog}
-                    >
-                      <DialogContent>
-                        <DialogHeader>
-                          <DialogTitle>
-                            Reset everything on this device?
-                          </DialogTitle>
-                          <DialogDescription>
-                            Type{" "}
-                            <span className="font-semibold">RESET</span> to
-                            permanently delete your recordings, transcripts,
-                            projects, logs, and saved API keys. This cannot be
-                            undone.
-                          </DialogDescription>
-                        </DialogHeader>
-                        <div className="space-y-2">
-                          <Label htmlFor="reset-phrase">Confirmation</Label>
-                          <Input
-                            id="reset-phrase"
-                            value={resetPhrase}
-                            onChange={(event) =>
-                              setResetPhrase(event.target.value)
-                            }
-                            placeholder="Type RESET"
-                            autoFocus
-                          />
-                          <p className="text-sm text-muted-foreground">
-                            Upper or lower case both work.
-                          </p>
-                        </div>
-                        <DialogFooter>
-                          <Button
-                            variant="outline"
-                            onClick={() => {
-                              setShowResetDialog(false);
-                              setResetPhrase("");
-                            }}
-                            disabled={resettingApp}
-                          >
-                            Cancel
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            disabled={
-                              resettingApp ||
-                              resetPhrase.trim().toUpperCase() !== "RESET"
-                            }
-                            onClick={async () => {
-                              await performReset();
-                            }}
-                          >
-                            {resettingApp ? (
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                            ) : null}
-                            Confirm reset
-                          </Button>
-                        </DialogFooter>
-                      </DialogContent>
-                    </Dialog>
-
-                    {backupConfigLoading && !backupConfig && (
-                      <div className="pt-4 border-t text-sm text-muted-foreground">
-                        Loading backup controls…
-                      </div>
-                    )}
-
-                    {backupConfig && (
-                      <div className="pt-4 border-t space-y-5">
-                        <div className="space-y-1">
-                          <p className="section-heading">Backups</p>
-                          <p className="text-sm text-muted-foreground">
-                            Nothing is backed up or uploaded on its own — a
-                            copy is made only when you press one of the
-                            buttons below.
-                          </p>
-                        </div>
-
-                        <div className="max-w-sm space-y-2">
-                          <Label>Backups to keep on this Mac</Label>
-                          <Input
-                            type="number"
-                            min={1}
-                            value={backupConfig.maxBackups}
-                            onChange={(
-                              e: ChangeEvent<HTMLInputElement>,
-                            ) =>
-                              setBackupConfig({
-                                ...backupConfig,
-                                maxBackups: Math.max(
-                                  1,
-                                  Number(e.target.value) || 7,
-                                ),
-                              })
-                            }
-                          />
-                          <p className="text-sm text-muted-foreground">
-                            Once there are more than this, the oldest backup
-                            is removed.
-                          </p>
-                        </div>
-
-                        <div className="space-y-2">
-                          <Label>Backup folder</Label>
-                          <p className="text-sm text-muted-foreground">
-                            Where a backup is written on this Mac. macOS has to
-                            hand Plainsong the folder through its own picker,
-                            so a typed path will not do.
-                          </p>
-                          <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-muted/20 p-3">
-                            <div className="min-w-0 flex-1">
-                              <p className="text-sm font-medium">
-                                {backupConfig.backupLocationLabel ?? "Choose a backup folder"}
-                              </p>
-                              <p className="text-xs text-muted-foreground">
-                                {backupConfig.backupLocationApproved
-                                  ? "Approved through the macOS folder picker"
-                                  : "A legacy custom folder must be selected again"}
-                              </p>
-                            </div>
-                            <Button
-                              type="button"
-                              variant="outline"
-                              disabled={backupBusy}
-                              onClick={async () => {
-                                setBackupBusy(true);
-                                setError(null);
-                                try {
-                                  const selected = await selectBackupLocation();
-                                  if (!selected) return;
-                                  setBackupConfig({
-                                    ...backupConfig,
-                                    backupDir: null,
-                                    backupLocationId: selected.id,
-                                    backupLocationLabel: selected.label,
-                                    backupLocationApproved: selected.approved,
-                                  });
-                                } catch (error) {
-                                  setError(
-                                    settingsErrorMessage(error, "Could not approve the backup folder"),
-                                  );
-                                } finally {
-                                  setBackupBusy(false);
-                                }
-                              }}
-                            >
-                              Choose backup folder
-                            </Button>
-                          </div>
-                        </div>
-
-                        <SettingsSwitch
-                          className="py-0"
-                          label="Allow uploading to cloud storage"
-                          description="Turns on the Sync buttons below. Uploads still only happen when you press one."
-                          checked={backupConfig.cloudSync}
-                          onCheckedChange={(checked) =>
+                    ) : null}
+                  </SettingsRow>
+                  <SettingsRow
+                    label={
+                      <label htmlFor="backup-max-count">
+                        Backups to keep on this Mac
+                      </label>
+                    }
+                    description="Once there are more than this, the oldest is removed."
+                    control={
+                      <div className="w-20 shrink-0">
+                        <Input
+                          id="backup-max-count"
+                          type="number"
+                          min={1}
+                          className="h-9 w-20"
+                          value={backupConfig.maxBackups}
+                          onChange={(e: ChangeEvent<HTMLInputElement>) =>
                             setBackupConfig({
                               ...backupConfig,
-                              cloudSync: checked,
+                              maxBackups: Math.max(1, Number(e.target.value) || 7),
                             })
                           }
                         />
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <SettingsOptionSelect
-                            label="Cloud storage service"
-                            description="Where an upload goes when you press one of the Sync buttons. Choosing one here uploads nothing on its own."
-                            value={backupConfig.cloudProvider ?? ""}
-                            onChange={(value) =>
-                              setBackupConfig({
-                                ...backupConfig,
-                                cloudProvider: (value ||
-                                  null) as BackupConfig["cloudProvider"],
-                                cloudLocationId: null,
-                                cloudLocationLabel: null,
-                                cloudLocationApproved: false,
-                              })
-                            }
-                          >
-                            <option value="">Choose one</option>
-                            <option value="one_drive">OneDrive</option>
-                            <option value="google_drive">
-                              Google Drive
-                            </option>
-                            <option value="proton_drive">
-                              Proton Drive
-                            </option>
-                            <option value="i_cloud">iCloud</option>
-                          </SettingsOptionSelect>
-
-                          <SettingsInput
-                            label="Cloud folder"
-                            description="The folder name Plainsong creates or reuses inside that service. It is created on the first upload."
-                            value={backupConfig.cloudFolder}
-                            onChange={(value) =>
-                              setBackupConfig({
-                                ...backupConfig,
-                                cloudFolder: value,
-                              })
-                            }
-                            placeholder="PlainsongBackups"
-                          />
-                        </div>
-
-                        {backupConfig.cloudProvider === "i_cloud" ? (
-                          <div className="space-y-2">
-                            <Label>iCloud destination</Label>
-                            <p className="text-sm text-muted-foreground">
-                              {backupConfig.cloudLocationLabel
-                                ? `Uploads go to ${backupConfig.cloudLocationLabel}.`
-                                : "Nothing can be uploaded until you pick the iCloud folder in the macOS picker below."}
-                            </p>
-                          </div>
-                        ) : (
-                          <SettingsInput
-                            label="rclone remote name"
-                            description="The name you gave this service when you ran rclone config. Plainsong uploads through rclone, so a name that does not match one of your remotes fails the connection test."
-                            value={backupConfig.cloudRemoteName ?? ""}
-                            onChange={(value) =>
-                              setBackupConfig({
-                                ...backupConfig,
-                                cloudRemoteName: value.trim() ? value : null,
-                              })
-                            }
-                            placeholder="onedrive / gdrive / protondrive"
-                          />
-                        )}
-
-                        <div className="flex flex-wrap items-center gap-3">
+                      </div>
+                    }
+                  />
+                  <SettingsRow
+                    label="Backup folder"
+                    description={
+                      backupConfig.backupLocationLabel
+                        ? `${backupConfig.backupLocationLabel} · ${backupConfig.backupLocationApproved ? "approved through the macOS folder picker." : "this older folder needs to be chosen again."}`
+                        : "Where a backup is written on this Mac. macOS hands Plainsong the folder through its own picker."
+                    }
+                    control={
+                      <Button
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                        disabled={backupBusy}
+                        onClick={async () => {
+                          setBackupBusy(true);
+                          setError(null);
+                          try {
+                            const selected = await selectBackupLocation();
+                            if (!selected) return;
+                            setBackupConfig({
+                              ...backupConfig,
+                              backupDir: null,
+                              backupLocationId: selected.id,
+                              backupLocationLabel: selected.label,
+                              backupLocationApproved: selected.approved,
+                            });
+                          } catch (error) {
+                            setError(
+                              settingsErrorMessage(error, "Could not approve the backup folder"),
+                            );
+                          } finally {
+                            setBackupBusy(false);
+                          }
+                        }}
+                      >
+                        Choose backup folder
+                      </Button>
+                    }
+                  />
+                  <SettingsSwitch
+                    label="Allow uploading to cloud storage"
+                    description="Shows where uploads go and the upload buttons. Uploads still only happen when you press one."
+                    checked={backupConfig.cloudSync}
+                    onCheckedChange={(checked) =>
+                      setBackupConfig({
+                        ...backupConfig,
+                        cloudSync: checked,
+                      })
+                    }
+                  />
+                  {backupConfig.cloudSync ? (
+                    <>
+                    <SettingsOptionSelect
+                      label="Cloud storage service"
+                      description="Where an upload goes when you press one of the Sync buttons. Choosing one here uploads nothing on its own."
+                      value={backupConfig.cloudProvider ?? ""}
+                      onChange={(value) =>
+                        setBackupConfig({
+                          ...backupConfig,
+                          cloudProvider: (value ||
+                            null) as BackupConfig["cloudProvider"],
+                          cloudLocationId: null,
+                          cloudLocationLabel: null,
+                          cloudLocationApproved: false,
+                        })
+                      }
+                    >
+                      <option value="">Choose one</option>
+                      <option value="one_drive">OneDrive</option>
+                      <option value="google_drive">
+                        Google Drive
+                      </option>
+                      <option value="proton_drive">
+                        Proton Drive
+                      </option>
+                      <option value="i_cloud">iCloud</option>
+                    </SettingsOptionSelect>
+                    <SettingsInput
+                      label="Cloud folder"
+                      description="The folder name Plainsong creates or reuses inside that service. It is created on the first upload."
+                      value={backupConfig.cloudFolder}
+                      onChange={(value) =>
+                        setBackupConfig({
+                          ...backupConfig,
+                          cloudFolder: value,
+                        })
+                      }
+                      placeholder="PlainsongBackups"
+                    />
+                    {backupConfig.cloudProvider === "i_cloud" ? (
+                      <div className="space-y-2">
+                        <Label>iCloud destination</Label>
+                        <p className="text-sm text-muted-foreground">
+                          {backupConfig.cloudLocationLabel
+                            ? `Uploads go to ${backupConfig.cloudLocationLabel}.`
+                            : "Nothing can be uploaded until you pick the iCloud folder in the macOS picker below."}
+                        </p>
+                      </div>
+                    ) : (
+                      <SettingsInput
+                        label="rclone remote name"
+                        description="The name you gave this service when you ran rclone config. Plainsong uploads through rclone, so a name that does not match one of your remotes fails the connection test."
+                        value={backupConfig.cloudRemoteName ?? ""}
+                        onChange={(value) =>
+                          setBackupConfig({
+                            ...backupConfig,
+                            cloudRemoteName: value.trim() ? value : null,
+                          })
+                        }
+                        placeholder="onedrive / gdrive / protondrive"
+                      />
+                    )}
+                      <SettingsRow
+                        label="Cloud destination"
+                        description={
+                          backupConfig.cloudLocationApproved
+                            ? `Approved: ${backupConfig.cloudLocationLabel}`
+                            : "Uploads stay blocked until this destination is confirmed."
+                        }
+                        control={
                           <Button
+                            size="sm"
                             type="button"
                             variant="outline"
                             disabled={backupBusy || !backupConfig.cloudProvider}
@@ -5666,285 +4860,152 @@ export function SettingsView() {
                               ? "Choose and approve cloud folder"
                               : "Confirm cloud destination"}
                           </Button>
+                        }
+                      >
+                        {backupConfig.cloudProvider !== "i_cloud" ? (
                           <p className="text-sm text-muted-foreground">
-                            {backupConfig.cloudLocationApproved
-                              ? `Approved: ${backupConfig.cloudLocationLabel}`
-                              : "Cloud uploads stay blocked until this destination is confirmed."}
-                          </p>
-                        </div>
-
-                        <div className="grid gap-3 border-t pt-4 md:grid-cols-2">
-                          <div>
-                            <p className="text-sm font-medium">
-                              Latest settings snapshot
-                            </p>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              {latestSettingsSnapshot
-                                ? formatDateTime(latestSettingsSnapshot.timestamp)
-                                : "None yet."}{" "}
-                              Settings and shortcuts only — no recordings or
-                              transcripts.
-                            </p>
-                            {latestSettingsSnapshot ? (
-                              <p className="mt-1 font-mono text-xs text-muted-foreground">
-                                {latestSettingsSnapshot.itemsCount} items ·{" "}
-                                {latestSettingsSnapshot.id}
-                              </p>
-                            ) : null}
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium">
-                              Latest full backup
-                            </p>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              {latestFullBackup
-                                ? formatDateTime(latestFullBackup.timestamp)
-                                : "None yet."}{" "}
-                              Everything, including recordings and
-                              transcripts.
-                            </p>
-                            {latestFullBackup ? (
-                              <p className="mt-1 font-mono text-xs text-muted-foreground">
-                                {latestFullBackup.itemsCount} items ·{" "}
-                                {latestFullBackup.id}
-                              </p>
-                            ) : null}
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2 mt-4">
-                          <Button
-                            variant="outline"
-                            disabled={backupBusy}
-                            onClick={async () => {
-                              setBackupBusy(true);
-                              setBackupStatus(null);
-                              setError(null);
-                              try {
-                                await saveBackupConfig(backupConfig);
-                                setBackupStatus(
-                                  "Backup settings saved.",
-                                );
-                              } catch (e) {
-                                setError(
-                                  settingsErrorMessage(e, "Failed to save backup config"),
-                                );
-                              } finally {
-                                setBackupBusy(false);
-                              }
-                            }}
-                          >
-                            Save these settings
-                          </Button>
-                          <Button
-                            variant="outline"
-                            disabled={backupBusy || !backupConfig.cloudSync}
-                            onClick={async () => {
-                              setBackupBusy(true);
-                              setBackupStatus(null);
-                              setError(null);
-                              try {
-                                await saveBackupConfig(backupConfig);
-                                await verifyBackupCloudConnection();
-                                setBackupStatus(
-                                  "Connected.",
-                                );
-                              } catch (e) {
-                                setError(
-                                  settingsErrorMessage(e, "Cloud verification failed"),
-                                );
-                              } finally {
-                                setBackupBusy(false);
-                              }
-                            }}
-                          >
-                            Test the connection
-                          </Button>
-                          <Button
-                            variant="outline"
-                            disabled={backupBusy || !backupConfig.cloudSync}
-                            onClick={async () => {
-                              setBackupBusy(true);
-                              setBackupStatus(null);
-                              setError(null);
-                              try {
-                                await saveBackupConfig(backupConfig);
-                                const report = await getBackupSetupReport();
-                                setBackupSetupReport(report);
-                                setBackupStatus(
-                                  report.ready
-                                    ? "Everything checks out."
-                                    : "Some checks need attention.",
-                                );
-                              } catch (e) {
-                                setError(
-                                  settingsErrorMessage(e, "Setup checks failed"),
-                                );
-                              } finally {
-                                setBackupBusy(false);
-                              }
-                            }}
-                          >
-                            Run setup checks
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            disabled={backupBusy}
-                            onClick={async () => {
-                              setBackupBusy(true);
-                              setBackupStatus(null);
-                              setError(null);
-                              try {
-                                await saveBackupConfig(backupConfig);
-                                const info =
-                                  await createSettingsBackupDefault();
-                                setBackupStatus(
-                                  `Settings snapshot created: ${info.id}`,
-                                );
-                                await refreshBackups();
-                              } catch (e) {
-                                setError(
-                                  settingsErrorMessage(e, "Settings snapshot failed"),
-                                );
-                              } finally {
-                                setBackupBusy(false);
-                              }
-                            }}
-                          >
-                            Snapshot settings
-                          </Button>
-                          <Button
-                            variant="outline"
-                            disabled={
-                              backupBusy ||
-                              !latestSettingsSnapshot ||
-                              !backupConfig.cloudSync
-                            }
-                            onClick={async () => {
-                              if (!latestSettingsSnapshot) return;
-                              setBackupBusy(true);
-                              setBackupStatus(null);
-                              setError(null);
-                              try {
-                                await saveBackupConfig(backupConfig);
-                                await syncBackupToCloud(
-                                  latestSettingsSnapshot.id,
-                                );
-                                setBackupStatus(
-                                  `Synced settings snapshot ${latestSettingsSnapshot.id} to cloud.`,
-                                );
-                              } catch (e) {
-                                setError(
-                                  settingsErrorMessage(e, "Settings snapshot sync failed"),
-                                );
-                              } finally {
-                                setBackupBusy(false);
-                              }
-                            }}
-                          >
-                            Upload latest snapshot
-                          </Button>
-                          <Button
-                            variant="outline"
-                            disabled={
-                              backupBusy ||
-                              !latestSettingsSnapshot ||
-                              hasUnsavedChanges
-                            }
-                            onClick={async () => {
-                              if (!latestSettingsSnapshot) return;
-                              setBackupBusy(true);
-                              setBackupStatus(null);
-                              setError(null);
-                              try {
-                                await restoreBackupDefault(
-                                  latestSettingsSnapshot.id,
-                                );
-                                const restored = await getSettings();
-                                setDraftSettings(restored);
-                                setPersistedSettings(restored);
-                                setBackupStatus(
-                                  `Restored settings snapshot ${latestSettingsSnapshot.id}.`,
-                                );
-                              } catch (e) {
-                                setError(
-                                  settingsErrorMessage(e, "Settings snapshot restore failed"),
-                                );
-                              } finally {
-                                setBackupBusy(false);
-                              }
-                            }}
-                          >
-                            Restore latest snapshot
-                          </Button>
-                          <Button
-                            disabled={backupBusy}
-                            onClick={async () => {
-                              setBackupBusy(true);
-                              setBackupStatus(null);
-                              setError(null);
-                              try {
-                                await saveBackupConfig(backupConfig);
-                                const info = await createBackupDefault();
-                                setBackupStatus(
-                                  `Backup created: ${info.id}`,
-                                );
-                                await refreshBackups();
-                              } catch (e) {
-                                setError(
-                                  settingsErrorMessage(e, "Backup failed"),
-                                );
-                              } finally {
-                                setBackupBusy(false);
-                              }
-                            }}
-                          >
-                            Back up everything
-                          </Button>
-                          <Button
-                            variant="outline"
-                            disabled={
-                              backupBusy ||
-                              !latestFullBackup ||
-                              !backupConfig.cloudSync
-                            }
-                            onClick={async () => {
-                              if (!latestFullBackup) return;
-                              setBackupBusy(true);
-                              setBackupStatus(null);
-                              setError(null);
-                              try {
-                                await saveBackupConfig(backupConfig);
-                                await syncBackupToCloud(latestFullBackup.id);
-                                setBackupStatus(
-                                  `Synced full backup ${latestFullBackup.id} to cloud.`,
-                                );
-                              } catch (e) {
-                                setError(
-                                  settingsErrorMessage(e, "Cloud sync failed"),
-                                );
-                              } finally {
-                                setBackupBusy(false);
-                              }
-                            }}
-                          >
-                            Upload latest backup
-                          </Button>
-                        </div>
-
-                        {backupStatus && (
-                          <p className="text-sm text-muted-foreground">
-                            {backupStatus}
-                          </p>
-                        )}
-                        {hasUnsavedChanges ? (
-                          <p className="text-sm text-rust">
-                            Save or discard your settings edits before
-                            restoring a snapshot.
+                            OneDrive, Google Drive and Proton Drive need
+                            rclone: run{" "}
+                            <code className="rounded bg-muted px-1">
+                              rclone config
+                            </code>{" "}
+                            in Terminal and create the remote first.
                           </p>
                         ) : null}
+                      </SettingsRow>
+                      <SettingsRow
+                        label="Upload"
+                        description="Sends the latest backup or snapshot to the destination above."
+                        control={
+                          <>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={
+                                backupBusy ||
+                                !latestSettingsSnapshot ||
+                                !backupConfig.cloudSync
+                              }
+                              onClick={async () => {
+                                if (!latestSettingsSnapshot) return;
+                                setBackupBusy(true);
+                                setBackupStatus(null);
+                                setError(null);
+                                try {
+                                  await saveBackupConfig(backupConfig);
+                                  await syncBackupToCloud(
+                                    latestSettingsSnapshot.id,
+                                  );
+                                  setBackupStatus(
+                                    `Synced settings snapshot ${latestSettingsSnapshot.id} to cloud.`,
+                                  );
+                                } catch (e) {
+                                  setError(
+                                    settingsErrorMessage(e, "Settings snapshot sync failed"),
+                                  );
+                                } finally {
+                                  setBackupBusy(false);
+                                }
+                              }}
+                            >
+                              Upload latest snapshot
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={
+                                backupBusy ||
+                                !latestFullBackup ||
+                                !backupConfig.cloudSync
+                              }
+                              onClick={async () => {
+                                if (!latestFullBackup) return;
+                                setBackupBusy(true);
+                                setBackupStatus(null);
+                                setError(null);
+                                try {
+                                  await saveBackupConfig(backupConfig);
+                                  await syncBackupToCloud(latestFullBackup.id);
+                                  setBackupStatus(
+                                    `Synced full backup ${latestFullBackup.id} to cloud.`,
+                                  );
+                                } catch (e) {
+                                  setError(
+                                    settingsErrorMessage(e, "Cloud sync failed"),
+                                  );
+                                } finally {
+                                  setBackupBusy(false);
+                                }
+                              }}
+                            >
+                              Upload latest backup
+                            </Button>
+                          </>
+                        }
+                      />
+                      <SettingsRow
+                        label="Check the cloud setup"
+                        description="Tests the connection, or lists what still stands between you and a working upload."
+                        control={
+                          <>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={backupBusy || !backupConfig.cloudSync}
+                              onClick={async () => {
+                                setBackupBusy(true);
+                                setBackupStatus(null);
+                                setError(null);
+                                try {
+                                  await saveBackupConfig(backupConfig);
+                                  await verifyBackupCloudConnection();
+                                  setBackupStatus(
+                                    "Connected.",
+                                  );
+                                } catch (e) {
+                                  setError(
+                                    settingsErrorMessage(e, "Cloud verification failed"),
+                                  );
+                                } finally {
+                                  setBackupBusy(false);
+                                }
+                              }}
+                            >
+                              Test the connection
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={backupBusy || !backupConfig.cloudSync}
+                              onClick={async () => {
+                                setBackupBusy(true);
+                                setBackupStatus(null);
+                                setError(null);
+                                try {
+                                  await saveBackupConfig(backupConfig);
+                                  const report = await getBackupSetupReport();
+                                  setBackupSetupReport(report);
+                                  setBackupStatus(
+                                    report.ready
+                                      ? "Everything checks out."
+                                      : "Some checks need attention.",
+                                  );
+                                } catch (e) {
+                                  setError(
+                                    settingsErrorMessage(e, "Setup checks failed"),
+                                  );
+                                } finally {
+                                  setBackupBusy(false);
+                                }
+                              }}
+                            >
+                              Run setup checks
+                            </Button>
+                          </>
+                        }
+                      >
                         {backupSetupReport && (
-                          <div className="space-y-2 border-t pt-4">
+                          <div className="space-y-2">
                             <div className="flex items-center justify-between">
                               <div>
                                 <p className="section-heading">
@@ -5989,199 +5050,649 @@ export function SettingsView() {
                             </div>
                           </div>
                         )}
-                        {backupConfig.cloudProvider !== "i_cloud" && (
-                          <p className="text-sm text-muted-foreground">
-                            OneDrive, Google Drive, and Proton Drive need
-                            rclone: run{" "}
-                            <code className="rounded bg-muted px-1">
-                              rclone config
-                            </code>{" "}
-                            in Terminal and create the remote first.
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {activeTab === "ai" && (
-                  <div className="space-y-5">
-                    {/* This is on by default and was previously only in
-                        the settings schema: every finished meeting was
-                        handed to the analysis provider with nothing in the
-                        UI saying so. */}
-                    <SettingsSwitch
-                      className="items-start py-0"
-                      label="Summarize every meeting automatically"
-                      description={
-                        !settings.transcription.enableAutoAnalysis
-                          ? "Meetings are summarized only when you ask for it from the meeting itself."
-                          : isRemoteAnalysisProvider(
-                                settings.privacy.meetingsAi.provider,
-                              ) && !settings.privacy.remoteProcessingEnabled
-                            ? `Every finished meeting would go to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}, but cloud AI is turned off — so no summary is written.`
-                            : `Every finished meeting transcript goes to ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)} for a summary and action items, without asking first.`
+                      </SettingsRow>
+                    </>
+                  ) : null}
+                </div>
+                <div className="flex flex-wrap items-center gap-3 pt-3">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={backupBusy}
+                    onClick={async () => {
+                      setBackupBusy(true);
+                      setBackupStatus(null);
+                      setError(null);
+                      try {
+                        await saveBackupConfig(backupConfig);
+                        setBackupStatus(
+                          "Backup settings saved.",
+                        );
+                      } catch (e) {
+                        setError(
+                          settingsErrorMessage(e, "Failed to save backup config"),
+                        );
+                      } finally {
+                        setBackupBusy(false);
                       }
-                      checked={settings.transcription.enableAutoAnalysis}
-                      onCheckedChange={(checked) =>
+                    }}
+                  >
+                    Save backup settings
+                  </Button>
+                  {backupStatus ? (
+                    <p role="status" className="text-sm text-muted-foreground">
+                      {backupStatus}
+                    </p>
+                  ) : null}
+                </div>
+              </>
+            )}
+          </div>
+        </SettingsMore>
+        {/* The vault-initialized bit only says a migration once ran.
+            Capture writes a plain WAV either way, so report the count of
+            files that are actually encrypted and say plainly that new
+            recordings are not. */}
+        <SettingsMore
+          settingId="encryption"
+          label="Encryption"
+          hint={`Recordings on disk: ${recordingEncryptionSummary.chip.toLowerCase()}`}
+        >
+          <div className="space-y-3 py-3">
+            <p className="text-sm leading-5 text-muted-foreground">
+              {recordingEncryptionSummary.description}
+            </p>
+            <p
+              id="vault-password-description"
+              className="text-sm leading-5 text-muted-foreground"
+            >
+              The vault encrypts recordings already saved on this Mac. Enter its
+              password to unlock it, or to encrypt what is on disk now. New
+              recordings are written unencrypted either way, and there is no
+              recovery if you lose the password.
+            </p>
+            <Label htmlFor="vault-password">Password</Label>
+            <Input
+              id="vault-password"
+              aria-describedby="vault-password-description"
+              type="password"
+              placeholder="Vault password"
+              value={vaultPassword}
+              onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                setVaultPassword(e.target.value)
+              }
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                disabled={!vaultPassword.trim()}
+                onClick={async () => {
+                  setError(null);
+                  try {
+                    await unlockVault(vaultPassword.trim());
+                    setVaultPassword("");
+                    setSecurityStatus(
+                      await getSecurityStatus(),
+                    );
+                  } catch (e) {
+                    setError(
+                      settingsErrorMessage(e, "Failed to unlock vault"),
+                    );
+                  }
+                }}
+              >
+                Unlock vault
+              </Button>
+              <Button
+                variant="outline"
+                onClick={async () => {
+                  setError(null);
+                  try {
+                    await lockVault();
+                    setSecurityStatus(
+                      await getSecurityStatus(),
+                    );
+                  } catch (e) {
+                    setError(
+                      settingsErrorMessage(e, "Failed to lock vault"),
+                    );
+                  }
+                }}
+              >
+                Lock vault
+              </Button>
+              <Button
+                disabled={!vaultPassword.trim()}
+                onClick={async () => {
+                  setError(null);
+                  try {
+                    await migrateToEncryptedStorage(
+                      vaultPassword.trim(),
+                    );
+                    setVaultPassword("");
+                    setSecurityStatus(
+                      await getSecurityStatus(),
+                    );
+                  } catch (e) {
+                    setError(
+                      settingsErrorMessage(e, "Failed to migrate to encrypted storage"),
+                    );
+                  }
+                }}
+              >
+                Encrypt what is on disk now
+              </Button>
+            </div>
+            {securityStatus ? (
+              <div className="mt-2 space-y-1 text-sm text-muted-foreground">
+                {[
+                  {
+                    label: "Vault set up",
+                    on: securityStatus.vaultInitialized,
+                  },
+                  {
+                    label: "Vault unlocked",
+                    on: securityStatus.vaultUnlocked,
+                  },
+                  {
+                    label: "Database encrypted",
+                    on: securityStatus.databaseEncrypted,
+                  },
+                ].map((row) => (
+                  <p
+                    key={row.label}
+                    className="flex items-center gap-2"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={
+                        row.on
+                          ? "neume neume-lit"
+                          : "neume neume-hollow"
+                      }
+                    />
+                    {row.label}:{" "}
+                    <span className="font-medium text-foreground">
+                      {row.on ? "yes" : "no"}
+                    </span>
+                  </p>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </SettingsMore>
+      </SettingsGroup>
+
+      <SettingsGroup title="Start over">
+        <SettingsRow
+          settingId="reset"
+          label="Reset Plainsong"
+          description="Deletes every recording, transcript, project and saved API key, and puts every setting back to a new install. Downloaded speech models are kept. Setup runs again next time."
+          control={
+            <Button
+              variant="destructive"
+              disabled={resettingApp}
+              onClick={() => {
+                setResetPhrase("");
+                setShowResetDialog(true);
+              }}
+            >
+              {resettingApp ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              Reset everything on this device
+            </Button>
+          }
+        />
+        <Dialog
+          open={showResetDialog}
+          onOpenChange={setShowResetDialog}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                Reset everything on this device?
+              </DialogTitle>
+              <DialogDescription>
+                Type{" "}
+                <span className="font-semibold">RESET</span> to
+                permanently delete your recordings, transcripts,
+                projects, logs, and saved API keys. This cannot be
+                undone.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2">
+              <Label htmlFor="reset-phrase">Confirmation</Label>
+              <Input
+                id="reset-phrase"
+                value={resetPhrase}
+                onChange={(event) =>
+                  setResetPhrase(event.target.value)
+                }
+                placeholder="Type RESET"
+                autoFocus
+              />
+              <p className="text-sm text-muted-foreground">
+                Upper or lower case both work.
+              </p>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setShowResetDialog(false);
+                  setResetPhrase("");
+                }}
+                disabled={resettingApp}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={
+                  resettingApp ||
+                  resetPhrase.trim().toUpperCase() !== "RESET"
+                }
+                onClick={async () => {
+                  await performReset();
+                }}
+              >
+                {resettingApp ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : null}
+                Confirm reset
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      </SettingsGroup>
+    </div>
+  );
+
+  const renderAdvancedSection = () => (
+    <div className="settings-section">
+      <div id="setting-speech-diagnostics">
+        <AsrProviderManager />
+      </div>
+
+      <SettingsGroup
+        title="Speech detection"
+        settingId="speech-detection"
+        description="How Plainsong treats quiet stretches and decides you are speaking."
+      >
+        <SettingsSwitch
+          label="Skip silence"
+          description="Skips digital silence before transcription while keeping quiet speech."
+          checked={settings.transcription.silenceSkipEnabled}
+          onCheckedChange={(checked) =>
+            updateTranscription({ silenceSkipEnabled: checked })
+          }
+        />
+        {/* The VAD backend drives dictation auto-stop-on-silence and
+            hands-free auto-start, so show the picker whenever either of
+            those features is in use. */}
+            {(settings.transcription.dictationHandsFreeEnabled ||
+              (settings.transcription.dictationSilenceTimeoutSeconds ?? 0) >
+                0) && (
+              <SettingsRow
+                label="How Plainsong hears you start talking"
+                labelId="vad-backend-label"
+                description={
+                  sileroVadAvailable
+                    ? "Loudness works well in a quiet room. The voice detection model holds up better in a noisy one."
+                    : "Loudness works well in a quiet room. A small voice detection model holds up better in a noisy one; it is a one-time 2 MB download."
+                }
+                control={
+                  <div
+                    role="group"
+                    aria-labelledby="vad-backend-label"
+                    className="inline-flex gap-0.5 rounded-lg border border-border/80 p-0.5"
+                  >
+                    <Button
+                      variant={
+                        (settings.transcription.dictationVadBackend ??
+                          "energy_threshold") === "energy_threshold"
+                          ? "active"
+                          : "ghost"
+                      }
+                      size="sm"
+                      className="h-8 px-2.5"
+                      aria-pressed={
+                        (settings.transcription.dictationVadBackend ??
+                          "energy_threshold") === "energy_threshold"
+                      }
+                      onClick={() =>
                         void updateSettings({
                           ...settings,
                           transcription: {
                             ...settings.transcription,
-                            enableAutoAnalysis: checked,
+                            dictationVadBackend: "energy_threshold",
                           },
                         })
                       }
-                    />
-
-                    {/* Which model writes them is chosen in Models, with the
-                        speech engines and the presets that set all four lanes
-                        at once. A second copy of those two pickers here would
-                        be two controls for one pair of settings keys. */}
-                    <div className="flex flex-col gap-3 rounded-md border border-border/60 bg-muted/20 p-4 lg:flex-row lg:items-center lg:justify-between">
-                      <p className="max-w-2xl text-sm leading-6 text-muted-foreground">
-                        {`Summaries are written by ${describeAnalysisDestination(settings.privacy.meetingsAi.provider)}, and dictation cleanup by ${describeAnalysisDestination(settings.privacy.dictationAi.provider)}. Both are chosen in Models.`}
-                      </p>
+                    >
+                      Loudness
+                    </Button>
+                    {sileroVadAvailable ? (
                       <Button
-                        variant="secondary"
-                        onClick={() => setActiveTab("models")}
+                        variant={
+                          settings.transcription.dictationVadBackend === "silero"
+                            ? "active"
+                            : "ghost"
+                        }
+                        size="sm"
+                        className="h-8 px-2.5"
+                        aria-pressed={
+                          settings.transcription.dictationVadBackend === "silero"
+                        }
+                        onClick={() =>
+                          void updateSettings({
+                            ...settings,
+                            transcription: {
+                              ...settings.transcription,
+                              dictationVadBackend: "silero",
+                            },
+                          })
+                        }
                       >
-                        Open Models
+                        Voice detection model
                       </Button>
-                    </div>
-
-                    {/* The prompt library the "/" picker offers in a
-                        meeting's chat and in "Ask your meetings". Managed
-                        here and from the picker's own footer -- same dialog,
-                        same settings key. */}
-                    <div className="flex flex-col gap-3 rounded-md border border-border/60 bg-muted/20 p-4 lg:flex-row lg:items-center lg:justify-between">
-                      <div className="max-w-2xl space-y-0.5">
-                        <p className="section-heading">Saved prompts</p>
-                        <p className="text-sm leading-6 text-muted-foreground">
-                          {`${resolveSavedPrompts(settings.ai?.savedPrompts).filter((prompt) => !prompt.hidden).length} prompts you can pick with "/" in a meeting's chat or in "Ask your meetings". They are stored in your settings file on this Mac.`}
-                        </p>
-                      </div>
+                    ) : (
                       <Button
-                        variant="secondary"
-                        onClick={() => setSavedPromptsOpen(true)}
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 px-2.5"
+                        disabled={sileroVadDownloading}
+                        onClick={async () => {
+                          setSileroVadDownloading(true);
+                          try {
+                            await downloadSileroVadModel();
+                            setSileroVadAvailable(true);
+                            const current = latestSettingsRef.current;
+                            if (!current) return;
+                            void updateSettings({
+                              ...current,
+                              transcription: {
+                                ...current.transcription,
+                                dictationVadBackend: "silero",
+                              },
+                            });
+                          } catch (e) {
+                            const msg = settingsErrorMessage(
+                              e,
+                              "Plainsong could not download the model.",
+                            );
+                            setError(`Download failed: ${msg}`);
+                          } finally {
+                            setSileroVadDownloading(false);
+                          }
+                        }}
                       >
-                        Manage prompts
+                        {sileroVadDownloading ? (
+                          <>
+                            <Loader2 aria-hidden="true" className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                            Downloading…
+                          </>
+                        ) : (
+                          <>
+                            <Download aria-hidden="true" className="mr-1.5 h-3.5 w-3.5" />
+                            Voice detection model, 2 MB
+                          </>
+                        )}
                       </Button>
-                    </div>
-
-                    <SavedPromptManagerDialog
-                      open={savedPromptsOpen}
-                      onOpenChange={setSavedPromptsOpen}
-                      prompts={resolveSavedPrompts(settings.ai?.savedPrompts)}
-                      onPersist={persistSavedPrompts}
-                      saveError={savedPromptsSaveError}
-                    />
-
-                    {/* The switch itself lives on Privacy & Security, and
-                        only there. Two switches on the same settings key with
-                        two different descriptions is what made a reader ask
-                        which of them was the real one. */}
-                    <div className="flex flex-col gap-3 rounded-md border border-border/60 bg-muted/20 p-4 lg:flex-row lg:items-center lg:justify-between">
-                      <div className="max-w-2xl space-y-0.5">
-                        <p className="flex items-center gap-2 text-sm font-medium">
-                          <span
-                            aria-hidden="true"
-                            className={
-                              settings.privacy.remoteProcessingEnabled
-                                ? "neume neume-lit"
-                                : "neume neume-hollow"
-                            }
-                          />
-                          {settings.privacy.remoteProcessingEnabled
-                            ? "Cloud AI is allowed"
-                            : "Cloud AI is off"}
-                        </p>
-                        <p className="text-sm leading-6 text-muted-foreground">
-                          {settings.privacy.remoteProcessingEnabled
-                            ? "Any service you pick in Models may receive your transcripts. Turn it back off under Privacy & Security."
-                            : "Only Ollama on this Mac may receive meeting transcripts, dictated text, or captured app context. Every other service is refused until you allow it under Privacy & Security."}
-                        </p>
-                      </div>
-                      <Button
-                        variant="secondary"
-                        onClick={() => setActiveTab("security")}
-                      >
-                        Open Privacy &amp; Security
-                      </Button>
-                    </div>
-
-                    {/* Either lane on Ollama makes the local daemon's state
-                        worth reporting. */}
-                    {AI_LANE_KEYS.some(
-                      (lane) => settings.privacy[lane].provider === "ollama",
-                    ) && (
-                      <div className="border-t pt-4">
-                        <p className="flex items-center gap-2 text-sm font-medium">
-                          <span
-                            aria-hidden="true"
-                            className={
-                              ollamaAvailable
-                                ? "neume neume-lit"
-                                : "neume neume-hollow"
-                            }
-                          />
-                          {ollamaAvailable === null
-                            ? "Looking for Ollama on this Mac…"
-                            : ollamaAvailable
-                              ? "Ollama is running on this Mac"
-                              : "Ollama is not running on this Mac"}
-                        </p>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          {ollamaModels.length > 0
-                            ? `Installed models: ${ollamaModels.join(", ")}`
-                            : "No models installed yet."}
-                        </p>
-                      </div>
                     )}
-
-                    <div className="pt-4 border-t space-y-5">
-                      <div className="space-y-1">
-                        <p className="section-heading">
-                          Advanced: keys and search
-                        </p>
-                        <p className="text-sm text-muted-foreground">
-                          Where your API keys are kept, and how search looks
-                          through past meetings.
-                        </p>
-                      </div>
-                        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                          <p className="text-sm text-muted-foreground">
-                            Smart Format, shortcut behavior, and capture
-                            defaults are set in Transcription.
-                          </p>
-                          <Button
-                            variant="secondary"
-                            onClick={() => setActiveTab("asr")}
-                          >
-                            Open Transcription
-                          </Button>
-                        </div>
-
-                        {renderSharedDictationControls({
-                          includeCoreControls: false,
-                          includeHotkeyBehavior: false,
-                          includeKeyManager: true,
-                          includeMemory: true,
-                        })}
-                      </div>
                   </div>
-                )}
+                }
+              />
+            )}
+      </SettingsGroup>
 
-                {activeTab === "updates" && (
-                  <div className="space-y-6">
-                    <UpdateStatusWidget />
-                    <BetaChannelToggle />
-                  </div>
-                )}
+      <LocalToolsSection
+        enabled={settings.automation?.localToolsEnabled ?? false}
+        onEnabledChange={(checked) =>
+          void updateSettings({
+            ...settings,
+            automation: {
+              ...settings.automation,
+              localToolsEnabled: checked,
+            },
+          })
+        }
+      />
 
+      <SupportBundlePanel />
+    </div>
+  );
+
+  const renderActiveSection = () => {
+    switch (activeTab) {
+      case "general":
+        return renderGeneralSection();
+      case "dictation":
+        return renderDictationSection();
+      case "meetings":
+        return renderMeetingsSection();
+      case "models":
+        return (
+          <ModelsScreen
+            settings={settings}
+            onPatchSettings={patchSettings}
+            aiModelsForProvider={getCachedModelsForProvider}
+            aiModelsLoading={modelsLoading}
+            onAiProviderChange={(lane, providerName) =>
+              void updateAnalysisProvider(lane, providerName)
+            }
+            onAiModelsRefresh={(providerName) => void refreshModelsForProvider(providerName)}
+            onAiModelChange={updateAnalysisModel}
+            onOpenKeySettings={() => setActiveTab("ai")}
+            onOpenDiagnostics={() => setActiveTab("advanced")}
+          />
+        );
+      case "shortcuts":
+        return renderShortcutsSection();
+      case "ai":
+        return renderSearchAndAiSection();
+      case "privacy":
+        return renderPrivacySection();
+      case "advanced":
+        return renderAdvancedSection();
+    }
+  };
+
+  return (
+    <div className="flex h-full min-h-0 bg-background">
+      {/* The section list stays put while a long section scrolls. */}
+      <nav
+        aria-label="Settings"
+        className="flex w-52 shrink-0 flex-col border-r border-border/60 px-3 pb-4 pt-6 lg:w-56"
+      >
+        <div className="px-2">
+          <h1 className="font-serif text-2xl font-semibold tracking-tight">
+            Settings
+          </h1>
+          <p className="mt-1 text-[13px] leading-5 text-muted-foreground">
+            How Plainsong listens, writes, and what it keeps.
+          </p>
+        </div>
+        <div className="relative mt-5">
+          <Search
+            aria-hidden="true"
+            className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
+            type="search"
+            aria-label="Search settings"
+            placeholder="Search"
+            value={settingsQuery}
+            onChange={(event) => setSettingsQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setSettingsQuery("");
+              } else if (event.key === "Enter" && searchResults[0]) {
+                event.preventDefault();
+                openSearchResult(searchResults[0]);
+              }
+            }}
+            className="h-8 pl-8 text-sm"
+          />
+        </div>
+        <div
+          role="tablist"
+          aria-label="Settings sections"
+          aria-orientation="vertical"
+          className="mt-3 flex flex-col gap-0.5"
+        >
+          {SETTINGS_SECTIONS.map((section) => {
+            const selected = !searching && activeTab === section.id;
+            return (
+              <button
+                key={section.id}
+                ref={(element) => {
+                  tabButtonRefs.current[section.id] = element;
+                }}
+                type="button"
+                role="tab"
+                id={`settings-tab-${section.id}`}
+                aria-selected={selected}
+                aria-controls="settings-tab-panel"
+                tabIndex={activeTab === section.id ? 0 : -1}
+                onClick={() => {
+                  setSettingsQuery("");
+                  setActiveTab(section.id);
+                }}
+                onKeyDown={handleTabKeyDown}
+                className={`flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                  selected
+                    ? "bg-muted font-medium text-foreground"
+                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                }`}
+              >
+                <section.icon
+                  aria-hidden="true"
+                  className={`h-4 w-4 shrink-0 ${selected ? "text-gold-text" : ""}`}
+                />
+                {section.label}
+              </button>
+            );
+          })}
+        </div>
+        <div className="mt-auto space-y-2 px-2 pt-4">
+          <p className="flex items-baseline gap-2 text-[13px] leading-5 text-muted-foreground">
+            <span
+              aria-hidden="true"
+              className={`neume shrink-0 ${
+                dictationReadinessChip.tone === "neutral"
+                  ? "neume-hollow"
+                  : dictationReadinessChip.tone
+                    ? "neume-lit"
+                    : "neume-rust"
+              }`}
+            />
+            <span className="min-w-0">
+            <span>{dictationReadinessChip.label}</span>
+            <span aria-hidden="true"> · </span>
+            <span
+              className={`whitespace-nowrap ${
+                dictationReadinessChip.tone === true
+                  ? "text-gold-text"
+                  : dictationReadinessChip.tone === false
+                    ? "text-rust"
+                    : ""
+              }`}
+            >
+              {dictationReadinessChip.status}
+            </span>
+            </span>
+          </p>
+          <p role="status" className="text-[13px] text-muted-foreground">
+            {saveStateLabel}
+          </p>
+        </div>
+      </nav>
+
+      <div ref={contentScrollRef} className="@container min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+        <div className="mx-auto max-w-[46rem] px-6 pb-16 pt-7 @lg:px-10">
+          {settingsSaveError && (
+            <div role="alert" className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+              <p className="min-w-0 flex-1">{settingsSaveError}</p>
+              {hasUnsavedChanges && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={isSaving}
+                  onClick={() => {
+                    const current = latestSettingsRef.current;
+                    if (current) {
+                      setSettingsSaveError(null);
+                      queueSettingsSave(current, 0);
+                      void flushPendingSettingsSave();
+                    }
+                  }}
+                >
+                  Retry saving
+                </Button>
+              )}
+            </div>
+          )}
+          {error && (
+            <div role="alert" className="mb-6 flex items-center gap-2 rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
+              {error}
+            </div>
+          )}
+
+          {searching ? (
+            <section aria-label="Search results">
+              <h2 className="font-serif text-2xl font-semibold tracking-tight">
+                Search
+              </h2>
+              <p className="mt-1 text-sm text-muted-foreground" role="status">
+                {searchResults.length === 0
+                  ? `Nothing in Settings matches “${settingsQuery.trim()}”.`
+                  : `${searchResults.length} ${searchResults.length === 1 ? "setting matches" : "settings match"} “${settingsQuery.trim()}”.`}
+              </p>
+              {searchResults.length > 0 ? (
+                <ul className="settings-rows mt-5">
+                  {searchResults.map((entry) => (
+                    <li key={entry.id}>
+                      <button
+                        type="button"
+                        onClick={() => openSearchResult(entry)}
+                        className="flex w-full items-center justify-between gap-4 rounded-md px-2 py-3 text-left text-sm hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <span className="font-medium">{entry.label}</span>
+                        <span className="shrink-0 text-muted-foreground">
+                          {settingsSectionLabel(entry.section)}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </section>
+          ) : (
+            <section
+              id="settings-tab-panel"
+              role="tabpanel"
+              aria-labelledby={`settings-tab-${activeTab}`}
+            >
+              {/* Keyed on the section so each switch replays a short fade;
+                  the reduced-motion variant drops it. */}
+              <div
+                key={activeTab}
+                className="animate-in fade-in-0 duration-150 motion-reduce:animate-none"
+              >
+                <h2 className="font-serif text-2xl font-semibold tracking-tight">
+                  {activeSection.label}
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {activeSection.summary}
+                </p>
+                <div className="mt-7">{renderActiveSection()}</div>
               </div>
             </section>
-          </div>
+          )}
         </div>
       </div>
     </div>

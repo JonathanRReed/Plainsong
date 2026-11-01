@@ -1,6 +1,7 @@
+import { createDictationEscapeFallback, dictationSessionCanCancel } from "../../electron/native-macos-shortcut";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildNativeShortcutHelperArgs,
   isNativeShortcutRawEvent,
@@ -8,7 +9,6 @@ import {
   normalizeNativeShortcutEvent,
   resolveNativeHelperConfigApplication,
   resolveNativeShortcutStatus,
-  synthesizeNativeShortcutRelease,
   trackNativeShortcutDownBindings,
 } from "../../electron/native-macos-shortcut";
 
@@ -159,7 +159,7 @@ describe("resolveNativeHelperConfigApplication", () => {
   });
 });
 
-describe("trackNativeShortcutDownBindings / synthesizeNativeShortcutRelease", () => {
+describe("trackNativeShortcutDownBindings", () => {
   it("owes an up for every down that has not been released", () => {
     let down = trackNativeShortcutDownBindings(new Set(), {
       event: "down",
@@ -170,9 +170,6 @@ describe("trackNativeShortcutDownBindings / synthesizeNativeShortcutRelease", ()
 
     down = trackNativeShortcutDownBindings(down, { event: "up", bindingId: "primary" });
     expect([...down]).toEqual(["email"]);
-    expect(synthesizeNativeShortcutRelease(down)).toEqual([
-      { event: "up", bindingId: "email" },
-    ]);
   });
 
   it("never mutates the set it was given", () => {
@@ -185,17 +182,12 @@ describe("trackNativeShortcutDownBindings / synthesizeNativeShortcutRelease", ()
     expect([...after]).toEqual([]);
   });
 
-  // Escape arrives as a bare `down` and is the cancel gesture, not a hold:
-  // synthesizing a release for it would cancel a later session.
   it("does not track Escape", () => {
     expect([
       ...trackNativeShortcutDownBindings(new Set(), { event: "down", bindingId: "escape" }),
     ]).toEqual([]);
   });
 
-  it("owes nothing when nothing is held", () => {
-    expect(synthesizeNativeShortcutRelease(new Set())).toEqual([]);
-  });
 });
 
 describe("native helper restart wiring in main.ts", () => {
@@ -208,18 +200,49 @@ describe("native helper restart wiring in main.ts", () => {
     );
   });
 
-  it("synthesizes the owed release before disposing the helper, not after", () => {
-    const release = mainSource.indexOf('releaseHeldNativeShortcutBindings("helper restart")');
-    const dispose = mainSource.indexOf(
-      "disposeNativeShortcutController();",
-      release,
-    );
-    expect(release).toBeGreaterThan(0);
-    expect(dispose).toBeGreaterThan(release);
-  });
-
   it("applies a deferred table when the session ends or the key comes up", () => {
     expect(mainSource).toContain('applyDeferredNativeShortcutConfig("binding released")');
     expect(mainSource).toContain("applyDeferredNativeShortcutConfig(`phase ${nextPhase}`)");
   });
+});
+
+it("accepts binding cancellation and validates native gesture timing", () => {
+  const cancel = { event: "cancel", bindingId: "right" } as const;
+  expect(isNativeShortcutRawEvent(cancel)).toBe(true);
+  expect(normalizeNativeShortcutEvent(cancel)).toEqual({ signal: "cancelled", bindingId: "right" });
+  expect(trackNativeShortcutDownBindings(new Set(["right"]), cancel).size).toBe(0);
+  expect(isNativeShortcutRawEvent({ event: "down", bindingId: "right", pressEpochMs: 123, modifierArmDelayMs: 150 })).toBe(true);
+  for (const value of [NaN, Infinity, "123"]) {
+    expect(isNativeShortcutRawEvent({ event: "down", bindingId: "right", pressEpochMs: value })).toBe(false);
+  }
+});
+
+it.each(["down", "up", "cancel"])("validates occurrence time on native %s", (event) => {
+  expect(isNativeShortcutRawEvent({ event, bindingId: "right", occurrenceEpochMs: 1000 })).toBe(true);
+  for (const occurrenceEpochMs of [NaN, Infinity, -1, "1000", null]) {
+    expect(isNativeShortcutRawEvent({ event, bindingId: "right", occurrenceEpochMs })).toBe(false);
+  }
+  expect(isNativeShortcutRawEvent({ event, bindingId: "right" })).toBe(true);
+});
+
+
+it("registers fallback Escape only for a cancellable owner without the helper", async () => {
+  let escape = () => {};
+  const register = vi.fn((_key: string, callback: () => void) => { escape = callback; return true; });
+  const unregister = vi.fn();
+  const cancel = vi.fn().mockResolvedValue(undefined);
+  const fallback = createDictationEscapeFallback({ register, unregister, cancel, onError: vi.fn() });
+  fallback.sync(null, false);
+  expect(register).not.toHaveBeenCalled();
+  fallback.sync(42, true);
+  expect(register).not.toHaveBeenCalled();
+  fallback.sync(42, false);
+  escape(); escape();
+  expect(cancel).toHaveBeenCalledExactlyOnceWith(42);
+  fallback.sync(null, false);
+  expect(unregister).toHaveBeenCalledExactlyOnceWith("Escape");
+  escape();
+  expect(cancel).toHaveBeenCalledTimes(1);
+  for (const phase of ["idle", "done", "error", "aborted", "delivering"]) expect(dictationSessionCanCancel(phase)).toBe(false);
+  for (const phase of ["preparing", "primed", "recording", "stopping", "transcribing"]) expect(dictationSessionCanCancel(phase)).toBe(true);
 });

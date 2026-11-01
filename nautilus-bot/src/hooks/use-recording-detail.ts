@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import { listen } from "@/lib/electron";
 import {
   getRecording,
@@ -94,7 +94,7 @@ export function useRecordingDetail({
   isOpen,
   onRecordingLoaded,
 }: UseRecordingDetailOptions) {
-  const [selectedRecording, setSelectedRecording] = useState<Recording | null>(null);
+  const [selectedRecording, setSelectedRecordingState] = useState<Recording | null>(null);
   const [selectedTranscript, setSelectedTranscript] = useState<Transcript | null>(null);
   const [selectedTranscriptDetails, setSelectedTranscriptDetails] =
     useState<MeetingTranscriptDetails | null>(null);
@@ -102,21 +102,29 @@ export function useRecordingDetail({
   const [waveformData, setWaveformData] = useState<number[]>([]);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const onRecordingLoadedRef = useRef(onRecordingLoaded);
+  onRecordingLoadedRef.current = onRecordingLoaded;
   const detailRequestGuard = useScopedRequestGuard<string | null>();
+  const recordingRequestGuard = useScopedRequestGuard<string | null>();
   const transcriptRequestGuard = useScopedRequestGuard<string | null>();
   const transcriptDetailsRequestGuard = useScopedRequestGuard<string | null>();
   const speakerNamesRequestGuard = useScopedRequestGuard<string | null>();
+  const setSelectedRecording = useCallback((action: SetStateAction<Recording | null>) => {
+    // A confirmed local write supersedes reads started before that write.
+    recordingRequestGuard.setScope(detailRequestGuard.activeScopeRef.current);
+    setSelectedRecordingState(action);
+  }, [detailRequestGuard, recordingRequestGuard]);
   const selectedRecordingId = selectedRecording?.id ?? null;
 
   const applyLatestRecording = useCallback(
     (recording: Recording) => {
-      setSelectedRecording((current) =>
+      setSelectedRecordingState((current) =>
         current?.id === recording.id ? recording : current
       );
-      onRecordingLoaded?.(recording);
+      onRecordingLoadedRef.current?.(recording);
       return recording;
     },
-    [onRecordingLoaded]
+    []
   );
 
   const fetchSelectedRecording = useCallback(async (recordingIdToRefresh: string) => {
@@ -151,20 +159,24 @@ export function useRecordingDetail({
 
   const refreshSelectedRecording = useCallback(
     async (recordingIdToRefresh: string) => {
+      if (detailRequestGuard.activeScopeRef.current !== recordingIdToRefresh) return null;
+      const requestToken = recordingRequestGuard.beginRequest(recordingIdToRefresh);
       const latestRecording = await fetchSelectedRecording(recordingIdToRefresh);
       if (
         !latestRecording ||
-        detailRequestGuard.activeScopeRef.current !== recordingIdToRefresh
+        detailRequestGuard.activeScopeRef.current !== recordingIdToRefresh ||
+        !recordingRequestGuard.isCurrent(requestToken)
       ) {
         return null;
       }
       return applyLatestRecording(latestRecording);
     },
-    [applyLatestRecording, detailRequestGuard, fetchSelectedRecording]
+    [applyLatestRecording, detailRequestGuard, fetchSelectedRecording, recordingRequestGuard]
   );
 
   const refreshTranscript = useCallback(
     async (recordingId: string) => {
+      if (detailRequestGuard.activeScopeRef.current !== recordingId) return null;
       const requestToken = transcriptRequestGuard.beginRequest(recordingId);
       const transcript = await fetchTranscript(recordingId);
       if (
@@ -181,6 +193,7 @@ export function useRecordingDetail({
 
   const refreshTranscriptDetails = useCallback(
     async (recordingId: string) => {
+      if (detailRequestGuard.activeScopeRef.current !== recordingId) return null;
       const requestToken = transcriptDetailsRequestGuard.beginRequest(recordingId);
       const details = await fetchTranscriptDetails(recordingId);
       if (
@@ -197,6 +210,7 @@ export function useRecordingDetail({
 
   const refreshSpeakerNames = useCallback(
     async (recordingId: string) => {
+      if (detailRequestGuard.activeScopeRef.current !== recordingId) return null;
       const requestToken = speakerNamesRequestGuard.beginRequest(recordingId);
       const names = await fetchSpeakerNames(recordingId);
       if (
@@ -214,12 +228,13 @@ export function useRecordingDetail({
   const loadRecordingDetail = useCallback(
     async (recording: Recording) => {
       const requestToken = detailRequestGuard.beginRequest(recording.id);
+      const recordingRequestToken = recordingRequestGuard.beginRequest(recording.id);
       const transcriptRequestToken = transcriptRequestGuard.beginRequest(recording.id);
       const transcriptDetailsRequestToken =
         transcriptDetailsRequestGuard.beginRequest(recording.id);
       const speakerNamesRequestToken =
         speakerNamesRequestGuard.beginRequest(recording.id);
-      setSelectedRecording(recording);
+      setSelectedRecordingState(recording);
       setIsLoadingDetail(true);
       setDetailError(null);
       setSelectedTranscript(null);
@@ -249,10 +264,12 @@ export function useRecordingDetail({
 
         let hadAnyFailure = false;
 
-        if (recordingResult.status === "fulfilled" && recordingResult.value) {
-          applyLatestRecording(recordingResult.value);
-        } else if (recordingResult.status === "rejected") {
-          hadAnyFailure = true;
+        if (recordingRequestGuard.isCurrent(recordingRequestToken)) {
+          if (recordingResult.status === "fulfilled" && recordingResult.value) {
+            applyLatestRecording(recordingResult.value);
+          } else if (recordingResult.status === "rejected") {
+            hadAnyFailure = true;
+          }
         }
 
         if (transcriptRequestGuard.isCurrent(transcriptRequestToken)) {
@@ -313,6 +330,7 @@ export function useRecordingDetail({
       applyLatestRecording,
       detailRequestGuard,
       fetchSelectedRecording,
+      recordingRequestGuard,
       fetchSpeakerNames,
       fetchTranscript,
       fetchTranscriptDetails,
@@ -325,10 +343,11 @@ export function useRecordingDetail({
 
   const clearRecordingDetail = useCallback(() => {
     detailRequestGuard.setScope(null);
+    recordingRequestGuard.setScope(null);
     transcriptRequestGuard.setScope(null);
     transcriptDetailsRequestGuard.setScope(null);
     speakerNamesRequestGuard.setScope(null);
-    setSelectedRecording(null);
+    setSelectedRecordingState(null);
     setSelectedTranscript(null);
     setSelectedTranscriptDetails(null);
     setSpeakerNames({});
@@ -337,6 +356,7 @@ export function useRecordingDetail({
     setDetailError(null);
   }, [
     detailRequestGuard,
+    recordingRequestGuard,
     speakerNamesRequestGuard,
     transcriptDetailsRequestGuard,
     transcriptRequestGuard,
@@ -424,12 +444,13 @@ export function useRecordingDetail({
         await listen<RecordingStatusChangedEvent>(
           "recording-status-changed",
           (event) => {
-            if (event.payload?.recordingId !== selectedRecordingId) {
+            if (disposed || event.payload?.recordingId !== selectedRecordingId
+                || detailRequestGuard.activeScopeRef.current !== selectedRecordingId) {
               return;
             }
 
             setSelectedRecording((current) =>
-              current ? { ...current, status: event.payload.status } : current
+              current?.id === selectedRecordingId ? { ...current, status: event.payload.status } : current
             );
 
             if (event.payload.status === "processing") {
@@ -442,6 +463,7 @@ export function useRecordingDetail({
 
             if (
               event.payload.status === "completed" ||
+              event.payload.status === "pending" ||
               event.payload.status === "error"
             ) {
               void refreshSelectedRecording(selectedRecordingId);
@@ -462,6 +484,8 @@ export function useRecordingDetail({
       unlistenTranscriptUpdated?.();
     };
   }, [
+    detailRequestGuard,
+    setSelectedRecording,
     isOpen,
     refreshSelectedRecording,
     refreshSpeakerNames,
@@ -470,59 +494,40 @@ export function useRecordingDetail({
     selectedRecordingId,
   ]);
 
+  const shouldPoll = isOpen && selectedRecordingId !== null
+    && selectedRecording?.status !== "error"
+    && selectedRecording?.status !== "pending"
+    && (selectedRecording?.status === "processing" || selectedTranscript == null);
+
   useEffect(() => {
-    if (!isOpen || !selectedRecording) {
-      return;
-    }
-
-    if (selectedRecording.status === "error") {
-      return;
-    }
-
-    const shouldPoll =
-      selectedRecording.status === "processing" || selectedTranscript == null;
-    if (!shouldPoll) {
-      return;
-    }
-
+    if (!shouldPoll || !selectedRecordingId) return;
     let cancelled = false;
+    let inFlight = false;
     const poll = async () => {
+      if (cancelled || inFlight) return;
+      inFlight = true;
       try {
-        const [latestRecording] = await Promise.all([
-          refreshSelectedRecording(selectedRecording.id),
-          refreshTranscript(selectedRecording.id),
-          refreshTranscriptDetails(selectedRecording.id),
+        const results = await Promise.allSettled([
+          refreshSelectedRecording(selectedRecordingId),
+          refreshTranscript(selectedRecordingId),
+          refreshTranscriptDetails(selectedRecordingId),
         ]);
-        if (cancelled) return;
-
-        if (
-          latestRecording &&
-          (latestRecording.status === "completed" || latestRecording.status === "error")
-        ) {
-          return;
+        if (!cancelled && results.some(result => result.status === "rejected")) {
+          console.warn("Some recording detail auto-refresh requests failed.");
         }
       } catch (error) {
-        console.warn("Recording detail auto-refresh failed:", error);
+        if (!cancelled) console.warn("Recording detail auto-refresh failed:", error);
+      } finally {
+        inFlight = false;
       }
     };
-
     void poll();
-    const intervalId = window.setInterval(() => {
-      void poll();
-    }, 2000);
-
+    const intervalId = window.setInterval(() => { void poll(); }, 2000);
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [
-    isOpen,
-    refreshSelectedRecording,
-    refreshTranscript,
-    refreshTranscriptDetails,
-    selectedRecording,
-    selectedTranscript,
-  ]);
+  }, [shouldPoll, selectedRecordingId, refreshSelectedRecording, refreshTranscript, refreshTranscriptDetails]);
 
   return {
     selectedRecording,

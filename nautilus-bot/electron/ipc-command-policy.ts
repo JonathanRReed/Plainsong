@@ -3,6 +3,27 @@ const FAST_COMMAND_TIMEOUT_MS = 15_000;
 const LONG_COMMAND_TIMEOUT_MS = 5 * 60_000;
 const EXTENDED_COMMAND_TIMEOUT_MS = 15 * 60_000;
 const ANALYSIS_COMMAND_TIMEOUT_MS = 50 * 60_000;
+// A model download is bounded by the sidecar itself: its HTTP client gives up
+// after 30 s without a connection or 60 s without a byte, and every transfer
+// resumes from its partial file. This is only the outer backstop, so it has to
+// outlast a whole download on a slow connection. At 15 minutes, a 739 MB
+// speech model on anything under about 7 Mbit/s "failed" while it was still
+// arriving; at the 60-second default, the 1.1 GB cleanup model and the 716 MB
+// live preview model could not finish on almost any home connection.
+const MODEL_DOWNLOAD_COMMAND_TIMEOUT_MS = 3 * 60 * 60_000;
+
+const MODEL_DOWNLOAD_COMMANDS = new Set<string>([
+  "download_asr_models",
+  "download_bundled_cleanup_model",
+  "download_diarization_model",
+  "download_embedding_model",
+  "download_live_preview_engine_model",
+  "download_native_text_model",
+  "download_platform_assets",
+  "download_silero_vad_model",
+  "download_whisper_model",
+  "install_ollama_model",
+]);
 
 const ANALYSIS_COMMANDS = new Set<string>([
   "analyze_recording",
@@ -38,17 +59,31 @@ const FAST_COMMANDS = new Set<string>([
   // is in trouble; the Meetings header should show nothing rather than sit on
   // a pending request.
   "get_calendar_snapshot",
+  "get_contacts_access_status",
+  "set_dictation_calendar_names",
   "get_default_asr_provider",
+  "get_diarization_model_plan",
   "get_dictation_audio_level",
   "get_dictation_overlay_state",
+  // One lookup in the in-memory recovery list, for the quit prompt.
+  "get_dictation_session_text",
+  "get_pending_dictation_recovery",
   "get_dictation_shortcut_capability_status",
   "get_loopback_device_name",
+  "get_local_text_runtime_health",
   // Reads the detector's in-memory state; the Meetings header polls it.
   "get_meeting_call_status",
+  // In-memory atomics; the live meeting window polls it for its two meters.
+  "get_meeting_source_levels",
   "get_system_audio_capability",
   "get_permission_diagnostics",
   "get_recording_overlay_state",
   "get_security_status",
+  "get_audio_storage_status",
+  "get_recording_asides",
+  "get_recording_aside_ranges",
+  "delete_recording_aside",
+  "export_recording_audio",
   "get_settings",
   "get_shortcut_conflicts",
   "get_update_channel",
@@ -79,11 +114,6 @@ const EXTENDED_COMMANDS = new Set<string>([
   "benchmark_asr_providers_bytes",
   "create_backup_default",
   "create_settings_backup_default",
-  "download_asr_models",
-  "download_bundled_cleanup_model",
-  "download_diarization_model",
-  "download_platform_assets",
-  "download_whisper_model",
   "export_backup_archive",
   "export_recording",
   "export_recording_v2",
@@ -92,7 +122,6 @@ const EXTENDED_COMMANDS = new Set<string>([
   // multi-hour source needs more than the default minute.
   "import_audio_file",
   "import_dictation_dictionary_csv",
-  "install_ollama_model",
   // Asks macOS to download a whole speech language pack. The size is Apple's,
   // not this app's, so it gets the same headroom as a model download.
   "install_apple_speech_language",
@@ -104,6 +133,9 @@ const EXTENDED_COMMANDS = new Set<string>([
   // Re-runs ASR (and possibly an LLM pass) over a saved dictation's kept
   // audio; a ten-minute dictation on a cold model needs the extended budget.
   "reprocess_dictation",
+  // Transcribes a dictation the previous run left unfinished (up to ten
+  // minutes of audio), the same work as Process again.
+  "recover_pending_dictation",
   "restore_backup_default",
   "run_diarization",
   "summarize_recording",
@@ -130,6 +162,8 @@ const LONG_COMMANDS = new Set<string>([
   // Blocks on a macOS permission dialog the reader has to read and answer, so
   // it gets the long timeout every other TCC prompt here gets.
   "request_calendar_access",
+  // The same: a Contacts prompt the reader answers.
+  "request_contacts_access",
   "request_dictation_permissions",
   "reset_app_state",
   "retry_meeting_auto_name",
@@ -149,6 +183,9 @@ const LONG_COMMANDS = new Set<string>([
 ]);
 
 export function getCommandTimeoutMs(command: string): number {
+  if (MODEL_DOWNLOAD_COMMANDS.has(command)) {
+    return MODEL_DOWNLOAD_COMMAND_TIMEOUT_MS;
+  }
   if (ANALYSIS_COMMANDS.has(command)) {
     return ANALYSIS_COMMAND_TIMEOUT_MS;
   }
@@ -191,6 +228,9 @@ export function getCommandWorkKey(command: string, args?: unknown): string | nul
   }
   if (command === "benchmark_asr_providers" || command === "benchmark_asr_providers_bytes") {
     return "benchmark:active";
+  }
+  if (command === "recover_pending_dictation") {
+    return "recover_pending_dictation";
   }
   if (command === "reprocess_dictation") {
     // One re-run per saved dictation at a time; a second click on the same

@@ -1,5 +1,6 @@
 export {
   approveDictationCorrectionSuggestion,
+  undoDictationCorrectionApproval,
   captureSelectedTextForPlayback,
   createDictationDictionaryEntry,
   createDictationSnippet,
@@ -33,6 +34,7 @@ export type {
   DictationDictionaryCsvImportResult,
   DictationDictionaryEntry,
   DictationHistoryDetails,
+  DictationRecognitionReviewWord,
   DictationHistorySearchHit,
   DictationInsights,
   DictationReprocessOutcome,

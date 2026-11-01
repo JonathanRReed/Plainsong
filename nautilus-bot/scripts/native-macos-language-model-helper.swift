@@ -4,7 +4,7 @@ import Foundation
   import FoundationModels
 #endif
 
-// On-device Apple Foundation Models helper for Plainsong's dictation cleanup.
+// Apple on-device model helper for cleanup and chunked notes.
 //
 // Four things this helper deliberately does NOT do:
 //
@@ -29,14 +29,8 @@ import Foundation
 
 private let protocolVersion = 1
 
-/// Hard ceiling on the transcript we will hand to the model.
-///
-/// `LanguageModelSession` has a 4,096-token window shared between the prompt
-/// and the response. At roughly four characters per token that is ~16 KB for
-/// everything, so the transcript gets a quarter of it and the instructions,
-/// the model's own preamble and the response share the rest. The sidecar
-/// applies its own token budget first; this is the backstop for a caller that
-/// does not.
+/// A conservative character cap for dictation. Notes use token-aware chunks
+/// and a separate byte ceiling below.
 private let maximumTranscriptCharacters = 4096
 
 /// Nothing here should ever take this long on-device. A hung request must not
@@ -52,6 +46,7 @@ private enum HelperErrorCode: String {
   case generationFailed = "generation_failed"
   case guardrailViolation = "guardrail_violation"
   case contextWindowExceeded = "context_window_exceeded"
+  case outputLimit = "output_limit"
   case timeout = "timeout"
 }
 
@@ -61,6 +56,7 @@ private struct HelperRequest: Decodable {
   let instructions: String?
   let prompt: String?
   let maximumResponseTokens: Int?
+  let responseKind: String?
 }
 
 private struct ErrorPayload: Encodable {
@@ -80,6 +76,7 @@ private struct ProbePayload: Encodable {
   /// One sentence a person can act on, or `nil` when available.
   let detail: String?
   let operatingSystemVersion: String
+  var contextTokens: Int? = nil
 }
 
 private struct CompletionPayload: Encodable {
@@ -168,6 +165,17 @@ private func readRequest() -> HelperRequest {
 
 #endif
 
+#if canImport(FoundationModels)
+@available(macOS 26.0, *)
+private func modelContextTokens() -> Int {
+  #if PLAINSONG_APPLE_CONTEXT_SIZE
+  return SystemLanguageModel.default.contextSize
+  #else
+  return 4096
+  #endif
+}
+#endif
+
 private func runProbe() -> Never {
   #if canImport(FoundationModels)
     if #available(macOS 26.0, *) {
@@ -179,7 +187,8 @@ private func runProbe() -> Never {
           available: reason == nil,
           reason: reason?.0,
           detail: reason?.1,
-          operatingSystemVersion: operatingSystemVersionString()
+          operatingSystemVersion: operatingSystemVersionString(),
+          contextTokens: modelContextTokens()
         ))
       exit(0)
     }
@@ -209,6 +218,43 @@ private func runProbe() -> Never {
   #endif
 }
 
+#if canImport(FoundationModels)
+@available(macOS 26.0, *)
+private func notesSchema(_ kind: String?) throws -> GenerationSchema? {
+  let text = DynamicGenerationSchema(type: String.self)
+  let ids = DynamicGenerationSchema(arrayOf: text)
+  let root: DynamicGenerationSchema
+  var dependencies: [DynamicGenerationSchema] = []
+  switch kind {
+  case "evidence":
+    let fact = DynamicGenerationSchema(name: "MeetingFact", properties: [
+      .init(name: "fact", schema: text), .init(name: "lineIds", schema: ids)
+    ])
+    dependencies = [fact]
+    root = DynamicGenerationSchema(name: "NotesEvidence", properties: [
+      .init(name: "evidence", schema: .init(arrayOf: .init(referenceTo: "MeetingFact")))
+    ])
+  case "actionItems":
+    let action = DynamicGenerationSchema(name: "MeetingAction", properties: [
+      .init(name: "task", schema: text),
+      .init(name: "assignee", schema: text, isOptional: true),
+      .init(name: "deadline", schema: text, isOptional: true),
+      .init(name: "lineIds", schema: ids)
+    ])
+    dependencies = [action]
+    root = DynamicGenerationSchema(name: "NotesActions", properties: [
+      .init(name: "actionItems", schema: .init(arrayOf: .init(referenceTo: "MeetingAction")))
+    ])
+  case "response":
+    root = DynamicGenerationSchema(name: "NotesResponse", properties: [
+      .init(name: "response", schema: text), .init(name: "lineIds", schema: ids)
+    ])
+  default: return nil
+  }
+  return try GenerationSchema(root: root, dependencies: dependencies)
+}
+#endif
+
 // MARK: - Generation
 
 private func runGenerate(_ request: HelperRequest) -> Never {
@@ -216,10 +262,10 @@ private func runGenerate(_ request: HelperRequest) -> Never {
   else {
     emitError(.malformedRequest, "The helper received an empty prompt.")
   }
-  guard prompt.count <= maximumTranscriptCharacters else {
+  guard request.mode == "notes" ? prompt.utf8.count <= 48 * 1024 : prompt.count <= maximumTranscriptCharacters else {
     emitError(
       .contextWindowExceeded,
-      "This dictation is longer than the Apple on-device model's shared 4,096-token window.")
+      "This text is too long for the Apple on-device model. The original text was kept.")
   }
   let instructions = request.instructions ?? ""
   guard !instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -252,15 +298,44 @@ private func runGenerate(_ request: HelperRequest) -> Never {
         if let limit = request.maximumResponseTokens, limit > 0 {
           options = GenerationOptions(sampling: .greedy, maximumResponseTokens: limit)
         }
-        let response = try await session.respond(to: prompt, options: options)
-        outcome = .success(response.content)
+        if request.mode == "notes" {
+          let schema = try notesSchema(request.responseKind)
+          var inputTokens = (prompt.utf8.count + instructions.utf8.count + 2) / 3
+          #if PLAINSONG_APPLE_TOKEN_COUNT
+          if #available(macOS 26.4, *) {
+            let model = SystemLanguageModel.default
+            let promptTokens = try await model.tokenCount(for: prompt)
+            let instructionTokens = try await model.tokenCount(for: Instructions(instructions))
+            let schemaTokens: Int
+            if let schema { schemaTokens = try await model.tokenCount(for: schema) }
+            else { schemaTokens = 0 }
+            inputTokens = promptTokens + instructionTokens + schemaTokens
+          }
+          #endif
+          guard inputTokens + (request.maximumResponseTokens ?? 1024) + 384 <= modelContextTokens() else {
+            emitError(.contextWindowExceeded, "This part of the meeting exceeds the on-device model's window. The transcript was kept.")
+          }
+          if let schema {
+            let response = try await session.respond(to: prompt, schema: schema, includeSchemaInPrompt: true, options: options)
+            try requireCompleteResponse(response.content)
+            outcome = .success(response.content.jsonString)
+          } else {
+            let response = try await session.respond(to: prompt, options: options)
+            try requireCompleteResponse(response.rawContent)
+            outcome = .success(response.content)
+          }
+        } else {
+          let response = try await session.respond(to: prompt, options: options)
+          try requireCompleteResponse(response.rawContent)
+          outcome = .success(response.content)
+        }
       } catch {
         outcome = .failure(error)
       }
       semaphore.signal()
     }
 
-    if semaphore.wait(timeout: .now() + requestTimeoutSeconds) == .timedOut {
+    if semaphore.wait(timeout: .now() + (request.mode == "notes" ? 60 : requestTimeoutSeconds)) == .timedOut {
       task.cancel()
       emitError(.timeout, "The Apple on-device model did not answer in time.", retryable: true)
     }
@@ -284,8 +359,16 @@ private func runGenerate(_ request: HelperRequest) -> Never {
 
 #if canImport(FoundationModels)
 
+  private struct IncompleteResponse: Error {}
+
+  @available(macOS 26.0, *)
+  private func requireCompleteResponse(_ content: GeneratedContent) throws {
+    guard content.isComplete else { throw IncompleteResponse() }
+  }
+
   @available(macOS 26.0, *)
   private func classify(_ error: Error) -> HelperErrorCode {
+    if error is IncompleteResponse { return .outputLimit }
     guard let generationError = error as? LanguageModelSession.GenerationError else {
       return .generationFailed
     }
@@ -307,14 +390,16 @@ private func runGenerate(_ request: HelperRequest) -> Never {
     // here is ours and the framework's own string is not echoed back into the
     // app's logs or UI.
     switch classify(error) {
+    case .outputLimit:
+      return "The Apple on-device model returned unfinished text. It was not used."
     case .contextWindowExceeded:
-      return "This dictation is longer than the Apple on-device model's shared 4,096-token window."
+      return "This text exceeds the Apple on-device model's window. The original text was kept."
     case .guardrailViolation:
-      return "Apple's on-device safety filter declined to rewrite this dictation."
+      return "Apple's on-device safety filter declined to process this text."
     case .modelUnavailable:
       return "Apple Intelligence has not finished downloading its model on this Mac."
     default:
-      return "The Apple on-device model could not rewrite this dictation."
+      return "The Apple on-device model could not process this text."
     }
   }
 
@@ -331,7 +416,7 @@ private let request = readRequest()
 switch request.mode {
 case "probe":
   runProbe()
-case "generate":
+case "generate", "notes":
   runGenerate(request)
 default:
   emitError(.malformedRequest, "Unknown helper mode '\(request.mode)'.")

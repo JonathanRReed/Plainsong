@@ -20,6 +20,8 @@ export interface ModelWeightsEntry {
   note?: string;
   /** Upstream declares nothing and a human has not yet resolved it. */
   pendingLicenseReview?: boolean;
+  /** Kept as license history for earlier downloads; never offered, downloaded or run. */
+  disabled?: boolean;
 }
 
 export const MODEL_WEIGHTS: readonly ModelWeightsEntry[];

@@ -12,7 +12,7 @@ const SLOW_STAGE_FACTOR = 2;
 
 export const SLOW_STAGE_LABEL = "Still working";
 export const SLOW_STAGE_DETAIL =
-  "Taking longer than usual. Your words are safe.";
+  "Taking longer than usual. Still processing your dictation.";
 
 /** How long a stage may run before the pill says it is running long. */
 export function slowStageThresholdMs(expectedMs: number | null | undefined): number {

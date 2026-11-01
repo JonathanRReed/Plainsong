@@ -10,6 +10,75 @@
 
 use super::*;
 
+/// Shown when the automatic speaker pass finished after the reader had
+/// already edited the transcript: their edit is kept, so the labels are not.
+pub(crate) const DIARIZATION_SKIPPED_FOR_EDIT_NOTICE: &str = "Speakers were not labelled because the transcript was edited while they were being identified. Your edit is saved; choose Label the speakers to label them now.";
+
+pub(crate) const MEETING_TRANSCRIPTION_PENDING_NOTICE: &str =
+    "Transcription is pending. The recording is saved. Free some memory, then retry transcription.";
+
+pub(crate) fn persist_pending_meeting_transcription(
+    db: &mut db::Database,
+    recording_id: &str,
+) -> Result<()> {
+    db.complete_recording_with_transcript_state(
+        recording_id,
+        "pending",
+        false,
+        Some(MEETING_TRANSCRIPTION_PENDING_NOTICE),
+    )
+}
+
+async fn defer_meeting_transcription(
+    state: &AppState,
+    handle: &crate::sidecar_handle::SidecarHandle,
+    recording_id: &str,
+) {
+    let result = {
+        let mut db = state.db.lock().await;
+        persist_pending_meeting_transcription(&mut db, recording_id)
+    };
+    let (status, phase, message) = match result {
+        Ok(()) => (
+            "pending",
+            "recoverable",
+            MEETING_TRANSCRIPTION_PENDING_NOTICE.to_string(),
+        ),
+        Err(error) => {
+            tracing::error!("Could not save pending transcription for {recording_id}: {error:#}");
+            (
+                "error",
+                "error",
+                "Could not save transcription status. Open Meetings to retry from saved audio."
+                    .to_string(),
+            )
+        }
+    };
+    emit_recording_status(handle, recording_id, status, Some(&message), None);
+    // A retry can finish after a newer capture opened its own overlay.
+    let updated_overlay = state
+        .recording_overlay_state
+        .lock()
+        .ok()
+        .is_some_and(|mut overlay| {
+            if overlay.recording_id.as_deref() != Some(recording_id) {
+                return false;
+            }
+            overlay.phase = phase.to_string();
+            overlay.dismissed = false;
+            overlay.message = Some(message.clone());
+            true
+        });
+    if updated_overlay {
+        handle.emit_event(
+            "meeting-recording-state-changed",
+            serde_json::json!({
+                "phase": phase, "recordingId": recording_id, "message": message,
+            }),
+        );
+    }
+}
+
 pub(crate) fn emit_completed_after_persistence(
     persistence_result: Result<(), String>,
     app: &impl crate::sidecar_handle::AppEmitter,
@@ -18,6 +87,23 @@ pub(crate) fn emit_completed_after_persistence(
     persistence_result?;
     app.emit_event("recording-status-changed", payload);
     Ok(())
+}
+
+fn meeting_completion_degraded_reason(
+    capture_summary: Result<Option<String>, String>,
+    asr_reason: Option<&str>,
+) -> Option<String> {
+    let capture_reason = match capture_summary {
+        Ok(summary) => summary,
+        Err(_) => Some("The recording's saved audio could not be checked for missing parts. This transcript may be incomplete.".to_string()),
+    };
+    let reasons: Vec<&str> = [capture_reason.as_deref(), asr_reason]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .collect();
+    (!reasons.is_empty()).then(|| reasons.join(" "))
 }
 
 /// Full post-capture meeting transcription pipeline: chunked ASR (source-aware
@@ -33,6 +119,49 @@ pub(crate) async fn run_meeting_transcription_pipeline(
     recording_id_clone: String,
     _audio_postprocessing_guard: MeetingAudioPostprocessingGuard,
 ) {
+    let cleanup_state = Arc::clone(&state_clone);
+    let cleanup_handle = handle_clone.clone();
+    let cleanup_id = recording_id_clone.clone();
+    let coordinator = Arc::clone(&state_clone.operation_coordinator);
+    coordinator
+        .run_post_call("meeting transcription and speaker labelling", async move {
+            run_meeting_transcription_pipeline_inner(
+                state_clone,
+                handle_clone,
+                recording_id_clone,
+                _audio_postprocessing_guard,
+            )
+            .await;
+        })
+        .await;
+    // The audio and processing owners have dropped before their cleanup runs.
+    if let Err(error) = apply_meeting_transcript_only_storage_policy(
+        cleanup_state.as_ref(),
+        Some(&cleanup_handle),
+        "meeting-post-processing-finished",
+        Some(&cleanup_id),
+    )
+    .await
+    {
+        tracing::debug!("Meeting audio cleanup deferred: {error}");
+    }
+}
+
+async fn run_meeting_transcription_pipeline_inner(
+    state_clone: Arc<AppState>,
+    handle_clone: crate::sidecar_handle::SidecarHandle,
+    recording_id_clone: String,
+    _audio_postprocessing_guard: MeetingAudioPostprocessingGuard,
+) {
+    if let Err(error) = state_clone
+        .db
+        .lock()
+        .await
+        .set_meeting_audio_finalized(&recording_id_clone, false)
+    {
+        tracing::error!("Could not protect full-rate meeting audio: {error}");
+        return;
+    }
     let resolved_audio =
         match resolve_recording_audio_bundle_for_runtime(state_clone.as_ref(), &recording_id_clone)
             .await
@@ -147,6 +276,20 @@ pub(crate) async fn run_meeting_transcription_pipeline(
         )
     };
 
+    let spans_result = { state_clone.db.lock().await.aside_spans(&recording_id_clone) };
+    let aside_spans = match spans_result {
+        Ok(spans) => spans,
+        Err(error) => {
+            tracing::error!("Could not read aside masks for {recording_id_clone}: {error}");
+            defer_meeting_transcription(state_clone.as_ref(), &handle_clone, &recording_id_clone)
+                .await;
+            return;
+        }
+    };
+
+    // One wait budget for the whole recording: both capture tracks and the
+    // speaker separation after them draw on it.
+    let wait_budget = MeetingWaitBudget::sharing_runtime_with(Arc::clone(&state_clone));
     match transcribe_meeting_recording(
         &handle_clone,
         Arc::clone(&state_clone.asr_manager),
@@ -158,22 +301,29 @@ pub(crate) async fn run_meeting_transcription_pipeline(
         meeting_model_id.clone(),
         enable_diarization,
         prefer_provider_diarization,
+        &wait_budget,
+        &aside_spans,
     )
     .await
     {
         Ok(output) => {
-            // Captured before `output.transcript` is moved out below: this is
-            // the only place a chunk/source transcription failure that was
-            // survived (rather than aborting the whole meeting) is visible.
-            // Without threading it through here it would reach neither the
-            // DB nor an emitted event, and the meeting would be marked
-            // "completed" with no signal that it may be incomplete.
-            let degraded_reason = output
-                .fallback_reason
-                .as_deref()
-                .map(str::trim)
-                .filter(|reason| !reason.is_empty())
-                .map(str::to_string);
+            let capture_summary = {
+                let db = state_clone.db.lock().await;
+                db.get_capture_degraded_summary(&recording_id_clone)
+                    .map_err(|error| {
+                        tracing::warn!(
+                            "Could not read capture completeness for meeting {}: {}",
+                            recording_id_clone,
+                            error
+                        );
+                        error.to_string()
+                    })
+            };
+            let mut degraded_reason = meeting_completion_degraded_reason(
+                capture_summary,
+                output.fallback_reason.as_deref(),
+            );
+            let mut transcript_complete = degraded_reason.is_none();
             let provider_speaker_turns = output.speaker_turns;
             let transcribed_by_provider = output.actual_provider;
             let mut transcript = output.transcript;
@@ -202,7 +352,10 @@ pub(crate) async fn run_meeting_transcription_pipeline(
 
             let persistence_result = {
                 let mut db = state_clone.db.lock().await;
-                match db.save_transcript(&transcript) {
+                match db
+                    .set_aside_rows(&recording_id_clone, &output.asides)
+                    .and_then(|_| db.save_meeting_transcript(&transcript))
+                {
                     Ok(()) => Ok(()),
                     Err(error) => {
                         if let Err(status_error) =
@@ -234,6 +387,16 @@ pub(crate) async fn run_meeting_transcription_pipeline(
             };
 
             let transcript_persisted = persistence_result.is_ok();
+            if transcript_persisted && wait_budget.memory_deferred() {
+                defer_meeting_transcription(
+                    state_clone.as_ref(),
+                    &handle_clone,
+                    &recording_id_clone,
+                )
+                .await;
+                return;
+            }
+
             let completion_result = match persistence_result {
                 Ok(()) => {
                     // Status and completeness are written together on purpose.
@@ -248,7 +411,15 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                         degraded_reason.is_none(),
                         degraded_reason.as_deref(),
                     ) {
-                        Ok(()) => Ok(()),
+                        Ok(()) => match db.get_recording(&recording_id_clone) {
+                            Ok(Some(recording)) => {
+                                transcript_complete = recording.transcript_complete;
+                                degraded_reason = recording.transcript_degraded_reason;
+                                Ok(())
+                            }
+                            Ok(None) => Err("Completed recording was not found".to_string()),
+                            Err(error) => Err(error.to_string()),
+                        },
                         Err(error) => {
                             let _ = db.update_recording_status(&recording_id_clone, "error");
                             Err(error.to_string())
@@ -257,6 +428,9 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                 }
                 Err(error) => Err(error),
             };
+            if transcript_persisted {
+                crate::semantic_index::request_index();
+            }
             let completed_at = chrono::Utc::now().to_rfc3339();
             let completion_result = emit_completed_after_persistence(
                 completion_result,
@@ -268,7 +442,7 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                     "updatedAt": &completed_at,
                     "transcriptFirstAvailableAt": &completed_at,
                     "message": &degraded_reason,
-                    "degraded": degraded_reason.is_some(),
+                    "degraded": !transcript_complete,
                 }),
             );
             if let Err(error) = completion_result.as_ref() {
@@ -302,6 +476,7 @@ pub(crate) async fn run_meeting_transcription_pipeline(
             // this recording while best-effort enrichment is still reading it.
             let mut diarization_updated = false;
             let mut diarization_fallback_notice: Option<String> = None;
+            let mut diarization_failure_notice: Option<String> = None;
             if transcript_persisted {
                 let (enable_diarization, diarization_model_id) = {
                     let sm = state_clone.settings_manager.lock().await;
@@ -316,12 +491,29 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                 };
                 // The automatic pass runs the model the user picked, not
                 // always the default one, and readiness is asked per model
-                // (the experimental speakrs backend needs a bundle, not one
+                // (pyannote community-1 needs a six-file bundle, not one
                 // .onnx). `resolve_model_for_run` answers both questions at
                 // once: whether anything local can run at all, and which model
                 // it will be.
+                // A meeting never downloads a speaker model: a missing pick
+                // falls back to one already on this Mac, and with none at all
+                // the meeting is saved without speakers and says how to get
+                // one, from the meeting itself.
+                let wants_local = resolve_meeting_diarizer(
+                    enable_diarization,
+                    prefer_provider_diarization,
+                    transcript_has_source_aware_speakers(&transcript.segments),
+                    transcribed_by_provider,
+                    provider_speaker_turns.len(),
+                    true,
+                ) == MeetingDiarizer::Local;
                 let resolved_local_model =
                     diarization::resolve_model_for_run(&diarization_model_id);
+                if wants_local && resolved_local_model.is_none() {
+                    let notice = diarization::no_speaker_model_notice(&diarization_model_id);
+                    tracing::warn!("No speaker model for {}: {}", recording_id_clone, notice);
+                    diarization_failure_notice = Some(notice);
+                }
                 let diarizer = resolve_meeting_diarizer(
                     enable_diarization,
                     prefer_provider_diarization,
@@ -355,8 +547,13 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                         )))
                     }
                     MeetingDiarizer::Local => Some(
-                        diarization::run_diarization_with_model(&path, &local_diarization_model_id)
-                            .await,
+                        run_meeting_diarization_with_waits(
+                            &path,
+                            &local_diarization_model_id,
+                            &recording_id_clone,
+                            &wait_budget,
+                        )
+                        .await,
                     ),
                 };
 
@@ -365,7 +562,11 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                     Some(Ok(result)) => {
                         let engine = diarization::DiarizationEngine::new();
                         let mut enriched_segments = transcript.segments.clone();
-                        engine.merge_with_transcript(&result, &mut enriched_segments);
+                        if transcript.measured_word_timestamps {
+                            engine.merge_with_measured_words(&result, &mut enriched_segments);
+                        } else {
+                            engine.merge_with_transcript(&result, &mut enriched_segments);
+                        }
                         let update_result = {
                             let mut db = state_clone.db.lock().await;
                             // The audit entry goes in with the enrichment, not
@@ -391,6 +592,21 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                             Ok(true) => {
                                 transcript.segments = enriched_segments;
                                 diarization_updated = true;
+                                // New speaker ids: whatever voices were held
+                                // or stored for the old ones no longer
+                                // describe them.
+                                if let Err(error) = forget_superseded_cluster_voices(
+                                    state_clone.as_ref(),
+                                    &recording_id_clone,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "Could not drop superseded voice signatures of {}: {}",
+                                        recording_id_clone,
+                                        error
+                                    );
+                                }
                                 // Only once labels are actually stored: a
                                 // notice about which model produced them is a
                                 // lie if none were produced. Only the local
@@ -437,22 +653,57 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                                     }
                                 }
                             }
-                            Ok(false) => tracing::warn!(
-                                "Skipped diarization enrichment for {} because the transcript changed while diarization was running",
-                                recording_id_clone
-                            ),
-                            Err(error) => tracing::warn!(
-                                "Diarization completed for {} but enriched transcript persistence failed: {}",
-                                recording_id_clone,
-                                error
-                            ),
+                            Ok(false) => {
+                                tracing::warn!(
+                                    "Skipped diarization enrichment for {} because the transcript changed while diarization was running",
+                                    recording_id_clone
+                                );
+                                // The reader's edit wins, but a transcript that
+                                // silently never gets speakers is owed a reason.
+                                diarization_failure_notice =
+                                    Some(DIARIZATION_SKIPPED_FOR_EDIT_NOTICE.to_string());
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "Diarization completed for {} but enriched transcript persistence failed: {}",
+                                    recording_id_clone,
+                                    error
+                                );
+                                diarization_failure_notice = Some(
+                                    "Speakers were not labelled because Plainsong could not save them. The transcript is saved; choose Label the speakers to try again."
+                                        .to_string(),
+                                );
+                            }
                         }
                     }
-                    Some(Err(error)) => tracing::warn!(
-                        "Best-effort diarization failed for {}: {}",
-                        recording_id_clone,
-                        error
-                    ),
+                    Some(Err(error)) => {
+                        let error = format!("{error:#}");
+                        tracing::warn!(
+                            "Best-effort diarization failed for {}: {}",
+                            recording_id_clone,
+                            error
+                        );
+                        // Not only a log line: the reader sees a transcript
+                        // with no speakers and is owed the reason.
+                        let mut db = state_clone.db.lock().await;
+                        if let Err(audit_error) = db.log_audit_event(
+                            "meeting_diarization_failed",
+                            Some(serde_json::json!({
+                                "recording_id": &recording_id_clone,
+                                "diarizer": diarizer_record.as_deref(),
+                                "error": &error,
+                            })),
+                            "warning",
+                        ) {
+                            tracing::warn!(
+                                "Failed to log the diarization failure for {}: {}",
+                                recording_id_clone,
+                                audit_error
+                            );
+                        }
+                        diarization_failure_notice =
+                            Some(meeting_diarization_failure_notice(&error));
+                    }
                 }
 
                 let db = state_clone.db.lock().await;
@@ -479,6 +730,16 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                     );
                 }
                 Ok(()) => {
+                    if transcript_complete && diarization_failure_notice.is_none() {
+                        if let Err(error) = state_clone
+                            .db
+                            .lock()
+                            .await
+                            .set_meeting_audio_finalized(&recording_id_clone, true)
+                        {
+                            tracing::warn!("Could not finalize meeting audio storage: {error}");
+                        }
+                    }
                     if diarization_updated {
                         handle_clone.emit_event(
                             "transcript-updated",
@@ -494,7 +755,7 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                         // still carry a note" path the degraded transcript uses.
                         if let Some(notice) = diarization_fallback_notice.as_deref() {
                             tracing::warn!(
-                                "Diarization for {} fell back to the default model: {}",
+                                "Diarization for {} ran another downloaded speaker model: {}",
                                 recording_id_clone,
                                 notice
                             );
@@ -508,6 +769,20 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                                 }),
                             );
                         }
+                    }
+
+                    // Same "a finished meeting can still carry a note" path
+                    // as the model substitution above.
+                    if let Some(notice) = diarization_failure_notice.as_deref() {
+                        handle_clone.emit_event(
+                            "recording-status-changed",
+                            serde_json::json!({
+                                "recordingId": &recording_id_clone,
+                                "status": "completed",
+                                "message": notice,
+                                "updatedAt": chrono::Utc::now().to_rfc3339(),
+                            }),
+                        );
                     }
 
                     report_provider_cleanup_warnings(
@@ -539,21 +814,6 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                         }
                     }
 
-                    if let Err(error) = apply_meeting_transcript_only_storage_policy(
-                        state_clone.as_ref(),
-                        Some(&handle_clone),
-                        "meeting-post-processing-finished",
-                        Some(&recording_id_clone),
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            "Failed to apply transcript-only storage policy for {}: {}",
-                            recording_id_clone,
-                            error
-                        );
-                    }
-
                     let full_text = transcript.full_text.clone();
                     let auto_analyze = {
                         let sm = state_clone.settings_manager.lock().await;
@@ -565,10 +825,11 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                         let handle_analysis = handle_clone.clone();
                         let rec_id_analysis = recording_id_clone.clone();
                         tokio::spawn(async move {
-                            run_meeting_analysis_pass(
-                                state_analysis.as_ref(),
+                            run_meeting_analysis_until_written(
+                                &state_analysis,
                                 &handle_analysis,
                                 &rec_id_analysis,
+                                MeetingAnalysisMode::Automatic,
                             )
                             .await;
                         });
@@ -626,6 +887,20 @@ pub(crate) async fn run_meeting_transcription_pipeline(
                     "Meeting transcription for {} was interrupted by sidecar shutdown; leaving it processing for startup recovery",
                     recording_id_clone
                 );
+                return;
+            }
+            if wait_budget.memory_deferred() {
+                tracing::info!(
+                    "Final transcription for {} is pending memory: {}",
+                    recording_id_clone,
+                    e
+                );
+                defer_meeting_transcription(
+                    state_clone.as_ref(),
+                    &handle_clone,
+                    &recording_id_clone,
+                )
+                .await;
                 return;
             }
             tracing::error!("Failed to transcribe {}: {}", recording_id_clone, e);
@@ -713,4 +988,61 @@ pub(crate) async fn run_meeting_transcription_pipeline(
 
 pub(crate) fn meeting_pipeline_failure_should_be_persisted(sidecar_shutting_down: bool) -> bool {
     !sidecar_shutting_down
+}
+
+#[cfg(test)]
+mod capture_completeness_tests {
+    use super::meeting_completion_degraded_reason;
+
+    #[test]
+    fn no_loss_is_complete() {
+        assert_eq!(meeting_completion_degraded_reason(Ok(None), None), None);
+        assert_eq!(
+            meeting_completion_degraded_reason(Ok(Some(" ".into())), Some(" ")),
+            None
+        );
+    }
+
+    #[test]
+    fn saved_capture_loss_survives_successful_retranscription() {
+        let summary = "Part of this conversation was not saved.";
+        for _ in 0..2 {
+            assert_eq!(
+                meeting_completion_degraded_reason(Ok(Some(summary.into())), None).as_deref(),
+                Some(summary)
+            );
+        }
+    }
+
+    #[test]
+    fn capture_and_asr_reasons_are_both_preserved() {
+        assert_eq!(
+            meeting_completion_degraded_reason(
+                Ok(Some("Missing saved audio.".into())),
+                Some(" Part could not be transcribed. ")
+            )
+            .as_deref(),
+            Some("Missing saved audio. Part could not be transcribed.")
+        );
+        assert_eq!(
+            meeting_completion_degraded_reason(Ok(None), Some("Part could not be transcribed."))
+                .as_deref(),
+            Some("Part could not be transcribed.")
+        );
+    }
+
+    #[test]
+    fn metadata_read_failure_keeps_incomplete_provenance() {
+        let reason = meeting_completion_degraded_reason(
+            Err("database unavailable".into()),
+            Some("ASR was partial."),
+        )
+        .unwrap();
+        assert!(reason.contains("could not be checked"));
+        assert!(reason.contains("ASR was partial."));
+        assert!(!reason.contains("database unavailable"));
+        assert!(
+            meeting_completion_degraded_reason(Err("database unavailable".into()), None).is_some()
+        );
+    }
 }

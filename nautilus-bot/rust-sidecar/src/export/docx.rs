@@ -337,7 +337,7 @@ mod tests {
             let mut file = archive.by_index(index).expect("zip entry");
             let mut contents = String::new();
             file.read_to_string(&mut contents).expect("utf-8 part");
-            out.push((file.name().to_string(), contents));
+            out.push((file.name().expect("zip entry name").into_owned(), contents));
         }
         out
     }

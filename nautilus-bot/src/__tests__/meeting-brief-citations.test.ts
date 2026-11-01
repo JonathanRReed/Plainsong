@@ -23,6 +23,7 @@ function related(overrides: Partial<RelatedMeeting> = {}): RelatedMeeting {
     createdAt: "2026-08-26T15:30:00Z",
     reason: { sharedAttendees: 1, titleMatch: true },
     sharedAttendeeNames: ["Alice"],
+    needsReview: false,
     summary: "Shipped the importer.",
     openItems: [],
     decisions: [],

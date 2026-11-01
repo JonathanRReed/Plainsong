@@ -84,3 +84,14 @@ describe("describeSidecarLoss", () => {
     );
   });
 });
+
+
+describe("credential startup failures", () => {
+  it("offers explicit recovery without implying an automatic restart", () => {
+    const event = parseSidecarRuntimeEvent({ ready: false, reason: "credential_required" });
+    expect(event?.reason).toBe("credential_required");
+    expect(describeSidecarLoss(event!.reason)).toMatchObject({
+      recovering: false, action: "unlock_credentials",
+    });
+  });
+});

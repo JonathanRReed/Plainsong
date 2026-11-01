@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import {
   parseStoredActionItem,
   parseStoredActionItems,
+  serializeActionItem,
 } from "@/lib/action-items";
 import { ActionItemList } from "@/components/views/meetings/action-item-list";
 
@@ -79,5 +80,18 @@ describe("ActionItemList", () => {
   it("renders nothing when there is nothing saved", () => {
     const { container } = render(<ActionItemList items={["  "]} />);
     expect(container.firstChild).toBeNull();
+  });
+});
+
+
+describe("serializeActionItem", () => {
+  it("round-trips conditional dates and internal task whitespace", () => {
+    expect(parseStoredActionItem(serializeActionItem("Send  deck", "Jane", "after approval"))).toMatchObject({ task: "Send  deck", owner: "Jane", dueDate: "after approval" });
+  });
+  it("rejects multiline and ambiguous field values", () => {
+    expect(() => serializeActionItem("", "", "")).toThrow();
+    expect(() => serializeActionItem("First\nSecond", "", "")).toThrow();
+    expect(() => serializeActionItem("Send deck", "Jane · Due: now", "")).toThrow();
+    expect(() => serializeActionItem("Task (Owner: fake)", "", "")).toThrow();
   });
 });

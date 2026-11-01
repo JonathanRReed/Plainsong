@@ -5,11 +5,18 @@
   routed here by scripts/sign-macos.mjs.
 
   One key, matching the Speech helper's shape: the binary that reads the
-  calendar holds the calendar entitlement, and nothing else in the bundle does.
-  The main app carries microphone, Apple Events and — at runtime — the
-  Accessibility grant that lets it type into every application; adding calendar
-  reading to THAT signature would have widened the blast radius of the one
-  process with the most to lose, to save compiling 300 lines of Swift.
+  calendar holds the calendar entitlement as the accessing process. Calendar
+  reading stays in this binary: the main app never links EventKit.
+
+  The main app ALSO carries this one entitlement, and must. TCC attributes the
+  helper's request to the responsible process (the app), and the hardened
+  runtime refuses to prompt for a responsible process whose signature lacks
+  it — 0.9.0-beta.6 shipped without it and Connect calendar silently did
+  nothing. See the note in entitlements.mac.plist.
+
+  The address book entitlement is for the same reason: when the user turns on
+  Contacts names for dictation, this helper reads the names (only names) and
+  the app holds the matching entitlement.
 
   Deliberately absent: microphone and audio-input (this helper never opens a
   device), Apple Events (it drives no other application), JIT and
@@ -17,6 +24,8 @@
 -->
 <plist version="1.0">
   <dict>
+    <key>com.apple.security.personal-information.addressbook</key>
+    <true/>
     <key>com.apple.security.personal-information.calendars</key>
     <true/>
   </dict>

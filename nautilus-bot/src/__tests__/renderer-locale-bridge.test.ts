@@ -89,10 +89,14 @@ describe("the argument the main process passes to every renderer", () => {
     // failure this catches.
     const windows = source("electron/windows.ts");
     const main = source("electron/main.ts");
+    // Both overlays are built by one shared constructor, so a single
+    // `additionalArguments` covers both of them.
     expect(
       [...windows.matchAll(/additionalArguments:/g)].length,
-      "both overlay windows must carry the locale",
-    ).toBe(2);
+      "the shared overlay constructor must carry the locale",
+    ).toBe(1);
+    expect(windows).toContain('return createOverlayWindow("dictation");');
+    expect(windows).toContain('return createOverlayWindow("recording");');
     expect(main).toContain("additionalArguments: [...rendererAdditionalArguments()]");
   });
 

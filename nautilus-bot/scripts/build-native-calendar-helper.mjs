@@ -46,6 +46,8 @@ const compile = spawnSync(
     "-target",
     deploymentTarget,
     "-framework",
+    "Contacts",
+    "-framework",
     "EventKit",
     "-framework",
     "Foundation",

@@ -72,6 +72,7 @@ describe("AppCommandPalette", () => {
       outputText: "- one\n- two\n- three",
       targetScope: "selection",
       pasted: true,
+      confirmed: true,
       copied: false,
       usedAi: true,
     });
@@ -85,6 +86,51 @@ describe("AppCommandPalette", () => {
     });
 
     expect(await screen.findByText(/Bulletized selected text/i)).toBeInTheDocument();
+    expect(screen.getByRole("status", { hidden: true })).toHaveClass("border-l-gold");
+  });
+
+  it.each([false, undefined])(
+    "shows an info toast for an unconfirmed Quick Fix: %s",
+    async (confirmed) => {
+      transformSelectedText.mockResolvedValue({
+        commandKey: "proofread_text",
+        inputText: "teh text",
+        outputText: "the text",
+        targetScope: "selection",
+        pasted: true,
+        confirmed,
+        copied: false,
+        usedAi: true,
+      });
+      renderPalette(true);
+      fireEvent.click(screen.getByText("Fix Spelling and Grammar"));
+
+      expect(await screen.findByText(
+        "Quick Fix sent to selected text. Check the target to confirm the change.",
+      )).toBeInTheDocument();
+      expect(screen.getByRole("status", { hidden: true })).toHaveClass("border-l-muted");
+      expect(screen.getByRole("status", { hidden: true })).not.toHaveClass("border-l-gold");
+    },
+  );
+
+  it("shows copied recovery in an info toast for an unconfirmed Quick Fix", async () => {
+    transformSelectedText.mockResolvedValue({
+      commandKey: "proofread_text",
+      inputText: "teh text",
+      outputText: "the text",
+      targetScope: "focused_field",
+      pasted: true,
+      confirmed: false,
+      copied: true,
+      usedAi: true,
+    });
+    renderPalette(true);
+    fireEvent.click(screen.getByText("Fix Spelling and Grammar"));
+
+    expect(await screen.findByText(
+      "Quick Fix sent to focused field. Check the target to confirm the change. Result is on the clipboard; paste it manually if needed.",
+    )).toBeInTheDocument();
+    expect(screen.getByRole("status", { hidden: true })).toHaveClass("border-l-muted");
   });
 
   it("shows an error toast when the action fails", async () => {

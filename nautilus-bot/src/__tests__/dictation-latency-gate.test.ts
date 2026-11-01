@@ -3,7 +3,7 @@ import {
   BETA_REFERENCE_BUDGETS,
   PIPELINE_BUDGETS,
   verifyDictationLatencyReport,
-} from "../../scripts/verify-dictation-latency.mjs";
+} from "../../scripts/verify-dictation-latency.ts";
 
 function validReport(overrides: Record<string, unknown> = {}) {
   return {

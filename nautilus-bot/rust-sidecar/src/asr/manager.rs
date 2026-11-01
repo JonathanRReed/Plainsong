@@ -2,6 +2,7 @@ use super::{
     platform::{
         macos_speech::AppleSpeechReadiness, EngineDiagnostics, EngineProbe, PlatformEngine,
     },
+    provider_cache::ProviderCache,
     AsrProvider, AsrProviderFactory, AsrProviderType, DownloadStatus, ModelInfo,
     TranscriptionOptions, TranscriptionResult,
 };
@@ -11,6 +12,200 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Provider-default dispatch leaves runtime selection to the provider. Keep
+/// its concrete engine instead of replacing it with that dispatch placeholder.
+fn reported_provider_engine(engine: PlatformEngine, reported: Option<String>) -> Option<String> {
+    if engine == PlatformEngine::ProviderDefault {
+        reported.or_else(|| Some(engine.id().to_string()))
+    } else {
+        Some(engine.id().to_string())
+    }
+}
+
+fn restore_source_timestamps(
+    mut result: TranscriptionResult,
+    timeline: Option<&crate::audio::utils::RetainedFrameTimeline>,
+) -> TranscriptionResult {
+    let Some(timeline) = timeline.filter(|timeline| !timeline.is_identity()) else {
+        return result;
+    };
+    let mapped_segments: Option<Vec<_>> = result
+        .segments
+        .iter()
+        .map(|segment| timeline.map_span(segment.start_time, segment.end_time))
+        .collect();
+    let Some(mapped_segments) = mapped_segments else {
+        result.segments.clear();
+        result.measured_word_timestamps = false;
+        result.speaker_turns.clear();
+        return result;
+    };
+    for (segment, (start, end)) in result.segments.iter_mut().zip(mapped_segments) {
+        segment.start_time = start;
+        segment.end_time = end;
+    }
+    result.speaker_turns.retain_mut(|turn| {
+        let Some((start, end)) = timeline.map_span(turn.start_time, turn.end_time) else {
+            return false;
+        };
+        turn.start_time = start;
+        turn.end_time = end;
+        true
+    });
+    result
+}
+
+async fn run_owned_asr_task_and_cleanup<T, Work, WorkFuture, Cleanup, CleanupFuture>(
+    work: Work,
+    cleanup: Cleanup,
+) -> std::result::Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    Work: FnOnce() -> WorkFuture + Send + 'static,
+    WorkFuture: std::future::Future<Output = T> + Send + 'static,
+    Cleanup: FnOnce() -> CleanupFuture + Send + 'static,
+    CleanupFuture: std::future::Future<Output = ()> + Send + 'static,
+{
+    let waiter_attached = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let worker_waiter_attached = Arc::clone(&waiter_attached);
+    let task = tokio::spawn(async move {
+        let result = work().await;
+        if !worker_waiter_attached.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::info!("Finishing cancelled ASR work before releasing its runtime");
+        }
+        cleanup().await;
+        result
+    });
+
+    struct DetachOnDrop(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DetachOnDrop {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+    let _detach_on_drop = DetachOnDrop(waiter_attached);
+    task.await
+}
+
+async fn run_owned_asr_task<T, Work, WorkFuture, Cleanup, CleanupFuture>(
+    work: Work,
+    cleanup: Cleanup,
+) -> std::result::Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    Work: FnOnce() -> WorkFuture + Send + 'static,
+    WorkFuture: std::future::Future<Output = T> + Send + 'static,
+    Cleanup: FnOnce() -> CleanupFuture + Send + 'static,
+    CleanupFuture: std::future::Future<Output = ()> + Send + 'static,
+{
+    run_owned_asr_task_and_cleanup(work, move || async move {
+        tokio::spawn(cleanup());
+    })
+    .await
+}
+
+async fn time_benchmark_work<T>(work: impl std::future::Future<Output = T>) -> (T, u64) {
+    let start = tokio::time::Instant::now();
+    let result = work.await;
+    (result, start.elapsed().as_millis() as u64)
+}
+
+async fn run_gated_cache_release<F, Fut, T>(
+    decision: F,
+    clear: impl FnOnce(&crate::llm::native_runtime_gate::RuntimePermit<'_>),
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    run_gated_cache_release_from(
+        &crate::llm::native_runtime_gate::NATIVE_RUNTIME,
+        decision,
+        clear,
+    )
+    .await;
+}
+
+async fn run_gated_cache_release_from<F, Fut, T>(
+    runtime_gate: &crate::llm::native_runtime_gate::RuntimeGate,
+    mut decision: F,
+    clear: impl FnOnce(&crate::llm::native_runtime_gate::RuntimePermit<'_>),
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    // Inspect keep-warm before waiting, then recheck under the gate. Never
+    // hold settings locked while another native operation finishes.
+    if decision().await.is_none() {
+        return;
+    }
+    let gate = match runtime_gate.acquire_when_available().await {
+        Ok(gate) => gate,
+        Err(error) => {
+            tracing::warn!("Final dictation cache release refused: {error}");
+            return;
+        }
+    };
+    if let Some(_decision_guard) = decision().await {
+        clear(&gate);
+    }
+}
+
+const BENCHMARK_ERROR_MESSAGE_LIMIT: usize = 512;
+
+fn bounded_benchmark_error_message(error: impl std::fmt::Display) -> String {
+    let message: String = error
+        .to_string()
+        .chars()
+        .take(BENCHMARK_ERROR_MESSAGE_LIMIT)
+        .collect();
+    if message.trim().is_empty() {
+        "Benchmark failed".to_string()
+    } else {
+        message
+    }
+}
+
+fn benchmark_result_from_outcome(
+    provider_type: AsrProviderType,
+    provider_name: String,
+    model_id: String,
+    processing_time_ms: u64,
+    outcome: std::result::Result<(String, f64), String>,
+) -> BenchmarkResult {
+    match outcome {
+        Ok((transcription, confidence)) => BenchmarkResult {
+            provider_type,
+            provider_name,
+            model_id,
+            runtime_status: RuntimeStatus::Ready,
+            non_empty_transcript: !transcription.trim().is_empty(),
+            processing_time_ms,
+            transcription,
+            confidence,
+            error_message: None,
+        },
+        Err(error) => BenchmarkResult {
+            provider_type,
+            provider_name,
+            model_id,
+            runtime_status: RuntimeStatus::Error,
+            non_empty_transcript: false,
+            processing_time_ms,
+            transcription: String::new(),
+            // The existing wire and persistence contracts require a number.
+            // Runtime status and non-empty transcript determine usability.
+            confidence: 0.0,
+            error_message: Some(bounded_benchmark_error_message(error)),
+        },
+    }
+}
+
+#[derive(Clone)]
+enum BenchmarkInput {
+    Path(PathBuf),
+    Bytes(Arc<Vec<u8>>),
+}
 
 // Parakeet legacy 110M: one sherpa-onnx CTC graph plus tokens. `encoder.onnx`
 // is what `scripts/provision-asr-assets.mjs` writes; `model.onnx` is what older
@@ -26,6 +221,14 @@ const PARAKEET_V3_REQUIRED_FILES: [(&str, u64); 4] = [
     ("decoder.int8.onnx", 1024 * 1024),
     ("joiner.int8.onnx", 512 * 1024),
     ("tokens.txt", 4096),
+];
+const ORUKEET_REQUIRED_FILES: [(&str, u64); 6] = [
+    ("encoder.int8.onnx", 64 * 1024 * 1024),
+    ("decoder.int8.onnx", 1024 * 1024),
+    ("joiner.int8.onnx", 512 * 1024),
+    ("tokens.txt", 4096),
+    ("LICENSE-WEIGHTS", 1024),
+    ("NOTICE.md", 512),
 ];
 // Whisper Candle: Whisper Large V3 Turbo via Candle (no Python)
 const WHISPER_CANDLE_REQUIRED_FILES: [&str; 4] = [
@@ -58,19 +261,62 @@ pub struct AsrManager {
     silence_skip_enabled: RwLock<bool>,
     platform_optimization: RwLock<crate::settings::PlatformOptimizationSettings>,
     last_runtime_errors: RwLock<HashMap<AsrProviderType, String>>,
-    provider_inventory_cache: RwLock<Option<Vec<ProviderInventory>>>,
-    provider_info_cache: RwLock<Option<Vec<ProviderInfo>>>,
+    provider_inventory_cache: ProviderCache<ProviderInventory>,
+    provider_info_cache: ProviderCache<ProviderInfo>,
     remote_processing_gate: RwLock<Option<Arc<crate::remote_processing::RemoteProcessingGate>>>,
     models_dir: PathBuf,
 }
 
 fn has_provider_secret_or_env(secret_name: &str, env_name: &str) -> bool {
-    match crate::secrets::get_provider_secret(secret_name) {
-        Ok(Some(secret)) if !secret.trim().is_empty() => true,
+    // Provider diagnostics are passive; never unlock credentials or migrate
+    // secrets while populating the model picker or startup readiness.
+    match crate::secrets::has_provider_secret(secret_name) {
+        Ok(true) => true,
         _ => std::env::var(env_name)
             .ok()
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false),
+    }
+}
+
+fn clear_local_route_cache(models_dir: &Path, provider_type: AsrProviderType, model_id: &str) {
+    match provider_type {
+        AsrProviderType::Whisper => super::whisper::clear_cached_model(model_id),
+        AsrProviderType::WhisperCandle => {
+            super::whisper_candle::clear_cached_runtime(&models_dir.join("canary"));
+        }
+        AsrProviderType::DistilWhisper => super::distil_whisper::clear_cached_runtime(),
+        AsrProviderType::Moonshine => {
+            let model_dir = if model_id == "moonshine-tiny" {
+                models_dir.join("moonshine_tiny")
+            } else {
+                models_dir.join("moonshine")
+            };
+            super::moonshine::clear_cached_runtime(&model_dir);
+        }
+        AsrProviderType::Parakeet => {
+            super::parakeet::clear_cached_model_runtime(models_dir, model_id)
+        }
+        AsrProviderType::Qwen3Asr => {
+            super::qwen3_asr::clear_cached_runtime(&models_dir.join("qwen3_asr"));
+        }
+        AsrProviderType::CohereLocal => super::cohere_local::clear_cached_runtime(
+            &models_dir.join(super::cohere_local::COHERE_LOCAL_MODEL_DIR),
+        ),
+        #[cfg(feature = "asr-transcribe-cpp")]
+        AsrProviderType::TranscribeCpp => {
+            let model_path = models_dir
+                .join(super::transcribe_cpp::TRANSCRIBE_CPP_MODEL_DIR)
+                .join(super::transcribe_cpp::route_spec_for(model_id).file_name);
+            super::transcribe_cpp::clear_cached_runtime_for_model(&model_path);
+            // The same model may be resident on the Neural Engine instead.
+            if super::transcribe_cpp::route_spec_for(model_id).model_id
+                == super::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+            {
+                super::neural_engine::stop_helper();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -104,8 +350,8 @@ impl AsrManager {
             meeting_mlx_enabled: RwLock::new(false),
             transcription_language: RwLock::new(None),
             last_runtime_errors: RwLock::new(HashMap::new()),
-            provider_inventory_cache: RwLock::new(None),
-            provider_info_cache: RwLock::new(None),
+            provider_inventory_cache: ProviderCache::new(),
+            provider_info_cache: ProviderCache::new(),
             remote_processing_gate: RwLock::new(None),
             models_dir,
         }
@@ -134,6 +380,7 @@ impl AsrManager {
             AsrProviderType::Parakeet => match candidate {
                 "parakeet-tdt-0.6b-v2" => "parakeet-tdt-0.6b-v2".to_string(),
                 "parakeet-tdt-0.6b-v3" => "parakeet-tdt-0.6b-v3".to_string(),
+                "orukeet-v0.1.0-int8" => "orukeet-v0.1.0-int8".to_string(),
                 "parakeet-tdt-ctc-110m" | "parakeet-legacy-110m" => {
                     "parakeet-tdt-ctc-110m".to_string()
                 }
@@ -379,6 +626,26 @@ impl AsrManager {
     }
 
     pub async fn cool_down_local_route(&self, provider_type: AsrProviderType, model_id: &str) {
+        let (provider_type, model_id) = self
+            .resolved_local_route_for_cleanup(provider_type, model_id)
+            .await;
+        let _cleanup_gate = match crate::llm::local_model_load::acquire_cleanup_gate().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                tracing::warn!(
+                    "Could not acquire the native runtime gate for cache cleanup: {error}"
+                );
+                return;
+            }
+        };
+        self.clear_resolved_local_route_after_gate(provider_type, &model_id, &_cleanup_gate);
+    }
+
+    pub(crate) async fn resolved_local_route_for_cleanup(
+        &self,
+        provider_type: AsrProviderType,
+        model_id: &str,
+    ) -> (AsrProviderType, String) {
         let normalized = Self::normalize_model_id(provider_type, model_id);
         let optimization = self.platform_optimization().await;
         let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
@@ -388,52 +655,31 @@ impl AsrManager {
             &optimization,
             mlx_accelerated_providers.contains(&provider_type),
         );
-        match effective.provider_type {
-            AsrProviderType::Whisper => super::whisper::clear_cached_model(&normalized),
-            AsrProviderType::WhisperCandle => {
-                super::whisper_candle::clear_cached_runtime(&self.models_dir.join("canary"));
-            }
-            AsrProviderType::DistilWhisper => {
-                super::distil_whisper::clear_cached_runtime();
-            }
-            AsrProviderType::Moonshine => {
-                let model_dir = if effective.model_id == "moonshine-tiny" {
-                    self.models_dir.join("moonshine_tiny")
-                } else {
-                    self.models_dir.join("moonshine")
-                };
-                super::moonshine::clear_cached_runtime(&model_dir);
-            }
-            AsrProviderType::Parakeet => {
-                super::parakeet::clear_cached_session();
-            }
-            AsrProviderType::Qwen3Asr => {
-                super::qwen3_asr::clear_cached_runtime(&self.models_dir.join("qwen3_asr"));
-            }
-            AsrProviderType::CohereLocal => {
-                super::cohere_local::clear_cached_runtime(
-                    &self
-                        .models_dir
-                        .join(super::cohere_local::COHERE_LOCAL_MODEL_DIR),
-                );
-            }
-            #[cfg(feature = "asr-transcribe-cpp")]
-            AsrProviderType::TranscribeCpp => {
-                super::transcribe_cpp::clear_cached_runtime();
-            }
-            _ => {}
-        }
+        (effective.provider_type, effective.model_id)
+    }
+
+    /// Caller must hold the native cleanup gate through this synchronous call.
+    pub(crate) fn clear_resolved_local_route_after_gate(
+        &self,
+        provider_type: AsrProviderType,
+        model_id: &str,
+        _gate: &crate::llm::native_runtime_gate::RuntimePermit<'_>,
+    ) {
+        clear_local_route_cache(&self.models_dir, provider_type, model_id);
     }
 
     pub async fn invalidate_provider_info_cache(&self) {
-        *self.provider_inventory_cache.write().await = None;
-        *self.provider_info_cache.write().await = None;
+        self.provider_inventory_cache.invalidate().await;
+        self.provider_info_cache.invalidate().await;
     }
 
     pub async fn get_provider_inventory(&self) -> Result<Vec<ProviderInventory>, String> {
+        let (cache_generation, cached_inventory) = self.provider_inventory_cache.snapshot().await;
         let apple_speech_readiness = Self::fresh_apple_speech_readiness().await?;
-        let cached_inventory = self.provider_inventory_cache.read().await.clone();
         if let Some(mut cached) = cached_inventory {
+            for provider in &mut cached {
+                provider.model_download_bytes = model_download_bytes(provider.provider_type);
+            }
             if let Some(apple) = cached
                 .iter_mut()
                 .find(|provider| provider.provider_type == AsrProviderType::MacosAppleSpeech)
@@ -441,11 +687,15 @@ impl AsrManager {
                 apple.is_available = apple_speech_readiness.ready;
                 apple.platform_readiness = Some(apple_speech_readiness);
             }
-            *self.provider_inventory_cache.write().await = Some(cached.clone());
+            self.provider_inventory_cache
+                .publish(cache_generation, cached.clone())
+                .await;
             return Ok(cached);
         }
 
         let provider_models = self.provider_model_map().await;
+        let optimization = self.platform_optimization().await;
+        let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
 
         let futures = AsrProviderType::all().into_iter().map(|provider_type| {
             let apple_speech_readiness = apple_speech_readiness.clone();
@@ -453,11 +703,21 @@ impl AsrManager {
                 .get(&provider_type)
                 .cloned()
                 .unwrap_or_else(|| provider_type.default_model_id().to_string());
+            let effective = Self::effective_provider_selection(
+                provider_type,
+                selected_model.as_str(),
+                &optimization,
+                mlx_accelerated_providers.contains(&provider_type),
+            );
 
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let provider =
+                    let visible_provider =
                         Self::provider_with_model(provider_type, Some(selected_model.as_str()));
+                    let provider = Self::provider_with_model(
+                        effective.provider_type,
+                        Some(effective.model_id.as_str()),
+                    );
                     let platform_readiness = match provider_type {
                         AsrProviderType::MacosAppleSpeech => Some(apple_speech_readiness),
                         _ => None,
@@ -468,13 +728,16 @@ impl AsrManager {
                         .unwrap_or_else(|| provider.is_available());
                     ProviderInventory {
                         provider_type,
-                        name: provider.name().to_string(),
-                        description: provider.description().to_string(),
+                        name: visible_provider.name().to_string(),
+                        description: visible_provider.description().to_string(),
                         is_available,
-                        inference_enabled: Self::is_provider_transcription_enabled(provider_type),
+                        inference_enabled: Self::is_provider_transcription_enabled(
+                            effective.provider_type,
+                        ),
                         selected_model_id: selected_model,
                         model_options: provider_type.model_options(),
                         download_status: provider.download_status(),
+                        model_download_bytes: model_download_bytes(provider_type),
                         platform_readiness,
                     }
                 })
@@ -493,7 +756,9 @@ impl AsrManager {
             }
         }
 
-        *self.provider_inventory_cache.write().await = Some(inventory.clone());
+        self.provider_inventory_cache
+            .publish(cache_generation, inventory.clone())
+            .await;
         Ok(inventory)
     }
 
@@ -505,14 +770,14 @@ impl AsrManager {
 
     /// Whether the provider has active transcription inference in this build.
     ///
-    /// This is the seam a provider sits behind while its runtime is still
-    /// unproven. Nothing is behind it today: Qwen3-ASR, the last occupant,
-    /// left on 2026-09-01 once its real-audio eval passed (see
-    /// `qwen3_asr_real_audio_eval` in asr/qwen3_asr.rs). The flag still
-    /// reaches the UI as `inferenceEnabled`, so a future provider can ship
-    /// downloadable-but-not-selectable without a schema change.
-    pub fn is_provider_transcription_enabled(_provider_type: AsrProviderType) -> bool {
-        true
+    /// Native Moonshine remains blocked by the route-readiness gate until its
+    /// runtime is validated. Call with the effective provider after routing.
+    pub fn is_provider_transcription_enabled(provider_type: AsrProviderType) -> bool {
+        match provider_type {
+            AsrProviderType::Moonshine => false,
+            AsrProviderType::Whistle => cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            _ => true,
+        }
     }
 
     /// Get the default provider
@@ -533,11 +798,20 @@ impl AsrManager {
         provider_type: AsrProviderType,
     ) -> RuntimeDiagnostics {
         let selected_model = self.provider_model_id(provider_type).await;
+        self.get_runtime_diagnostics_for_model(provider_type, &selected_model)
+            .await
+    }
+
+    pub async fn get_runtime_diagnostics_for_model(
+        &self,
+        provider_type: AsrProviderType,
+        selected_model: &str,
+    ) -> RuntimeDiagnostics {
         let optimization = self.platform_optimization().await;
         let mlx_accelerated_providers = self.mlx_accelerated_providers().await;
         let effective = Self::effective_provider_selection(
             provider_type,
-            selected_model.as_str(),
+            selected_model,
             &optimization,
             mlx_accelerated_providers.contains(&provider_type),
         );
@@ -603,10 +877,10 @@ impl AsrManager {
             mlx_enabled,
         );
 
-        // Pre-process: remove silence from audio bytes if enabled
-        let processed_bytes: Option<Vec<u8>> = if skip_silence {
-            audio_data.and_then(|bytes| {
-                match crate::audio::utils::remove_silence_from_wav_bytes(bytes) {
+        // Optional compaction retains quiet speech and maps results back to source time.
+        let processed = if skip_silence {
+            audio_data.and_then(
+                |bytes| match crate::audio::utils::compact_digital_silence(bytes) {
                     Ok(filtered) => Some(filtered),
                     Err(e) => {
                         tracing::warn!(
@@ -615,12 +889,16 @@ impl AsrManager {
                         );
                         None
                     }
-                }
-            })
+                },
+            )
         } else {
             None
         };
-        let effective_audio_data = processed_bytes.as_deref().or(audio_data);
+        let effective_audio_data = processed
+            .as_ref()
+            .map(|wav| wav.bytes.as_slice())
+            .or(audio_data);
+        let timeline = processed.as_ref().map(|wav| &wav.timeline);
 
         let mut attempt_errors: Vec<String> = Vec::new();
         let requested_engine =
@@ -665,7 +943,7 @@ impl AsrManager {
                             )
                             .await
                         {
-                            Ok(result) => return Ok(result),
+                            Ok(result) => return Ok(restore_source_timestamps(result, timeline)),
                             Err(error) => {
                                 attempt_errors.push(format!(
                                     "Engine '{}' failed: {}; {}",
@@ -716,7 +994,7 @@ impl AsrManager {
             )
             .await
         {
-            Ok(result) => return Ok(result),
+            Ok(result) => return Ok(restore_source_timestamps(result, timeline)),
             Err(primary_error) => {
                 attempt_errors.push(format!(
                     "{} failed: {}",
@@ -775,7 +1053,9 @@ impl AsrManager {
             optimization_applied: true,
             fallback_reason: None,
             vocabulary_hint_terms_applied: 0,
+            measured_word_timestamps: false,
             speaker_turns: Vec::new(),
+            vocabulary_candidates: Vec::new(),
         })
     }
 
@@ -828,9 +1108,11 @@ impl AsrManager {
                     .remove(&actual_provider);
                 result.requested_provider = requested_provider;
                 result.actual_provider = actual_provider;
-                result.requested_engine = Some(requested_engine.id().to_string());
-                result.actual_engine = Some(actual_engine.id().to_string());
-                result.optimization_applied = optimization_applied;
+                result.requested_engine =
+                    reported_provider_engine(requested_engine, result.requested_engine);
+                result.actual_engine =
+                    reported_provider_engine(actual_engine, result.actual_engine);
+                result.optimization_applied |= optimization_applied;
                 if result.model_id.trim().is_empty() {
                     result.model_id = model_id.to_string();
                 }
@@ -984,15 +1266,24 @@ impl AsrManager {
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
-        self.transcribe_inner(
-            provider_type,
-            None,
-            Some(audio_data),
-            selected_model,
-            None,
-            &TranscriptionOptions::default(),
-        )
-        .await
+        let mut options =
+            meeting_spelling_options(provider_type, self.transcription_language().await);
+        options.request_speaker_labels = false;
+        let mut result = self
+            .transcribe_inner(
+                provider_type,
+                None,
+                Some(audio_data),
+                selected_model,
+                None,
+                &options,
+            )
+            .await?;
+        crate::dictation_vocabulary::apply_to_meeting_result(
+            &mut result,
+            &options.acoustic_vocabulary,
+        );
+        Ok(result)
     }
 
     /// Transcribe bytes for the dictation route slot (uses per-slot dictation MLX flag).
@@ -1034,6 +1325,105 @@ impl AsrManager {
         .await
     }
 
+    /// Run a final dictation decode with the selected cache-retention policy.
+    ///
+    /// Local decodes whose cache must be released run in an owned task. If the
+    /// session caller is cancelled, that task keeps the provider future alive
+    /// through native completion and only then takes the cleanup gate and
+    /// clears the exact route used by this request.
+    pub async fn transcribe_bytes_for_dictation_with_cache_policy(
+        self: &Arc<Self>,
+        provider_type: AsrProviderType,
+        audio_data: &[u8],
+        selected_model: Option<&str>,
+        options: &TranscriptionOptions,
+        keep_warm: bool,
+    ) -> Result<TranscriptionResult> {
+        if keep_warm || provider_type.is_remote() {
+            return self
+                .transcribe_bytes_for_dictation_with_options(
+                    provider_type,
+                    audio_data,
+                    selected_model,
+                    options,
+                )
+                .await;
+        }
+
+        self.transcribe_bytes_for_dictation_with_release_decision(
+            provider_type,
+            audio_data,
+            selected_model,
+            options,
+            || async { Some(()) },
+        )
+        .await
+    }
+
+    /// Evaluate retention after native completion, with a decision guard held
+    /// through eviction. Production returns the locked current settings here.
+    pub(crate) async fn transcribe_bytes_for_dictation_with_release_decision<F, Fut, T>(
+        self: &Arc<Self>,
+        provider_type: AsrProviderType,
+        audio_data: &[u8],
+        selected_model: Option<&str>,
+        options: &TranscriptionOptions,
+        decision: F,
+    ) -> Result<TranscriptionResult>
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Option<T>> + Send,
+        T: Send,
+    {
+        if provider_type.is_remote() {
+            return self
+                .transcribe_bytes_for_dictation_with_options(
+                    provider_type,
+                    audio_data,
+                    selected_model,
+                    options,
+                )
+                .await;
+        }
+        let model_id = match selected_model {
+            Some(model) => Self::normalize_model_id(provider_type, model),
+            None => self.provider_model_id(provider_type).await,
+        };
+        let worker_manager = Arc::clone(self);
+        let cleanup_manager = Arc::clone(self);
+        let worker_model = model_id.clone();
+        let cleanup_route = self
+            .resolved_local_route_for_cleanup(provider_type, &model_id)
+            .await;
+        let audio_data = audio_data.to_vec();
+        let options = options.clone();
+
+        run_owned_asr_task(
+            move || async move {
+                worker_manager
+                    .transcribe_bytes_for_dictation_with_options(
+                        provider_type,
+                        &audio_data,
+                        Some(&worker_model),
+                        &options,
+                    )
+                    .await
+            },
+            move || async move {
+                run_gated_cache_release(decision, move |gate| {
+                    cleanup_manager.clear_resolved_local_route_after_gate(
+                        cleanup_route.0,
+                        &cleanup_route.1,
+                        gate,
+                    );
+                })
+                .await;
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("Owned final dictation task failed to join: {error}"))?
+    }
+
     /// Transcribe bytes for the meeting route slot (uses per-slot meeting MLX flag).
     pub async fn transcribe_bytes_for_meeting(
         &self,
@@ -1041,10 +1431,14 @@ impl AsrManager {
         audio_data: &[u8],
         selected_model: Option<&str>,
     ) -> Result<TranscriptionResult> {
+        if !provider_type.is_remote() {
+            crate::llm::local_model_load::yield_to_dictation().await;
+        }
         // Apple Speech reaches meetings only through SpeechAnalyzer, which is
         // the only one of its two engines that returns the per-segment
         // timestamps the meeting transcript is assembled from.
-        let mut options = meeting_transcription_options(self.transcription_language().await);
+        let mut options =
+            meeting_spelling_options(provider_type, self.transcription_language().await);
         if provider_type == AsrProviderType::MacosAppleSpeech {
             // `meetings_supported` can run a bounded probe when nothing has
             // looked yet, so it does not hold a runtime worker.
@@ -1066,7 +1460,7 @@ impl AsrManager {
                 Some(crate::asr::platform::macos_speech::AppleSpeechEngine::SpeechAnalyzer);
         }
         let mlx_enabled = *self.meeting_mlx_enabled.read().await;
-        let result = self
+        let mut result = self
             .transcribe_inner(
                 provider_type,
                 None,
@@ -1082,6 +1476,10 @@ impl AsrManager {
         {
             return Err(anyhow::anyhow!(refusal));
         }
+        crate::dictation_vocabulary::apply_to_meeting_result(
+            &mut result,
+            &options.acoustic_vocabulary,
+        );
         Ok(result)
     }
 
@@ -1149,9 +1547,12 @@ impl AsrManager {
 
     /// Get info for all providers (Parallelized)
     pub async fn get_all_providers_info(&self) -> Result<Vec<ProviderInfo>, String> {
+        let (cache_generation, cached_info) = self.provider_info_cache.snapshot().await;
         let apple_speech_readiness = Self::fresh_apple_speech_readiness().await?;
-        let cached_info = self.provider_info_cache.read().await.clone();
         if let Some(mut cached) = cached_info {
+            for provider in &mut cached {
+                provider.model_download_bytes = model_download_bytes(provider.provider_type);
+            }
             if let Some(apple) = cached
                 .iter_mut()
                 .find(|provider| provider.provider_type == AsrProviderType::MacosAppleSpeech)
@@ -1187,7 +1588,9 @@ impl AsrManager {
                 );
                 apple.platform_readiness = Some(apple_speech_readiness);
             }
-            *self.provider_info_cache.write().await = Some(cached.clone());
+            self.provider_info_cache
+                .publish(cache_generation, cached.clone())
+                .await;
             return Ok(cached);
         }
 
@@ -1248,7 +1651,9 @@ impl AsrManager {
                             visible_provider.description().to_string()
                         },
                         is_available,
-                        inference_enabled: Self::is_provider_transcription_enabled(provider_type),
+                        inference_enabled: Self::is_provider_transcription_enabled(
+                            effective.provider_type,
+                        ),
                         model_info: provider.model_info(),
                         selected_model_id: selected_model.clone(),
                         model_options: provider_type.model_options(),
@@ -1263,6 +1668,7 @@ impl AsrManager {
                             mlx_enabled,
                             platform_readiness.as_ref(),
                         ),
+                        model_download_bytes: model_download_bytes(provider_type),
                         platform_readiness,
                     }
                 })
@@ -1282,7 +1688,9 @@ impl AsrManager {
             }
         }
 
-        *self.provider_info_cache.write().await = Some(infos.clone());
+        self.provider_info_cache
+            .publish(cache_generation, infos.clone())
+            .await;
         Ok(infos)
     }
 
@@ -1398,6 +1806,22 @@ impl AsrManager {
 
     /// Compare providers with benchmark
     pub async fn benchmark_providers(&self, test_audio: &Path) -> Vec<BenchmarkResult> {
+        self.benchmark_providers_with_input(BenchmarkInput::Path(test_audio.to_path_buf()))
+            .await
+    }
+
+    /// Compare providers using caller-owned audio bytes without creating a
+    /// dispatch-layer copy on disk. Each provider worker owns an `Arc` until
+    /// its real transcription future and cleanup have finished.
+    pub async fn benchmark_providers_bytes(&self, test_audio: Vec<u8>) -> Vec<BenchmarkResult> {
+        self.benchmark_providers_with_input(BenchmarkInput::Bytes(Arc::new(test_audio)))
+            .await
+    }
+
+    async fn benchmark_providers_with_input(
+        &self,
+        test_audio: BenchmarkInput,
+    ) -> Vec<BenchmarkResult> {
         let mut results = Vec::new();
 
         // This aggregate benchmark has no provider-selection or disclosure UI.
@@ -1410,23 +1834,91 @@ impl AsrManager {
                 continue;
             }
 
-            let start = std::time::Instant::now();
-            match provider.transcribe(test_audio).await {
-                Ok(transcription) => {
-                    let non_empty_transcript = !transcription.text.trim().is_empty();
-                    results.push(BenchmarkResult {
+            let provider_name = provider.name().to_string();
+            let benchmark_input = test_audio.clone();
+            let models_dir = self.models_dir.clone();
+            let cleanup_model = selected_model.clone();
+            let (run, joined_processing_time_ms) = time_benchmark_work(run_owned_asr_task_and_cleanup(
+                move || async move {
+                    // A warm-up or another model can hold the native gate for
+                    // a moment; wait for it as the dictation decode does.
+                    let busy_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    let (result, processing_time_ms) = loop {
+                        let attempt = match &benchmark_input {
+                            BenchmarkInput::Path(audio_path) => {
+                                time_benchmark_work(provider.transcribe(audio_path)).await
+                            }
+                            BenchmarkInput::Bytes(audio_bytes) => {
+                                time_benchmark_work(
+                                    provider.transcribe_bytes(audio_bytes.as_slice()),
+                                )
+                                .await
+                            }
+                        };
+                        match &attempt.0 {
+                            Err(error)
+                                if crate::llm::native_runtime_is_busy(&error.to_string())
+                                    && std::time::Instant::now() < busy_deadline =>
+                            {
+                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            }
+                            _ => break attempt,
+                        }
+                    };
+                    drop(provider);
+                    ((result, processing_time_ms), benchmark_input)
+                },
+                move || async move {
+                    let _cleanup_gate = match crate::llm::local_model_load::acquire_cleanup_gate().await {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            tracing::warn!(
+                                provider = ?provider_type,
+                                "Could not acquire the native runtime gate after an ASR benchmark: {error}"
+                            );
+                            return;
+                        }
+                    };
+                    clear_local_route_cache(&models_dir, provider_type, &cleanup_model);
+                },
+            ))
+            .await;
+            let ((transcription, processing_time_ms), _benchmark_input) = match run {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::error!(
+                        provider = ?provider_type,
+                        "ASR benchmark task failed before cleanup completed: {error}"
+                    );
+                    results.push(benchmark_result_from_outcome(
                         provider_type,
-                        provider_name: provider.name().to_string(),
-                        model_id: selected_model.clone(),
-                        runtime_status: RuntimeStatus::Ready,
-                        non_empty_transcript,
-                        processing_time_ms: start.elapsed().as_millis() as u64,
-                        transcription: transcription.text,
-                        confidence: transcription.confidence,
-                    });
+                        provider_name,
+                        selected_model,
+                        joined_processing_time_ms,
+                        Err(format!("Benchmark task failed: {error}")),
+                    ));
+                    continue;
+                }
+            };
+            match transcription {
+                Ok(transcription) => {
+                    results.push(benchmark_result_from_outcome(
+                        provider_type,
+                        provider_name,
+                        selected_model,
+                        processing_time_ms,
+                        Ok((transcription.text, transcription.confidence)),
+                    ));
                 }
                 Err(e) => {
-                    tracing::error!("Benchmark failed for {}: {}", provider.name(), e);
+                    tracing::error!("Benchmark failed for {}: {}", provider_name, e);
+                    results.push(benchmark_result_from_outcome(
+                        provider_type,
+                        provider_name,
+                        selected_model,
+                        processing_time_ms,
+                        Err(e.to_string()),
+                    ));
                 }
             }
         }
@@ -1461,6 +1953,24 @@ pub struct ProviderInfo {
     pub engine_diagnostics: EngineDiagnostics,
     #[serde(default)]
     pub platform_readiness: Option<crate::asr::platform::macos_speech::AppleSpeechReadiness>,
+    /// Bytes a Download fetches per model on this Mac where that is more
+    /// than the catalog's single-file size, keyed by model id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_download_bytes: HashMap<String, u64>,
+}
+
+/// Read fresh on every request, cached inventory or not: the transcription
+/// language picks which Neural Engine build a Parakeet download fetches.
+fn model_download_bytes(provider_type: AsrProviderType) -> HashMap<String, u64> {
+    #[cfg(feature = "asr-transcribe-cpp")]
+    if provider_type == AsrProviderType::TranscribeCpp {
+        return HashMap::from([(
+            super::transcribe_cpp::PARAKEET_GGUF_MODEL_ID.to_string(),
+            super::transcribe_cpp::parakeet_download_bytes(),
+        )]);
+    }
+    let _ = provider_type;
+    HashMap::new()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1476,6 +1986,10 @@ pub struct ProviderInventory {
     pub download_status: DownloadStatus,
     #[serde(default)]
     pub platform_readiness: Option<crate::asr::platform::macos_speech::AppleSpeechReadiness>,
+    /// Bytes a Download fetches per model on this Mac where that is more
+    /// than the catalog's single-file size, keyed by model id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_download_bytes: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1532,6 +2046,8 @@ pub struct BenchmarkResult {
     pub processing_time_ms: u64,
     pub transcription: String,
     pub confidence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 impl Default for AsrManager {
@@ -1560,7 +2076,7 @@ fn runtime_diagnostics_for_provider(
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingModel,
                     runtime_message: Some(
-                        "Whisper model not downloaded yet. Download a model to enable this provider."
+                        "Whisper model isn't downloaded yet. Download it in Settings > Models."
                             .to_string(),
                     ),
                     runtime_details: RuntimeDetails {
@@ -1568,7 +2084,7 @@ fn runtime_diagnostics_for_provider(
                         python_path: None,
                         missing_files: vec![model_file],
                         setup_action: Some(
-                            "Download a Whisper model in Settings -> ASR Models.".to_string(),
+                            "Download a Whisper model in Settings > Models.".to_string(),
                         ),
                     },
                 };
@@ -1576,7 +2092,7 @@ fn runtime_diagnostics_for_provider(
             if provider_available {
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::Ready,
-                    runtime_message: Some("Whisper runtime ready.".to_string()),
+                    runtime_message: Some("Whisper is ready on this Mac.".to_string()),
                     runtime_details: RuntimeDetails {
                         model_path: Some(model_path.to_string_lossy().to_string()),
                         python_path: None,
@@ -1600,29 +2116,17 @@ fn runtime_diagnostics_for_provider(
         }
         AsrProviderType::Parakeet => {
             let normalized_model = AsrManager::normalize_model_id(provider_type, selected_model_id);
-            let legacy = normalized_model == "parakeet-tdt-ctc-110m";
-
             let (model_dir, missing_files) =
                 parakeet_model_dir_and_missing_files(models_root.as_path(), &normalized_model);
 
             if !missing_files.is_empty() {
-                let (message, setup_action) = if legacy {
-                    (
-                        "Parakeet legacy model not downloaded. Download encoder.onnx + tokens.txt from Settings -> ASR Models.".to_string(),
-                        "Download Parakeet legacy artifacts (encoder.onnx + tokens.txt) in Settings -> ASR Models.".to_string(),
-                    )
-                } else {
-                    (
-                        format!(
-                            "Parakeet model '{}' is not downloaded yet.",
-                            normalized_model
-                        ),
-                        format!(
-                            "Download Parakeet TDT {} (encoder + decoder + joiner + tokens) in Settings -> ASR Models.",
-                            normalized_model.strip_prefix("parakeet-tdt-0.6b-").unwrap_or("model")
-                        ),
-                    )
-                };
+                let display_name = provider_type.speech_model_name(&normalized_model);
+                let (message, setup_action) = (
+                    format!(
+                        "{display_name} isn't downloaded yet. Download it in Settings > Models."
+                    ),
+                    format!("Download {display_name} in Settings > Models."),
+                );
                 return RuntimeDiagnosticsInternal {
                     runtime_status: RuntimeStatus::MissingModel,
                     runtime_message: Some(message),
@@ -1642,16 +2146,10 @@ fn runtime_diagnostics_for_provider(
                     RuntimeStatus::Error
                 },
                 runtime_message: Some(last_error.map(ToString::to_string).unwrap_or_else(|| {
-                    if legacy {
-                        "Parakeet legacy ONNX runtime ready.".to_string()
-                    } else {
-                        format!(
-                            "Parakeet TDT {} native ONNX runtime ready.",
-                            normalized_model
-                                .strip_prefix("parakeet-tdt-0.6b-")
-                                .unwrap_or("model")
-                        )
-                    }
+                    format!(
+                        "{} is ready.",
+                        provider_type.speech_model_name(&normalized_model)
+                    )
                 })),
                 runtime_details: RuntimeDetails {
                     model_path: Some(model_dir.to_string_lossy().to_string()),
@@ -1676,10 +2174,10 @@ fn runtime_diagnostics_for_provider(
                 ),
                 MissingModelCopy {
                     message:
-                        "Whisper Candle model not downloaded. Download Whisper Large V3 Turbo safetensors first.",
-                    setup_action: "Download Whisper Candle model assets in Settings -> ASR Models.",
+                        "Whisper Candle isn't downloaded yet. Download it in Settings > Models.",
+                    setup_action: "Download Whisper Candle in Settings > Models.",
                 },
-                "Whisper Candle native local runtime ready.",
+                "Whisper Candle is ready on this Mac.",
                 last_error,
             )
         }
@@ -1698,8 +2196,8 @@ fn runtime_diagnostics_for_provider(
                 ),
                 MissingModelCopy {
                     message:
-                        "Distil-Whisper model not downloaded. Download model.safetensors + config first.",
-                    setup_action: "Download Distil-Whisper model assets in Settings -> ASR Models.",
+                        "Distil-Whisper isn't downloaded yet. Download it in Settings > Models.",
+                    setup_action: "Download Distil-Whisper in Settings > Models.",
                 },
                 "Distil-Whisper native Candle inference ready.",
                 last_error,
@@ -1751,11 +2249,10 @@ fn runtime_diagnostics_for_provider(
                 model_ready,
                 &missing_files,
                 MissingModelCopy {
-                    message:
-                        "Moonshine ONNX model not downloaded. Download encoder_model.onnx + decoder_model_merged.onnx first.",
-                    setup_action: "Re-download Moonshine ONNX assets in Settings -> ASR Models.",
+                    message: "Moonshine isn't downloaded yet. Download it in Settings > Models.",
+                    setup_action: "Download Moonshine again in Settings > Models.",
                 },
-                "Moonshine native ONNX inference ready.",
+                "Moonshine is ready on this Mac.",
                 last_error,
             )
         }
@@ -1769,7 +2266,7 @@ fn runtime_diagnostics_for_provider(
                     RuntimeStatus::MissingRuntime
                 },
                 runtime_message: Some(if provider_available && probe.ready {
-                    "Windows native speech runtime ready.".to_string()
+                    "Windows speech recognition is ready.".to_string()
                 } else if !probe.notes.is_empty() {
                     probe.notes.join(" ")
                 } else {
@@ -1810,7 +2307,10 @@ fn runtime_diagnostics_for_provider(
                     setup_action: if has_key {
                         None
                     } else {
-                        Some("Set ELEVENLABS_API_KEY in Settings -> API Keys.".to_string())
+                        Some(
+                            "Set ELEVENLABS_API_KEY in Settings > Search & AI > API keys."
+                                .to_string(),
+                        )
                     },
                 },
             }
@@ -1839,7 +2339,7 @@ fn runtime_diagnostics_for_provider(
                     setup_action: if has_key {
                         None
                     } else {
-                        Some("Set OPENAI_API_KEY in Settings -> API Keys.".to_string())
+                        Some("Set OPENAI_API_KEY in Settings > Search & AI > API keys.".to_string())
                     },
                 },
             }
@@ -1869,7 +2369,7 @@ fn runtime_diagnostics_for_provider(
                     setup_action: if has_key {
                         None
                     } else {
-                        Some("Get API key from https://console.groq.com/keys and set in Settings -> API Keys.".to_string())
+                        Some("Get API key from https://console.groq.com/keys and set in Settings > Search & AI > API keys.".to_string())
                     },
                 },
             }
@@ -1899,7 +2399,7 @@ fn runtime_diagnostics_for_provider(
                     setup_action: if has_key {
                         None
                     } else {
-                        Some("Get API key from https://dashboard.cohere.com/api-keys and set in Settings -> API Keys.".to_string())
+                        Some("Get API key from https://dashboard.cohere.com/api-keys and set in Settings > Search & AI > API keys.".to_string())
                     },
                 },
             }
@@ -1932,7 +2432,7 @@ fn runtime_diagnostics_for_provider(
                         None
                     } else {
                         Some(
-                            "Get an API key from https://console.mistral.ai and set it in Settings -> API Keys."
+                            "Get an API key from https://console.mistral.ai and set it in Settings > Search & AI > API keys."
                                 .to_string(),
                         )
                     },
@@ -1966,39 +2466,9 @@ fn runtime_diagnostics_for_provider(
                         None
                     } else {
                         Some(
-                            "Get an API key from https://console.x.ai and set it in Settings -> API Keys."
+                            "Get an API key from https://console.x.ai and set it in Settings > Search & AI > API keys."
                                 .to_string(),
                         )
-                    },
-                },
-            }
-        }
-        #[cfg(feature = "plainsong-plus")]
-        AsrProviderType::PlainsongPlus => {
-            let signed_in = crate::plus::is_signed_in();
-            RuntimeDiagnosticsInternal {
-                runtime_status: if signed_in {
-                    RuntimeStatus::Ready
-                } else {
-                    RuntimeStatus::MissingModel
-                },
-                runtime_message: Some(if signed_in {
-                    "Plainsong Plus is ready for dictation.".to_string()
-                } else {
-                    "Sign in to Plainsong Plus to use hosted transcription.".to_string()
-                }),
-                runtime_details: RuntimeDetails {
-                    model_path: None,
-                    python_path: None,
-                    missing_files: if signed_in {
-                        Vec::new()
-                    } else {
-                        vec!["Plainsong Plus license".to_string()]
-                    },
-                    setup_action: if signed_in {
-                        None
-                    } else {
-                        Some("Enter your license key in Settings -> Plainsong Plus.".to_string())
                     },
                 },
             }
@@ -2030,7 +2500,7 @@ fn runtime_diagnostics_for_provider(
                         None
                     } else {
                         Some(
-                            "Get an API key from https://console.deepgram.com and set it in Settings -> API Keys."
+                            "Get an API key from https://console.deepgram.com and set it in Settings > Search & AI > API keys."
                                 .to_string(),
                         )
                     },
@@ -2064,7 +2534,7 @@ fn runtime_diagnostics_for_provider(
                         None
                     } else {
                         Some(
-                            "Get an API key from https://aistudio.google.com/apikey and set it in Settings -> API Keys."
+                            "Get an API key from https://aistudio.google.com/apikey and set it in Settings > Search & AI > API keys."
                                 .to_string(),
                         )
                     },
@@ -2079,14 +2549,13 @@ fn runtime_diagnostics_for_provider(
                 && is_valid_json_artifact(&model_dir.join("config.json"), 64)
                 && is_valid_json_artifact(&model_dir.join("tokenizer.json"), 1024);
             let mut missing_files = missing_or_invalid_qwen3_asr_files(model_dir.as_path());
-            // Bytes that look right are not enough: readiness follows the
-            // integrity receipts, the same rule `Qwen3AsrProvider::is_available`
-            // applies, so the diagnostics never say Ready for a swapped file.
-            let trusted = super::qwen3_asr::artifacts_trusted(model_dir.as_path());
+            // Bytes that look right are not enough: a file this session hashed
+            // and found wrong reads as missing, the same rule
+            // `Qwen3AsrProvider::is_available` applies.
+            let trusted = super::qwen3_asr::artifacts_installed(model_dir.as_path());
             if model_ready && !trusted {
-                missing_files.push(
-                    "integrity receipts for the pinned Qwen3-ASR files (not verified)".to_string(),
-                );
+                missing_files
+                    .push("a pinned Qwen3-ASR file (failed its integrity check)".to_string());
             }
             let model_ready = model_ready && trusted;
             runtime_native_model(
@@ -2095,11 +2564,10 @@ fn runtime_diagnostics_for_provider(
                 model_ready,
                 &missing_files,
                 MissingModelCopy {
-                    message:
-                        "Qwen3-ASR model files are missing or have not passed Plainsong integrity verification.",
-                    setup_action: "Re-download Qwen3-ASR ONNX assets in Settings -> ASR Models.",
+                    message: "Qwen3-ASR model files are missing or failed their integrity check.",
+                    setup_action: "Download Qwen3-ASR again in Settings > Models.",
                 },
-                "Qwen3-ASR native ONNX inference ready.",
+                "Qwen3-ASR is ready on this Mac.",
                 last_error,
             )
         }
@@ -2108,14 +2576,12 @@ fn runtime_diagnostics_for_provider(
             let model_dir = models_root.join(cohere_local::COHERE_LOCAL_MODEL_DIR);
             let mut missing_files = cohere_local::missing_or_invalid_files(model_dir.as_path());
             let model_ready = missing_files.is_empty();
-            // Bytes that look right are not enough: 2 GiB of weights this app
-            // never reads is exactly the artifact worth swapping, so readiness
-            // follows the integrity receipts like every other local route.
-            let trusted = cohere_local::artifacts_trusted(model_dir.as_path());
+            // Bytes that look right are not enough: a file this session hashed
+            // and found wrong reads as missing, like every other local route.
+            let trusted = cohere_local::artifacts_installed(model_dir.as_path());
             if model_ready && !trusted {
                 missing_files.push(
-                    "integrity receipts for the pinned Cohere Transcribe files (not verified)"
-                        .to_string(),
+                    "a pinned Cohere Transcribe file (failed its integrity check)".to_string(),
                 );
             }
             let model_ready = model_ready && trusted;
@@ -2126,47 +2592,92 @@ fn runtime_diagnostics_for_provider(
                 &missing_files,
                 MissingModelCopy {
                     message:
-                        "Cohere Transcribe (local) files are missing or have not passed Plainsong integrity verification.",
-                    setup_action: "Download Cohere Transcribe (local) in Settings -> ASR Models.",
+                        "Cohere Transcribe (local) files are missing or failed their integrity check.",
+                    setup_action: "Download Cohere Transcribe (local) in Settings > Models.",
                 },
-                "Cohere Transcribe (local) ONNX inference ready, on CPU.",
+                "Cohere Transcribe (local) is ready on this Mac. It transcribes more slowly than the other local models.",
+                last_error,
+            )
+        }
+        AsrProviderType::Whistle => {
+            let model_dir = super::whistle::model_dir(&models_root);
+            let missing_files = [super::whistle::MODEL_FILE, super::whistle::CLI_FILE]
+                .into_iter()
+                .filter(|name| !model_dir.join(name).is_file())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            runtime_native_model(
+                provider_available,
+                model_dir,
+                missing_files.is_empty(),
+                &missing_files,
+                MissingModelCopy {
+                    message: "Whistle model and native CLI are not downloaded or failed their integrity check.",
+                    setup_action: "Download Whistle 2.0 in Settings > Models.",
+                },
+                "Whistle 2.0 is ready on this Mac.",
                 last_error,
             )
         }
         #[cfg(feature = "asr-transcribe-cpp")]
         AsrProviderType::TranscribeCpp => {
             use super::transcribe_cpp;
-            let spec = transcribe_cpp::spec_for(selected_model_id);
+            let spec = transcribe_cpp::route_spec_for(selected_model_id);
             let model_dir = models_root.join(transcribe_cpp::TRANSCRIBE_CPP_MODEL_DIR);
             let model_path = model_dir.join(spec.file_name);
-            let present = std::fs::metadata(&model_path)
+            let model_present = std::fs::metadata(&model_path)
                 .map(|metadata| metadata.is_file() && metadata.len() > 0)
                 .unwrap_or(false);
             // Bytes that look right are not enough, same rule as every other
-            // local route: readiness follows the integrity receipt.
-            let trusted =
-                crate::download::is_model_artifact_trusted(&model_path, Some(spec.sha256));
+            // local route: a file found wrong this session reads as missing.
+            let model_trusted =
+                crate::download::is_model_artifact_installed(&model_path, Some(spec.sha256));
             let mut missing_files = Vec::new();
-            if !present {
+            if !model_present {
                 missing_files.push(spec.file_name.to_string());
-            } else if !trusted {
-                missing_files.push(format!(
-                    "integrity receipt for {} (not verified)",
-                    spec.file_name
-                ));
+            } else if !model_trusted {
+                missing_files.push(format!("{} (failed its integrity check)", spec.file_name));
+            }
+            let mut auxiliary_ready = true;
+            for aux in transcribe_cpp::auxiliary_specs_for(spec.model_id) {
+                let path = model_dir.join(aux.local_file_name);
+                let present = std::fs::metadata(&path)
+                    .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                    .unwrap_or(false);
+                let trusted = present
+                    && crate::download::is_model_artifact_installed(&path, Some(aux.sha256));
+                if !present {
+                    missing_files.push(aux.local_file_name.to_string());
+                } else if !trusted {
+                    missing_files.push(format!(
+                        "{} (failed its integrity check)",
+                        aux.local_file_name
+                    ));
+                }
+                auxiliary_ready &= present && trusted;
+            }
+            let ggml_ready = model_present && model_trusted && auxiliary_ready;
+            // On a Mac that runs it, Parakeet's download is the Core ML build
+            // alone, so a missing ggml file is not a missing model there.
+            let ready = ggml_ready
+                || (spec.model_id == transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+                    && super::neural_engine::serves_without_ggml(
+                        &models_root,
+                        super::neural_engine::preferred_family(),
+                    ));
+            if ready && !ggml_ready {
+                missing_files.clear();
             }
             runtime_native_model(
                 provider_available,
                 model_dir,
-                present && trusted,
+                ready,
                 &missing_files,
                 MissingModelCopy {
-                    message:
-                        "The transcribe.cpp GGUF is missing or has not passed Plainsong integrity verification.",
-                    setup_action:
-                        "Re-download the transcribe.cpp model in Settings -> ASR Models.",
+                    message: MISSING_SPEECH_MODEL_MESSAGE,
+                    setup_action: "Download the speech model again in Settings > Models.",
                 },
-                "transcribe.cpp GGUF inference ready (experimental).",
+                "The speech model is ready.",
                 last_error,
             )
         }
@@ -2189,6 +2700,17 @@ fn runtime_diagnostics_for_provider(
 ///
 /// The language is carried because a cloud provider has to be told one; see
 /// `TranscriptionOptions::language`.
+fn meeting_spelling_options(
+    provider: AsrProviderType,
+    language: Option<String>,
+) -> TranscriptionOptions {
+    let mut options = meeting_transcription_options(language);
+    if !provider.is_remote() {
+        options.acoustic_vocabulary = crate::dictation_vocabulary::for_meeting();
+    }
+    options
+}
+
 fn meeting_transcription_options(language: Option<String>) -> TranscriptionOptions {
     TranscriptionOptions {
         request_speaker_labels: true,
@@ -2238,6 +2760,10 @@ fn runtime_native_model(
         },
     }
 }
+
+#[cfg(any(feature = "asr-transcribe-cpp", test))]
+const MISSING_SPEECH_MODEL_MESSAGE: &str =
+    "The speech model is missing or couldn't be verified. Download it again in Settings > Models.";
 
 struct MissingModelCopy<'a> {
     message: &'a str,
@@ -2333,10 +2859,18 @@ fn parakeet_model_dir_and_missing_files(
     }
 
     let model_dir = models_root.join("parakeet").join(normalized_model);
-    for (file_name, min_bytes) in PARAKEET_V3_REQUIRED_FILES {
+    let required_files: &[_] = if normalized_model == "orukeet-v0.1.0-int8" {
+        &ORUKEET_REQUIRED_FILES
+    } else {
+        &PARAKEET_V3_REQUIRED_FILES
+    };
+    for &(file_name, min_bytes) in required_files {
         let path = model_dir.join(file_name);
         let ok = if file_name == "tokens.txt" {
             is_valid_token_list_artifact(&path, 128)
+        } else if file_name == "LICENSE-WEIGHTS" || file_name == "NOTICE.md" {
+            path.metadata()
+                .is_ok_and(|metadata| metadata.len() >= min_bytes)
         } else {
             is_valid_sized_artifact(&path, min_bytes)
         };
@@ -2489,13 +3023,172 @@ fn sanitize_whisper_model_id(model_id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        benchmark_provider_types, meeting_transcription_options, migrate_legacy_local_artifacts,
-        parakeet_model_dir_and_missing_files, runtime_diagnostics_for_provider, AsrManager,
-        AsrProviderType,
+        benchmark_provider_types, benchmark_result_from_outcome, meeting_transcription_options,
+        migrate_legacy_local_artifacts, parakeet_model_dir_and_missing_files,
+        run_owned_asr_task_and_cleanup, runtime_diagnostics_for_provider, runtime_native_model,
+        time_benchmark_work, AsrManager, AsrProviderType, BenchmarkInput, MissingModelCopy,
+        RuntimeStatus, BENCHMARK_ERROR_MESSAGE_LIMIT, MISSING_SPEECH_MODEL_MESSAGE,
     };
     use crate::asr::AsrProviderFactory;
     use crate::settings::PlatformOptimizationSettings;
     use std::path::PathBuf;
+    use std::sync::Arc;
+
+    #[cfg(feature = "asr-transcribe-cpp")]
+    #[test]
+    fn parakeet_reports_every_byte_its_download_fetches() {
+        use crate::asr::transcribe_cpp::{parakeet_download_bytes, PARAKEET_GGUF_MODEL_ID};
+        let bytes = super::model_download_bytes(AsrProviderType::TranscribeCpp);
+        assert_eq!(
+            bytes.get(PARAKEET_GGUF_MODEL_ID),
+            Some(&parakeet_download_bytes())
+        );
+        assert!(super::model_download_bytes(AsrProviderType::Whisper).is_empty());
+
+        let json = serde_json::to_value(super::ProviderInventory {
+            provider_type: AsrProviderType::TranscribeCpp,
+            name: String::new(),
+            description: String::new(),
+            is_available: false,
+            inference_enabled: true,
+            selected_model_id: PARAKEET_GGUF_MODEL_ID.to_string(),
+            model_options: Vec::new(),
+            download_status: crate::asr::DownloadStatus::NotDownloaded,
+            platform_readiness: None,
+            model_download_bytes: bytes,
+        })
+        .unwrap();
+        assert_eq!(
+            json["modelDownloadBytes"][PARAKEET_GGUF_MODEL_ID],
+            serde_json::json!(parakeet_download_bytes())
+        );
+    }
+
+    #[test]
+    fn silence_skip_restores_segments_and_speaker_turns_without_repairing_invalid_times() {
+        use crate::asr::{SpeakerTurn, TranscriptSegment, TranscriptionResult};
+        let mut bytes = Vec::new();
+        let mut writer = hound::WavWriter::new(
+            std::io::Cursor::new(&mut bytes),
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: 10,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for sample in [vec![0_i16; 10], vec![1; 10]].concat() {
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        let processed = crate::audio::utils::compact_digital_silence(&bytes).unwrap();
+        let result = TranscriptionResult {
+            text: "quiet speech".into(),
+            segments: vec![
+                TranscriptSegment {
+                    start_time: 0.5,
+                    end_time: 1.0,
+                    text: "quiet".into(),
+                    confidence: 0.9,
+                },
+                TranscriptSegment {
+                    start_time: 0.5,
+                    end_time: 0.5,
+                    text: "point".into(),
+                    confidence: 0.9,
+                },
+                TranscriptSegment {
+                    start_time: 1.6,
+                    end_time: 1.7,
+                    text: "invalid".into(),
+                    confidence: 0.1,
+                },
+            ],
+            measured_word_timestamps: true,
+            speaker_turns: vec![SpeakerTurn {
+                start_time: 0.5,
+                end_time: 1.0,
+                speaker_id: "S1".into(),
+                confidence: 0.8,
+            }],
+            language: "en".into(),
+            confidence: 0.9,
+            processing_time_ms: 17,
+            model_name: "fixture".into(),
+            model_id: "fixture".into(),
+            requested_provider: AsrProviderType::Whisper,
+            actual_provider: AsrProviderType::Whisper,
+            requested_engine: None,
+            actual_engine: None,
+            optimization_applied: false,
+            fallback_reason: None,
+            vocabulary_hint_terms_applied: 0,
+            vocabulary_candidates: Vec::new(),
+        };
+        let identity = super::restore_source_timestamps(result.clone(), None);
+        assert_eq!(identity.segments, result.segments);
+        assert!(identity.measured_word_timestamps);
+        let mut valid = result.clone();
+        valid.segments.truncate(2);
+        valid.speaker_turns.push(SpeakerTurn {
+            start_time: 1.6,
+            end_time: 1.7,
+            speaker_id: "invalid".into(),
+            confidence: 0.1,
+        });
+        let restored = super::restore_source_timestamps(valid, Some(&processed.timeline));
+        assert_eq!(restored.segments.len(), 2);
+        assert_eq!(
+            (
+                restored.segments[0].start_time,
+                restored.segments[0].end_time
+            ),
+            (1.0, 1.5)
+        );
+        assert_eq!(
+            (
+                restored.segments[1].start_time,
+                restored.segments[1].end_time
+            ),
+            (1.0, 1.0)
+        );
+        assert!(restored.measured_word_timestamps);
+        assert_eq!(restored.speaker_turns.len(), 1);
+        assert_eq!(
+            (
+                restored.speaker_turns[0].start_time,
+                restored.speaker_turns[0].end_time
+            ),
+            (1.0, 1.5)
+        );
+        let unaligned = super::restore_source_timestamps(result, Some(&processed.timeline));
+        assert!(unaligned.segments.is_empty());
+        assert!(unaligned.speaker_turns.is_empty());
+        assert!(!unaligned.measured_word_timestamps);
+        assert_eq!(unaligned.processing_time_ms, 17);
+        assert_eq!(unaligned.text, "quiet speech");
+        assert_eq!(unaligned.model_id, "fixture");
+        assert_eq!(unaligned.model_name, "fixture");
+    }
+
+    #[tokio::test]
+    async fn requested_model_diagnostics_do_not_change_the_selected_model() {
+        let manager = AsrManager::new();
+        let before = manager.provider_model_id(AsrProviderType::Whisper).await;
+        let requested = manager
+            .get_runtime_diagnostics_for_model(AsrProviderType::Whisper, "large-v3-turbo")
+            .await;
+        assert!(requested
+            .runtime_details
+            .model_path
+            .unwrap()
+            .ends_with("ggml-large-v3-turbo.bin"));
+        assert_eq!(
+            manager.provider_model_id(AsrProviderType::Whisper).await,
+            before
+        );
+    }
 
     #[test]
     fn aggregate_benchmark_never_includes_remote_providers() {
@@ -2507,6 +3200,637 @@ mod tests {
             .into_iter()
             .filter(|provider| provider.is_remote())
             .all(|provider| !providers.contains(&provider)));
+    }
+
+    #[test]
+    fn benchmark_outcomes_preserve_success_and_expose_unusable_failures() {
+        let success = benchmark_result_from_outcome(
+            AsrProviderType::Whisper,
+            "Whisper".to_string(),
+            "base.en".to_string(),
+            17,
+            Ok(("hello".to_string(), 0.81)),
+        );
+        assert!(matches!(success.runtime_status, RuntimeStatus::Ready));
+        assert!(success.non_empty_transcript);
+        assert_eq!(success.transcription, "hello");
+        assert_eq!(success.confidence, 0.81);
+        assert_eq!(success.error_message, None);
+
+        let failure = benchmark_result_from_outcome(
+            AsrProviderType::Whisper,
+            "Whisper".to_string(),
+            "base.en".to_string(),
+            23,
+            Err("decode failed ".repeat(BENCHMARK_ERROR_MESSAGE_LIMIT)),
+        );
+        assert!(matches!(failure.runtime_status, RuntimeStatus::Error));
+        assert!(!failure.non_empty_transcript);
+        assert!(failure.transcription.is_empty());
+        assert_eq!(failure.processing_time_ms, 23);
+        assert_eq!(
+            failure.error_message.as_deref().unwrap().chars().count(),
+            BENCHMARK_ERROR_MESSAGE_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_release_rechecks_current_warmth_and_holds_the_decision_guard() {
+        for current_keep_warm in [false, true] {
+            let settings = std::sync::Arc::new(tokio::sync::Mutex::new(current_keep_warm));
+            let decision_settings = settings.clone();
+            let cleared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = cleared.clone();
+            let settings_during_clear = settings.clone();
+            super::run_gated_cache_release(
+                move || {
+                    let decision_settings = Arc::clone(&decision_settings);
+                    async move {
+                        let guard = decision_settings.lock_owned().await;
+                        if *guard {
+                            None
+                        } else {
+                            Some(guard)
+                        }
+                    }
+                },
+                move |_gate| {
+                    assert!(
+                        settings_during_clear.try_lock().is_err(),
+                        "Settings must remain locked through eviction"
+                    );
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                },
+            )
+            .await;
+            assert_eq!(
+                cleared.load(std::sync::atomic::Ordering::SeqCst),
+                !current_keep_warm
+            );
+            assert!(settings.try_lock().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_returns_while_owned_cleanup_waits_for_background_work() {
+        let gate = Arc::new(crate::llm::native_runtime_gate::RuntimeGate::new());
+        let background = gate.acquire().unwrap();
+        let cleanup_gate = Arc::clone(&gate);
+        let cleaned = Arc::new(tokio::sync::Notify::new());
+        let done = Arc::clone(&cleaned);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            super::run_owned_asr_task(
+                || async { "transcript" },
+                move || async move {
+                    let _gate = cleanup_gate.acquire_when_available().await.unwrap();
+                    done.notify_one();
+                },
+            ),
+        )
+        .await
+        .expect("cleanup must not delay the transcript")
+        .unwrap();
+        assert_eq!(result, "transcript");
+        drop(background);
+        tokio::time::timeout(std::time::Duration::from_secs(1), cleaned.notified())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn keep_warm_cleanup_does_not_wait_for_a_busy_gate() {
+        let runtime_gate = crate::llm::native_runtime_gate::RuntimeGate::new();
+        let gate = runtime_gate.acquire().unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            super::run_gated_cache_release_from(
+                &runtime_gate,
+                || async { None::<()> },
+                |_| panic!("keep warm"),
+            ),
+        )
+        .await
+        .expect("keep-warm cleanup does not acquire the gate");
+        drop(gate);
+    }
+
+    #[tokio::test]
+    async fn owned_asr_task_cleans_up_once_after_success_or_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        for result in [Ok::<_, &'static str>("done"), Err("failed")] {
+            let cleanups = Arc::new(AtomicUsize::new(0));
+            let cleanup_count = Arc::clone(&cleanups);
+            let actual = run_owned_asr_task_and_cleanup(
+                move || async move { result },
+                move || async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(actual, result);
+            assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn benchmark_bytes_are_released_after_success_or_error() {
+        use std::sync::Arc;
+
+        for result in [Ok::<_, &'static str>(()), Err("failed")] {
+            let bytes = Arc::new(vec![1, 2, 3, 4]);
+            let weak_bytes = Arc::downgrade(&bytes);
+            let cleanup_weak_bytes = weak_bytes.clone();
+            let input = BenchmarkInput::Bytes(bytes);
+
+            let (actual, owned_bytes) = run_owned_asr_task_and_cleanup(
+                move || async move {
+                    let BenchmarkInput::Bytes(bytes) = input else {
+                        unreachable!("test provides bytes")
+                    };
+                    assert_eq!(bytes.as_slice(), &[1, 2, 3, 4]);
+                    (result, bytes)
+                },
+                move || async move {
+                    assert!(
+                        cleanup_weak_bytes.upgrade().is_some(),
+                        "benchmark bytes must remain owned through cleanup"
+                    );
+                },
+            )
+            .await
+            .expect("worker should join");
+
+            assert_eq!(actual, result);
+            drop(owned_bytes);
+            assert!(weak_bytes.upgrade().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_benchmark_waiter_keeps_bytes_until_worker_finishes() {
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let bytes = Arc::new(vec![5, 6, 7, 8]);
+        let weak_bytes = Arc::downgrade(&bytes);
+        let input = BenchmarkInput::Bytes(bytes);
+        let finish = Arc::new(Notify::new());
+        let cleaned = Arc::new(Notify::new());
+        let worker_finish = Arc::clone(&finish);
+        let cleanup_done = Arc::clone(&cleaned);
+        let waiter = tokio::spawn(async move {
+            run_owned_asr_task_and_cleanup(
+                move || async move {
+                    let BenchmarkInput::Bytes(bytes) = input else {
+                        unreachable!("test provides bytes")
+                    };
+                    worker_finish.notified().await;
+                    assert_eq!(bytes.as_slice(), &[5, 6, 7, 8]);
+                },
+                move || async move { cleanup_done.notify_one() },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(weak_bytes.upgrade().is_some());
+
+        finish.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), cleaned.notified())
+            .await
+            .expect("detached benchmark worker should finish cleanup");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while weak_bytes.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached benchmark worker should release its bytes");
+    }
+
+    #[test]
+    fn benchmark_path_input_never_deletes_the_callers_file() {
+        let path = std::env::temp_dir().join(format!(
+            "plainsong-benchmark-path-ownership-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b"caller-owned audio").expect("write test audio");
+
+        let input = BenchmarkInput::Path(path.clone());
+        drop(input);
+
+        assert_eq!(
+            std::fs::read(&path).expect("benchmark input must not remove caller file"),
+            b"caller-owned audio"
+        );
+        std::fs::remove_file(path).expect("remove test audio");
+    }
+
+    /// Opt-in production-path proof for the final-dictation cache policy.
+    /// The harness must expose the pinned base.en artifact through a QA-owned
+    /// symlink and copy the public AMI crop under an isolated root before
+    /// running this one test serially.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "asr-whisper"))]
+    #[tokio::test]
+    #[ignore = "requires isolated roots, a QA symlink to the pinned base.en model, and copied public designer audio"]
+    async fn final_dictation_live_retention_rechecks_current_setting() {
+        use crate::asr::{TranscriptionOptions, VocabularyHint};
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::MetadataExt;
+        use std::path::Path;
+        use std::sync::Arc;
+        use tokio::sync::{oneshot, Mutex};
+
+        let root = PathBuf::from(
+            std::env::var("PLAINSONG_DICTATION_CACHE_POLICY_PROBE_ROOT")
+                .expect("explicit isolated probe root"),
+        );
+        assert!(root.is_absolute(), "probe root must be absolute");
+        let data_dir = crate::paths::data_dir().unwrap();
+        let config_dir = crate::paths::config_dir().unwrap();
+        assert!(
+            data_dir.is_absolute(),
+            "probe data directory must be absolute"
+        );
+        assert!(
+            config_dir.is_absolute(),
+            "probe config directory must be absolute"
+        );
+        assert_eq!(data_dir, root.join("data"));
+        assert_eq!(config_dir, root.join("config"));
+
+        let model_path = root.join("data/Plainsong/models/whisper/ggml-base.en.bin");
+        let source = PathBuf::from(
+            std::env::var("PLAINSONG_READONLY_WHISPER_MODEL_PATH")
+                .expect("explicit read-only pinned base.en source"),
+        );
+        let audio_path = root.join("designer.wav");
+        assert!(source.is_absolute(), "model source must be absolute");
+        assert_ne!(source, model_path, "QA model path must not be the source");
+        let source_leaf_metadata =
+            std::fs::symlink_metadata(&source).expect("model source metadata");
+        assert!(
+            source_leaf_metadata.file_type().is_file(),
+            "model source leaf must be a regular file"
+        );
+        assert!(
+            !source_leaf_metadata.file_type().is_symlink(),
+            "model source leaf must not be a symlink"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&source).expect("canonical model source"),
+            source,
+            "model source must already be canonical"
+        );
+        let alias_metadata =
+            std::fs::symlink_metadata(&model_path).expect("QA model alias metadata");
+        assert!(
+            alias_metadata.file_type().is_symlink(),
+            "QA model leaf must be a symlink"
+        );
+        assert_eq!(
+            std::fs::canonicalize(&model_path).expect("canonical QA model target"),
+            source,
+            "QA model alias must resolve to the exact read-only source"
+        );
+        assert_eq!(
+            std::fs::metadata(&model_path)
+                .expect("resolved QA model metadata")
+                .len(),
+            147_964_211,
+            "unexpected QA model target byte size"
+        );
+
+        let source_metadata = |path: &Path| {
+            let metadata = std::fs::metadata(path).expect("model source metadata");
+            (
+                metadata.dev(),
+                metadata.ino(),
+                metadata.len(),
+                metadata.mtime(),
+                metadata.mtime_nsec(),
+                metadata.ctime(),
+                metadata.ctime_nsec(),
+            )
+        };
+        // Verification is remembered in memory only, so nothing may appear
+        // beside the source: no record, temporary copy or old-style receipt.
+        let files_beside_source = |path: &Path| {
+            let name = path
+                .file_name()
+                .expect("model source file name")
+                .to_string_lossy()
+                .into_owned();
+            let mut names = std::fs::read_dir(path.parent().expect("model source directory"))
+                .expect("list model source directory")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|other| other.starts_with(&name) && *other != name)
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        let source_metadata_before = source_metadata(&source);
+        let files_beside_source_before = files_beside_source(&source);
+        let model_bytes = source_metadata_before.2 as usize;
+        assert_eq!(model_bytes, 147_964_211, "unexpected base.en byte size");
+        let expected_model_sha = crate::download::whisper_model_expected_sha256("base.en").unwrap();
+        assert!(
+            crate::download::verify_existing_model_in_process(&source, &expected_model_sha)
+                .await
+                .expect("streaming verification of read-only base.en source"),
+            "read-only base.en source must match its pinned digest"
+        );
+        let audio = std::fs::read(&audio_path).expect("copied public designer fixture");
+        assert_eq!(audio.len(), 531_244, "unexpected designer WAV byte size");
+        let audio_sha = hex::encode(Sha256::digest(&audio));
+        assert_eq!(
+            audio_sha,
+            "54ae84d8543fe30ec0e8200bb308e7015511e39c7ca2a555f4f97dcf896b11b3"
+        );
+        super::super::whisper::clear_cached_model("base.en");
+        struct ClearProbeCache;
+        impl Drop for ClearProbeCache {
+            fn drop(&mut self) {
+                super::super::whisper::clear_cached_model("base.en");
+            }
+        }
+        let _clear_probe_cache = ClearProbeCache;
+
+        let manager = Arc::new(AsrManager::new());
+        let options = TranscriptionOptions {
+            vocabulary_hint: VocabularyHint::new(vec![
+                "industrial designer".into(),
+                "technical functional designs".into(),
+                "interface specifications".into(),
+            ]),
+            ..Default::default()
+        };
+
+        let mut observations = Vec::new();
+        for (name, initial_keep_warm, current_keep_warm, expected_cached) in [
+            ("offToOn", false, true, true),
+            ("onToOff", true, false, false),
+        ] {
+            super::super::whisper::clear_cached_model("base.en");
+            let keep_warm = Arc::new(Mutex::new(initial_keep_warm));
+            let decision_keep_warm = Arc::clone(&keep_warm);
+            let (decision_reached_tx, decision_reached_rx) = oneshot::channel();
+            let (continue_decision_tx, continue_decision_rx) = oneshot::channel();
+            let decode_manager = Arc::clone(&manager);
+            let decode_audio = audio.clone();
+            let decode_options = options.clone();
+            let mut first_decision = Some((decision_reached_tx, continue_decision_rx));
+            let decode = tokio::spawn(async move {
+                decode_manager
+                    .transcribe_bytes_for_dictation_with_release_decision(
+                        AsrProviderType::Whisper,
+                        &decode_audio,
+                        Some("base.en"),
+                        &decode_options,
+                        move || {
+                            let first = first_decision.take();
+                            let decision_keep_warm = Arc::clone(&decision_keep_warm);
+                            async move {
+                                if let Some((reached, resume)) = first {
+                                    reached
+                                        .send(())
+                                        .expect("parent waits for the live decision");
+                                    resume.await.expect("parent releases the live decision");
+                                }
+                                let guard = decision_keep_warm.lock_owned().await;
+                                if *guard {
+                                    None
+                                } else {
+                                    Some(guard)
+                                }
+                            }
+                        },
+                    )
+                    .await
+            });
+
+            decision_reached_rx
+                .await
+                .expect("decision callback after native decode");
+            assert!(
+                super::super::whisper::is_model_cached("base.en"),
+                "{name} must populate the exact cache before the live decision"
+            );
+            *keep_warm.lock().await = current_keep_warm;
+            continue_decision_tx
+                .send(())
+                .expect("decision callback must still be waiting");
+
+            let result = decode
+                .await
+                .expect("owned dictation probe task must join")
+                .expect("production dictation decode must succeed");
+            assert!(!result.text.trim().is_empty(), "{name} transcript");
+            if !expected_cached {
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while super::super::whisper::is_model_cached("base.en") {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("owned cleanup eventually clears the cache");
+            }
+            assert_eq!(
+                super::super::whisper::is_model_cached("base.en"),
+                expected_cached,
+                "{name} cache outcome"
+            );
+            observations.push((
+                name,
+                initial_keep_warm,
+                current_keep_warm,
+                expected_cached,
+                result,
+            ));
+        }
+
+        assert_eq!(observations[0].4.text, observations[1].4.text);
+        assert!(!super::super::whisper::is_model_cached("base.en"));
+        super::super::whisper::clear_cached_model("base.en");
+
+        assert!(
+            crate::download::verify_existing_model_in_process(&source, &expected_model_sha)
+                .await
+                .expect("post-runtime streaming verification of read-only base.en source"),
+            "read-only base.en source must retain its pinned digest"
+        );
+        assert_eq!(
+            source_metadata(&source),
+            source_metadata_before,
+            "model source metadata changed during the probe"
+        );
+        assert_eq!(
+            files_beside_source(&source),
+            files_beside_source_before,
+            "the probe wrote a file beside the model source"
+        );
+
+        std::fs::write(
+            root.join("live-retention-results.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "scope": "Copied public audio and a read-only pinned model source exposed through a QA-owned symlink were used through the production final-dictation live-decision path. No microphone, formatting, insertion, download, model copy, file written beside the model, or competitor claim.",
+                "provider": "whisper",
+                "model": "base.en",
+                "modelBytes": model_bytes,
+                "modelSha256": expected_model_sha,
+                "modelCopyCreated": false,
+                "sourceUnchangedAndNothingWrittenBeside": true,
+                "audioBytes": audio.len(),
+                "audioSha256": audio_sha,
+                "timing": "Each result.processingTimeMs is provider inference time and excludes the test barrier.",
+                "observations": observations.into_iter().map(
+                    |(name, initial_keep_warm, current_keep_warm, cache_present_after_decision, result)| serde_json::json!({
+                        "name": name,
+                        "initialKeepWarm": initial_keep_warm,
+                        "currentKeepWarm": current_keep_warm,
+                        "cachePresentBeforeDecision": true,
+                        "cachePresentAfterDecision": cache_present_after_decision,
+                        "result": result,
+                    })
+                ).collect::<Vec<_>>(),
+                "cachePresentAfterProbe": false,
+            }))
+            .unwrap(),
+        )
+        .expect("write probe results");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn benchmark_timing_excludes_delayed_cleanup() {
+        let (result, processing_time_ms) = run_owned_asr_task_and_cleanup(
+            || async {
+                time_benchmark_work(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    "transcript"
+                })
+                .await
+            },
+            || async {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "transcript");
+        assert_eq!(processing_time_ms, 2_000);
+    }
+
+    #[tokio::test]
+    async fn cancelling_asr_waiter_retains_worker_allocation_then_cleans_up() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        struct FakeNativeAllocation(Arc<AtomicUsize>);
+        impl Drop for FakeNativeAllocation {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let finish = Arc::new(Notify::new());
+        let cleaned = Arc::new(Notify::new());
+        let cleanups = Arc::new(AtomicUsize::new(0));
+        let allocations_dropped = Arc::new(AtomicUsize::new(0));
+        let worker_finish = Arc::clone(&finish);
+        let cleanup_done = Arc::clone(&cleaned);
+        let cleanup_count = Arc::clone(&cleanups);
+        let worker_allocations_dropped = Arc::clone(&allocations_dropped);
+        let waiter = tokio::spawn(async move {
+            super::run_owned_asr_task(
+                move || async move {
+                    let _allocation = FakeNativeAllocation(worker_allocations_dropped);
+                    worker_finish.notified().await;
+                },
+                move || async move {
+                    cleanup_count.fetch_add(1, Ordering::SeqCst);
+                    cleanup_done.notify_one();
+                },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(cleanups.load(Ordering::SeqCst), 0);
+        assert_eq!(allocations_dropped.load(Ordering::SeqCst), 0);
+
+        finish.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), cleaned.notified())
+            .await
+            .expect("detached provider task cleaned up after its worker exited");
+        assert_eq!(cleanups.load(Ordering::SeqCst), 1);
+        assert_eq!(allocations_dropped.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_aggregate_waiter_does_not_start_the_next_provider() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        let finish = Arc::new(Notify::new());
+        let cleaned = Arc::new(Notify::new());
+        let started = Arc::new(AtomicUsize::new(0));
+        let loop_finish = Arc::clone(&finish);
+        let loop_cleaned = Arc::clone(&cleaned);
+        let loop_started = Arc::clone(&started);
+        let aggregate = tokio::spawn(async move {
+            for index in 0..2 {
+                let worker_finish = Arc::clone(&loop_finish);
+                let cleanup_done = Arc::clone(&loop_cleaned);
+                let worker_started = Arc::clone(&loop_started);
+                run_owned_asr_task_and_cleanup(
+                    move || async move {
+                        worker_started.fetch_add(1, Ordering::SeqCst);
+                        if index == 0 {
+                            worker_finish.notified().await;
+                        }
+                    },
+                    move || async move { cleanup_done.notify_one() },
+                )
+                .await
+                .unwrap();
+            }
+        });
+        while started.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        aggregate.abort();
+        assert!(aggregate.await.unwrap_err().is_cancelled());
+        finish.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), cleaned.notified())
+            .await
+            .expect("current provider cleaned up");
+        tokio::task::yield_now().await;
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cloud_meetings_never_receive_local_name_lists() {
+        for provider in [
+            AsrProviderType::OpenAiCloud,
+            AsrProviderType::Deepgram,
+            AsrProviderType::GeminiTranscribe,
+        ] {
+            let options = super::meeting_spelling_options(provider, Some("en".into()));
+            assert!(options.acoustic_vocabulary.is_empty());
+            assert!(options.vocabulary_hint.is_none());
+            assert!(options.request_speaker_labels);
+        }
     }
 
     #[test]
@@ -2553,14 +3877,14 @@ mod tests {
     }
 
     #[test]
-    fn no_provider_is_gated_out_of_transcription_in_this_build() {
-        // Qwen3-ASR was the last provider behind this gate; it was lifted
-        // after the 2026-09-01 real-audio eval. If a provider needs to go
-        // back behind it, this test is the place to say which and why.
+    fn native_moonshine_is_gated_out_of_transcription() {
         for provider in AsrProviderType::all() {
-            assert!(
+            assert_eq!(
                 AsrManager::is_provider_transcription_enabled(provider),
-                "{provider:?} is gated out of transcription"
+                provider != AsrProviderType::Moonshine
+                    && (provider != AsrProviderType::Whistle
+                        || cfg!(all(target_os = "macos", target_arch = "aarch64"))),
+                "Unexpected inference capability for {provider:?}"
             );
         }
     }
@@ -3143,6 +4467,27 @@ mod tests {
     }
 
     #[test]
+    fn missing_speech_model_copy_keeps_file_details_in_diagnostics() {
+        let diagnostics = runtime_native_model(
+            true,
+            PathBuf::from("/models/speech"),
+            false,
+            &["model.gguf".to_string()],
+            MissingModelCopy {
+                message: MISSING_SPEECH_MODEL_MESSAGE,
+                setup_action: "Download the speech model again in Settings > Models.",
+            },
+            "Ready",
+            None,
+        );
+        assert_eq!(diagnostics.runtime_message.as_deref(), Some("The speech model is missing or couldn't be verified. Download it again in Settings > Models."));
+        assert_eq!(
+            diagnostics.runtime_details.missing_files,
+            vec!["model.gguf"]
+        );
+    }
+
+    #[test]
     fn create_with_model_constructs_every_provider_option() {
         for provider_type in AsrProviderType::all() {
             for model_option in provider_type.model_options() {
@@ -3166,5 +4511,34 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_reporting_tests {
+    use super::*;
+
+    #[test]
+    fn default_dispatch_preserves_the_engine_that_ran() {
+        for engine in ["coreml_cpu", "neural_engine", "ggml", "provider_default"] {
+            assert_eq!(
+                reported_provider_engine(PlatformEngine::ProviderDefault, Some(engine.to_string()))
+                    .as_deref(),
+                Some(engine)
+            );
+        }
+        assert_eq!(
+            reported_provider_engine(PlatformEngine::ProviderDefault, None).as_deref(),
+            Some("provider_default")
+        );
+    }
+
+    #[test]
+    fn an_explicit_dispatch_reports_its_selected_engine() {
+        let engine = PlatformEngine::from_id("macos_apple_speech").unwrap();
+        assert_eq!(
+            reported_provider_engine(engine, Some("provider_default".to_string())).as_deref(),
+            Some("macos_apple_speech")
+        );
     }
 }

@@ -22,7 +22,7 @@ pub mod subtitles;
 pub mod templates;
 
 use crate::models::{Recording, Transcript};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Export format
@@ -86,11 +86,22 @@ impl std::str::FromStr for ExportFormat {
 
 /// What an export needs beyond the recording row and its transcript.
 ///
-/// Only speaker names so far: subtitles label a cue with the alias a person
-/// set in the transcript viewer instead of the raw `me`/`them` capture side.
+/// Speaker names label subtitle cues with a person's saved alias. Completed
+/// action task strings add status to meeting exports without changing the
+/// stored action text or its provenance.
 #[derive(Debug, Clone, Default)]
 pub struct ExportContext {
     pub speaker_names: HashMap<String, String>,
+    pub completed_action_tasks: HashSet<String>,
+}
+
+/// The speaker name a document export shows for a segment: the name the
+/// person gave that speaker in the transcript, so an export reads like the
+/// transcript they reviewed.
+fn export_speaker_name(speaker_id: Option<&str>, context: &ExportContext) -> String {
+    speaker_id
+        .and_then(|id| subtitles::speaker_label(id, &context.speaker_names))
+        .unwrap_or_else(|| "Unknown".to_string())
 }
 
 /// Export a recording to the specified format.
@@ -108,10 +119,10 @@ pub fn export_recording(
     match format {
         // Word documents are the Markdown export, re-encoded by `encode_export`.
         ExportFormat::Markdown | ExportFormat::Docx => {
-            export_markdown(recording, transcript, include_metadata)
+            export_markdown(recording, transcript, include_metadata, context)
         }
-        ExportFormat::Json => export_json(recording, transcript),
-        ExportFormat::Text => export_text(recording, transcript),
+        ExportFormat::Json => export_json(recording, transcript, context),
+        ExportFormat::Text => export_text(recording, transcript, context),
         ExportFormat::Srt => export_subtitles(transcript, subtitles::SubtitleFormat::Srt, context),
         ExportFormat::Vtt => export_subtitles(transcript, subtitles::SubtitleFormat::Vtt, context),
     }
@@ -173,11 +184,47 @@ fn attendee_export_line(attendee: &crate::models::MeetingAttendee) -> String {
     line
 }
 
+pub(crate) fn meeting_source_limitations(recording: &Recording) -> Option<String> {
+    if recording.source_type != "meeting" {
+        return None;
+    }
+    let capture_warning = recording
+        .capture_degraded_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|warning| !warning.is_empty());
+    if recording.transcript_complete && capture_warning.is_none() {
+        return None;
+    }
+
+    let mut notices = Vec::new();
+    if !recording.transcript_complete {
+        notices.push("This transcript is incomplete.".to_string());
+        if let Some(reason) = recording
+            .transcript_degraded_reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+        {
+            notices.push(reason.to_string());
+        }
+    }
+    if let Some(warning) = capture_warning {
+        notices.push(warning.to_string());
+        notices.push(
+            "Conversation that was not captured is not in the saved audio or transcript."
+                .to_string(),
+        );
+    }
+    Some(notices.join(" "))
+}
+
 /// Export to Markdown format
 fn export_markdown(
     recording: &Recording,
     transcript: Option<&Transcript>,
     include_metadata: bool,
+    context: &ExportContext,
 ) -> Result<String> {
     let mut output = String::new();
 
@@ -201,6 +248,12 @@ fn export_markdown(
         output.push('\n');
     }
 
+    if let Some(notice) = meeting_source_limitations(recording) {
+        output.push_str("## Source limitations\n\n");
+        output.push_str(&notice);
+        output.push_str("\n\n");
+    }
+
     if recording.source_type == "meeting" {
         if !recording.attendees.is_empty() {
             output.push_str("## Attendees\n\n");
@@ -221,12 +274,24 @@ fn export_markdown(
             output.push_str("\n\n");
         }
 
-        let action_items =
-            action_items::structured_action_items(recording.action_items.as_deref().unwrap_or(&[]));
+        let action_items = recording
+            .action_items
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|item| !item.trim().is_empty())
+            .collect::<Vec<_>>();
         if !action_items.is_empty() {
             output.push_str("## Action Items\n\n");
-            for item in &action_items {
-                output.push_str(&action_items::markdown_bullet(item));
+            for stored_item in action_items {
+                let item = action_items::parse_stored_action_item(stored_item);
+                let marker = if context.completed_action_tasks.contains(stored_item) {
+                    "x"
+                } else {
+                    " "
+                };
+                let bullet = action_items::markdown_bullet(&item);
+                output.push_str(&format!("- [{marker}] {}", bullet.trim_start_matches("- ")));
                 output.push('\n');
             }
             output.push('\n');
@@ -249,7 +314,7 @@ fn export_markdown(
         output.push_str("## Transcript\n\n");
 
         for segment in &t.segments {
-            let speaker = segment.speaker_id.as_deref().unwrap_or("Unknown");
+            let speaker = export_speaker_name(segment.speaker_id.as_deref(), context);
             let time = format_time_range(segment.start_time, segment.end_time);
 
             output.push_str(&format!(
@@ -285,8 +350,30 @@ fn export_markdown(
 }
 
 /// Export to JSON format
-fn export_json(recording: &Recording, transcript: Option<&Transcript>) -> Result<String> {
+fn export_json(
+    recording: &Recording,
+    transcript: Option<&Transcript>,
+    context: &ExportContext,
+) -> Result<String> {
     use serde_json::json;
+
+    let structured_action_items = recording
+        .action_items
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|stored_item| !stored_item.trim().is_empty())
+        .map(|stored_item| {
+            let item = action_items::parse_stored_action_item(stored_item);
+            json!({
+                "text": item.text,
+                "task": item.task,
+                "owner": item.owner,
+                "due_date": item.due_date,
+                "completed": context.completed_action_tasks.contains(stored_item),
+            })
+        })
+        .collect::<Vec<_>>();
 
     let export_data = json!({
         "version": "1.0",
@@ -300,15 +387,18 @@ fn export_json(recording: &Recording, transcript: Option<&Transcript>) -> Result
             "updated_at": recording.updated_at,
             "source_type": recording.source_type,
             "status": recording.status,
+            "transcript_complete": recording.transcript_complete,
+            "transcript_degraded_reason": recording.transcript_degraded_reason,
+            "capture_degraded_summary": recording.capture_degraded_summary,
             "audio_path": recording.audio_path,
             "summary": recording.summary,
+            "summary_provenance": recording.summary_provenance,
             "action_items": recording.action_items,
+            "action_items_provenance": recording.action_items_provenance,
             // The same items with the stored `(Owner: … · Due: …)` suffix read
             // back into parts, so a downstream tool does not have to re-parse
             // the line. `action_items` above stays the verbatim stored text.
-            "action_items_structured": action_items::structured_action_items(
-                recording.action_items.as_deref().unwrap_or(&[]),
-            ),
+            "action_items_structured": structured_action_items,
             // Names AND addresses: an export is the reader's own file. The
             // prompt path drops addresses (`attendee_names_for_context`); this
             // one deliberately does not.
@@ -344,7 +434,11 @@ fn export_json(recording: &Recording, transcript: Option<&Transcript>) -> Result
 }
 
 /// Export to plain text format
-fn export_text(recording: &Recording, transcript: Option<&Transcript>) -> Result<String> {
+fn export_text(
+    recording: &Recording,
+    transcript: Option<&Transcript>,
+    context: &ExportContext,
+) -> Result<String> {
     let mut output = String::new();
 
     output.push_str(&format!("Title: {}\n", recording.title));
@@ -356,6 +450,12 @@ fn export_text(recording: &Recording, transcript: Option<&Transcript>) -> Result
         "Duration: {}\n\n",
         format_duration(recording.duration)
     ));
+
+    if let Some(notice) = meeting_source_limitations(recording) {
+        output.push_str("Source limitations\n\n");
+        output.push_str(&notice);
+        output.push_str("\n\n");
+    }
 
     if recording.source_type == "meeting" {
         if !recording.attendees.is_empty() {
@@ -386,15 +486,19 @@ fn export_text(recording: &Recording, transcript: Option<&Transcript>) -> Result
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .map(|item| item.trim())
-            .filter(|item| !item.is_empty())
+            .filter(|item| !item.trim().is_empty())
             .collect::<Vec<_>>();
         if !action_items.is_empty() {
             output.push_str("ACTION ITEMS\n");
             output.push_str(&"=".repeat(50));
             output.push_str("\n\n");
-            for item in action_items {
-                output.push_str(&format!("- {}\n", item));
+            for stored_item in action_items {
+                let marker = if context.completed_action_tasks.contains(stored_item) {
+                    "x"
+                } else {
+                    " "
+                };
+                output.push_str(&format!("[{marker}] {}\n", stored_item.trim()));
             }
             output.push('\n');
         }
@@ -418,8 +522,13 @@ fn export_text(recording: &Recording, transcript: Option<&Transcript>) -> Result
         output.push_str(&"=".repeat(50));
         output.push_str("\n\n");
 
+        if t.segments.is_empty() {
+            output.push_str(&t.full_text);
+            output.push('\n');
+        }
+
         for segment in &t.segments {
-            let speaker = segment.speaker_id.as_deref().unwrap_or("Unknown");
+            let speaker = export_speaker_name(segment.speaker_id.as_deref(), context);
             output.push_str(&format!("[{}] ", format_time(segment.start_time)));
             output.push_str(&format!("{}: ", speaker));
             output.push_str(&segment.text);
@@ -466,26 +575,43 @@ pub fn get_default_export_path(recording: &Recording, format: ExportFormat) -> P
         .join("Plainsong")
         .join("exports");
 
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let filename = format!(
-        "{}_{}.{}",
-        sanitize_filename(&recording.title),
-        timestamp,
-        format.extension()
-    );
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let filename = default_export_filename(&recording.title, &timestamp, format);
 
     exports_dir.join(filename)
 }
 
-/// Sanitize a string for use as a filename
+fn default_export_filename(title: &str, timestamp: &str, format: ExportFormat) -> String {
+    let nonce = uuid::Uuid::new_v4().simple();
+    format!(
+        "{}_{}_{}.{}",
+        sanitize_filename(title),
+        timestamp,
+        nonce,
+        format.extension()
+    )
+}
+
+/// Sanitize a string for use as a filename. A leading dot would hide the
+/// export in Finder (".NET sync"), control characters do not belong in a
+/// name, and an empty title still needs a readable stem.
 fn sanitize_filename(name: &str) -> String {
-    name.chars()
+    let cleaned: String = name
+        .trim()
+        .chars()
         .map(|c| match c {
             ' ' | '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            c if c.is_control() => '_',
             _ => c,
         })
+        .skip_while(|c| *c == '.' || *c == '_')
         .take(50) // Limit length
-        .collect()
+        .collect();
+    if cleaned.is_empty() {
+        "Meeting".to_string()
+    } else {
+        cleaned
+    }
 }
 
 #[cfg(test)]
@@ -538,6 +664,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn default_export_filename_is_unique_for_repeated_exports() {
+        let timestamp = "20261014_123456";
+        let first = default_export_filename("Planning Sync", timestamp, ExportFormat::Markdown);
+        let second = default_export_filename("Planning Sync", timestamp, ExportFormat::Markdown);
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("Planning_Sync_20261014_123456_"));
+        assert!(first.ends_with(".md"));
+        assert!(second.starts_with("Planning_Sync_20261014_123456_"));
+        assert!(second.ends_with(".md"));
+    }
+
+    #[test]
+    fn default_export_filename_separates_titles_that_sanitize_identically() {
+        let timestamp = "20261014_123456";
+        let slash_title = default_export_filename("Road/Map", timestamp, ExportFormat::Text);
+        let colon_title = default_export_filename("Road:Map", timestamp, ExportFormat::Text);
+
+        assert_ne!(slash_title, colon_title);
+        assert!(slash_title.starts_with("Road_Map_20261014_123456_"));
+        assert!(colon_title.starts_with("Road_Map_20261014_123456_"));
+        assert!(slash_title.ends_with(".txt"));
+        assert!(colon_title.ends_with(".txt"));
+    }
+
+    #[test]
+    fn default_export_filename_is_never_hidden_or_blank() {
+        let timestamp = "20261014_123456";
+        let dotted = default_export_filename(".NET sync", timestamp, ExportFormat::Markdown);
+        assert!(dotted.starts_with("NET_sync_"), "{dotted}");
+        let blank = default_export_filename("   ", timestamp, ExportFormat::Markdown);
+        assert!(blank.starts_with("Meeting_"), "{blank}");
+        let control = default_export_filename("Q3\nplan\t", timestamp, ExportFormat::Text);
+        assert!(!control.chars().any(char::is_control), "{control:?}");
+        assert!(control.starts_with("Q3_plan_"), "{control}");
+    }
+
+    #[test]
+    fn default_export_filename_preserves_each_format_extension() {
+        let timestamp = "20261014_123456";
+        for format in [
+            ExportFormat::Markdown,
+            ExportFormat::Json,
+            ExportFormat::Text,
+            ExportFormat::Srt,
+            ExportFormat::Vtt,
+            ExportFormat::Docx,
+        ] {
+            let filename = default_export_filename("Planning Sync", timestamp, format);
+            assert!(filename.ends_with(&format!(".{}", format.extension())));
+        }
+    }
+
     /// `docs/beta/PRIVACY-AND-CLOUD.md` promises the reader that the addresses
     /// the meeting header only shows on hover are in their export. This is that
     /// promise: names AND addresses in Markdown (which is also the .docx text),
@@ -559,7 +739,8 @@ mod tests {
             },
         ];
 
-        let markdown = export_markdown(&recording, None, false).expect("markdown export");
+        let markdown = export_markdown(&recording, None, false, &ExportContext::default())
+            .expect("markdown export");
         assert!(
             markdown.contains(
                 "## Attendees\n\n- Dana Okafor (organizer) <dana@example.com>\n- Sam Ito\n"
@@ -579,12 +760,13 @@ mod tests {
             markdown
         );
 
-        let text = export_text(&recording, None).expect("text export");
+        let text = export_text(&recording, None, &ExportContext::default()).expect("text export");
         assert!(text.contains("- Dana Okafor (organizer) <dana@example.com>"));
 
-        let json: serde_json::Value =
-            serde_json::from_str(&export_json(&recording, None).expect("json export"))
-                .expect("json export parses");
+        let json: serde_json::Value = serde_json::from_str(
+            &export_json(&recording, None, &ExportContext::default()).expect("json export"),
+        )
+        .expect("json export parses");
         assert_eq!(
             json["recording"]["attendees"],
             serde_json::json!([
@@ -599,10 +781,12 @@ mod tests {
     fn an_export_with_no_attendees_has_no_attendee_section() {
         let recording = meeting_recording_with_recap();
         assert!(recording.attendees.is_empty());
-        assert!(!export_markdown(&recording, None, false)
-            .expect("markdown export")
-            .contains("## Attendees"));
-        assert!(!export_text(&recording, None)
+        assert!(
+            !export_markdown(&recording, None, false, &ExportContext::default())
+                .expect("markdown export")
+                .contains("## Attendees")
+        );
+        assert!(!export_text(&recording, None, &ExportContext::default())
             .expect("text export")
             .contains("ATTENDEES"));
     }
@@ -614,6 +798,7 @@ mod tests {
             .single()
             .expect("valid test timestamp");
         let transcript = Transcript {
+            heard_through_speakers: Vec::new(),
             id: "transcript-1".to_string(),
             recording_id: "meeting-1".to_string(),
             segments: vec![],
@@ -624,37 +809,171 @@ mod tests {
             model_id: None,
             requested_provider: None,
             actual_provider: Some("distil_whisper".to_string()),
+            measured_word_timestamps: false,
             created_at: now,
         };
 
-        let output = export_markdown(&meeting_recording_with_recap(), Some(&transcript), true)
-            .expect("meeting markdown export");
+        let output = export_markdown(
+            &meeting_recording_with_recap(),
+            Some(&transcript),
+            true,
+            &ExportContext::default(),
+        )
+        .expect("meeting markdown export");
 
         assert!(
             output.contains("## Summary\n\nThe signed candidate completed the local meeting flow.")
         );
-        assert!(
-            output.contains("## Action Items\n\n- Jonathan confirms export before beta invites.")
-        );
+        assert!(output
+            .contains("## Action Items\n\n- [ ] Jonathan confirms export before beta invites."));
         assert!(output.contains("## Notes\n\n## Goals\nVerify the limited beta meeting flow."));
         assert!(output.contains("## Full Text\n\nThe local transcript stays in the full record."));
+    }
+
+    #[test]
+    fn meeting_exports_preserve_source_limitations_without_warning_on_clean_records() {
+        for (complete, reason, capture_warning, source_type, should_warn) in [
+            (
+                false,
+                Some("1 of 2 chunks failed."),
+                Some("System audio was not saved for 10 seconds."),
+                "meeting",
+                true,
+            ),
+            (
+                true,
+                None,
+                Some("System audio was not saved for 10 seconds."),
+                "meeting",
+                true,
+            ),
+            (false, None, None, "meeting", true),
+            (true, None, None, "meeting", false),
+            (true, None, Some("  "), "meeting", false),
+            (true, None, None, "dictation", false),
+            (
+                false,
+                Some("Dictation recovery retained original text."),
+                Some("A dictation source warning."),
+                "dictation",
+                false,
+            ),
+            (
+                true,
+                Some("An old failure was recovered."),
+                None,
+                "meeting",
+                false,
+            ),
+        ] {
+            let mut recording = meeting_recording_with_recap();
+            recording.source_type = source_type.to_string();
+            recording.transcript_complete = complete;
+            recording.transcript_degraded_reason = reason.map(str::to_string);
+            recording.capture_degraded_summary = capture_warning.map(str::to_string);
+            for format in [
+                ExportFormat::Markdown,
+                ExportFormat::Text,
+                ExportFormat::Docx,
+            ] {
+                let output =
+                    export_recording(&recording, None, format, false, &ExportContext::default())
+                        .expect("meeting document export");
+                assert_eq!(
+                    output.contains("Source limitations"),
+                    should_warn,
+                    "{format:?} {complete} {source_type}"
+                );
+                assert_eq!(
+                    output.contains("This transcript is incomplete."),
+                    should_warn && !complete,
+                    "{format:?} must describe the saved completeness flag",
+                );
+                if should_warn {
+                    for warning in [reason, capture_warning].into_iter().flatten() {
+                        assert!(
+                            output.contains(warning),
+                            "{format:?} must preserve {warning}"
+                        );
+                    }
+                }
+            }
+            let json =
+                export_json(&recording, None, &ExportContext::default()).expect("JSON export");
+            let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+            assert_eq!(parsed["recording"]["transcript_complete"], complete);
+            for (key, expected) in [
+                ("transcript_degraded_reason", reason),
+                ("capture_degraded_summary", capture_warning),
+            ] {
+                let expected = expected
+                    .map(|value| serde_json::Value::String(value.to_string()))
+                    .unwrap_or(serde_json::Value::Null);
+                assert_eq!(parsed["recording"].get(key), Some(&expected));
+            }
+        }
+    }
+
+    #[test]
+    fn json_export_preserves_summary_evidence_and_attribution() {
+        let mut recording = meeting_recording_with_recap();
+        let summary = "Do not send the receipt before legal approval.";
+        recording.summary = Some(summary.to_string());
+        let provenance = crate::models::AnalysisProvenance {
+            version: crate::models::ANALYSIS_PROVENANCE_VERSION,
+            grounding_policy_version: Some(crate::models::SUMMARY_GROUNDING_POLICY_VERSION),
+            content_hash: crate::models::analysis_content_hash(summary),
+            actual_provider: "native".to_string(),
+            actual_model: "public-fixture-no-inference".to_string(),
+            prompt_source: "meeting_playbook:auto".to_string(),
+            completed_at: recording.created_at,
+            citations: vec![crate::models::AnalysisCitation {
+                text: summary.to_string(),
+                source_kind: Some("transcript".to_string()),
+                line_id: Some("L1".to_string()),
+                segment_id: Some("segment-1".to_string()),
+                start_time: Some(1.25),
+                end_time: Some(5.75),
+                recording_id: Some(recording.id.clone()),
+                certainty: Some(1.0),
+            }],
+            grounded: true,
+            unverified_statements: Vec::new(),
+            summary_diagnostics: None,
+        };
+        recording.summary_provenance = Some(provenance.clone());
+
+        let exported =
+            export_json(&recording, None, &ExportContext::default()).expect("meeting JSON export");
+        let parsed: serde_json::Value = serde_json::from_str(&exported).expect("valid export JSON");
+        assert_eq!(parsed["recording"]["summary"], summary);
+        assert_eq!(
+            parsed["recording"]["summary_provenance"],
+            serde_json::to_value(provenance).expect("saved summary evidence"),
+        );
     }
 
     #[test]
     fn meeting_text_and_json_exports_include_saved_meeting_work() {
         let recording = meeting_recording_with_recap();
 
-        let text = export_text(&recording, None).expect("meeting text export");
+        let text =
+            export_text(&recording, None, &ExportContext::default()).expect("meeting text export");
         assert!(text.contains(
             "SUMMARY\n==================================================\n\nThe signed candidate completed the local meeting flow."
         ));
         assert!(text.contains("ACTION ITEMS\n=================================================="));
-        assert!(text.contains("- Jonathan confirms export before beta invites."));
+        assert!(text.contains("[ ] Jonathan confirms export before beta invites."));
         assert!(text.contains("NOTES\n=================================================="));
         assert!(text.contains("## Decisions\nKeep capture local."));
 
-        let json = export_json(&recording, None).expect("meeting json export");
+        let json =
+            export_json(&recording, None, &ExportContext::default()).expect("meeting json export");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid export json");
+        assert_eq!(
+            parsed["recording"].get("summary_provenance"),
+            Some(&serde_json::Value::Null),
+        );
         assert_eq!(
             parsed["recording"]["summary"],
             "The signed candidate completed the local meeting flow."
@@ -675,6 +994,7 @@ mod tests {
             .single()
             .expect("valid test timestamp");
         Transcript {
+            heard_through_speakers: Vec::new(),
             id: "transcript-1".to_string(),
             recording_id: "meeting-1".to_string(),
             segments: vec![
@@ -702,6 +1022,7 @@ mod tests {
             model_id: None,
             requested_provider: None,
             actual_provider: Some("distil_whisper".to_string()),
+            measured_word_timestamps: false,
             created_at: now,
         }
     }
@@ -729,6 +1050,7 @@ mod tests {
     fn subtitle_exports_carry_the_timed_segments_and_speaker_aliases() {
         let context = ExportContext {
             speaker_names: HashMap::from([("them".to_string(), "Priya".to_string())]),
+            ..ExportContext::default()
         };
         let srt = export_recording(
             &meeting_recording_with_recap(),
@@ -754,6 +1076,61 @@ mod tests {
         .expect("vtt export");
         assert!(vtt.starts_with("WEBVTT\n\n"));
         assert!(vtt.contains("00:00:02.000 --> 00:00:05.500"));
+    }
+
+    #[test]
+    fn document_exports_use_the_speaker_names_from_the_transcript() {
+        let context = ExportContext {
+            speaker_names: HashMap::from([("them".to_string(), "Priya".to_string())]),
+            ..ExportContext::default()
+        };
+        let mut transcript = transcript_with_segments();
+        transcript.segments.push(crate::models::TranscriptSegment {
+            id: "s3".to_string(),
+            start_time: 5.5,
+            end_time: 7.0,
+            text: "Noted.".to_string(),
+            speaker_id: Some("S10".to_string()),
+            confidence: 0.9,
+        });
+        for format in [
+            ExportFormat::Markdown,
+            ExportFormat::Text,
+            ExportFormat::Docx,
+        ] {
+            let text = export_recording(
+                &meeting_recording_with_recap(),
+                Some(&transcript),
+                format,
+                true,
+                &context,
+            )
+            .expect("document export");
+            assert!(text.contains("Priya"), "{format:?}: {text}");
+            assert!(text.contains("Me"), "{format:?}");
+            assert!(text.contains("Speaker 10"), "{format:?}");
+            assert!(!text.contains("them:"), "{format:?}");
+            assert!(!text.contains("*them*"), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn default_speaker_names_come_from_the_id() {
+        assert_eq!(
+            subtitles::default_speaker_name("S1").as_deref(),
+            Some("Speaker 1")
+        );
+        assert_eq!(
+            subtitles::default_speaker_name("S10").as_deref(),
+            Some("Speaker 10")
+        );
+        assert_eq!(
+            subtitles::default_speaker_name("them").as_deref(),
+            Some("Them")
+        );
+        assert_eq!(subtitles::default_speaker_name("S0"), None);
+        assert_eq!(subtitles::default_speaker_name("Sam"), None);
+        assert_eq!(subtitles::default_speaker_name("speaker_0"), None);
     }
 
     #[test]
@@ -820,14 +1197,15 @@ mod tests {
             "Plain follow-up".to_string(),
         ]);
 
-        let markdown = export_markdown(&recording, None, false).expect("markdown export");
+        let markdown = export_markdown(&recording, None, false, &ExportContext::default())
+            .expect("markdown export");
         assert!(
-            markdown.contains("- Send the deck — **Owner:** Priya · **Due:** Friday"),
+            markdown.contains("- [ ] Send the deck — **Owner:** Priya · **Due:** Friday"),
             "{markdown}"
         );
-        assert!(markdown.contains("- Plain follow-up"));
+        assert!(markdown.contains("- [ ] Plain follow-up"));
 
-        let json = export_json(&recording, None).expect("json export");
+        let json = export_json(&recording, None, &ExportContext::default()).expect("json export");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid export json");
         assert_eq!(
             parsed["recording"]["action_items"][0], "Send the deck (Owner: Priya · Due: Friday)",
@@ -839,6 +1217,48 @@ mod tests {
         assert_eq!(structured[0]["due_date"], "Friday");
         assert_eq!(structured[1]["task"], "Plain follow-up");
         assert!(structured[1]["owner"].is_null());
+    }
+
+    #[test]
+    fn meeting_exports_add_completion_without_changing_stored_action_text() {
+        let mut recording = meeting_recording_with_recap();
+        let completed = "Send the deck (Owner: Priya · Due: Friday)".to_string();
+        let pending = "Confirm the room".to_string();
+        recording.action_items = Some(vec![completed.clone(), pending.clone()]);
+        let context = ExportContext {
+            completed_action_tasks: HashSet::from([completed.clone()]),
+            ..ExportContext::default()
+        };
+
+        let markdown = export_recording(&recording, None, ExportFormat::Markdown, false, &context)
+            .expect("markdown export");
+        assert!(markdown.contains(
+            "- [x] Send the deck — **Owner:** Priya · **Due:** Friday\n- [ ] Confirm the room"
+        ));
+        let text = export_recording(&recording, None, ExportFormat::Text, false, &context)
+            .expect("text export");
+        assert!(
+            text.contains("[x] Send the deck (Owner: Priya · Due: Friday)\n[ ] Confirm the room")
+        );
+
+        let json: serde_json::Value = serde_json::from_str(
+            &export_recording(&recording, None, ExportFormat::Json, false, &context)
+                .expect("json export"),
+        )
+        .expect("valid export json");
+        assert_eq!(
+            json["recording"]["action_items"],
+            serde_json::json!([completed, pending]),
+            "completion metadata must not rewrite stored task text"
+        );
+        assert_eq!(
+            json["recording"]["action_items_structured"][0]["completed"],
+            true
+        );
+        assert_eq!(
+            json["recording"]["action_items_structured"][1]["completed"],
+            false
+        );
     }
 
     #[test]
@@ -859,5 +1279,32 @@ mod tests {
         assert_eq!(sanitize_filename("Hello World"), "Hello_World");
         assert_eq!(sanitize_filename("file/name"), "file_name");
         assert_eq!(sanitize_filename("test:file"), "test_file");
+    }
+
+    #[test]
+    fn odd_unicode_titles_export_to_files_inside_the_selected_directory() {
+        let dir = crate::test_fs::TempDir::new("meeting-unicode-export");
+        let mut recording = meeting_recording_with_recap();
+        recording.title = "../..\\ / : \0\n李雷 Zoë 🦀".into();
+        let mut transcript = transcript_with_segments();
+        transcript.full_text = "No, keep €1,250.50 for Zoë and 李雷 🦀.".into();
+        transcript.segments.clear();
+        for format in [ExportFormat::Markdown, ExportFormat::Text] {
+            let text = export_recording(
+                &recording,
+                Some(&transcript),
+                format,
+                true,
+                &ExportContext::default(),
+            )
+            .unwrap();
+            let filename = default_export_filename(&recording.title, "20261023_000000", format);
+            let path = dir.path().join(filename);
+            assert_eq!(path.parent(), Some(dir.path()));
+            std::fs::write(&path, encode_export(format, &text).unwrap()).unwrap();
+            let saved = std::fs::read_to_string(path).unwrap();
+            assert!(saved.contains(&recording.title));
+            assert!(saved.contains(&transcript.full_text));
+        }
     }
 }

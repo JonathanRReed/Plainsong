@@ -3,7 +3,7 @@ import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { encodeBundleBuildVersion } from "../../scripts/lib/bundle-build-version.mjs";
+import { encodeBundleBuildVersion } from "../../scripts/lib/bundle-build-version.ts";
 
 const repoRoot = process.cwd();
 
@@ -236,6 +236,7 @@ describe("encodeBundleBuildVersion", () => {
       "0.9.0-beta.3",
       "0.9.0-beta.4",
       "0.9.0-beta.5",
+      "0.9.0-beta.6",
       "0.9.0",
       "0.9.1-beta.1",
       "0.9.1",
@@ -358,13 +359,13 @@ describe("electron-builder macOS packaging", () => {
   });
 
   it("builds the ad-hoc disk image with the same format as the release one", () => {
-    // scripts/build-dmg.mjs is the NOT-FOR-RELEASE path. If it compresses
+    // scripts/build-dmg.ts is the NOT-FOR-RELEASE path. If it compresses
     // differently, a mount or a download size checked there is evidence about
     // an artifact nobody receives.
     const config = builderConfig();
     const dmg = config.slice(config.indexOf("\ndmg:"), config.indexOf("\npublish:"));
     const format = /^ {2}format: (\w+)$/m.exec(dmg)![1];
-    const script = readFileSync(path.join(repoRoot, "scripts/build-dmg.mjs"), "utf8");
+    const script = readFileSync(path.join(repoRoot, "scripts/build-dmg.ts"), "utf8");
 
     expect(script).toContain(`const DMG_FORMAT = "${format}";`);
     expect(script, "hdiutil should read the constant, not a literal").not.toMatch(
@@ -446,11 +447,11 @@ describe("what the packaged bundle is allowed to contain", () => {
     expect(allowListDrift(kept, required)).toEqual({ missing: [], surplus: [] });
   });
 
-  it("names electron-updater as the only npm package the main process loads", () => {
+  it("names the updater and ChatGPT account packages the main process loads", () => {
     // The premise of the line above, read from the main-process source rather
     // than assumed: a new `import` of a real package in electron/ fails here
     // until it is added to the allow-list it now depends on.
-    expect(mainProcessPackages()).toEqual(["electron-updater"]);
+    expect(mainProcessPackages()).toEqual(["electron-updater", "jose", "proper-lockfile"]);
   });
 
   it("also sees a package the main process imports lazily", () => {
@@ -516,7 +517,7 @@ describe("what the packaged bundle is allowed to contain", () => {
   });
 });
 
-describe("scripts/build-dmg.mjs", () => {
+describe("scripts/build-dmg.ts", () => {
   it("says at runtime that its output must not be distributed", () => {
     // The comment at the top of the file existed and the beta.2 DMG still went
     // out unnotarized. Whoever runs the script reads its OUTPUT.
@@ -527,8 +528,8 @@ describe("scripts/build-dmg.mjs", () => {
     // an actual DMG build.
     const emptyReleaseDir = mkdtempSync(path.join(os.tmpdir(), "plainsong-banner-test-"));
     const result = spawnSync(
-      process.execPath,
-      [path.join(repoRoot, "scripts/build-dmg.mjs")],
+      "bun",
+      [path.join(repoRoot, "scripts/build-dmg.ts")],
       {
         cwd: repoRoot,
         encoding: "utf8",
@@ -546,7 +547,7 @@ describe("scripts/build-dmg.mjs", () => {
   });
 
   it("prints the warning before it can fail on a missing app", () => {
-    const source = readFileSync(path.join(repoRoot, "scripts/build-dmg.mjs"), "utf8");
+    const source = readFileSync(path.join(repoRoot, "scripts/build-dmg.ts"), "utf8");
     expect(source.indexOf("warnNotForRelease();")).toBeLessThan(
       source.indexOf("Signed app not found"),
     );

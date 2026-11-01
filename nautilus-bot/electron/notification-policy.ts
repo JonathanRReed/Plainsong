@@ -71,6 +71,7 @@ export interface PlainsongNotification {
     | "call_detected";
   title: string;
   body: string;
+  actions?: [{ type: "button"; text: "Record" }];
   /** Where a click on the notification takes the reader. */
   focus: NotificationFocus;
   /**
@@ -194,12 +195,20 @@ export function notificationForSidecarEvent(
         typeof payload.silenceMinutes === "number" && payload.silenceMinutes > 0
           ? Math.round(payload.silenceMinutes)
           : null;
+      const durationMinutes =
+        typeof payload.durationMinutes === "number" && Number.isFinite(payload.durationMinutes) && payload.durationMinutes > 0
+          ? Math.round(payload.durationMinutes)
+          : null;
       const title =
-        reason === "silence" && minutes !== null
+        reason === "duration_limit" && durationMinutes !== null
+          ? `Meeting stopped: ${durationMinutes}-minute limit`
+          : reason === "silence" && minutes !== null
           ? `Meeting stopped: ${minutes} minutes of silence`
           : reason === "call_ended"
             ? `Meeting stopped: ${app ?? "the call app"} closed`
-            : "Meeting stopped";
+            : reason === "microphone_lost"
+              ? "Meeting stopped: the microphone disconnected"
+              : "Meeting stopped";
       return {
         kind: "meeting_auto_stopped",
         title,
@@ -273,7 +282,7 @@ export function notificationForSidecarEvent(
         return {
           kind: "dictation_refused",
           title: "Dictation not inserted",
-          body: "The focused field is a secure text field, so the words stayed in dictation history.",
+          body: "Plainsong didn't insert or copy the words because the field is secure. Open Plainsong to recover them.",
           focus: { view: "dictation" },
           dedupeKey: `dictation:${sessionId}`,
         };
@@ -357,6 +366,7 @@ export function notificationForCallDetected(
     kind: "call_detected",
     title: `${appLabel} call started`,
     body: "Record it with Plainsong?",
+    actions: [{ type: "button", text: "Record" }],
     focus: {
       view: "recordings",
       recordingId: null,

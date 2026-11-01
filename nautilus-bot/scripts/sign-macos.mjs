@@ -20,9 +20,10 @@ const shortcutHelperEntitlements = path.resolve(
   "entitlements.mac.shortcut-helper.plist",
 );
 // Read-only EventKit helper. It gets the calendar entitlement and nothing
-// else, for the same reason the Speech helper gets only Speech: the app's own
-// signature already carries microphone, Apple Events and the Accessibility
-// grant, and calendar reading has no business joining that set.
+// else, for the same reason the Speech helper gets only Speech. (The app's own
+// signature carries the calendar entitlement too, because TCC attributes the
+// helper's prompt to the app and the hardened runtime will not prompt without
+// it; the reading itself stays in this helper.)
 const calendarHelperName = "plainsong-native-calendar-helper";
 const calendarHelperEntitlements = path.resolve(
   import.meta.dirname,
@@ -40,6 +41,26 @@ const languageModelHelperEntitlements = path.resolve(
   "..",
   "build-resources",
   "entitlements.mac.language-model-helper.plist",
+);
+// Neural Engine speech helper. It reads 16 kHz audio from the sidecar on
+// stdin and runs Parakeet through Core ML; it does not capture audio itself,
+// so like the language model helper it carries an empty entitlement set.
+const asrHelperName = "plainsong-native-asr-helper";
+const asrHelperEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.asr-helper.plist",
+);
+// llama.cpp text helper. It reads a model file descriptor and JSON on stdin
+// and runs on Metal or the CPU, linking only system libraries, so it also
+// carries an empty entitlement set.
+const textHelperName = "plainsong-text-helper";
+const textHelperEntitlements = path.resolve(
+  import.meta.dirname,
+  "..",
+  "build-resources",
+  "entitlements.mac.text-helper.plist",
 );
 const sidecarName = "plainsong-sidecar";
 // The command-line tool / MCP server. Same empty entitlement set as the
@@ -90,6 +111,18 @@ export function optionsForSignedFile(filePath, inheritedOptionsForFile, signCont
     return {
       ...inherited,
       entitlements: languageModelHelperEntitlements,
+    };
+  }
+  if (path.basename(filePath) === asrHelperName) {
+    return {
+      ...inherited,
+      entitlements: asrHelperEntitlements,
+    };
+  }
+  if (path.basename(filePath) === textHelperName) {
+    return {
+      ...inherited,
+      entitlements: textHelperEntitlements,
     };
   }
   if (genericHelperPattern.test(path.basename(filePath))) {

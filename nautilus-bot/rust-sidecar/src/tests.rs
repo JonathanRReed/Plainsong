@@ -97,6 +97,9 @@ fn custom_meeting_template_fixture(
 fn snapshot_with(notes: Option<&str>, attendee_names: &[&str]) -> RecordingAnalysisSnapshot {
     RecordingAnalysisSnapshot {
         transcript_revision: 7,
+        transcript_complete: true,
+        transcript_degraded_reason: None,
+        capture_degraded_summary: None,
         meeting_notes: notes.map(str::to_string),
         notes_updated_at: None,
         meeting_template_id: None,
@@ -104,6 +107,7 @@ fn snapshot_with(notes: Option<&str>, attendee_names: &[&str]) -> RecordingAnaly
         expected_action_items: None,
         custom_summary_prompt: None,
         attendee_names: attendee_names.iter().map(|name| name.to_string()).collect(),
+        speaker_names: None,
     }
 }
 
@@ -688,6 +692,13 @@ fn lsappinfo_reports_none_when_the_key_is_unset() {
     assert_eq!(parse_lsappinfo_value(stdout), None);
 }
 
+#[test]
+fn an_empty_leading_name_is_not_replaced_by_a_later_key() {
+    let stdout = "\"\" ASN:0x0-0x25025: (in front) \n    bundleID=\"com.apple.Notes\" \n";
+
+    assert_eq!(parse_lsappinfo_value(stdout), None);
+}
+
 fn temp_models_root() -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "nautilus-model-repair-tests-{}",
@@ -836,7 +847,7 @@ fn initialized_locked_vault_blocks_meeting_before_capture() {
     assert!(require_recording_vault_ready(false, &vault).is_ok());
     assert_eq!(
         require_recording_vault_ready(true, &vault).unwrap_err(),
-        "Unlock the vault before starting a meeting"
+        "The vault is locked. Unlock vault in Settings > Privacy & data, then start the meeting again."
     );
 
     vault.unlocked = true;
@@ -1192,19 +1203,63 @@ fn settings_reset_preserves_only_encrypted_database_vault_state() {
         Some("preserved-salt")
     );
     assert!(!settings.privacy.remote_processing_enabled);
-    // A reset returns both lanes to their shipped defaults, which are no
-    // longer the same value: dictation goes back to the zero-setup
-    // bundled model, meetings to Ollama.
+    // A reset returns both lanes to their shipped defaults.
     assert_eq!(
         settings.privacy.dictation_ai.provider,
         settings::DEFAULT_DICTATION_AI_PROVIDER
     );
-    assert_eq!(settings.privacy.meetings_ai.provider, "ollama");
+    assert_eq!(
+        settings.privacy.meetings_ai.provider,
+        settings::DEFAULT_MEETINGS_AI_PROVIDER
+    );
     assert!(settings.transcription.dictation_custom_prompt.is_none());
 
     reset_settings_preserving_encrypted_database_state(&mut settings, false);
     assert!(!settings.privacy.vault_initialized);
     assert!(settings.privacy.vault_salt.is_none());
+}
+
+#[test]
+fn app_reset_invalidates_dictation_generation_and_clears_session_state() {
+    let mut tracker = DictationSessionTracker {
+        next_session_id: 42,
+        active_session_id: Some(42),
+        started_at: Some(std::time::Instant::now()),
+        started_at_epoch_ms: Some(1),
+        startup_latency_ms: Some(2),
+        acknowledged_at_epoch_ms: Some(3),
+        capture_ready_at_epoch_ms: Some(4),
+        first_stable_partial_at_epoch_ms: Some(5),
+        stop_requested_at: Some(std::time::Instant::now()),
+        final_transcript_at_epoch_ms: Some(6),
+        insertion_completed_at_epoch_ms: Some(7),
+        insertion_mode_at_start: Some(DictationInsertionMode::ClipboardOnly),
+        copy_to_clipboard_at_start: Some(true),
+        stopping_session_id: Some(42),
+        cancellation_requested_session_id: Some(42),
+        delivery_started_session_id: Some(42),
+    };
+    let old_active_session_id = tracker.active_session_id.unwrap();
+    let staged_idle_generation = tracker.next_session_id;
+    tracker.reset_for_app_state();
+    assert_eq!(tracker.next_session_id, 43);
+    assert_ne!(tracker.next_session_id, old_active_session_id);
+    assert_ne!(tracker.next_session_id, staged_idle_generation);
+    assert!(tracker.active_session_id.is_none());
+    assert!(tracker.started_at.is_none());
+    assert!(tracker.started_at_epoch_ms.is_none());
+    assert!(tracker.startup_latency_ms.is_none());
+    assert!(tracker.acknowledged_at_epoch_ms.is_none());
+    assert!(tracker.capture_ready_at_epoch_ms.is_none());
+    assert!(tracker.first_stable_partial_at_epoch_ms.is_none());
+    assert!(tracker.stop_requested_at.is_none());
+    assert!(tracker.final_transcript_at_epoch_ms.is_none());
+    assert!(tracker.insertion_completed_at_epoch_ms.is_none());
+    assert!(tracker.insertion_mode_at_start.is_none());
+    assert!(tracker.copy_to_clipboard_at_start.is_none());
+    assert!(tracker.stopping_session_id.is_none());
+    assert!(tracker.cancellation_requested_session_id.is_none());
+    assert!(tracker.delivery_started_session_id.is_none());
 }
 
 #[test]
@@ -1538,7 +1593,7 @@ fn dictation_insertion_never_reads_a_streaming_partial() {
     }
     // The one thing it may say about the preview is "stop".
     assert!(
-        body.contains("stop_dictation_live_preview_for_session(state, session_id).await;"),
+        body.contains("stop_dictation_live_preview_for_session(state, session_id)"),
         "the stop path must close the live preview before the batch decode"
     );
 }
@@ -1549,7 +1604,7 @@ fn dictation_insertion_never_reads_a_streaming_partial() {
 fn the_live_preview_is_closed_before_the_final_transcription_starts() {
     let body = owned_stop_dictation_body();
     let close = body
-        .find("stop_dictation_live_preview_for_session(state, session_id).await;")
+        .find("stop_dictation_live_preview_for_session(state, session_id)")
         .expect("the stop path must close the live preview");
     let transcribe = body
         .find("transcribe_bytes_for_dictation")
@@ -1736,7 +1791,7 @@ fn the_live_preview_engine_has_exactly_one_slot() {
 /// its model loaded -- while the dictation went on to the batch decode.
 #[tokio::test(start_paused = true)]
 async fn a_preview_that_will_not_stop_is_aborted_rather_than_detached() {
-    let task = tokio::spawn(async {
+    let mut task = tokio::spawn(async {
         // Never finishes on its own: exactly the wedged engine the timeout
         // exists for.
         std::future::pending::<()>().await;
@@ -1744,7 +1799,7 @@ async fn a_preview_that_will_not_stop_is_aborted_rather_than_detached() {
     let abort = task.abort_handle();
 
     assert!(
-        !await_live_preview_task(task, 7).await,
+        !await_live_preview_task(&mut task, 7).await,
         "a task that outlives the close timeout did not stop on its own"
     );
     // Let the abort land, then check it actually did.
@@ -1764,11 +1819,11 @@ async fn a_preview_that_will_not_stop_is_aborted_rather_than_detached() {
 /// reported as having stopped on its own, and is never aborted.
 #[tokio::test(start_paused = true)]
 async fn a_preview_that_stops_on_its_own_is_not_aborted() {
-    let task = tokio::spawn(async {
+    let mut task = tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(10)).await;
     });
     assert!(
-        await_live_preview_task(task, 7).await,
+        await_live_preview_task(&mut task, 7).await,
         "a preview that closes inside the timeout stopped on its own"
     );
 }
@@ -1987,6 +2042,7 @@ fn sample_transcript(
     text: &str,
 ) -> models::Transcript {
     models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: format!("transcript-{}", recording_id),
         recording_id: recording_id.to_string(),
         segments: vec![models::TranscriptSegment {
@@ -2004,6 +2060,7 @@ fn sample_transcript(
         model_id: Some("test-model".to_string()),
         requested_provider: Some("distil_whisper".to_string()),
         actual_provider: Some("distil_whisper".to_string()),
+        measured_word_timestamps: false,
         created_at,
     }
 }
@@ -2063,6 +2120,31 @@ fn template_export_writer_rejects_a_linked_parent_without_creating_outside_it() 
 
     assert!(!outside.join("nested").exists());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn speaker_alias_inference_rejects_non_name_phrases_without_stripping_their_prefix() {
+    for phrase in [
+        "This is our agenda.",
+        "This is the roadmap.",
+        "I'm a little worried.",
+        "I'm not gonna do that.",
+        "I am going somewhere.",
+        "Here's the plan.",
+    ] {
+        let segments = vec![seg("S1", phrase), seg("S2", "Thanks.")];
+        assert!(
+            infer_speaker_aliases_from_segments(&segments).is_empty(),
+            "ordinary speech must not name a speaker: {phrase}"
+        );
+    }
+    let segments = vec![
+        seg("S1", "My name is Alice Cooper."),
+        seg("S2", "I'm Sarah, the project manager."),
+    ];
+    let aliases = infer_speaker_aliases_from_segments(&segments);
+    assert_eq!(aliases.get("S1").map(String::as_str), Some("Alice Cooper"));
+    assert_eq!(aliases.get("S2").map(String::as_str), Some("Sarah"));
 }
 
 #[test]
@@ -2288,6 +2370,11 @@ fn a_dead_capture_stream_and_source_silence_are_both_reported() {
     assert!(summary.contains("device disconnected"));
     assert!(summary.contains("60s"));
     assert!(summary.contains("90s"));
+    // A Me + Them meeting keeps recording after a source drops out.
+    assert!(!summary.contains("ends early"), "{summary}");
+    let mic_only = describe_recording_capture_degradation(Some("device disconnected"), None)
+        .expect("a mic-only stream failure is reported");
+    assert!(mic_only.contains("ends early"), "{mic_only}");
 }
 
 #[test]
@@ -2517,9 +2604,24 @@ fn build_relationship_memory_aggregates_people_and_companies() {
 }
 
 #[test]
-fn enrich_meeting_transcript_merges_adjacent_source_segments() {
+fn meeting_enrichment_keeps_measured_word_rows_intact() {
+    let mut transcript = meeting_transcript_fixture(&["twenty", "five", "Euros"]);
+    for (i, segment) in transcript.segments.iter_mut().enumerate() {
+        segment.speaker_id = None;
+        segment.start_time = 10.0 + i as f64 * 0.2;
+        segment.end_time = 10.2 + i as f64 * 0.2;
+    }
+    let before = serde_json::to_value(&transcript.segments).unwrap();
+    enrich_meeting_transcript(&mut transcript, &[]);
+    assert_eq!(serde_json::to_value(&transcript.segments).unwrap(), before);
+    assert_eq!(transcript.full_text, "twenty five Euros");
+}
+
+#[test]
+fn enrich_meeting_transcript_preserves_adjacent_source_segments() {
     let now = chrono::Utc::now();
     let mut transcript = models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: "t1".to_string(),
         recording_id: "r1".to_string(),
         segments: vec![
@@ -2555,14 +2657,17 @@ fn enrich_meeting_transcript_merges_adjacent_source_segments() {
         model_id: Some("test-model".to_string()),
         requested_provider: Some("distil_whisper".to_string()),
         actual_provider: Some("distil_whisper".to_string()),
+        measured_word_timestamps: false,
         created_at: now,
     };
 
     enrich_meeting_transcript(&mut transcript, &[]);
 
-    assert_eq!(transcript.segments.len(), 1);
+    assert_eq!(transcript.segments.len(), 2);
     assert_eq!(transcript.segments[0].speaker_id.as_deref(), Some("me"));
-    assert_eq!(transcript.segments[0].text, "Hello there. How are you?");
+    assert_eq!(transcript.segments[0].text, "Hello there.");
+    assert_eq!(transcript.segments[1].text, "How are you?");
+    assert_eq!(transcript.segments[1].id, "b");
     assert_eq!(transcript.full_text, "Hello there. How are you?");
 }
 
@@ -2589,6 +2694,7 @@ fn dictionary_entry_fixture(
 fn meeting_transcript_fixture(segment_texts: &[&str]) -> models::Transcript {
     let now = chrono::Utc::now();
     models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: "t-dict".to_string(),
         recording_id: "r-dict".to_string(),
         segments: segment_texts
@@ -2610,6 +2716,7 @@ fn meeting_transcript_fixture(segment_texts: &[&str]) -> models::Transcript {
         model_id: Some("test-model".to_string()),
         requested_provider: Some("distil_whisper".to_string()),
         actual_provider: Some("distil_whisper".to_string()),
+        measured_word_timestamps: false,
         created_at: now,
     }
 }
@@ -2671,7 +2778,7 @@ fn an_empty_dictionary_leaves_meeting_enrichment_unchanged() {
 
 #[test]
 fn meeting_dictionary_correction_precedes_transcript_persistence() {
-    // Ordering is the whole point: correcting after `save_transcript` would
+    // Ordering is the whole point: correcting after `save_meeting_transcript` would
     // leave the persisted transcript -- and every artifact derived from it --
     // carrying the mis-heard spelling.
     const SOURCE: &str = include_str!("meeting_pipeline.rs");
@@ -2683,7 +2790,7 @@ fn meeting_dictionary_correction_precedes_transcript_persistence() {
         .find("enrich_meeting_transcript(&mut transcript, &meeting_dictionary_entries)")
         .expect("meeting post-processing must enrich with the dictionary");
     let save = window
-        .find("db.save_transcript(&transcript)")
+        .find("db.save_meeting_transcript(&transcript)")
         .expect("meeting post-processing must persist the transcript");
     assert!(
         enrich < save,
@@ -2691,10 +2798,203 @@ fn meeting_dictionary_correction_precedes_transcript_persistence() {
     );
 }
 
+/// One measured-word meeting transcript as each local Parakeet route returns
+/// it: one row per word, already on the recording's timeline.
+fn word_row_meeting_transcript(
+    provider: asr::AsrProviderType,
+    model_id: &str,
+    words: &[(&str, f64, f64)],
+) -> models::Transcript {
+    let result = asr::TranscriptionResult {
+        text: words
+            .iter()
+            .map(|(word, _, _)| *word)
+            .collect::<Vec<_>>()
+            .join(" "),
+        segments: words
+            .iter()
+            .map(|(word, start, end)| asr::TranscriptSegment {
+                start_time: *start,
+                end_time: *end,
+                text: (*word).to_string(),
+                confidence: 0.9,
+            })
+            .collect(),
+        measured_word_timestamps: true,
+        speaker_turns: Vec::new(),
+        language: "en".to_string(),
+        confidence: 0.9,
+        processing_time_ms: 1,
+        model_name: model_id.to_string(),
+        model_id: model_id.to_string(),
+        requested_provider: provider,
+        actual_provider: provider,
+        requested_engine: None,
+        actual_engine: None,
+        optimization_applied: false,
+        fallback_reason: None,
+        vocabulary_hint_terms_applied: 0,
+        vocabulary_candidates: Vec::new(),
+    };
+    build_models_transcript_from_asr_result("r-words", result)
+}
+
+/// The two local routes that time every word: ONNX Parakeet, and GGUF
+/// Parakeet where the build has transcribe.cpp.
+fn word_row_routes() -> Vec<(asr::AsrProviderType, &'static str)> {
+    #[allow(unused_mut)]
+    let mut routes = vec![(asr::AsrProviderType::Parakeet, "parakeet-tdt-0.6b-v3")];
+    #[cfg(feature = "asr-transcribe-cpp")]
+    routes.push((
+        asr::AsrProviderType::TranscribeCpp,
+        crate::asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
+    ));
+    routes
+}
+
+#[test]
+fn a_multi_word_dictionary_entry_matches_across_word_rows_on_both_parakeet_routes() {
+    let words = [
+        ("We", 1.0, 1.2),
+        ("asked", 1.2, 1.5),
+        ("open", 1.6, 1.9),
+        ("ai.", 1.9, 2.3),
+        ("Then", 2.6, 2.8),
+        ("jon", 2.8, 3.0),
+        ("reed", 3.0, 3.3),
+        ("replied.", 3.3, 3.8),
+    ];
+    let entries = vec![
+        dictionary_entry_fixture("open ai", "OpenAI", None, None),
+        dictionary_entry_fixture("jon reed", "Jon Reed", None, None),
+    ];
+    for (provider, model_id) in word_row_routes() {
+        let mut transcript = word_row_meeting_transcript(provider, model_id, &words);
+        let ids: Vec<String> = transcript.segments.iter().map(|s| s.id.clone()).collect();
+        enrich_meeting_transcript(&mut transcript, &entries);
+
+        let rows: Vec<(&str, f64, f64)> = transcript
+            .segments
+            .iter()
+            .map(|s| (s.text.as_str(), s.start_time, s.end_time))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("We", 1.0, 1.2),
+                ("asked", 1.2, 1.5),
+                // Two rows became one: the first row's start, the last's end.
+                ("OpenAI.", 1.6, 2.3),
+                ("Then", 2.6, 2.8),
+                // As many words as rows: each keeps its own timing.
+                ("Jon", 2.8, 3.0),
+                ("Reed", 3.0, 3.3),
+                ("replied.", 3.3, 3.8),
+            ],
+            "{provider:?}"
+        );
+        // The spanning row is the first spanned row, not a new one.
+        assert_eq!(transcript.segments[2].id, ids[2]);
+        assert!(transcript.measured_word_timestamps);
+        assert_eq!(
+            transcript.full_text,
+            "We asked OpenAI. Then Jon Reed replied."
+        );
+    }
+}
+
+#[test]
+fn a_repeated_sentence_collapses_across_word_rows() {
+    let mut words = Vec::new();
+    for repeat in 0..3 {
+        let base = repeat as f64;
+        words.push(("Thank", base, base + 0.3));
+        words.push(("you.", base + 0.3, base + 0.6));
+    }
+    words.push(("Bye.", 3.0, 3.4));
+    for (provider, model_id) in word_row_routes() {
+        let mut transcript = word_row_meeting_transcript(provider, model_id, &words);
+        enrich_meeting_transcript(&mut transcript, &[]);
+        let rows: Vec<(&str, f64)> = transcript
+            .segments
+            .iter()
+            .map(|s| (s.text.as_str(), s.start_time))
+            .collect();
+        assert_eq!(
+            rows,
+            [("Thank", 0.0), ("you.", 0.3), ("Bye.", 3.0)],
+            "{provider:?}"
+        );
+        assert_eq!(transcript.full_text, "Thank you. Bye.");
+    }
+}
+
+#[test]
+fn word_rows_join_only_within_one_speaker_and_one_breath() {
+    let entries = vec![dictionary_entry_fixture("open ai", "OpenAI", None, None)];
+
+    // A long pause between the words: two separate phrases.
+    let mut paused = word_row_meeting_transcript(
+        asr::AsrProviderType::Parakeet,
+        "parakeet-tdt-0.6b-v3",
+        &[("open", 0.0, 0.3), ("ai", 5.0, 5.3)],
+    );
+    enrich_meeting_transcript(&mut paused, &entries);
+    assert_eq!(paused.full_text, "open ai");
+    assert_eq!(paused.segments.len(), 2);
+
+    // Microphone and system audio interleave by time; "open" from one side
+    // and "ai" from the other are not one phrase.
+    let mut sources = word_row_meeting_transcript(
+        asr::AsrProviderType::Parakeet,
+        "parakeet-tdt-0.6b-v3",
+        &[("open", 0.0, 0.3), ("ai", 0.3, 0.6)],
+    );
+    sources.segments[0].speaker_id = Some("me".to_string());
+    sources.segments[1].speaker_id = Some("them".to_string());
+    enrich_meeting_transcript(&mut sources, &entries);
+    assert_eq!(sources.full_text, "open ai");
+
+    // Same speaker, adjacent: one phrase.
+    let mut same = word_row_meeting_transcript(
+        asr::AsrProviderType::Parakeet,
+        "parakeet-tdt-0.6b-v3",
+        &[("open", 0.0, 0.3), ("ai", 0.3, 0.6)],
+    );
+    for segment in &mut same.segments {
+        segment.speaker_id = Some("me".to_string());
+    }
+    enrich_meeting_transcript(&mut same, &entries);
+    assert_eq!(same.full_text, "OpenAI");
+    assert_eq!(same.segments.len(), 1);
+    assert_eq!(same.segments[0].speaker_id.as_deref(), Some("me"));
+    assert_eq!(
+        (same.segments[0].start_time, same.segments[0].end_time),
+        (0.0, 0.6)
+    );
+}
+
+#[test]
+fn a_placeholder_word_row_is_dropped_without_joining_its_neighbours_text() {
+    let mut transcript = word_row_meeting_transcript(
+        asr::AsrProviderType::Parakeet,
+        "parakeet-tdt-0.6b-v3",
+        &[
+            ("Hello", 0.0, 0.3),
+            ("<|nospeech|>", 0.3, 0.6),
+            ("there.", 0.6, 0.9),
+        ],
+    );
+    enrich_meeting_transcript(&mut transcript, &[]);
+    assert_eq!(transcript.full_text, "Hello there.");
+    assert_eq!(transcript.segments.len(), 2);
+}
+
 #[test]
 fn meeting_transcript_quality_penalizes_repetitive_hallucinations() {
     let now = chrono::Utc::now();
     let transcript = models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: "t2".to_string(),
         recording_id: "r2".to_string(),
         segments: vec![models::TranscriptSegment {
@@ -2712,6 +3012,7 @@ fn meeting_transcript_quality_penalizes_repetitive_hallucinations() {
         model_id: Some("test-model".to_string()),
         requested_provider: Some("distil_whisper".to_string()),
         actual_provider: Some("distil_whisper".to_string()),
+        measured_word_timestamps: false,
         created_at: now,
     };
 
@@ -2722,6 +3023,7 @@ fn meeting_transcript_quality_penalizes_repetitive_hallucinations() {
 fn build_meeting_transcript_details_prefers_me_them_source_mode() {
     let now = chrono::Utc::now();
     let transcript = models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: "t-source".to_string(),
         recording_id: "r-source".to_string(),
         segments: vec![models::TranscriptSegment {
@@ -2739,6 +3041,7 @@ fn build_meeting_transcript_details_prefers_me_them_source_mode() {
         model_id: Some("distil-large-v3".to_string()),
         requested_provider: Some("distil_whisper".to_string()),
         actual_provider: Some("distil_whisper".to_string()),
+        measured_word_timestamps: false,
         created_at: now,
     };
     let artifact = TranscriptArtifactRecord {
@@ -2775,6 +3078,7 @@ fn build_meeting_transcript_details_prefers_me_them_source_mode() {
 fn build_meeting_transcript_details_falls_back_to_single_source() {
     let now = chrono::Utc::now();
     let transcript = models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: "t-single".to_string(),
         recording_id: "r-single".to_string(),
         segments: vec![models::TranscriptSegment {
@@ -2792,6 +3096,7 @@ fn build_meeting_transcript_details_falls_back_to_single_source() {
         model_id: Some("parakeet-tdt-0.6b-v2".to_string()),
         requested_provider: Some("parakeet".to_string()),
         actual_provider: Some("parakeet".to_string()),
+        measured_word_timestamps: false,
         created_at: now,
     };
 
@@ -2811,6 +3116,7 @@ fn a_source_aware_capture_names_no_diarizer_even_if_one_is_recorded() {
     // attribution it did not do.
     let now = chrono::Utc::now();
     let transcript = models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: "t-src".to_string(),
         recording_id: "r-src".to_string(),
         segments: vec![models::TranscriptSegment {
@@ -2828,6 +3134,7 @@ fn a_source_aware_capture_names_no_diarizer_even_if_one_is_recorded() {
         model_id: Some("nova-3".to_string()),
         requested_provider: Some("deepgram".to_string()),
         actual_provider: Some("deepgram".to_string()),
+        measured_word_timestamps: false,
         created_at: now,
     };
 
@@ -2842,6 +3149,7 @@ fn a_source_aware_capture_names_no_diarizer_even_if_one_is_recorded() {
 fn a_provider_diarized_meeting_reports_the_provider_that_labelled_it() {
     let now = chrono::Utc::now();
     let transcript = models::Transcript {
+        heard_through_speakers: Vec::new(),
         id: "t-dg".to_string(),
         recording_id: "r-dg".to_string(),
         segments: vec![models::TranscriptSegment {
@@ -2859,6 +3167,7 @@ fn a_provider_diarized_meeting_reports_the_provider_that_labelled_it() {
         model_id: Some("nova-3".to_string()),
         requested_provider: Some("deepgram".to_string()),
         actual_provider: Some("deepgram".to_string()),
+        measured_word_timestamps: false,
         created_at: now,
     };
 
@@ -3273,6 +3582,7 @@ fn provider_turns_merge_onto_a_transcript_exactly_as_local_turns_do() {
         duration: 2.0,
         method: diarization::DiarizationMethod::Embedding,
         cluster_centroids: std::collections::HashMap::new(),
+        word_activity: None,
     };
 
     let engine = diarization::DiarizationEngine::new();
@@ -3343,11 +3653,6 @@ fn reset_secret_registry_clears_every_remote_asr_provider_secret() {
         .into_iter()
         .filter(|provider| provider.is_remote())
     {
-        // Plus has no provider key; reset signs it out instead (`plus::sign_out`).
-        #[cfg(feature = "plainsong-plus")]
-        if provider == asr::AsrProviderType::PlainsongPlus {
-            continue;
-        }
         let secret_name = provider
             .provider_secret_name()
             .expect("every remote ASR provider must declare its credential slot");
@@ -3457,27 +3762,51 @@ fn a_session_can_only_be_claimed_for_stopping_once() {
 }
 
 #[test]
-fn sweep_removes_orphaned_dictation_audio_only() {
-    // A SIGKILL skips TempWav's Drop, leaving real recorded speech in the
-    // OS temp directory. The sweep must clear ours and touch nothing else.
-    let temp_dir = std::env::temp_dir();
+fn sweep_removes_only_confirmed_dead_owners_in_an_isolated_directory() {
     let unique = uuid::Uuid::new_v4();
-    let ours = temp_dir.join(format!("plainsong-dictation-sweep-{unique}.wav"));
-    let not_ours = temp_dir.join(format!("unrelated-{unique}.wav"));
-    let not_a_wav = temp_dir.join(format!("plainsong-dictation-{unique}.log"));
+    let directory = std::env::temp_dir().join(format!("plainsong-sweep-test-{unique}"));
+    std::fs::create_dir(&directory).unwrap();
+    let files = [
+        format!("plainsong-whisper-input-pid-1-{unique}.wav"),
+        format!("plainsong-whisper-input-pid-2-{unique}.wav"),
+        format!("plainsong-whisper-input-pid-3-{unique}.wav"),
+        format!("plainsong-dictation-whisper-{unique}.wav"),
+        format!("plainsong-whisper-input-pid-0-{unique}.wav"),
+        "plainsong-whisper-input-pid-2-invalid.wav".into(),
+        format!("plainsong-whisper-input-pid-2-{unique}.log"),
+        format!("unrelated-{unique}.wav"),
+    ];
+    for name in &files {
+        std::fs::write(directory.join(name), b"test-owned fixture").unwrap();
+    }
+    #[cfg(unix)]
+    let symlink = {
+        let link = directory.join(format!("plainsong-whisper-input-pid-4-{unique}.wav"));
+        std::os::unix::fs::symlink(directory.join(&files[7]), &link).unwrap();
+        link
+    };
+    let removed = sweep_dictation_temp_audio_in(&directory, |pid| match pid {
+        1 => Some(true),
+        3 => None,
+        _ => Some(false),
+    });
+    assert_eq!(removed, 1);
+    for (index, name) in files.iter().enumerate() {
+        assert_eq!(directory.join(name).exists(), index != 1, "{name}");
+    }
+    #[cfg(unix)]
+    assert!(symlink.symlink_metadata().unwrap().file_type().is_symlink());
+    std::fs::remove_dir_all(directory).unwrap();
+}
 
-    std::fs::write(&ours, b"RIFF").expect("write ours");
-    std::fs::write(&not_ours, b"RIFF").expect("write unrelated");
-    std::fs::write(&not_a_wav, b"log").expect("write log");
-
-    sweep_stale_dictation_temp_audio();
-
-    assert!(!ours.exists(), "orphaned dictation audio should be removed");
-    assert!(not_ours.exists(), "unrelated temp files must be left alone");
-    assert!(not_a_wav.exists(), "non-wav files must be left alone");
-
-    let _ = std::fs::remove_file(&not_ours);
-    let _ = std::fs::remove_file(&not_a_wav);
+#[test]
+fn dictation_temp_audio_owner_queries_preserve_the_current_process() {
+    #[cfg(unix)]
+    assert_eq!(
+        dictation_temp_audio_owner_exists(std::process::id()),
+        Some(true)
+    );
+    assert!(dictation_temp_audio_owner_pid("plainsong-dictation-whisper-legacy.wav").is_none());
 }
 
 #[test]
@@ -3529,8 +3858,30 @@ fn collapse_repeated_sentence_runs_keeps_structure_around_collapsed_runs() {
 
 #[test]
 fn sanitize_dictation_output_treats_blank_audio_as_empty() {
-    let sanitized = sanitize_dictation_output("[blank audio]", "[blank audio]");
-    assert!(sanitized.is_empty());
+    for transcript in ["[blank audio]", "[BLANK_AUDIO]", " \t[BlAnK_AuDiO]\n"] {
+        assert!(sanitize_dictation_output(transcript, transcript).is_empty());
+    }
+}
+
+#[test]
+fn strip_non_speech_placeholder_filters_only_complete_provider_markers() {
+    for marker in [
+        "[blank audio]",
+        "[BLANK_AUDIO]",
+        "<|nospeech|>",
+        "\n<|NoSpeech|> ",
+    ] {
+        assert!(strip_non_speech_placeholder(marker).is_empty());
+    }
+    for transcript in [
+        "No blank audio.",
+        "Say [BLANK_AUDIO] literally.",
+        "[blank audio] is a provider marker.",
+        "Keep <|nospeech|> in this example.",
+        "blank_audio",
+    ] {
+        assert_eq!(strip_non_speech_placeholder(transcript), transcript);
+    }
 }
 
 #[test]
@@ -3541,7 +3892,14 @@ fn sanitize_dictation_output_treats_nospeech_token_as_empty() {
 
 #[test]
 fn sanitize_dictation_output_preserves_words_used_by_non_speech_markers() {
-    for transcript in ["Music.", "No noise.", "Audio speech"] {
+    for transcript in [
+        "Music.",
+        "No noise.",
+        "Audio speech",
+        "No blank audio.",
+        "Say [BLANK_AUDIO] literally.",
+        "Keep <|nospeech|> in this example.",
+    ] {
         assert_eq!(
             sanitize_dictation_output(transcript, transcript),
             transcript
@@ -3776,8 +4134,7 @@ fn scoped_dictation_session_reset_clears_only_the_owned_session() {
 /// wedging dictation are asserted against its shape instead.
 fn owned_stop_dictation_body() -> &'static str {
     const SOURCE: &str = include_str!("dictation_session.rs");
-    const ANCHOR: &str =
-        "let mut dictation_options = state.dictation_start_options.lock().await.clone();";
+    const ANCHOR: &str = "let mut dictation_options = snapshot_dictation_stop_options(";
 
     let start = SOURCE
         .find("async fn stop_dictation_for_sidecar(")
@@ -3790,31 +4147,6 @@ fn owned_stop_dictation_body() -> &'static str {
     &body[body
         .find(ANCHOR)
         .expect("session ownership anchor must exist")..]
-}
-
-#[test]
-fn stop_dictation_error_paths_never_bypass_cleanup() {
-    // Any `?` past the ownership anchor returns without resetting
-    // `dictation_runtime_state` and without emitting a terminal phase,
-    // which leaves the sidecar on `Recording`, Electron's mirrored phase on
-    // "stopping", and the hotkey wedged until the app restarts. Every
-    // failure must go through `fail_dictation_stop`.
-    let body = owned_stop_dictation_body();
-    let escaping = body
-        .lines()
-        .filter(|line| line.split("//").next().unwrap_or_default().contains('?'))
-        .collect::<Vec<_>>();
-
-    assert!(
-        escaping.is_empty(),
-        "these lines short-circuit out of stop_dictation_for_sidecar without running the \
-         cleanup in fail_dictation_stop: {:#?}",
-        escaping
-    );
-    assert!(
-        body.contains("fail_dictation_stop("),
-        "stop_dictation_for_sidecar must route its failures through fail_dictation_stop"
-    );
 }
 
 #[test]
@@ -3831,6 +4163,11 @@ fn a_failed_delivery_holds_the_done_hud_longer_than_a_successful_one() {
         DICTATION_IDLE_RESET_ERROR_MS,
         "a secure-field refusal is a non-delivery and keeps the long window"
     );
+    assert_eq!(
+        dictation_overlay_idle_reset_delay_ms("paste_dispatched"),
+        DICTATION_IDLE_RESET_ERROR_MS,
+        "an unconfirmed paste needs time to review the target and details"
+    );
     for delivered in ["pasted", "copied", "undone", ""] {
         assert_eq!(
             dictation_overlay_idle_reset_delay_ms(delivered),
@@ -3839,6 +4176,159 @@ fn a_failed_delivery_holds_the_done_hud_longer_than_a_successful_one() {
             delivered
         );
     }
+}
+
+#[test]
+fn warned_successful_delivery_keeps_the_done_hud_readable() {
+    let warnings = vec!["Formatting fell back to the local text.".to_string()];
+    for delivered in ["pasted", "copied", "replaced"] {
+        assert_eq!(
+            dictation_overlay_idle_reset_delay_with_warnings_ms(delivered, &warnings),
+            DICTATION_IDLE_RESET_ERROR_MS,
+            "{delivered} warnings need the long details window"
+        );
+    }
+}
+
+#[test]
+fn blank_warnings_keep_legacy_success_and_failure_delays() {
+    let blank = vec!["".to_string(), "  \n\t".to_string()];
+    for delivered in ["pasted", "copied", "replaced"] {
+        assert_eq!(
+            dictation_overlay_idle_reset_delay_with_warnings_ms(delivered, &blank),
+            DICTATION_IDLE_RESET_SUCCESS_MS,
+        );
+    }
+    for outcome in ["error", dictation_secure_field::SECURE_FIELD_REASON_CODE] {
+        assert_eq!(
+            dictation_overlay_idle_reset_delay_with_warnings_ms(outcome, &blank),
+            dictation_overlay_idle_reset_delay_ms(outcome),
+        );
+    }
+    assert_eq!(
+        dictation_overlay_idle_reset_delay_with_warnings_ms("paste_dispatched", &blank),
+        DICTATION_IDLE_RESET_ERROR_MS,
+        "blank warnings do not shorten an unconfirmed delivery's review window",
+    );
+}
+
+#[test]
+fn dictation_overlay_warning_snapshot_defaults_empty_and_hydrates_done_details() {
+    let mut overlay = DictationOverlayState::default();
+    let idle = serde_json::to_value(&overlay).unwrap();
+    assert_eq!(idle["warnings"], serde_json::json!([]));
+
+    overlay.phase = "done".to_string();
+    overlay.warnings = vec!["Formatting fell back to local text.".to_string()];
+    let done = serde_json::to_value(&overlay).unwrap();
+    assert_eq!(
+        done["warnings"],
+        serde_json::json!(["Formatting fell back to local text."])
+    );
+}
+
+#[test]
+fn a_new_dictation_phase_clears_prior_done_warnings() {
+    let mut overlay = DictationOverlayState {
+        phase: "done".to_string(),
+        warnings: vec!["Prior warning".to_string()],
+        ..Default::default()
+    };
+
+    overlay.phase = "preparing".to_string();
+    overlay.clear_warnings();
+
+    assert!(overlay.warnings.is_empty());
+    assert_eq!(
+        serde_json::to_value(&overlay).unwrap()["warnings"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
+fn held_terminal_overlay_resists_its_scheduled_idle_reset() {
+    let mut overlay = DictationOverlayState {
+        phase: "done".to_string(),
+        session_id: Some(7),
+        preview: Some("Words under review".to_string()),
+        ..Default::default()
+    };
+    assert!(hold_dictation_overlay_review(&mut overlay, 7));
+
+    assert!(!try_reset_dictation_overlay(&mut overlay, 7));
+    assert_eq!(overlay.phase, "done");
+    assert_eq!(overlay.preview.as_deref(), Some("Words under review"));
+    assert!(overlay.review_held);
+}
+
+#[test]
+fn only_current_undismissed_terminal_overlay_can_be_held() {
+    let mut overlay = DictationOverlayState {
+        phase: "recording".to_string(),
+        session_id: Some(7),
+        ..Default::default()
+    };
+    assert!(!hold_dictation_overlay_review(&mut overlay, 7));
+
+    overlay.phase = "done".to_string();
+    assert!(!hold_dictation_overlay_review(&mut overlay, 8));
+    overlay.dismissed = true;
+    assert!(!hold_dictation_overlay_review(&mut overlay, 7));
+    overlay.dismissed = false;
+    assert!(hold_dictation_overlay_review(&mut overlay, 7));
+    assert!(hold_dictation_overlay_review(&mut overlay, 7));
+}
+
+#[test]
+fn dismiss_or_new_capture_clears_overlay_review_hold() {
+    let mut overlay = DictationOverlayState {
+        phase: "done".to_string(),
+        session_id: Some(7),
+        warnings: vec!["Review this warning".to_string()],
+        ..Default::default()
+    };
+    assert!(hold_dictation_overlay_review(&mut overlay, 7));
+
+    overlay.dismissed = true;
+    overlay.clear_warnings();
+    assert!(!overlay.review_held);
+    assert!(overlay.dismissed);
+    assert_eq!(overlay.phase, "done");
+
+    overlay.dismissed = false;
+    overlay.review_held = true;
+    overlay.phase = "preparing".to_string();
+    overlay.clear_warnings();
+    assert!(!overlay.review_held);
+    assert!(overlay.warnings.is_empty());
+}
+
+#[test]
+fn unheld_current_overlay_still_resets_to_idle() {
+    let mut overlay = DictationOverlayState {
+        phase: "done".to_string(),
+        session_id: Some(7),
+        preview: Some("Finished words".to_string()),
+        ..Default::default()
+    };
+
+    assert!(try_reset_dictation_overlay(&mut overlay, 7));
+    assert_eq!(overlay.phase, "idle");
+    assert!(overlay.preview.is_none());
+    assert!(!overlay.review_held);
+}
+
+#[test]
+fn dictation_overlay_snapshot_serializes_review_hold() {
+    let mut overlay = DictationOverlayState {
+        phase: "error".to_string(),
+        session_id: Some(9),
+        ..Default::default()
+    };
+    assert!(hold_dictation_overlay_review(&mut overlay, 9));
+
+    let snapshot = serde_json::to_value(&overlay).unwrap();
+    assert_eq!(snapshot["reviewHeld"], serde_json::json!(true));
 }
 
 #[test]
@@ -3852,7 +4342,9 @@ fn secure_field_refusal_is_its_own_outcome_and_never_reports_a_copy() {
         confirmed: false,
         undo_performed: false,
         secure_field_refused: true,
+        newer_clipboard_kept: false,
         has_paste_error: true,
+        clipboard_requested: false,
         previous: "",
     });
     assert_eq!(refused, dictation_secure_field::SECURE_FIELD_REASON_CODE);
@@ -3865,6 +4357,7 @@ fn secure_field_refusal_is_its_own_outcome_and_never_reports_a_copy() {
             "paste_dispatched",
         ),
         ((true, false, true, true, false, false), "replaced"),
+        ((true, false, false, true, false, false), "paste_dispatched"),
         ((false, true, false, false, false, false), "copied"),
         (
             (false, true, false, true, false, false),
@@ -3881,18 +4374,142 @@ fn secure_field_refusal_is_its_own_outcome_and_never_reports_a_copy() {
                 confirmed,
                 undo_performed,
                 secure_field_refused: secure,
+                newer_clipboard_kept: false,
                 has_paste_error: has_error,
+                clipboard_requested: true,
                 previous: "kept",
             }),
             expected
         );
     }
 
-    let message =
-        dictation_done_message(dictation_secure_field::SECURE_FIELD_REASON_CODE, false, &[]);
+    // Auto delivery that fell back to the clipboard is not the copy the
+    // user asked for.
+    assert_eq!(
+        resolve_dictation_delivery_outcome(DictationDeliveryFacts {
+            pasted: false,
+            copied: true,
+            confirmed: false,
+            undo_performed: false,
+            secure_field_refused: false,
+            newer_clipboard_kept: false,
+            has_paste_error: true,
+            clipboard_requested: false,
+            previous: "kept",
+        }),
+        "copied_instead"
+    );
+
+    let message = dictation_done_message(
+        dictation_secure_field::SECURE_FIELD_REASON_CODE,
+        false,
+        false,
+        &[],
+        DictationDoneContext::default(),
+    );
     assert!(message.contains("password"), "{message}");
     assert!(message.contains("did not insert or copy"), "{message}");
     assert!(message.contains("dictation history"), "{message}");
+}
+
+#[test]
+fn done_messages_name_the_app_the_return_result_and_the_failure() {
+    let context = |app, submit, error| DictationDoneContext {
+        app,
+        submit_after_insert_sent: submit,
+        delivery_error: error,
+        history_off: false,
+    };
+    assert_eq!(
+        dictation_done_message(
+            "pasted",
+            false,
+            false,
+            &[],
+            context(Some("Slack"), Some(true), None)
+        ),
+        "Inserted and sent in Slack."
+    );
+    let not_sent = dictation_done_message(
+        "pasted",
+        false,
+        false,
+        &[],
+        context(Some("Slack"), Some(false), None),
+    );
+    assert!(
+        not_sent.starts_with("Inserted into Slack. Return not pressed"),
+        "{not_sent}"
+    );
+    let fallback = dictation_done_message(
+        "copied_instead",
+        false,
+        true,
+        &[],
+        context(Some("Notes"), None, None),
+    );
+    assert!(
+        fallback.starts_with("Couldn't insert into Notes"),
+        "{fallback}"
+    );
+    let failed = dictation_done_message(
+        "error",
+        false,
+        false,
+        &[],
+        context(None, None, Some("Accessibility is off for Plainsong.")),
+    );
+    assert_eq!(
+        failed,
+        "Not inserted. Accessibility is off for Plainsong. The text is saved in your dictation history."
+    );
+}
+
+#[test]
+fn done_messages_never_point_at_history_that_was_not_written() {
+    // With history off the words are only in the popup (and the paste-last
+    // slot); "saved in your dictation history" would send the reader to look
+    // for something that does not exist.
+    let history_off = DictationDoneContext {
+        delivery_error: Some("Focus changed."),
+        history_off: true,
+        ..DictationDoneContext::default()
+    };
+    let failed = dictation_done_message("error", false, false, &[], history_off);
+    assert!(!failed.contains("dictation history"), "{failed}");
+    assert!(failed.contains("Recent dictations"), "{failed}");
+
+    let secure = dictation_done_message(
+        dictation_secure_field::SECURE_FIELD_REASON_CODE,
+        false,
+        false,
+        &[],
+        history_off,
+    );
+    assert!(!secure.contains("dictation history"), "{secure}");
+    assert!(secure.contains("Recent dictations"), "{secure}");
+}
+
+#[test]
+fn unconfirmed_delivery_recovery_advice_requires_a_retained_copy() {
+    let restored = dictation_done_message(
+        "paste_dispatched",
+        false,
+        false,
+        &[],
+        DictationDoneContext::default(),
+    );
+    assert!(!restored.contains("Cmd+V"), "{restored}");
+    assert!(restored.contains("Copy result"), "{restored}");
+
+    let retained = dictation_done_message(
+        "paste_dispatched",
+        false,
+        true,
+        &[],
+        DictationDoneContext::default(),
+    );
+    assert!(retained.contains("Cmd+V"), "{retained}");
 }
 
 #[test]
@@ -3904,7 +4521,13 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
     // and the warning qualifies it.
     let warnings = vec![DICTATION_FORMAT_TIMEOUT_WARNING.to_string()];
 
-    let copied = dictation_done_message("copied", false, &warnings);
+    let copied = dictation_done_message(
+        "copied",
+        false,
+        true,
+        &warnings,
+        DictationDoneContext::default(),
+    );
     assert!(
         copied.starts_with("Copied to the clipboard"),
         "a clipboard-only delivery must still be reported: {}",
@@ -3912,7 +4535,13 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
     );
     assert!(copied.contains(DICTATION_FORMAT_TIMEOUT_WARNING));
 
-    let failed = dictation_done_message("error", false, &warnings);
+    let failed = dictation_done_message(
+        "error",
+        false,
+        false,
+        &warnings,
+        DictationDoneContext::default(),
+    );
     assert!(
         !failed.contains("Inserted"),
         "a failed delivery must never claim insertion: {}",
@@ -3921,16 +4550,25 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
     assert!(failed.contains(DICTATION_FORMAT_TIMEOUT_WARNING));
 
     assert_eq!(
-        dictation_done_message("pasted", false, &[]),
-        "Inserted into the target app."
+        dictation_done_message("pasted", false, false, &[], DictationDoneContext::default()),
+        "Inserted into the app."
     );
-    assert_eq!(dictation_done_message("undone", true, &[]), "Undo applied.");
     assert_eq!(
-        dictation_done_message("empty", true, &[]),
+        dictation_done_message("undone", true, false, &[], DictationDoneContext::default()),
+        "Undo applied."
+    );
+    assert_eq!(
+        dictation_done_message("empty", true, false, &[], DictationDoneContext::default()),
         "No speech detected."
     );
     assert_eq!(
-        dictation_done_message("previewed", false, &[]),
+        dictation_done_message(
+            "previewed",
+            false,
+            false,
+            &[],
+            DictationDoneContext::default()
+        ),
         "Ready in Plainsong."
     );
     assert!(should_deliver_dictation_text(
@@ -3944,10 +4582,12 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
     let both = dictation_done_message(
         "pasted",
         false,
+        false,
         &[
             "Nothing was selected, so the command ran on the transcript.".to_string(),
             DICTATION_FORMAT_FAILED_WARNING.to_string(),
         ],
+        DictationDoneContext::default(),
     );
     assert!(both.contains("Nothing was selected"));
     assert!(both.contains(DICTATION_FORMAT_FAILED_WARNING));
@@ -3955,6 +4595,64 @@ fn done_message_leads_with_the_delivery_outcome_not_the_warning() {
 
 #[test]
 fn empty_delete_command_results_are_delivered_to_the_selection() {
+    for (command, output) in [("newline", "\n"), ("paragraph", "\n\n")] {
+        let result = finalize_dictation_result_text(output, "spoken command", Some(command));
+        assert_eq!(result, output);
+        assert!(should_insert_dictation_result(
+            &result,
+            Some(command),
+            false,
+            false
+        ));
+        assert!(!should_insert_dictation_result(
+            &result,
+            Some(command),
+            true,
+            false
+        ));
+        assert!(should_insert_dictation_result(
+            &result,
+            Some(command),
+            true,
+            true
+        ));
+    }
+    for command in [
+        "delete_selection",
+        "delete_phrase",
+        "undo_last_insert",
+        "delete_last_sentence",
+        "backtrack_undo_last_insert",
+    ] {
+        let result = finalize_dictation_result_text("", "spoken command", Some(command));
+        assert_eq!(result, "");
+        assert_eq!(
+            should_insert_dictation_result(&result, Some(command), false, false),
+            matches!(command, "delete_selection" | "delete_phrase"),
+        );
+    }
+    for command in [None, Some("rewrite_shorter"), Some("unknown")] {
+        for candidate in ["", " ", "\n", "[blank audio]", "<|nospeech|>"] {
+            assert_eq!(
+                finalize_dictation_result_text(candidate, "original words", command),
+                "original words"
+            );
+            assert!(
+                !should_insert_dictation_result(candidate, command, false, false)
+                    || !candidate.trim().is_empty()
+            );
+        }
+    }
+    for (command, invalid) in [
+        ("newline", "\n\n"),
+        ("paragraph", "\n"),
+        ("delete_phrase", " "),
+    ] {
+        assert_eq!(
+            finalize_dictation_result_text(invalid, "original words", Some(command)),
+            "original words"
+        );
+    }
     assert!(should_insert_dictation_result(
         "",
         Some("delete_phrase"),
@@ -4043,9 +4741,9 @@ fn pre_insert_llm_passes_are_gated_and_time_boxed() {
         "exactly three pre-insert LLM call sites (translate-to-English, mode-transform, default/voice) must be time-boxed"
     );
     assert_eq!(
-        body.matches("dictation_format_timeout(").count(),
+        body.matches("dictation_format_timeout_for_policy(").count(),
         3,
-        "every timed call must pick its budget via dictation_format_timeout (the local-vs-remote split)"
+        "every timed call must use the provider and selected transform policy to pick its budget"
     );
     // Translate-to-English (B7a) is the one pre-insert model call that is
     // NOT gated by Smart Format: it has its own opt-in
@@ -4197,7 +4895,7 @@ fn retry_meeting_analysis_reuses_the_shared_pass() {
         .unwrap_or(arm);
 
     assert!(
-        arm.contains("run_meeting_analysis_pass("),
+        arm.contains("run_meeting_analysis_until_written("),
         "retry must call the shared analysis pass"
     );
     assert!(
@@ -4208,20 +4906,18 @@ fn retry_meeting_analysis_reuses_the_shared_pass() {
 
 #[test]
 fn the_stop_capture_tail_is_awaited_before_the_capture_mutex() {
-    // The 120ms capture tail used to be a blocking sleep inside
-    // `stop_dictation`, which ran while the caller held the async
-    // `audio_capture` mutex and parked a tokio worker. It must be awaited
-    // before the lock is taken.
+    // Snapshotting the aside's frame clock briefly takes the capture lock.
+    // Waiting for either tail must release it before the final stop takes it.
     let body = owned_stop_dictation_body();
     let tail = body
         .find("DICTATION_STOP_CAPTURE_TAIL_MS")
         .expect("stop must wait the capture tail");
     let lock = body
-        .find("state.audio_capture.lock().await")
+        .find("let mut audio = state.audio_capture.lock().await;")
         .expect("stop must take the capture mutex");
     assert!(
         tail < lock,
-        "the capture tail must be awaited before the audio_capture mutex is acquired"
+        "the capture tail must be awaited before the stop holds the audio_capture mutex"
     );
     assert!(
         body[tail..lock].contains("tokio::time::sleep"),
@@ -4256,7 +4952,7 @@ fn dictation_insertion_never_blocks_the_async_runtime() {
     // check.
     let body = owned_stop_dictation_body();
     let call = body
-        .find("paste_text_systemwide(")
+        .find("paste_original_dictation(")
         .expect("dictation stop must contain the delivery path");
     let dispatch = body
         .find("tokio::task::spawn_blocking(")
@@ -4310,7 +5006,7 @@ fn the_native_paste_probes_the_focused_field_right_before_it_stages_the_clipboar
     // touch the clipboard and send Cmd+V.
     let body = top_level_item(
         include_str!("text_insert.rs"),
-        "fn dispatch_paste_from_clipboard(",
+        "fn dispatch_paste_from_clipboard_owned(",
     );
     let reactivate = body
         .find("reactivate_target_application(")
@@ -4319,14 +5015,44 @@ fn the_native_paste_probes_the_focused_field_right_before_it_stages_the_clipboar
         .find("probe_focused_secure_field()")
         .expect("the dispatcher must probe the focused control");
     let stage = body
-        .find("copy_to_clipboard(text)")
-        .expect("the dispatcher must stage the clipboard");
+        .find("stage_and_dispatch_native_paste(")
+        .expect("the dispatcher must enter the guarded clipboard transaction");
     let keystroke = body
-        .find("send_native_paste_key()")
+        .find("send_native_paste_key(")
         .expect("the dispatcher must send Cmd+V");
     assert!(reactivate < probe, "reactivate before probing");
     assert!(probe < stage, "probe before the clipboard is touched");
     assert!(stage < keystroke, "stage before Cmd+V");
+}
+
+#[test]
+fn native_copy_and_paste_wait_only_for_an_app_that_was_brought_forward() {
+    // An app already in front has its field focused, so its 50 ms settle is
+    // skipped. The paste must still confirm the frontmost app is the target.
+    let source = include_str!("text_insert.rs");
+    let copy = top_level_item(source, "fn send_native_copy_key(");
+    let paste = top_level_item(source, "fn dispatch_paste_from_clipboard_owned(");
+    for body in [copy, paste] {
+        let reactivate = body
+            .find("reactivate_target_application(")
+            .expect("the target is brought forward");
+        let settle = body
+            .find(".settle(std::time::Duration::from_millis(50))")
+            .expect("the settle wait depends on whether the target moved");
+        assert!(reactivate < settle);
+        assert!(
+            !body[reactivate..].contains("std::thread::sleep("),
+            "no unconditional sleep after reactivation"
+        );
+    }
+    let settle = paste
+        .find(".settle(std::time::Duration::from_millis(50))")
+        .unwrap();
+    let verify = paste
+        .find("resolve_native_paste_target(\n        frontmost_application_identity(),")
+        .expect("the paste confirms the frontmost app is the target");
+    let probe = paste.find("probe_focused_secure_field()").unwrap();
+    assert!(settle < verify && verify < probe);
 }
 
 #[test]
@@ -4337,19 +5063,21 @@ fn macos_paste_restores_clipboard_after_all_successful_dispatches() {
         .find("Command::new(\"/usr/bin/osascript\")")
         .expect("paste must try the observable System Events path");
     let core_graphics = sender
-        .find("dispatch_command_keystroke(9)")
+        .find("dispatch_command_keystroke(paste_keycode)")
         .expect("paste must retain the CoreGraphics fallback");
     assert!(
         system_events < core_graphics,
         "System Events must run before the unconfirmable CoreGraphics fallback"
     );
-    assert!(sender.contains("PasteDispatchStatus::Confirmed"));
-    assert!(sender.contains("PasteDispatchStatus::FallbackDispatched"));
+    assert!(sender.contains("send_native_paste_with_fallback("));
+    let attempts = top_level_item(source, "fn send_native_paste_with_fallback(");
+    assert!(attempts.contains("PasteDispatchStatus::Confirmed"));
+    assert!(attempts.contains("PasteDispatchStatus::FallbackDispatched"));
 
-    let dispatcher = top_level_item(source, "fn dispatch_paste_from_clipboard(");
+    let dispatcher = top_level_item(source, "fn dispatch_paste_from_clipboard_owned(");
     assert!(
-        dispatcher.contains("if !keep_text_in_clipboard {"),
-        "the old clipboard must be restored when retention is disabled"
+        dispatcher.contains("schedule_macos_clipboard_restore,"),
+        "successful native paste dispatch must schedule ownership-checked restoration"
     );
     assert!(
         !dispatcher.contains("status == PasteDispatchStatus::Confirmed"),
@@ -4393,8 +5121,8 @@ fn dictation_result_is_durable_before_delivery_begins() {
         .find("create_dictation_history_entry")
         .expect("dictation stop must persist the result transactionally");
     let delivery = body
-        .find("paste_text_systemwide")
-        .expect("dictation stop must contain the delivery path");
+        .find("claim_dictation_delivery(")
+        .expect("dictation stop must claim delivery before insertion");
 
     assert!(
         persistence < delivery,
@@ -4501,39 +5229,6 @@ fn a_cancelled_language_install_reads_as_stopped_not_failed() {
         "{note}"
     );
     assert!(note.contains("the helper exited"), "{note}");
-}
-
-#[test]
-fn missing_command_context_never_fails_the_stop() {
-    // A selection-scoped command spoken with nothing selected is a soft
-    // failure: the raw transcript is still inserted and the reason is
-    // reported as a warning. It used to propagate as `Err` straight past
-    // the cleanup, which killed dictation until the app restarted.
-    let error = resolve_contextual_command_input("", None, "none", "Uppercase Selection")
-        .map_err(DictationCommandError::MissingContext)
-        .expect_err("missing context should not resolve");
-    assert!(matches!(error, DictationCommandError::MissingContext(_)));
-    assert!(matches!(
-        DictationCommandError::from("prompt lookup failed".to_string()),
-        DictationCommandError::Failed(_)
-    ));
-
-    let body = owned_stop_dictation_body();
-    let missing_context_arm = body
-        .split_once("Err(DictationCommandError::MissingContext(")
-        .expect("the stop path must handle a missing-context command error")
-        .1
-        .split_once("Err(DictationCommandError::Failed(")
-        .expect("the stop path must still treat other command errors as terminal")
-        .0;
-    assert!(
-        missing_context_arm.contains("warnings.push("),
-        "a missing-context command must record a warning"
-    );
-    assert!(
-        !missing_context_arm.contains("return Err("),
-        "a missing-context command must not fail the stop"
-    );
 }
 
 #[test]
@@ -4656,29 +5351,56 @@ fn leaving_the_bundled_lane_releases_the_resident_model() {
 /// The setting has to reach the provider, or "off" means nothing again.
 #[test]
 fn the_keep_warm_setting_reaches_the_bundled_provider() {
-    let _serialized = llm::bundled_local::KEEP_WARM_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // A private residency: settings saves in other tests write the global one.
+    let residency = llm::bundled_local::Residency::for_test();
     let mut settings = settings::Settings::default();
     settings.transcription.dictation_keep_warm = "off".to_string();
-    apply_bundled_cleanup_keep_warm(&settings);
-    assert!(!llm::bundled_local::keep_warm_enabled());
+    apply_bundled_cleanup_keep_warm_to(residency, &settings);
+    assert!(!residency.keep_warm_enabled());
     assert!(llm::bundled_local::should_schedule_idle_unload(
-        llm::bundled_local::keep_warm_enabled()
+        residency.keep_warm_enabled()
     ));
 
-    // Restore the default the rest of the suite expects.
     settings.transcription.dictation_keep_warm = "on".to_string();
-    apply_bundled_cleanup_keep_warm(&settings);
-    assert!(llm::bundled_local::keep_warm_enabled());
+    apply_bundled_cleanup_keep_warm_to(residency, &settings);
+    assert!(residency.keep_warm_enabled());
+}
+
+/// Switching to Parakeet, or changing its language, must fetch the matching
+/// fast-route files now, not at the next launch.
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn every_settings_save_asks_for_speech_model_maintenance() {
+    NEURAL_ENGINE_MAINTENANCE_REQUESTS.with(|requests| requests.borrow_mut().clear());
+    let mut settings = settings::Settings::default();
+    settings.transcription.use_shared_asr_selection = true;
+    settings.transcription.default_provider = "whisper".to_string();
+    settings.transcription.selected_model_id = "base.en".to_string();
+    apply_speech_model_residency(&settings);
+
+    settings.transcription.default_provider = "transcribe_cpp".to_string();
+    settings.transcription.selected_model_id =
+        asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID.to_string();
+    apply_speech_model_residency(&settings);
+
+    settings.transcription.language = Some("en".to_string());
+    apply_speech_model_residency(&settings);
+
+    let requests = NEURAL_ENGINE_MAINTENANCE_REQUESTS.with(|requests| requests.borrow().clone());
+    assert_eq!(requests, vec![false, true, true]);
 }
 
 #[tokio::test]
 async fn dictation_model_readiness_is_truthful_when_warmup_is_deferred_or_unneeded() {
     assert_eq!(
-        prepare_dictation_model(asr::AsrProviderType::Whisper, "missing-test-model", "off")
-            .await
-            .expect("off defers local loading"),
+        prepare_dictation_model(
+            asr::AsrProviderType::Whisper,
+            "missing-test-model",
+            "off",
+            WarmupReason::Background,
+        )
+        .await
+        .expect("off defers local loading"),
         DictationModelWarmState::Deferred
     );
     assert_eq!(
@@ -4686,11 +5408,29 @@ async fn dictation_model_readiness_is_truthful_when_warmup_is_deferred_or_unneed
             asr::AsrProviderType::OpenAiCloud,
             "gpt-4o-mini-transcribe",
             "on",
+            WarmupReason::Background,
         )
         .await
         .expect("cloud routes have no local runtime to warm"),
         DictationModelWarmState::NotRequired
     );
+}
+
+#[tokio::test]
+async fn session_warmup_skips_the_optional_headroom_deferral() {
+    // A session warm-up goes straight to the load; a missing model fails
+    // there instead of reporting Deferred and loading only at stop. Whisper
+    // maps an unknown id to base.en, which may be installed on this Mac, so
+    // ask for a route whose folder a development machine does not hold.
+    let error = prepare_dictation_model(
+        asr::AsrProviderType::Qwen3Asr,
+        "qwen3-asr-missing-test-model",
+        "on",
+        WarmupReason::Session,
+    )
+    .await
+    .expect_err("a session warm-up reaches the model load");
+    assert!(error.contains("Could not prepare"));
 }
 
 #[tokio::test]
@@ -4724,13 +5464,67 @@ async fn shutdown_waits_for_native_background_model_warmups_to_finish() {
     assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
 }
 
+#[tokio::test(start_paused = true)]
+async fn timed_out_model_warmup_remains_owned_until_blocking_worker_finishes() {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let task = tokio::spawn(async move {
+        acknowledge_dictation_model_warmup("synthetic-model", async move {
+            tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            Ok(())
+        })
+        .await
+    });
+    started_rx.await.unwrap();
+    tokio::time::advance(Duration::from_secs(
+        DICTATION_MODEL_WARMUP_TIMEOUT_SECONDS + 1,
+    ))
+    .await;
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "timeout must not detach native initialization"
+    );
+    release_tx.send(()).unwrap();
+    let error = task
+        .await
+        .unwrap()
+        .expect_err("a late finish is not a ready acknowledgement");
+    assert!(error.contains("exceeded"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn final_decode_waits_for_an_in_flight_session_warmup() {
+    let (sender, done) = tokio::sync::watch::channel(false);
+    let waiter = tokio::spawn(wait_for_matching_prewarms(vec![done]));
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    assert!(
+        !waiter.is_finished(),
+        "decode must not start while the model loads"
+    );
+    sender.send(true).unwrap();
+    waiter.await.unwrap();
+
+    let (sender, done) = tokio::sync::watch::channel(false);
+    let waiter = tokio::spawn(wait_for_matching_prewarms(vec![done]));
+    drop(sender);
+    waiter.await.unwrap();
+}
+
 #[tokio::test]
 async fn duplicate_background_model_warmups_are_detected() {
     let task = tokio::spawn(std::future::pending::<()>());
+    let (_done_sender, done) = tokio::sync::watch::channel(false);
     let tasks = vec![DictationModelPrewarmTask {
         provider: asr::AsrProviderType::Whisper,
         model_id: "base.en".to_string(),
         handle: task,
+        done,
     }];
 
     assert!(has_matching_model_prewarm(
@@ -4783,11 +5577,12 @@ fn me_and_them_start_requires_verified_system_audio() {
         ready: false,
         reason: None,
         actionable_reason: Some("Run Test system audio.".to_string()),
+        permission: None,
     };
 
     let error = require_verified_system_audio_for_meeting(&unverified)
         .expect_err("an unverified route must not start Me + Them capture");
-    assert!(error.contains("Test system audio"));
+    assert!(error.contains("Check meeting audio"));
     assert!(error.contains("Mic only"));
 
     let inconsistent = audio::system_capture::SystemAudioCapability {
@@ -5074,6 +5869,22 @@ fn dictation_profile_normalization_preserves_backward_compatibility() {
 
 #[test]
 fn command_parser_detects_prefix_commands() {
+    for (text, prefix, intended) in [
+        ("command", "command", true),
+        ("COMMAND: unknown instruction", "command", true),
+        ("plainsong, new line.", "plainsong", true),
+        ("command appendectomy", "", true),
+        ("commander new line", "command", false),
+        ("ordinary command new line", "command", false),
+        ("new line", "command", false),
+    ] {
+        assert_eq!(
+            crate::dictation_parity::has_dictation_command_prefix(text, prefix),
+            intended,
+            "{text}"
+        );
+    }
+
     let newline = parse_dictation_command("command newline", "command")
         .expect("newline command should parse");
     assert_eq!(newline.0, "newline");
@@ -5363,7 +6174,9 @@ fn dictation_text_ready_payload_includes_required_telemetry_fields() {
         optimization_applied: true,
         fallback_reason: Some("fallback test".to_string()),
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
 
     let payload = build_dictation_text_ready_payload(
@@ -5462,7 +6275,9 @@ fn dictation_text_ready_payload_does_not_flag_optimization_remap_as_fallback() {
         optimization_applied: true,
         fallback_reason: None,
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
 
     let payload = build_dictation_text_ready_payload(
@@ -5677,7 +6492,7 @@ fn reprocess_audio_decision_names_the_setting_that_would_have_kept_it() {
     // Kept, then removed by auto-delete: name the retention preset.
     let swept = dictation_reprocess_audio_decision("/kept/a.wav", false, true, "24h").unwrap_err();
     assert!(
-        swept.contains("auto-delete") && swept.contains("24h"),
+        swept.contains("auto-delete") && swept.contains("\"After 24 hours\""),
         "{swept}"
     );
 
@@ -6075,9 +6890,7 @@ fn settings_with_active_custom_mode(
 #[test]
 fn numbers_as_digits_follows_the_mode_preset_by_default() {
     let mut settings = settings::Settings::default();
-    // A fresh install is on "voice", the one preset that keeps the words
-    // as spoken.
-    assert!(!resolve_dictation_numbers_as_digits(&settings));
+    assert!(resolve_dictation_numbers_as_digits(&settings));
 
     for preset in ["messages", "email", "notes", "meeting_follow_up"] {
         settings.transcription.dictation_mode_preset = preset.to_string();
@@ -6097,6 +6910,12 @@ fn numbers_as_digits_uses_the_users_per_preset_override() {
         .insert("voice".to_string(), true);
     assert!(resolve_dictation_numbers_as_digits(&settings));
 
+    settings
+        .transcription
+        .dictation_numbers_as_digits
+        .insert("voice".to_string(), false);
+    assert!(!resolve_dictation_numbers_as_digits(&settings));
+
     settings.transcription.dictation_mode_preset = "email".to_string();
     settings
         .transcription
@@ -6110,6 +6929,9 @@ fn numbers_as_digits_lets_a_custom_profile_inherit_or_override() {
     // Inherits its base preset when it stores nothing (which is what a
     // profile saved before this setting carries).
     let mut settings = settings_with_active_custom_mode(Some("voice"), None);
+    assert!(resolve_dictation_numbers_as_digits(&settings));
+
+    settings.transcription.dictation_custom_modes[0].numbers_as_digits = Some(false);
     assert!(!resolve_dictation_numbers_as_digits(&settings));
 
     settings.transcription.dictation_custom_modes[0].numbers_as_digits = Some(true);
@@ -6125,8 +6947,8 @@ fn numbers_as_digits_lets_a_custom_profile_inherit_or_override() {
     overridden
         .transcription
         .dictation_numbers_as_digits
-        .insert("voice".to_string(), true);
-    assert!(resolve_dictation_numbers_as_digits(&overridden));
+        .insert("voice".to_string(), false);
+    assert!(!resolve_dictation_numbers_as_digits(&overridden));
 }
 
 #[test]
@@ -6192,9 +7014,14 @@ fn a_custom_mode_for_another_base_preset_does_not_hijack_the_transform() {
 
 #[test]
 fn modes_without_a_transform_prompt_resolve_to_nothing() {
+    let plain = settings::Settings::default();
+    assert!(resolve_dictation_mode_transform_prompt(&plain, "voice").is_none());
+    assert!(resolve_dictation_mode_transform_prompt(&plain, "notes").is_none());
     let settings =
         settings_with_active_custom_mode(Some("voice"), Some("Speak like a lighthouse."));
-    assert!(resolve_dictation_mode_transform_prompt(&settings, "voice").is_none());
+    let (prompt, _) = resolve_dictation_mode_transform_prompt(&settings, "voice")
+        .expect("the matching custom Voice mode must keep its explicit prompt");
+    assert_eq!(prompt, "Speak like a lighthouse.");
     assert!(resolve_dictation_mode_transform_prompt(&settings, "notes").is_none());
 }
 
@@ -6255,12 +7082,13 @@ fn dictation_persistence_honors_no_save_and_immediate_retention() {
 #[test]
 fn recent_delivery_falls_back_when_current_target_is_unknown() {
     let now = chrono::Utc::now();
-    let delivery = RecentDictationDelivery {
+    let delivery = RecentDictationDeliverySnapshot {
+        owner_session_id: 1,
         text: "ship it tomorrow".to_string(),
         app_target: Some("Slack".to_string()),
         app_bundle_id: None,
         delivered_at: now,
-        undo_eligible: true,
+        undo_available: true,
     };
 
     assert!(recent_delivery_matches_target(&delivery, None, None));
@@ -6279,14 +7107,15 @@ fn recent_delivery_falls_back_when_current_target_is_unknown() {
 #[test]
 fn recent_delivery_freshness_window_expires() {
     let now = chrono::Utc::now();
-    let fresh_delivery = RecentDictationDelivery {
+    let fresh_delivery = RecentDictationDeliverySnapshot {
+        owner_session_id: 1,
         text: "ship it tomorrow".to_string(),
         app_target: Some("Slack".to_string()),
         app_bundle_id: None,
         delivered_at: now - chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS),
-        undo_eligible: true,
+        undo_available: true,
     };
-    let stale_delivery = RecentDictationDelivery {
+    let stale_delivery = RecentDictationDeliverySnapshot {
         delivered_at: now - chrono::Duration::seconds(RECENT_DICTATION_DELIVERY_WINDOW_SECS + 1),
         ..fresh_delivery.clone()
     };
@@ -6308,17 +7137,18 @@ fn recent_delivery_freshness_window_expires() {
 }
 
 #[test]
-fn undo_requires_confirmed_insert_and_unchanged_known_target() {
+fn undo_planning_requires_an_owned_edit_and_unchanged_known_target() {
     let now = chrono::Utc::now();
-    let delivery = RecentDictationDelivery {
+    let delivery = RecentDictationDeliverySnapshot {
+        owner_session_id: 1,
         text: "ship it tomorrow".to_string(),
         app_target: Some("Slack".to_string()),
         app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
         delivered_at: now,
-        undo_eligible: true,
+        undo_available: true,
     };
 
-    assert!(recent_delivery_authorizes_undo(
+    assert!(recent_delivery_allows_undo_attempt(
         &delivery,
         Some("Slack"),
         Some("com.tinyspeck.slackmacgap"),
@@ -6327,7 +7157,7 @@ fn undo_requires_confirmed_insert_and_unchanged_known_target() {
         "auto",
         now,
     ));
-    assert!(!recent_delivery_authorizes_undo(
+    assert!(!recent_delivery_allows_undo_attempt(
         &delivery,
         Some("Slack"),
         Some("com.tinyspeck.slackmacgap"),
@@ -6336,7 +7166,7 @@ fn undo_requires_confirmed_insert_and_unchanged_known_target() {
         "auto",
         now,
     ));
-    assert!(!recent_delivery_authorizes_undo(
+    assert!(!recent_delivery_allows_undo_attempt(
         &delivery,
         Some("Slack"),
         Some("com.tinyspeck.slackmacgap"),
@@ -6346,11 +7176,11 @@ fn undo_requires_confirmed_insert_and_unchanged_known_target() {
         now,
     ));
 
-    let unconfirmed = RecentDictationDelivery {
-        undo_eligible: false,
+    let unconfirmed = RecentDictationDeliverySnapshot {
+        undo_available: false,
         ..delivery
     };
-    assert!(!recent_delivery_authorizes_undo(
+    assert!(!recent_delivery_allows_undo_attempt(
         &unconfirmed,
         Some("Slack"),
         Some("com.tinyspeck.slackmacgap"),
@@ -6364,15 +7194,16 @@ fn undo_requires_confirmed_insert_and_unchanged_known_target() {
 #[test]
 fn undo_fails_closed_when_a_recorded_bundle_id_is_unavailable() {
     let now = chrono::Utc::now();
-    let delivery = RecentDictationDelivery {
+    let delivery = RecentDictationDeliverySnapshot {
+        owner_session_id: 1,
         text: "ship it tomorrow".to_string(),
         app_target: Some("Slack".to_string()),
         app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
         delivered_at: now,
-        undo_eligible: true,
+        undo_available: true,
     };
 
-    assert!(!recent_delivery_authorizes_undo(
+    assert!(!recent_delivery_allows_undo_attempt(
         &delivery,
         Some("Slack"),
         None,
@@ -6386,15 +7217,16 @@ fn undo_fails_closed_when_a_recorded_bundle_id_is_unavailable() {
 #[test]
 fn undo_rejects_delivery_timestamps_from_the_future() {
     let now = chrono::Utc::now();
-    let delivery = RecentDictationDelivery {
+    let delivery = RecentDictationDeliverySnapshot {
+        owner_session_id: 1,
         text: "ship it tomorrow".to_string(),
         app_target: Some("Slack".to_string()),
         app_bundle_id: Some("com.tinyspeck.slackmacgap".to_string()),
         delivered_at: now + chrono::Duration::seconds(1),
-        undo_eligible: true,
+        undo_available: true,
     };
 
-    assert!(!recent_delivery_authorizes_undo(
+    assert!(!recent_delivery_allows_undo_attempt(
         &delivery,
         Some("Slack"),
         Some("com.tinyspeck.slackmacgap"),
@@ -6403,6 +7235,28 @@ fn undo_rejects_delivery_timestamps_from_the_future() {
         "auto",
         now,
     ));
+}
+
+#[test]
+fn undo_retires_only_its_delivery_and_fences_late_correction_samples() {
+    let mut slot = Some(RecentDictationDelivery {
+        snapshot: RecentDictationDeliverySnapshot {
+            owner_session_id: 7,
+            text: "public fixture".into(),
+            app_target: Some("Fixture editor".into()),
+            app_bundle_id: Some("local.test.editor".into()),
+            delivered_at: chrono::Utc::now(),
+            undo_available: false,
+        },
+        undo: None,
+    });
+    assert!(recent_delivery_owned_by(&slot, 7));
+    assert!(take_recent_delivery_undo(&mut slot, 6).is_none());
+    assert!(recent_delivery_owned_by(&slot, 7));
+    assert!(take_recent_delivery_undo(&mut slot, 7).is_none());
+    assert!(slot.is_none());
+    assert!(!recent_delivery_owned_by(&slot, 7));
+    assert!(take_recent_delivery_undo(&mut slot, 7).is_none());
 }
 
 #[test]
@@ -6527,6 +7381,50 @@ fn apple_speech_suppresses_generic_batch_live_preview() {
     ));
 }
 
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn unified_batch_route_disables_every_live_preview_engine() {
+    let eligible = dictation_route_supports_live_preview(
+        asr::AsrProviderType::TranscribeCpp,
+        asr::transcribe_cpp::PARAKEET_UNIFIED_EN_GGUF_MODEL_ID,
+    );
+    assert!(!eligible);
+    for setting in ["redecode", "streaming", "auto"] {
+        assert_eq!(
+            resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+                live_preview_enabled: eligible,
+                engine_setting: setting,
+                provider_supports_redecode: true,
+                streaming_compiled_in: true,
+                streaming_model_ready: true,
+                streaming_language_supported: true,
+            }),
+            DictationLivePreviewEngine::Off,
+            "{setting} must stay off for the Unified batch route"
+        );
+    }
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn existing_transcribe_cpp_batch_route_keeps_its_live_preview_eligibility() {
+    assert!(dictation_route_supports_live_preview(
+        asr::AsrProviderType::TranscribeCpp,
+        asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
+    ));
+    assert_eq!(
+        resolve_dictation_live_preview_engine(DictationLivePreviewInputs {
+            live_preview_enabled: true,
+            engine_setting: "redecode",
+            provider_supports_redecode: true,
+            streaming_compiled_in: true,
+            streaming_model_ready: true,
+            streaming_language_supported: true,
+        }),
+        DictationLivePreviewEngine::Redecode
+    );
+}
+
 #[test]
 fn apple_speech_legacy_engine_override_is_removed() {
     let mut optimization = settings::PlatformOptimizationSettings {
@@ -6641,6 +7539,33 @@ fn whisper_english_model_in_the_meeting_slot_falls_through_to_parakeet() {
 
     assert_eq!(transcription.meeting_provider, "parakeet");
     assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
+}
+
+#[test]
+fn a_meeting_model_still_downloading_is_substituted_for_one_meeting_only() {
+    use asr::manager::RuntimeStatus;
+    // A new install's first meeting before its GGUF download lands: the
+    // substitute serves this meeting and the slot keeps the reader's choice.
+    assert!(!meeting_route_repair_is_persistent(
+        &RuntimeStatus::MissingModel
+    ));
+    // A route that cannot run at all is still repaired on disk, as before.
+    assert!(meeting_route_repair_is_persistent(
+        &RuntimeStatus::MissingRuntime
+    ));
+    assert!(meeting_route_repair_is_persistent(&RuntimeStatus::Error));
+    // And the substitution is decided before the settings write, not after.
+    let source = include_str!("lib.rs");
+    let body = &source[source
+        .find("async fn resolve_ready_meeting_selection(")
+        .expect("resolve_ready_meeting_selection")..];
+    let check = body
+        .find("meeting_route_repair_is_persistent(")
+        .expect("persistence check");
+    let persist = body
+        .find("persist_repaired_meeting_route(")
+        .expect("persistence call");
+    assert!(check < persist);
 }
 
 #[test]
@@ -6895,6 +7820,182 @@ fn fresh_settings_resolve_the_meeting_lane_to_parakeet_v3() {
     assert_eq!(model_id, "parakeet-tdt-0.6b-v3");
 }
 
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn moonshine_medium_route_does_not_claim_meetings_or_generic_preview() {
+    let model = crate::asr::transcribe_cpp::MOONSHINE_STREAM_MEDIUM_MODEL_ID;
+    assert!(!meeting_model_is_supported(
+        asr::AsrProviderType::TranscribeCpp,
+        model
+    ));
+    assert!(meeting_route_is_dictation_only(
+        asr::AsrProviderType::TranscribeCpp,
+        model
+    ));
+    assert!(!dictation_route_supports_live_preview(
+        asr::AsrProviderType::TranscribeCpp,
+        model
+    ));
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn transcribe_cpp_orukeet_is_dictation_only_while_parakeet_keeps_meeting_support() {
+    use crate::asr::transcribe_cpp::{
+        ORUKEET_R3_GGUF_MODEL_ID, PARAKEET_GGUF_MODEL_ID, QWEN3_ASR_06_GGUF_MODEL_ID,
+        QWEN3_ASR_17_GGUF_MODEL_ID,
+    };
+
+    assert!(meeting_model_is_supported(
+        asr::AsrProviderType::TranscribeCpp,
+        PARAKEET_GGUF_MODEL_ID,
+    ));
+    assert!(!meeting_model_is_supported(
+        asr::AsrProviderType::TranscribeCpp,
+        ORUKEET_R3_GGUF_MODEL_ID,
+    ));
+    assert!(meeting_route_is_dictation_only(
+        asr::AsrProviderType::TranscribeCpp,
+        ORUKEET_R3_GGUF_MODEL_ID,
+    ));
+    for model in [QWEN3_ASR_17_GGUF_MODEL_ID, QWEN3_ASR_06_GGUF_MODEL_ID] {
+        assert!(!meeting_model_is_supported(
+            asr::AsrProviderType::TranscribeCpp,
+            model
+        ));
+        assert!(!dictation_route_supports_live_preview(
+            asr::AsrProviderType::TranscribeCpp,
+            model
+        ));
+    }
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn transcribe_cpp_unified_meeting_selection_is_preserved() {
+    use crate::asr::transcribe_cpp::PARAKEET_UNIFIED_EN_GGUF_MODEL_ID;
+    let settings = settings::TranscriptionSettings {
+        use_shared_asr_selection: false,
+        meeting_provider: "transcribe_cpp".to_string(),
+        meeting_model_id: PARAKEET_UNIFIED_EN_GGUF_MODEL_ID.to_string(),
+        ..Default::default()
+    };
+    let (provider, model) =
+        resolve_transcription_provider_and_model(&settings, TranscriptionScope::Meeting);
+    assert_eq!(provider, asr::AsrProviderType::TranscribeCpp);
+    assert_eq!(model, PARAKEET_UNIFIED_EN_GGUF_MODEL_ID);
+    assert!(meeting_model_is_supported(provider, &model));
+    assert!(!meeting_route_is_dictation_only(provider, &model));
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn optional_english_gguf_routes_serve_both_lanes_and_are_never_defaults() {
+    use crate::asr::transcribe_cpp::{
+        FLUID_SPEECH_MINI_GGUF_MODEL_ID, PARAKEET_GGUF_MODEL_ID, UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+    };
+    for model_id in [
+        FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+        UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+    ] {
+        let settings = settings::TranscriptionSettings {
+            use_shared_asr_selection: false,
+            dictation_provider: "transcribe_cpp".to_string(),
+            dictation_model_id: model_id.to_string(),
+            meeting_provider: "transcribe_cpp".to_string(),
+            meeting_model_id: model_id.to_string(),
+            ..Default::default()
+        };
+        for scope in [TranscriptionScope::Dictation, TranscriptionScope::Meeting] {
+            let (provider, model) = resolve_transcription_provider_and_model(&settings, scope);
+            assert_eq!(provider, asr::AsrProviderType::TranscribeCpp);
+            assert_eq!(model, model_id);
+        }
+        assert!(meeting_model_is_supported(
+            asr::AsrProviderType::TranscribeCpp,
+            model_id
+        ));
+        assert!(!meeting_route_is_dictation_only(
+            asr::AsrProviderType::TranscribeCpp,
+            model_id
+        ));
+    }
+    // Neither is ever what a provider, a fresh install or a meeting slot
+    // falls back to.
+    assert_eq!(
+        asr::AsrProviderType::TranscribeCpp.default_model_id(),
+        PARAKEET_GGUF_MODEL_ID
+    );
+    assert_eq!(
+        default_meeting_model_id(asr::AsrProviderType::TranscribeCpp),
+        PARAKEET_GGUF_MODEL_ID
+    );
+    if let Some((_, model)) = crate::settings::fresh_install_dictation_route() {
+        assert_ne!(model, FLUID_SPEECH_MINI_GGUF_MODEL_ID);
+        assert_ne!(model, UNDERDOG_BARK_PRO_GGUF_MODEL_ID);
+    }
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn optional_english_gguf_routes_hand_other_languages_to_multilingual_parakeet() {
+    use crate::asr::transcribe_cpp::{
+        FLUID_SPEECH_MINI_GGUF_MODEL_ID, ORUKEET_R3_GGUF_MODEL_ID, PARAKEET_GGUF_MODEL_ID,
+        UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+    };
+    let cpp = asr::AsrProviderType::TranscribeCpp;
+    for model_id in [
+        FLUID_SPEECH_MINI_GGUF_MODEL_ID,
+        UNDERDOG_BARK_PRO_GGUF_MODEL_ID,
+    ] {
+        for language in [
+            None,
+            Some(""),
+            Some("auto"),
+            Some("en"),
+            Some("EN"),
+            Some("en-GB"),
+        ] {
+            assert_eq!(
+                english_only_route_language_substitute(cpp, model_id, language),
+                None,
+                "{model_id} {language:?}"
+            );
+        }
+        for language in ["de", "fr", "es-ES", "ja"] {
+            assert_eq!(
+                english_only_route_language_substitute(cpp, model_id, Some(language)),
+                Some((cpp, PARAKEET_GGUF_MODEL_ID)),
+                "{model_id} {language}"
+            );
+        }
+        let warning = english_only_route_language_warning(
+            &cpp.speech_model_name(model_id),
+            "de",
+            &cpp.speech_model_name(PARAKEET_GGUF_MODEL_ID),
+            "meeting",
+        );
+        assert!(
+            warning.contains("English only") && warning.contains("'de'"),
+            "{warning}"
+        );
+        assert!(warning.contains("uses Parakeet v3."), "{warning}");
+        assert!(!warning.contains(model_id), "{warning}");
+    }
+    // Other routes keep their existing behaviour.
+    for (provider, model_id) in [
+        (cpp, PARAKEET_GGUF_MODEL_ID),
+        (cpp, ORUKEET_R3_GGUF_MODEL_ID),
+        (asr::AsrProviderType::Parakeet, "parakeet-tdt-0.6b-v3"),
+        (asr::AsrProviderType::Whisper, "base.en"),
+    ] {
+        assert_eq!(
+            english_only_route_language_substitute(provider, model_id, Some("de")),
+            None
+        );
+    }
+}
+
 fn provider_info_for_test(
     provider_type: asr::AsrProviderType,
     model_id: &str,
@@ -6926,6 +8027,7 @@ fn provider_info_for_test(
         runtime_details: asr::manager::RuntimeDetails::default(),
         engine_diagnostics: asr::platform::EngineDiagnostics::default(),
         platform_readiness: None,
+        model_download_bytes: Default::default(),
     }
 }
 
@@ -7004,6 +8106,591 @@ fn moonshine_tiny_does_not_auto_fall_back_until_native_runtime_is_smoke_verified
     let _ = std::fs::remove_dir_all(root);
 }
 
+fn source_result(segments: &[(f64, f64, &str)]) -> asr::TranscriptionResult {
+    asr::TranscriptionResult {
+        text: segments
+            .iter()
+            .map(|(_, _, text)| *text)
+            .collect::<Vec<_>>()
+            .join(" "),
+        segments: segments
+            .iter()
+            .map(|(start, end, text)| asr::TranscriptSegment {
+                start_time: *start,
+                end_time: *end,
+                text: text.to_string(),
+                confidence: 0.9,
+            })
+            .collect(),
+        language: "en".to_string(),
+        confidence: 0.9,
+        processing_time_ms: 10,
+        model_name: "Parakeet".to_string(),
+        model_id: "parakeet-tdt-0.6b-v3".to_string(),
+        requested_provider: asr::AsrProviderType::Parakeet,
+        actual_provider: asr::AsrProviderType::Parakeet,
+        requested_engine: None,
+        actual_engine: None,
+        optimization_applied: false,
+        fallback_reason: None,
+        vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: true,
+        speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
+    }
+}
+
+fn source_aware_transcript(
+    me: &[(f64, f64, &str)],
+    them: &[(f64, f64, &str)],
+    acoustics: Option<&meeting_bleed::BleedAcoustics>,
+) -> models::Transcript {
+    build_source_aware_models_transcript(
+        "recording-bleed",
+        asr::AsrProviderType::Parakeet,
+        "parakeet-tdt-0.6b-v3",
+        vec![("me", source_result(me)), ("them", source_result(them))],
+        acoustics,
+    )
+}
+
+fn source_aware(me: &[(f64, f64, &str)], them: &[(f64, f64, &str)]) -> Vec<(String, String)> {
+    source_aware_transcript(me, them, None)
+        .segments
+        .into_iter()
+        .map(|segment| (segment.speaker_id.unwrap_or_default(), segment.text))
+        .collect()
+}
+
+/// One row per word, the shape the default local route returns once its word
+/// alignment completes: 0.3 s a word, punctuation left on the word.
+fn word_rows(start: f64, sentence: &str) -> Vec<(f64, f64, String)> {
+    sentence
+        .split_whitespace()
+        .enumerate()
+        .map(|(index, word)| {
+            let at = start + index as f64 * 0.3;
+            (at, at + 0.25, word.to_string())
+        })
+        .collect()
+}
+
+fn rows(owned: &[(f64, f64, String)]) -> Vec<(f64, f64, &str)> {
+    owned
+        .iter()
+        .map(|(start, end, text)| (*start, *end, text.as_str()))
+        .collect()
+}
+
+/// The texts each side keeps in the transcript, and the rows set aside as
+/// heard through the speakers.
+fn bleed_outcome(transcript: &models::Transcript) -> (String, String, String) {
+    let side = |speaker: &str| {
+        transcript
+            .segments
+            .iter()
+            .filter(|segment| segment.speaker_id.as_deref() == Some(speaker))
+            .map(|segment| segment.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let set_aside = transcript
+        .heard_through_speakers
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (side("me"), side("them"), set_aside)
+}
+
+/// Loudness tracks for the acoustic check: the far side talking over
+/// `them_spans`, and the microphone either echoing it (quieter, 150 ms late)
+/// or carrying the user's own speech over `own_spans`.
+fn bleed_tracks(
+    them_spans: &[(f64, f64)],
+    echo: bool,
+    own_spans: &[(f64, f64)],
+) -> meeting_bleed::BleedAcoustics {
+    const RATE: u32 = 16_000;
+    let length = 20 * RATE as usize;
+    let mut state = 0x2545_f491_u64;
+    let mut noise = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % 20_000) as f32 / 10_000.0 - 1.0
+    };
+    // Syllables: a 4 Hz rhythm for the far side, a different one for the user.
+    let talk = |track: &mut Vec<f32>,
+                spans: &[(f64, f64)],
+                rhythm: f64,
+                noise: &mut dyn FnMut() -> f32| {
+        for (index, sample) in track.iter_mut().enumerate() {
+            let t = index as f64 / f64::from(RATE);
+            if spans.iter().any(|(start, end)| t >= *start && t < *end) {
+                let syllable = (t * rhythm * std::f64::consts::PI).sin().abs() as f32;
+                *sample += 0.3 * syllable * noise();
+            }
+        }
+    };
+    let mut system = vec![0.0_f32; length];
+    talk(&mut system, them_spans, 4.0, &mut noise);
+    let mut mic: Vec<f32> = (0..length).map(|_| 0.001 * noise()).collect();
+    if echo {
+        let delay = (0.15 * f64::from(RATE)) as usize;
+        for index in delay..length {
+            mic[index] += 0.2 * system[index - delay];
+        }
+    }
+    talk(&mut mic, own_spans, 2.7, &mut noise);
+    meeting_bleed::BleedAcoustics::from_samples(&mic, &system, RATE)
+}
+
+#[test]
+fn speaker_bleed_of_the_far_side_is_kept_only_as_them() {
+    // Without headphones the microphone hears the remote sentence a little
+    // later and transcribes it slightly differently, here as sentence rows.
+    let rows_out = source_aware(
+        &[
+            (10.3, 13.4, "we should move the launch to next thursday"),
+            (14.0, 16.0, "I agree, Thursday works for me."),
+        ],
+        &[(10.0, 13.0, "We should move the launch to next Thursday.")],
+    );
+    assert_eq!(
+        rows_out,
+        vec![
+            (
+                "them".to_string(),
+                "We should move the launch to next Thursday.".to_string()
+            ),
+            (
+                "me".to_string(),
+                "I agree, Thursday works for me.".to_string()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn true_bleed_in_word_rows_is_set_aside_not_deleted() {
+    let them = word_rows(4.0, "We should ship the patch today.");
+    // The echo: same words, 150 ms late, as the default route's word rows.
+    let me = word_rows(4.15, "we should ship the patch today");
+    let acoustics = bleed_tracks(&[(4.0, 5.9)], true, &[]);
+    for evidence in [None, Some(&acoustics)] {
+        let transcript = source_aware_transcript(&rows(&me), &rows(&them), evidence);
+        let (me_text, them_text, set_aside) = bleed_outcome(&transcript);
+        assert_eq!(me_text, "");
+        assert_eq!(them_text, "We should ship the patch today.");
+        assert_eq!(set_aside, "we should ship the patch today");
+        // Out of the text that search and summaries read, but kept.
+        assert_eq!(transcript.full_text, "We should ship the patch today.");
+        assert_eq!(transcript.heard_through_speakers.len(), 6);
+        assert!(transcript
+            .heard_through_speakers
+            .iter()
+            .all(|segment| segment.speaker_id.as_deref() == Some("me")));
+    }
+}
+
+#[test]
+fn a_negated_reply_in_word_rows_is_never_set_aside() {
+    // Six of the seven words match, and the seventh is the whole point.
+    let them = word_rows(4.0, "We should ship the patch today.");
+    let me = word_rows(4.2, "We should not ship the patch today.");
+    let acoustics = bleed_tracks(&[(4.0, 5.9)], true, &[]);
+    for evidence in [None, Some(&acoustics)] {
+        let transcript = source_aware_transcript(&rows(&me), &rows(&them), evidence);
+        let (me_text, _, set_aside) = bleed_outcome(&transcript);
+        assert_eq!(me_text, "We should not ship the patch today.");
+        assert_eq!(set_aside, "");
+    }
+}
+
+#[test]
+fn a_changed_amount_in_word_rows_is_never_set_aside() {
+    let them = word_rows(2.0, "The budget is $1,200 for the pilot.");
+    let me = word_rows(2.1, "The budget is $12,000 for the pilot.");
+    let transcript = source_aware_transcript(&rows(&me), &rows(&them), None);
+    let (me_text, _, set_aside) = bleed_outcome(&transcript);
+    assert_eq!(me_text, "The budget is $12,000 for the pilot.");
+    assert_eq!(set_aside, "");
+
+    // A changed name or condition is the same: different words, kept.
+    let them = word_rows(2.0, "Ask Maria to ship it if the tests pass.");
+    let me = word_rows(2.1, "Ask Mario to ship it unless the tests pass.");
+    let transcript = source_aware_transcript(&rows(&me), &rows(&them), None);
+    assert_eq!(bleed_outcome(&transcript).2, "");
+}
+
+#[test]
+fn the_user_deliberately_repeating_the_far_side_keeps_their_words() {
+    let them = word_rows(4.0, "Ship the patch today.");
+    // Agreeing in their own words, straight after.
+    let agreeing = word_rows(5.3, "Yes, ship the patch today.");
+    let transcript = source_aware_transcript(&rows(&agreeing), &rows(&them), None);
+    assert_eq!(bleed_outcome(&transcript).0, "Yes, ship the patch today.");
+
+    // An identical repetition once the far side has finished is a repetition,
+    // not an echo: it starts a beat after the far side ended.
+    let repeating = word_rows(5.4, "ship the patch today");
+    let transcript = source_aware_transcript(&rows(&repeating), &rows(&them), None);
+    assert_eq!(bleed_outcome(&transcript).0, "ship the patch today");
+
+    // Identical words at an echo's timing, but the microphone does not follow
+    // the far side's sound: the user saying it over them. The recordings
+    // decide, and they say it was the user.
+    let overlapping = word_rows(4.2, "ship the patch today");
+    let acoustics = bleed_tracks(&[(4.0, 5.2)], false, &[(4.2, 5.4)]);
+    let transcript = source_aware_transcript(&rows(&overlapping), &rows(&them), Some(&acoustics));
+    let (me_text, _, set_aside) = bleed_outcome(&transcript);
+    assert_eq!(me_text, "ship the patch today");
+    assert_eq!(set_aside, "");
+}
+
+#[test]
+fn a_mixed_utterance_keeps_every_word_including_the_echoed_ones() {
+    // The user talks straight on from the echo without a pause: the
+    // utterance is not wholly the far side, so none of it is set aside.
+    let them = word_rows(4.0, "we should ship the patch today");
+    let mut me = word_rows(4.15, "we should ship the patch today");
+    me.extend(word_rows(5.95, "but I disagree"));
+    let transcript = source_aware_transcript(&rows(&me), &rows(&them), None);
+    let (me_text, _, set_aside) = bleed_outcome(&transcript);
+    assert_eq!(me_text, "we should ship the patch today but I disagree");
+    assert_eq!(set_aside, "");
+
+    // Where the recogniser ended the echoed sentence, the user's next one is
+    // judged on its own: the echo is set aside, their reply stays.
+    let them = word_rows(4.0, "We should ship the patch today.");
+    let mut me = word_rows(4.15, "We should ship the patch today.");
+    me.extend(word_rows(5.95, "I disagree."));
+    let transcript = source_aware_transcript(&rows(&me), &rows(&them), None);
+    let (me_text, _, set_aside) = bleed_outcome(&transcript);
+    assert_eq!(me_text, "I disagree.");
+    assert_eq!(set_aside, "We should ship the patch today.");
+}
+
+#[test]
+fn bleed_check_keeps_the_users_own_words() {
+    // Short replies, talking over the far side, and repeating a sentence much
+    // later are all the user's own speech.
+    let rows_out = source_aware(
+        &[
+            (2.1, 2.5, "Yes."),
+            (5.0, 8.0, "No, the budget is ten thousand, not twelve."),
+            (40.0, 43.0, "the budget is twelve thousand dollars"),
+        ],
+        &[
+            (2.0, 2.4, "Yes."),
+            (4.8, 7.5, "The budget is twelve thousand dollars."),
+        ],
+    );
+    let me: Vec<&str> = rows_out
+        .iter()
+        .filter(|(speaker, _)| speaker == "me")
+        .map(|(_, text)| text.as_str())
+        .collect();
+    assert_eq!(
+        me,
+        vec![
+            "Yes.",
+            "No, the budget is ten thousand, not twelve.",
+            "the budget is twelve thousand dollars"
+        ]
+    );
+}
+
+#[test]
+fn bleed_check_never_drops_untimed_or_single_source_text() {
+    let mut segments = vec![models::TranscriptSegment {
+        id: "a".to_string(),
+        start_time: 0.0,
+        end_time: 0.0,
+        text: "we should move the launch".to_string(),
+        speaker_id: Some("me".to_string()),
+        confidence: 0.9,
+    }];
+    assert!(separate_far_side_bleed(&mut segments, None).is_empty());
+    segments.push(models::TranscriptSegment {
+        id: "b".to_string(),
+        start_time: 0.0,
+        end_time: 0.0,
+        text: "we should move the launch".to_string(),
+        speaker_id: Some("them".to_string()),
+        confidence: 0.9,
+    });
+    assert!(separate_far_side_bleed(&mut segments, None).is_empty());
+    assert_eq!(segments.len(), 2);
+}
+
+/// A toy "speech" vocabulary for the synthetic Me + Them pipeline test: each
+/// word is a short tone at its own frequency, so a recogniser can be written
+/// in a few lines and its errors are impossible, leaving only the pipeline
+/// under test.
+const SYNTHETIC_WORDS: &[&str] = &[
+    "can", "you", "send", "the", "budget", "by", "friday", "yes", "i", "will", "share", "it",
+    "today", "thanks", "that", "works", "for", "me",
+];
+const SYNTHETIC_RATE: u32 = 16_000;
+const SYNTHETIC_WORD_SECONDS: f64 = 0.12;
+const SYNTHETIC_GAP_SECONDS: f64 = 0.04;
+
+fn synthetic_word_hz(word: &str) -> f64 {
+    let index = SYNTHETIC_WORDS
+        .iter()
+        .position(|candidate| *candidate == word)
+        .unwrap_or_else(|| panic!("{word} is not in the synthetic vocabulary"));
+    500.0 + 150.0 * index as f64
+}
+
+/// Add `sentence`, starting at `start_seconds`, to `track` at `gain`.
+fn speak_into(track: &mut [f32], start_seconds: f64, sentence: &str, gain: f32) {
+    let mut at = start_seconds;
+    for word in sentence.split_whitespace() {
+        let hz = synthetic_word_hz(word);
+        let first = (at * SYNTHETIC_RATE as f64).round() as usize;
+        let frames = (SYNTHETIC_WORD_SECONDS * SYNTHETIC_RATE as f64).round() as usize;
+        for frame in 0..frames {
+            let t = frame as f64 / SYNTHETIC_RATE as f64;
+            if let Some(sample) = track.get_mut(first + frame) {
+                *sample += gain * (std::f64::consts::TAU * hz * t).sin() as f32;
+            }
+        }
+        at += SYNTHETIC_WORD_SECONDS + SYNTHETIC_GAP_SECONDS;
+    }
+}
+
+fn write_synthetic_wav(path: &Path, samples: &[f32]) {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: SYNTHETIC_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec).expect("create synthetic wav");
+    for sample in samples {
+        writer
+            .write_sample((sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)
+            .expect("write synthetic sample");
+    }
+    writer.finalize().expect("finalize synthetic wav");
+}
+
+/// Recognise one track of the toy vocabulary: 10 ms frames above a level are
+/// sound, a run of sound is a word (named by its strongest vocabulary tone),
+/// and 300 ms of quiet ends a segment. Returns what an ASR provider returns
+/// for that track, with timestamps measured from the audio.
+fn recognise_synthetic_wav(path: &Path, word_rows: bool) -> asr::TranscriptionResult {
+    let samples: Vec<f32> = hound::WavReader::open(path)
+        .expect("open synthetic wav")
+        .samples::<i16>()
+        .map(|sample| sample.expect("read synthetic sample") as f32 / i16::MAX as f32)
+        .collect();
+    let frame = (SYNTHETIC_RATE / 100) as usize;
+    let loud: Vec<bool> = samples
+        .chunks(frame)
+        .map(|chunk| {
+            let rms = (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
+            rms > 0.02
+        })
+        .collect();
+    let goertzel = |slice: &[f32], hz: f64| -> f64 {
+        let coefficient = 2.0 * (std::f64::consts::TAU * hz / SYNTHETIC_RATE as f64).cos();
+        let (mut previous, mut before) = (0.0_f64, 0.0_f64);
+        for &sample in slice {
+            let current = sample as f64 + coefficient * previous - before;
+            before = previous;
+            previous = current;
+        }
+        previous * previous + before * before - coefficient * previous * before
+    };
+    let mut words: Vec<(f64, f64, &str)> = Vec::new();
+    let mut index = 0;
+    while index < loud.len() {
+        if !loud[index] {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < loud.len() && loud[index] {
+            index += 1;
+        }
+        let slice = &samples[start * frame..(index * frame).min(samples.len())];
+        let word = SYNTHETIC_WORDS
+            .iter()
+            .copied()
+            .max_by(|left, right| {
+                goertzel(slice, synthetic_word_hz(left))
+                    .total_cmp(&goertzel(slice, synthetic_word_hz(right)))
+            })
+            .expect("vocabulary");
+        words.push((start as f64 / 100.0, index as f64 / 100.0, word));
+    }
+    let mut segments: Vec<asr::TranscriptSegment> = Vec::new();
+    for (start, end, word) in words {
+        match segments.last_mut() {
+            // Sentence rows join words across short pauses; word rows, the
+            // default local route's shape once alignment completes, never do.
+            Some(segment) if !word_rows && start - segment.end_time < 0.3 => {
+                segment.end_time = end;
+                segment.text.push(' ');
+                segment.text.push_str(word);
+            }
+            _ => segments.push(asr::TranscriptSegment {
+                start_time: start,
+                end_time: end,
+                text: word.to_string(),
+                confidence: 0.9,
+            }),
+        }
+    }
+    let mut result = source_result(&[]);
+    result.text = segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    result.segments = segments;
+    result
+}
+
+/// A Me + Them meeting rendered to two WAV tracks the way capture writes them,
+/// then transcribed per track and merged by the source-aware path.
+///
+/// `bleed_gain` is how loudly the microphone hears the meeting audio through
+/// the speakers (0 for headphones), and it arrives `bleed_delay` seconds late.
+fn synthetic_me_and_them(
+    bleed_gain: f32,
+    bleed_delay: f64,
+    word_rows: bool,
+) -> Vec<(String, String)> {
+    let root = std::env::temp_dir().join(format!(
+        "plainsong-me-them-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).expect("create synthetic dir");
+    let length = (12.0 * SYNTHETIC_RATE as f64) as usize;
+    let mut system = vec![0.0_f32; length];
+    let mut mic = vec![0.0_f32; length];
+
+    let them = [
+        (0.5, "can you send the budget by friday"),
+        (6.5, "thanks that works for me"),
+    ];
+    for (start, sentence) in them {
+        speak_into(&mut system, start, sentence, 0.3);
+    }
+    speak_into(&mut mic, 3.0, "yes i will share it today", 0.3);
+    // Without headphones the microphone also hears the meeting audio.
+    if bleed_gain > 0.0 {
+        let delay = (bleed_delay * SYNTHETIC_RATE as f64) as usize;
+        for (index, sample) in system.iter().enumerate() {
+            if let Some(target) = mic.get_mut(index + delay) {
+                *target += sample * bleed_gain;
+            }
+        }
+    }
+
+    let mic_path = root.join("mic.wav");
+    let system_path = root.join("system.wav");
+    write_synthetic_wav(&mic_path, &mic);
+    write_synthetic_wav(&system_path, &system);
+    let mic_result = recognise_synthetic_wav(&mic_path, word_rows);
+    let system_result = recognise_synthetic_wav(&system_path, word_rows);
+    let acoustics = meeting_bleed::BleedAcoustics::from_wav_files(&mic_path, &system_path)
+        .expect("both synthetic tracks are readable");
+    let _ = std::fs::remove_dir_all(&root);
+
+    if bleed_gain > 0.0 {
+        // The premise of the test: the microphone track really did pick up
+        // the far side, so its own transcription repeats it.
+        assert!(
+            mic_result
+                .text
+                .contains("can you send the budget by friday"),
+            "the simulated bleed should be audible to the microphone's ASR: {}",
+            mic_result.text
+        );
+    }
+
+    let transcript = build_source_aware_models_transcript(
+        "synthetic-me-them",
+        asr::AsrProviderType::Parakeet,
+        "parakeet-tdt-0.6b-v3",
+        vec![("me", mic_result), ("them", system_result)],
+        Some(&acoustics),
+    );
+    let full_text = transcript.full_text.clone();
+    let set_aside = transcript
+        .heard_through_speakers
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if bleed_gain > 0.0 {
+        // The echo is kept, out of the text, for the meeting view to show.
+        assert_eq!(
+            set_aside,
+            "can you send the budget by friday thanks that works for me"
+        );
+    } else {
+        assert!(set_aside.is_empty());
+    }
+    for sentence in [
+        "can you send the budget by friday",
+        "thanks that works for me",
+        "yes i will share it today",
+    ] {
+        assert_eq!(
+            full_text.matches(sentence).count(),
+            1,
+            "{sentence:?} should appear exactly once in {full_text:?}"
+        );
+    }
+    // Rows are compared as sentences, whatever shape the recogniser used.
+    let mut sentences: Vec<(String, String)> = Vec::new();
+    let mut last_end = f64::MIN;
+    for segment in transcript.segments {
+        let speaker = segment.speaker_id.unwrap_or_default();
+        match sentences.last_mut() {
+            Some((last_speaker, text))
+                if *last_speaker == speaker && segment.start_time - last_end < 0.3 =>
+            {
+                text.push(' ');
+                text.push_str(&segment.text);
+            }
+            _ => sentences.push((speaker, segment.text)),
+        }
+        last_end = segment.end_time;
+    }
+    sentences
+}
+
+#[test]
+fn synthetic_me_and_them_tracks_keep_each_side_once_with_and_without_headphones() {
+    let expected = vec![
+        (
+            "them".to_string(),
+            "can you send the budget by friday".to_string(),
+        ),
+        ("me".to_string(), "yes i will share it today".to_string()),
+        ("them".to_string(), "thanks that works for me".to_string()),
+    ];
+    for word_rows in [false, true] {
+        // Headphones: the microphone hears only the user.
+        assert_eq!(synthetic_me_and_them(0.0, 0.0, word_rows), expected);
+        // Speakers: the microphone also hears the far side, quieter and a
+        // little late. The far side is still "them" only, and the user's
+        // words stay.
+        assert_eq!(synthetic_me_and_them(0.5, 0.15, word_rows), expected);
+        // Strong bleed with a long acoustic and output delay.
+        assert_eq!(synthetic_me_and_them(0.9, 0.4, word_rows), expected);
+    }
+}
+
 #[test]
 fn source_aware_transcript_labels_me_and_them_segments() {
     let me = asr::TranscriptionResult {
@@ -7026,7 +8713,9 @@ fn source_aware_transcript_labels_me_and_them_segments() {
         optimization_applied: false,
         fallback_reason: None,
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
     let them = asr::TranscriptionResult {
         text: "Let's ship this Friday".to_string(),
@@ -7048,7 +8737,9 @@ fn source_aware_transcript_labels_me_and_them_segments() {
         optimization_applied: false,
         fallback_reason: None,
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
 
     let transcript = build_source_aware_models_transcript(
@@ -7056,6 +8747,7 @@ fn source_aware_transcript_labels_me_and_them_segments() {
         asr::AsrProviderType::Parakeet,
         "parakeet-ctc-0.6b",
         vec![("me", me), ("them", them)],
+        None,
     );
 
     assert_eq!(transcript.segments.len(), 2);
@@ -7065,6 +8757,63 @@ fn source_aware_transcript_labels_me_and_them_segments() {
         transcript.full_text,
         "I opened the roadmap Let's ship this Friday"
     );
+}
+
+#[test]
+fn a_silent_source_does_not_mark_the_meeting_untimed() {
+    let timed = asr::TranscriptionResult {
+        text: "I opened the roadmap".to_string(),
+        segments: vec![asr::TranscriptSegment {
+            start_time: 0.0,
+            end_time: 1.0,
+            text: "I opened the roadmap".to_string(),
+            confidence: 0.9,
+        }],
+        language: "en".to_string(),
+        confidence: 0.9,
+        processing_time_ms: 10,
+        model_name: "Parakeet".to_string(),
+        model_id: "parakeet-tdt-0.6b-v3".to_string(),
+        requested_provider: asr::AsrProviderType::Parakeet,
+        actual_provider: asr::AsrProviderType::Parakeet,
+        requested_engine: None,
+        actual_engine: None,
+        optimization_applied: false,
+        fallback_reason: None,
+        vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: true,
+        speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
+    };
+    let silent = asr::TranscriptionResult {
+        text: String::new(),
+        segments: Vec::new(),
+        measured_word_timestamps: false,
+        ..timed.clone()
+    };
+    let transcript = build_source_aware_models_transcript(
+        "recording-1",
+        asr::AsrProviderType::Parakeet,
+        "parakeet-tdt-0.6b-v3",
+        vec![("me", timed.clone()), ("them", silent)],
+        None,
+    );
+    assert!(transcript.measured_word_timestamps);
+
+    // Text without timed segments still marks the meeting untimed.
+    let untimed_text = asr::TranscriptionResult {
+        segments: Vec::new(),
+        measured_word_timestamps: false,
+        ..timed.clone()
+    };
+    let transcript = build_source_aware_models_transcript(
+        "recording-1",
+        asr::AsrProviderType::Parakeet,
+        "parakeet-tdt-0.6b-v3",
+        vec![("me", timed), ("them", untimed_text)],
+        None,
+    );
+    assert!(!transcript.measured_word_timestamps);
 }
 
 #[test]
@@ -7084,7 +8833,9 @@ fn source_aware_transcript_keeps_text_only_provider_output() {
         optimization_applied: false,
         fallback_reason: None,
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
     let them = asr::TranscriptionResult {
         text: "Let's ship this Friday".to_string(),
@@ -7101,7 +8852,9 @@ fn source_aware_transcript_keeps_text_only_provider_output() {
         optimization_applied: false,
         fallback_reason: None,
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
 
     let mut transcript = build_source_aware_models_transcript(
@@ -7109,6 +8862,7 @@ fn source_aware_transcript_keeps_text_only_provider_output() {
         asr::AsrProviderType::DistilWhisper,
         "distil-large-v3.5",
         vec![("me", me), ("them", them)],
+        None,
     );
     enrich_meeting_transcript(&mut transcript, &[]);
 
@@ -7138,7 +8892,9 @@ fn dual_source_degradation_note_is_none_when_both_sides_transcribe_cleanly() {
         optimization_applied: false,
         fallback_reason: None,
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
 
     let reason = describe_dual_source_transcription_degradation(
@@ -7166,7 +8922,9 @@ fn dual_source_degradation_note_reports_a_fully_failed_side() {
         optimization_applied: false,
         fallback_reason: None,
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
 
     let reason = describe_dual_source_transcription_degradation(
@@ -7197,7 +8955,9 @@ fn dual_source_degradation_note_reports_a_chunk_level_fallback_on_a_successful_s
             "2 of 10 transcription chunk(s) failed; transcript may be incomplete".to_string(),
         ),
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
     let clean = asr::TranscriptionResult {
         text: "system side".to_string(),
@@ -7214,7 +8974,9 @@ fn dual_source_degradation_note_reports_a_chunk_level_fallback_on_a_successful_s
         optimization_applied: false,
         fallback_reason: None,
         vocabulary_hint_terms_applied: 0,
+        measured_word_timestamps: false,
         speaker_turns: Vec::new(),
+        vocabulary_candidates: Vec::new(),
     };
 
     let reason = describe_dual_source_transcription_degradation(&Ok(degraded), &Ok(clean))
@@ -7270,12 +9032,7 @@ fn renderer_provider_set(set_name: &str) -> std::collections::BTreeSet<String> {
 /// list alone fails here.
 #[test]
 fn every_cloud_provider_is_remote_in_both_languages() {
-    // The renderer names Plainsong Plus so a Plus build is disclosed as
-    // remote; a build without the feature has no such route to compare.
-    let renderer = renderer_provider_set("CLOUD_PROVIDER_SET")
-        .into_iter()
-        .filter(|name| cfg!(feature = "plainsong-plus") || name != "plainsong_plus")
-        .collect::<std::collections::BTreeSet<String>>();
+    let renderer = renderer_provider_set("CLOUD_PROVIDER_SET");
     let sidecar = asr::AsrProviderType::all()
         .into_iter()
         .filter(|provider| provider.is_remote())
@@ -7632,7 +9389,7 @@ fn token_list_validator_accepts_sentencepiece_style_tokens() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// The arm list `scripts/verify-ipc-contract.mjs` reads, and the three literal
+/// The arm list `scripts/verify-ipc-contract.ts` reads, and the three literal
 /// anchors it slices on.
 ///
 /// The gate is what actually compares this list to `ALLOWED_RENDERER_COMMANDS`
@@ -7652,17 +9409,17 @@ fn dispatcher_arms() -> Vec<String> {
     const MATCH_BLOCK: &str = "    match method {";
     const FALLBACK: &str = "        _ => Err(format!(\"Unknown command: {}\", method)),";
 
-    let start = DISPATCH.find(SIGNATURE).expect(
-        "verify-ipc-contract.mjs looks for `pub async fn dispatch_command(` in dispatch.rs",
-    );
+    let start = DISPATCH
+        .find(SIGNATURE)
+        .expect("verify-ipc-contract.ts looks for `pub async fn dispatch_command(` in dispatch.rs");
     let match_start = DISPATCH[start..]
         .find(MATCH_BLOCK)
         .map(|offset| start + offset)
-        .expect("verify-ipc-contract.mjs looks for `match method {` inside dispatch_command");
+        .expect("verify-ipc-contract.ts looks for `match method {` inside dispatch_command");
     let end = DISPATCH[match_start..]
         .find(FALLBACK)
         .map(|offset| match_start + offset)
-        .expect("verify-ipc-contract.mjs looks for the `Unknown command` fallback arm");
+        .expect("verify-ipc-contract.ts looks for the `Unknown command` fallback arm");
 
     // The same pattern the gate uses, at the same indentation: eight spaces, so
     // a match nested inside an arm body cannot contribute a command name.
@@ -7779,12 +9536,17 @@ fn voice_edit_without_a_selection_writes_a_draft_without_inventing_facts() {
 #[test]
 fn a_failed_voice_edit_stops_instead_of_inserting_the_instruction() {
     let body = owned_stop_dictation_body();
-    let start = body
-        .find("crate::dictation_text::run_voice_edit(")
-        .expect("the stop path runs Voice Edit");
-    let branch = &body[start..start + 700];
+    let (_, after_match) = body
+        .split_once("match voice_edit {")
+        .expect("the stop path handles the Voice Edit result");
+    let (branch, _) = after_match
+        .split_once("\n    if command_applied.is_none()")
+        .expect("the command pipeline follows Voice Edit");
+    let (_, failure) = branch
+        .split_once("Err(error) => {")
+        .expect("Voice Edit handles errors");
     assert!(
-        branch.contains("fail_dictation_stop("),
+        failure.contains("return Err(fail_dictation_stop_with_recovery("),
         "a Voice Edit error must end the session, not fall through to inserting the spoken instruction"
     );
 }
@@ -7820,4 +9582,936 @@ fn a_voice_edit_that_returns_nothing_or_echoes_the_instruction_fails() {
         "Already clean.",
         "Already clean."
     ));
+}
+
+#[test]
+fn app_bundle_is_found_from_the_sidecar_inside_resources() {
+    let root = std::env::temp_dir().join(format!("plainsong-bundle-{}", std::process::id()));
+    let sidecar_dir = root.join("Plainsong.app/Contents/Resources/sidecar");
+    std::fs::create_dir_all(&sidecar_dir).expect("bundle layout");
+    let sidecar = sidecar_dir.join("plainsong-sidecar");
+    assert_eq!(
+        crate::text_insert::app_bundle_containing(&sidecar),
+        Some(root.join("Plainsong.app"))
+    );
+    assert_eq!(
+        crate::text_insert::app_bundle_containing(&root.join("target/release/plainsong-sidecar")),
+        None
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn analysis_snapshot_rejects_a_corrected_action_owner() {
+    let mut db = db::Database::new_in_memory_for_test().unwrap();
+    let now = chrono::Utc::now();
+    db.create_recording(&sample_recording(
+        "owner-race",
+        "QA meeting",
+        now,
+        None,
+        None,
+    ))
+    .unwrap();
+    db.save_transcript(&sample_transcript(
+        "owner-race",
+        now,
+        "I will send the report.",
+    ))
+    .unwrap();
+    db.rename_speaker("owner-race", "speaker_1", "Marcus")
+        .unwrap();
+    let (_, revision) = db
+        .get_transcript_with_revision("owner-race")
+        .unwrap()
+        .unwrap();
+    let mut snapshot = snapshot_with(None, &[]);
+    snapshot.transcript_revision = revision;
+    snapshot.speaker_names = Some(std::collections::BTreeMap::from([(
+        "seg-owner-race".into(),
+        "Marcus".into(),
+    )]));
+    assert!(verify_analysis_snapshot(&db, "owner-race", &snapshot).is_ok());
+    db.rename_speaker("owner-race", "speaker_1", "Dana")
+        .unwrap();
+    assert_eq!(
+        db.get_transcript_with_revision("owner-race")
+            .unwrap()
+            .unwrap()
+            .1,
+        revision
+    );
+    assert!(
+        verify_analysis_snapshot(&db, "owner-race", &snapshot).is_err(),
+        "speaker identity changed without a transcript revision"
+    );
+}
+
+#[test]
+fn analysis_snapshot_tracks_attendee_names_but_not_addresses() {
+    let mut db = db::Database::new_in_memory_for_test().unwrap();
+    let now = chrono::Utc::now();
+    db.create_recording(&sample_recording(
+        "attendee-race",
+        "QA meeting",
+        now,
+        None,
+        None,
+    ))
+    .unwrap();
+    db.save_transcript(&sample_transcript(
+        "attendee-race",
+        now,
+        "We discussed the report.",
+    ))
+    .unwrap();
+    let attendee = |name: &str, email: &str| models::MeetingAttendee {
+        name: name.into(),
+        email: Some(email.into()),
+        is_organizer: false,
+    };
+    db.update_recording_attendees(
+        "attendee-race",
+        vec![attendee("Marcus", "one@example.invalid")],
+    )
+    .unwrap();
+    let mut snapshot = snapshot_with(None, &["Marcus"]);
+    snapshot.transcript_revision = db
+        .get_transcript_with_revision("attendee-race")
+        .unwrap()
+        .unwrap()
+        .1;
+    assert!(verify_analysis_snapshot(&db, "attendee-race", &snapshot).is_ok());
+    db.update_recording_attendees(
+        "attendee-race",
+        vec![attendee("Marcus", "two@example.invalid")],
+    )
+    .unwrap();
+    assert!(verify_analysis_snapshot(&db, "attendee-race", &snapshot).is_ok());
+    db.update_recording_attendees(
+        "attendee-race",
+        vec![attendee("Dana", "two@example.invalid")],
+    )
+    .unwrap();
+    assert!(verify_analysis_snapshot(&db, "attendee-race", &snapshot).is_err());
+}
+
+#[test]
+fn action_input_fingerprint_includes_used_speaker_names() {
+    let mut snapshot = snapshot_with(None, &[]);
+    let summary_fingerprint = analysis_input_fingerprint(&snapshot, "Summarize");
+    snapshot.speaker_names = Some(std::collections::BTreeMap::from([(
+        "segment-1".into(),
+        "Marcus".into(),
+    )]));
+    let before = analysis_input_fingerprint(&snapshot, "Summarize");
+    assert_ne!(before, summary_fingerprint);
+    snapshot
+        .speaker_names
+        .as_mut()
+        .unwrap()
+        .insert("segment-1".into(), "Dana".into());
+    assert_ne!(before, analysis_input_fingerprint(&snapshot, "Summarize"));
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated QA profile and an explicitly selected installed local model"]
+async fn named_meeting_question_probe() {
+    assert_eq!(std::env::var("PLAINSONG_QA_MODE").as_deref(), Ok("1"));
+    let model = std::env::var("PLAINSONG_NAMED_PROBE_MODEL").unwrap();
+    let output = std::env::var("PLAINSONG_NAMED_PROBE_OUT").unwrap();
+    let state = build_app_state().await.unwrap();
+    {
+        let mut manager = state.settings_manager.lock().await;
+        manager.settings_mut().privacy.remote_processing_enabled = false;
+        manager.settings_mut().privacy.meetings_ai.provider = "ollama".into();
+    }
+    let id = format!("qa-named-{}", uuid::Uuid::new_v4());
+    let now = chrono::Utc::now();
+    let spoken = "I will send the test report by Friday.";
+    {
+        let mut db = state.db.lock().await;
+        db.create_recording(&sample_recording(
+            &id,
+            "Synthetic named-speaker QA",
+            now,
+            None,
+            None,
+        ))
+        .unwrap();
+        db.save_transcript(&sample_transcript(&id, now, spoken))
+            .unwrap();
+    }
+    let mut results = Vec::new();
+    for name in ["Marcus", "Dana"] {
+        state
+            .db
+            .lock()
+            .await
+            .rename_speaker(&id, "speaker_1", name)
+            .unwrap();
+        let result = run_grounded_response_query_for_recording(
+            &state,
+            &id,
+            "Who said they would send the test report? Give only the name.",
+            Some(&model),
+            None,
+        )
+        .await;
+        results.push(serde_json::json!({"assignedName":name,"sourceText":spoken,
+            "result":result.map(|result| serde_json::to_value(result).unwrap())}));
+        std::fs::write(&output, serde_json::to_vec_pretty(&results).unwrap()).unwrap();
+    }
+    state.db.lock().await.delete_recording(&id).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// GGUF Parakeet as the Apple Silicon dictation default
+// ---------------------------------------------------------------------------
+
+/// The transcription settings an Apple Silicon install starts with, built the
+/// same way `Settings::fresh_install` builds them, so these tests run on any
+/// host that compiles the feature.
+#[cfg(feature = "asr-transcribe-cpp")]
+fn gguf_dictation_default_settings() -> settings::TranscriptionSettings {
+    settings::TranscriptionSettings {
+        use_shared_asr_selection: false,
+        dictation_provider: "transcribe_cpp".to_string(),
+        dictation_model_id: asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID.to_string(),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn gguf_dictation_default_keeps_meetings_on_onnx_parakeet() {
+    let mut transcription = gguf_dictation_default_settings();
+    normalize_contextual_asr_settings(&mut transcription);
+    assert!(!transcription.use_shared_asr_selection);
+    assert_eq!(transcription.dictation_provider, "transcribe_cpp");
+    assert_eq!(
+        transcription.dictation_model_id,
+        asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+    );
+    assert_eq!(transcription.meeting_provider, "parakeet");
+    assert_eq!(transcription.meeting_model_id, "parakeet-tdt-0.6b-v3");
+
+    assert_eq!(
+        resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Dictation),
+        (
+            asr::AsrProviderType::TranscribeCpp,
+            asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID.to_string()
+        )
+    );
+    assert_eq!(
+        resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting),
+        (
+            asr::AsrProviderType::Parakeet,
+            "parakeet-tdt-0.6b-v3".to_string()
+        )
+    );
+
+    // Setup used to overwrite the shared default with the dictation choice.
+    // Even then, normalization must not hand the meeting slot to GGUF.
+    let mut overwritten = gguf_dictation_default_settings();
+    overwritten.default_provider = "transcribe_cpp".to_string();
+    overwritten.selected_model_id = asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID.to_string();
+    overwritten.meeting_provider = "moonshine".to_string();
+    overwritten.meeting_model_id = "moonshine-base".to_string();
+    normalize_contextual_asr_settings(&mut overwritten);
+    assert_eq!(overwritten.meeting_provider, "parakeet");
+    assert_eq!(overwritten.meeting_model_id, "parakeet-tdt-0.6b-v3");
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn gguf_is_never_an_inherited_meeting_candidate() {
+    let inherited = preferred_meeting_provider_candidates(
+        MeetingRoutePolicy::PreferLocal,
+        asr::AsrProviderType::TranscribeCpp,
+        asr::AsrProviderType::TranscribeCpp,
+        None,
+        Some(asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID),
+    );
+    assert!(!inherited.contains(&asr::AsrProviderType::TranscribeCpp));
+    assert_eq!(inherited.first(), Some(&asr::AsrProviderType::Parakeet));
+
+    for policy in [
+        MeetingRoutePolicy::PreferLocal,
+        MeetingRoutePolicy::BestAvailable,
+    ] {
+        let from_dictation = preferred_meeting_provider_candidates(
+            policy,
+            asr::AsrProviderType::Parakeet,
+            asr::AsrProviderType::TranscribeCpp,
+            Some(asr::AsrProviderType::Parakeet),
+            Some("parakeet-tdt-0.6b-v3"),
+        );
+        assert!(!from_dictation.contains(&asr::AsrProviderType::TranscribeCpp));
+    }
+
+    // A meeting slot that names a meeting-grade GGUF model is a choice, and
+    // keeps it.
+    let explicit = preferred_meeting_provider_candidates(
+        MeetingRoutePolicy::PreferLocal,
+        asr::AsrProviderType::Parakeet,
+        asr::AsrProviderType::TranscribeCpp,
+        Some(asr::AsrProviderType::TranscribeCpp),
+        Some(asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID),
+    );
+    assert_eq!(explicit.first(), Some(&asr::AsrProviderType::TranscribeCpp));
+
+    // ...but not one naming a dictation-only GGUF model.
+    let dictation_only = preferred_meeting_provider_candidates(
+        MeetingRoutePolicy::PreferLocal,
+        asr::AsrProviderType::Parakeet,
+        asr::AsrProviderType::TranscribeCpp,
+        Some(asr::AsrProviderType::TranscribeCpp),
+        Some(asr::transcribe_cpp::ORUKEET_R3_GGUF_MODEL_ID),
+    );
+    assert!(!dictation_only.contains(&asr::AsrProviderType::TranscribeCpp));
+}
+
+/// The repair path persists whatever `select_ready_meeting_candidate` picks
+/// (`persist_repaired_meeting_route`). With ONNX Parakeet not downloaded and
+/// GGUF Parakeet ready for dictation, there must be nothing to persist.
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn meeting_repair_cannot_pick_or_persist_the_gguf_dictation_route() {
+    let transcription = gguf_dictation_default_settings();
+    let candidates = preferred_meeting_provider_candidates(
+        meeting_route_policy_from_settings(&transcription.meeting_route_policy),
+        asr_provider_from_settings_value(&transcription.default_provider).unwrap(),
+        asr_provider_from_settings_value(&transcription.dictation_provider).unwrap(),
+        asr_provider_from_settings_value(&transcription.meeting_provider),
+        Some(transcription.meeting_model_id.as_str()),
+    );
+    let providers = vec![
+        provider_info_for_test(
+            asr::AsrProviderType::TranscribeCpp,
+            asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
+            asr::manager::RuntimeStatus::Ready,
+            true,
+        ),
+        provider_info_for_test(
+            asr::AsrProviderType::Parakeet,
+            "parakeet-tdt-0.6b-v3",
+            asr::manager::RuntimeStatus::MissingModel,
+            false,
+        ),
+    ];
+    for policy in [
+        MeetingRoutePolicy::PreferLocal,
+        MeetingRoutePolicy::BestAvailable,
+    ] {
+        assert_eq!(
+            select_ready_meeting_candidate(&providers, &candidates, policy),
+            None,
+            "a missing ONNX meeting model must surface as a download, not a switch"
+        );
+    }
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn gguf_dictation_falls_back_to_onnx_parakeet_before_the_generic_order() {
+    for default_provider in [
+        asr::AsrProviderType::Parakeet,
+        // What setup wrote before it stopped overwriting the shared default.
+        asr::AsrProviderType::TranscribeCpp,
+    ] {
+        let candidates = preferred_dictation_provider_candidates(
+            DictationRoutePreference::Local,
+            default_provider,
+            asr::AsrProviderType::TranscribeCpp,
+        );
+        assert_eq!(
+            &candidates[..3],
+            &[
+                asr::AsrProviderType::TranscribeCpp,
+                asr::AsrProviderType::Parakeet,
+                asr::AsrProviderType::DistilWhisper,
+            ]
+        );
+        let unique: std::collections::HashSet<_> = candidates.iter().collect();
+        assert_eq!(unique.len(), candidates.len(), "no duplicates");
+
+        let mut providers = vec![
+            provider_info_for_test(
+                asr::AsrProviderType::TranscribeCpp,
+                asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
+                asr::manager::RuntimeStatus::MissingModel,
+                false,
+            ),
+            provider_info_for_test(
+                asr::AsrProviderType::DistilWhisper,
+                "distil-large-v3.5",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+            provider_info_for_test(
+                asr::AsrProviderType::Whisper,
+                "base.en",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+            provider_info_for_test(
+                asr::AsrProviderType::Parakeet,
+                "parakeet-tdt-0.6b-v3",
+                asr::manager::RuntimeStatus::Ready,
+                true,
+            ),
+        ];
+        assert_eq!(
+            select_ready_dictation_candidate(
+                &providers,
+                &candidates,
+                DictationRoutePreference::Local
+            ),
+            Some((
+                asr::AsrProviderType::Parakeet,
+                "parakeet-tdt-0.6b-v3".to_string()
+            ))
+        );
+
+        // ONNX Parakeet not downloaded: the existing order continues.
+        providers.pop();
+        assert_eq!(
+            select_ready_dictation_candidate(
+                &providers,
+                &candidates,
+                DictationRoutePreference::Local
+            )
+            .map(|(provider, _)| provider),
+            Some(asr::AsrProviderType::DistilWhisper)
+        );
+    }
+
+    // Any other selection keeps its old order exactly.
+    assert_eq!(
+        &preferred_dictation_provider_candidates(
+            DictationRoutePreference::Local,
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::Whisper,
+        )[..3],
+        &[
+            asr::AsrProviderType::Whisper,
+            asr::AsrProviderType::DistilWhisper,
+            asr::AsrProviderType::MacosAppleSpeech,
+        ]
+    );
+}
+
+/// Startup prewarm, the session warm-up and the release coordinator all key
+/// off `dictation_provider_uses_local_model` and the resolved dictation route.
+/// (The coordinator's own transcribe.cpp test is in settings_values.rs, and the
+/// calibrated admission pair in llm/local_model_load.rs.)
+#[cfg(feature = "asr-transcribe-cpp")]
+#[tokio::test]
+async fn the_gguf_dictation_default_is_a_warmable_local_route() {
+    let transcription = gguf_dictation_default_settings();
+    let (provider, model_id) =
+        resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Dictation);
+    assert!(dictation_provider_uses_local_model(provider));
+    // With keep-warm off a local route is deferred, not "not required": the
+    // same answer ONNX Parakeet gets, and proof the route is recognized
+    // without loading a model in a unit test.
+    assert!(matches!(
+        prepare_dictation_model(provider, &model_id, "off", WarmupReason::Background).await,
+        Ok(DictationModelWarmState::Deferred)
+    ));
+    assert!(matches!(
+        prepare_dictation_model(
+            asr::AsrProviderType::Parakeet,
+            "parakeet-tdt-0.6b-v3",
+            "off",
+            WarmupReason::Background
+        )
+        .await,
+        Ok(DictationModelWarmState::Deferred)
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// GGUF Parakeet as the Apple Silicon meeting default for new installs
+// ---------------------------------------------------------------------------
+
+/// The transcription settings a new Apple Silicon install starts with, built
+/// the same way `Settings::fresh_install` builds them, so these tests run on
+/// any host that compiles the feature.
+#[cfg(feature = "asr-transcribe-cpp")]
+fn gguf_fresh_install_settings() -> settings::TranscriptionSettings {
+    settings::TranscriptionSettings {
+        use_shared_asr_selection: false,
+        dictation_provider: "transcribe_cpp".to_string(),
+        dictation_model_id: asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID.to_string(),
+        meeting_provider: "transcribe_cpp".to_string(),
+        meeting_model_id: asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID.to_string(),
+        ..Default::default()
+    }
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn a_new_install_records_meetings_on_gguf_parakeet() {
+    let mut transcription = gguf_fresh_install_settings();
+    normalize_contextual_asr_settings(&mut transcription);
+    assert_eq!(transcription.meeting_provider, "transcribe_cpp");
+    assert_eq!(
+        transcription.meeting_model_id,
+        asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID
+    );
+    assert_eq!(
+        resolve_transcription_provider_and_model(&transcription, TranscriptionScope::Meeting),
+        (
+            asr::AsrProviderType::TranscribeCpp,
+            asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID.to_string()
+        )
+    );
+    // The shared default is still ONNX Parakeet: it is the fallback.
+    assert_eq!(transcription.default_provider, "parakeet");
+}
+
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn a_gguf_meeting_slot_falls_back_to_onnx_parakeet_before_the_generic_order() {
+    for default_provider in [
+        asr::AsrProviderType::Parakeet,
+        asr::AsrProviderType::Whisper,
+        asr::AsrProviderType::DistilWhisper,
+    ] {
+        let candidates = preferred_meeting_provider_candidates(
+            MeetingRoutePolicy::PreferLocal,
+            default_provider,
+            asr::AsrProviderType::TranscribeCpp,
+            Some(asr::AsrProviderType::TranscribeCpp),
+            Some(asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID),
+        );
+        assert_eq!(
+            &candidates[..2],
+            &[
+                asr::AsrProviderType::TranscribeCpp,
+                asr::AsrProviderType::Parakeet
+            ],
+            "default {default_provider:?}"
+        );
+        let unique: std::collections::HashSet<_> = candidates.iter().collect();
+        assert_eq!(unique.len(), candidates.len(), "no duplicates");
+    }
+
+    let candidates = preferred_meeting_provider_candidates(
+        MeetingRoutePolicy::PreferLocal,
+        asr::AsrProviderType::Parakeet,
+        asr::AsrProviderType::TranscribeCpp,
+        Some(asr::AsrProviderType::TranscribeCpp),
+        Some(asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID),
+    );
+    let gguf = provider_info_for_test(
+        asr::AsrProviderType::TranscribeCpp,
+        asr::transcribe_cpp::PARAKEET_GGUF_MODEL_ID,
+        asr::manager::RuntimeStatus::Ready,
+        true,
+    );
+    let onnx = |status, available| {
+        provider_info_for_test(
+            asr::AsrProviderType::Parakeet,
+            "parakeet-tdt-0.6b-v3",
+            status,
+            available,
+        )
+    };
+    let distil = provider_info_for_test(
+        asr::AsrProviderType::DistilWhisper,
+        "distil-large-v3.5",
+        asr::manager::RuntimeStatus::Ready,
+        true,
+    );
+    let pick = |providers: &[asr::manager::ProviderInfo]| {
+        select_ready_meeting_candidate(providers, &candidates, MeetingRoutePolicy::PreferLocal)
+            .map(|(provider, _)| provider)
+    };
+    // GGUF ready: GGUF, even with ONNX Parakeet on disk too.
+    assert_eq!(
+        pick(&[
+            distil.clone(),
+            onnx(asr::manager::RuntimeStatus::Ready, true),
+            gguf.clone()
+        ]),
+        Some(asr::AsrProviderType::TranscribeCpp)
+    );
+    // GGUF missing: ONNX Parakeet before Distil-Whisper.
+    let mut missing_gguf = gguf.clone();
+    missing_gguf.runtime_status = asr::manager::RuntimeStatus::MissingModel;
+    missing_gguf.is_available = false;
+    assert_eq!(
+        pick(&[
+            distil.clone(),
+            onnx(asr::manager::RuntimeStatus::Ready, true),
+            missing_gguf.clone()
+        ]),
+        Some(asr::AsrProviderType::Parakeet)
+    );
+    // Neither Parakeet: the existing order continues.
+    assert_eq!(
+        pick(&[
+            distil,
+            onnx(asr::manager::RuntimeStatus::MissingModel, false),
+            missing_gguf
+        ]),
+        Some(asr::AsrProviderType::DistilWhisper)
+    );
+}
+
+/// GGUF meetings take the ninety-second chunked path at any length: the
+/// whole-file route exists only for cloud providers that diarize, and one
+/// request for a long meeting would hold the whole decode in memory.
+#[cfg(feature = "asr-transcribe-cpp")]
+#[test]
+fn gguf_meetings_are_always_chunked() {
+    assert!(whole_file_meeting_limits(asr::AsrProviderType::TranscribeCpp).is_none());
+    for (diarize, prefer_provider) in [(true, true), (true, false), (false, false)] {
+        for seconds in [60.0, 30.0 * 60.0, 3.0 * 60.0 * 60.0] {
+            assert!(!should_request_whole_file_meeting(
+                asr::AsrProviderType::TranscribeCpp,
+                diarize,
+                prefer_provider,
+                seconds,
+                1_000_000,
+            ));
+        }
+    }
+}
+
+/// A meeting stopped before any frame was written: the WAV headers exist but
+/// hold no audio. Stop used to leave a permanent error row with a file path in
+/// it; the meeting is now removed with its empty files. A meeting with audio on
+/// any track is kept.
+#[test]
+fn an_empty_meeting_is_discarded_and_one_with_audio_is_kept() {
+    fn write_wav(path: &std::path::Path, samples: usize) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for index in 0..samples {
+            writer.write_sample(((index % 64) as i16) * 100).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
+    let root =
+        std::env::temp_dir().join(format!("plainsong-empty-meeting-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut db = db::Database::new_in_memory_for_test().unwrap();
+    let now = chrono::Utc::now();
+    for (id, mic_samples) in [("empty", 0usize), ("spoken", 1_600usize)] {
+        let plan = recording_audio::RecordingCapturePlan {
+            recording_id: id.to_string(),
+            primary_path: root.join(format!("{id}.wav")),
+            mic_path: Some(root.join(format!("{id}_mic.wav"))),
+            system_path: Some(root.join(format!("{id}_system.wav"))),
+        };
+        let mut recording = sample_recording(id, "Quick start", now, None, None);
+        recording.status = "recording".to_string();
+        db.create_recording_with_audio_plan(&recording, &plan)
+            .unwrap();
+        write_wav(&plan.primary_path, 0);
+        write_wav(plan.mic_path.as_ref().unwrap(), mic_samples);
+        write_wav(plan.system_path.as_ref().unwrap(), 0);
+    }
+
+    assert!(discard_empty_recording_in(
+        &mut db,
+        "empty",
+        "no frames",
+        std::slice::from_ref(&root)
+    ));
+    assert!(db.get_recording("empty").unwrap().is_none());
+    assert!(!root.join("empty.wav").exists());
+    assert!(!root.join("empty_mic.wav").exists());
+    assert!(!root.join("empty_system.wav").exists());
+
+    assert!(!discard_empty_recording_in(
+        &mut db,
+        "spoken",
+        "no frames",
+        std::slice::from_ref(&root)
+    ));
+    assert!(db.get_recording("spoken").unwrap().is_some());
+    assert!(root.join("spoken_mic.wav").exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// "Audio only" retention used `?` on each meeting's audio removal, so one
+/// meeting with an encryption step still open ended the sweep: every meeting
+/// after it kept its audio and no cleanup was recorded.
+#[test]
+fn one_stuck_meeting_does_not_stop_the_audio_only_retention_sweep() {
+    for signature in [
+        "async fn enforce_meeting_retention_policy_inner(",
+        "async fn apply_meeting_transcript_only_storage_policy(",
+    ] {
+        let body = top_level_item(include_str!("retention.rs"), signature);
+        let call = body
+            .find("remove_recording_audio_for_retention(")
+            .expect("the sweep clears audio per meeting");
+        let rest = &body[call..];
+        let statement = &rest[..rest.find("};").expect("the call is matched")];
+        assert!(
+            statement.contains("continue;"),
+            "a failed audio removal skips that meeting: {statement}"
+        );
+        assert!(
+            !statement.contains(".await?"),
+            "a failed audio removal must not end the sweep: {statement}"
+        );
+    }
+}
+
+/// The automatic speaker pass loses to an edit made while it ran. That used
+/// to be only a log line, so the transcript never got speakers and nothing
+/// said why; the skipped pass now leaves the reader a note.
+#[test]
+fn a_speaker_pass_skipped_for_an_edit_tells_the_reader() {
+    const SOURCE: &str = include_str!("meeting_pipeline.rs");
+    let skipped = SOURCE
+        .find("Ok(false) => {")
+        .expect("the stale-revision outcome is handled");
+    let arm = &SOURCE[skipped..skipped + 800];
+    assert!(
+        arm.contains("diarization_failure_notice =")
+            && arm.contains("DIARIZATION_SKIPPED_FOR_EDIT_NOTICE"),
+        "{arm}"
+    );
+    let notice = crate::meeting_pipeline::DIARIZATION_SKIPPED_FOR_EDIT_NOTICE;
+    assert!(notice.contains("Label the speakers"), "{notice}");
+}
+
+/// Exports, imports, auto-titles and audio opens record a format and a size,
+/// never a file name, a folder or a title: each of those carries the meeting's
+/// own words into a log that outlives the meeting.
+#[test]
+fn the_audit_log_keeps_no_file_names_paths_or_titles() {
+    for (file, source) in [
+        ("dispatch.rs", include_str!("dispatch.rs")),
+        ("retention.rs", include_str!("retention.rs")),
+        (
+            "audio_import_runtime.rs",
+            include_str!("audio_import_runtime.rs"),
+        ),
+        ("permissions.rs", include_str!("permissions.rs")),
+        (
+            "recording_lifecycle.rs",
+            include_str!("recording_lifecycle.rs"),
+        ),
+    ] {
+        for key in [
+            "\"export_path\":",
+            "\"target\": &export_path",
+            "\"new_title\":",
+            "\"source_file_name\":",
+            "\"audio_path\":",
+        ] {
+            assert!(!source.contains(key), "{file} still logs {key}");
+        }
+    }
+
+    let mut db = crate::db::Database::new_in_memory_for_test().expect("database");
+    db.log_audit_event(
+        "recording_exported",
+        Some(serde_json::json!({
+            "recording_id": "r1",
+            "format": "markdown",
+            "bytes": 2048,
+            "export_path": "/Users/someone/Desktop/Board offsite with Priya.md",
+            "nested": { "new_title": "Board offsite with Priya" },
+        })),
+        "info",
+    )
+    .expect("audit write");
+    let entry = db.get_audit_log().expect("audit log").remove(0);
+    let details = entry.details.to_string();
+    assert!(!details.contains("Priya"), "{details}");
+    assert_eq!(entry.details["format"], "markdown");
+    assert_eq!(entry.details["bytes"], 2048);
+}
+
+/// The audit log is append-only and outlives a deleted meeting, so it records
+/// that a question was asked, not the question: a person's words about a
+/// meeting must go when the meeting goes.
+#[test]
+fn the_audit_log_keeps_no_question_text() {
+    const SOURCE: &str = include_str!("dispatch.rs");
+    for line in SOURCE
+        .lines()
+        .filter(|line| line.contains("log_audit_event("))
+    {
+        assert!(
+            !line.contains("\"query\": &query") && !line.contains("\"question\":"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn pending_meeting_transcription_keeps_audio_and_partial_text_out_of_cleanup() {
+    let root = std::env::temp_dir().join(format!(
+        "plainsong-pending-meeting-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let audio = root.join("meeting.wav");
+    let wav = mono_samples_to_wav_bytes(&[0.0; 160], 16_000).unwrap();
+    std::fs::write(&audio, &wav).unwrap();
+    for partial in [false, true] {
+        let mut db = db::Database::new_in_memory_for_test().unwrap();
+        let mut recording = sample_recording(
+            "pending-meeting",
+            "QA meeting",
+            chrono::Utc::now(),
+            None,
+            None,
+        );
+        recording.status = "processing".to_string();
+        recording.audio_path = audio.to_string_lossy().to_string();
+        db.create_recording(&recording).unwrap();
+        if partial {
+            db.save_meeting_transcript(&sample_transcript(
+                &recording.id,
+                chrono::Utc::now(),
+                "Words already transcribed.",
+            ))
+            .unwrap();
+        }
+        persist_pending_meeting_transcription(&mut db, &recording.id).unwrap();
+        let pending = db.get_recording(&recording.id).unwrap().unwrap();
+        assert_eq!(pending.status, "pending");
+        assert!(!pending.transcript_complete);
+        assert!(pending
+            .transcript_degraded_reason
+            .as_deref()
+            .unwrap()
+            .contains("retry transcription"));
+        assert_eq!(std::fs::read(&audio).unwrap(), wav);
+        assert_eq!(db.get_transcript(&recording.id).unwrap().is_some(), partial);
+        assert!(!meeting_retention_cleanup_candidate(
+            &pending,
+            chrono::Utc::now(),
+            None,
+            &HashSet::new(),
+            &HashSet::new()
+        ));
+        assert!(!meeting_transcript_only_cleanup_candidate(
+            &pending,
+            None,
+            &HashSet::new(),
+            &HashSet::new()
+        ));
+        db.update_recording_status(&recording.id, "processing")
+            .unwrap();
+        assert_eq!(
+            db.get_recording(&recording.id).unwrap().unwrap().status,
+            "processing"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn audio_retention_preserves_recovery_and_bounds_custom_cutoffs() {
+    let now = chrono::Utc::now();
+    assert_eq!(
+        meeting_retention_cutoff("1w", 1, now),
+        Some(now - chrono::Duration::days(7))
+    );
+    assert_eq!(
+        meeting_retention_cutoff("custom", u32::MAX, now),
+        Some(now - chrono::Duration::days(36_000))
+    );
+    let mut recording = sample_recording(
+        "retention-recovery",
+        "Meeting",
+        now - chrono::Duration::days(365),
+        None,
+        None,
+    );
+    let none = HashSet::new();
+    for status in ["recording", "processing", "error", "pending"] {
+        recording.status = status.to_string();
+        assert!(
+            !meeting_retention_cleanup_candidate(&recording, now, None, &none, &none),
+            "{status}"
+        );
+        assert!(
+            !meeting_transcript_only_cleanup_candidate(&recording, None, &none, &none),
+            "{status}"
+        );
+    }
+    recording.source_type = "dictation".into();
+    for status in ["recording", "processing", "error", "pending"] {
+        recording.status = status.into();
+        assert!(
+            !dictation_retention_cleanup_candidate(&recording, now),
+            "{status}"
+        );
+    }
+    recording.status = "completed".into();
+    assert!(dictation_retention_cleanup_candidate(&recording, now));
+    let defaults = settings::TranscriptionSettings::default();
+    assert_eq!(defaults.meeting_retention_preset, "3m");
+    assert_eq!(defaults.meeting_retention_delete_mode, "audio_only");
+    assert!(!defaults.meeting_retention_confirmed);
+}
+
+#[test]
+fn retention_retries_companions_after_primary_audio_was_removed() {
+    let mut recording = sample_recording(
+        "retention-companion",
+        "Meeting",
+        chrono::Utc::now(),
+        None,
+        None,
+    );
+    recording.status = "completed".into();
+    recording.audio_path.clear();
+    let none = HashSet::new();
+    assert!(
+        meeting_transcript_only_cleanup_candidate(&recording, None, &none, &none),
+        "canonical companion assets still need a cleanup pass"
+    );
+}
+
+#[test]
+fn retention_rechecks_pending_and_incomplete_meetings_after_a_stale_snapshot() {
+    let now = chrono::Utc::now();
+    let mut current = sample_recording(
+        "retention-current",
+        "Meeting",
+        now - chrono::Duration::days(365),
+        None,
+        None,
+    );
+    current.status = "completed".into();
+    let stale = current.clone();
+    let none = HashSet::new();
+    let mut active = std::collections::HashMap::new();
+    assert!(meeting_retention_cleanup_candidate(
+        &stale, now, None, &none, &none
+    ));
+    assert!(meeting_audio_can_be_pruned(&current, &active, true));
+    active.insert(current.id.clone(), 1);
+    assert!(!meeting_audio_can_be_pruned(&current, &active, true));
+    active.clear();
+    current.status = "processing".into();
+    assert!(!meeting_audio_can_be_pruned(&current, &active, true));
+    current.status = "completed".into();
+    current.transcript_complete = false;
+    assert!(!meeting_audio_can_be_pruned(&current, &active, true));
+    current.transcript_incomplete_acknowledged_at = Some(now);
+    assert!(meeting_audio_can_be_pruned(&current, &active, true));
+    assert!(!meeting_audio_can_be_pruned(&current, &active, false));
 }

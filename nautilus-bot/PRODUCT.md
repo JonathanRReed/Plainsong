@@ -20,12 +20,31 @@ Use plain, concrete language. Prefer "insert", "transcribe", "record", "meeting 
 
 ## Product Principles
 
+- Electron is the chosen desktop shell, with the React renderer and Rust sidecar.
 - Dictation stays first. Meetings deepen the product without taking over the app.
 - The default path is local-first, with optional bring-your-own-key cloud providers.
 - Every status should tell the user what is happening now and what they can do next.
 - Power features must be discoverable without turning the app into an internal console.
 - Public claims follow reality. Describe what the app actually does, not what it aspires to.
 - Trust UX matters as much as raw model breadth.
+- Meeting recaps quote what was said. A model may choose and group transcript sentences, but it never writes recap text; action items quote the source sentences of commitments the parser fully understands, ending with the latest correction, and show an owner or due date only when the final sentence states it.
+
+## Dictation quality target
+
+Typeless is the main dictation benchmark. Compare final text on the same
+recordings and destination apps, including self-corrections, names, numbers,
+negation, conditions, and longer thoughts. Measure manual corrections and
+stop-to-insertion time. Feature coverage alone does not establish parity.
+
+A short processing pause is acceptable when cleanup improves the result.
+Preserve the speaker's meaning and voice. Distinguish conservative automatic
+cleanup from an explicitly selected rewrite. Keep the original text available
+when a model fails, times out, or cannot perform the requested operation.
+
+Local models remain free and usable without an account or subscription.
+Cloud providers are optional. ChatGPT plan access is a separate, text-only
+desktop preview through the officially supported sign-in flow. Its source
+integration is wired; real account and installed-app qualification remain open.
 
 ## Anti-References
 

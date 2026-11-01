@@ -16,6 +16,7 @@ import {
   releaseRecordingPlayback,
 } from "@/lib/backend/recordings";
 import {
+  clampTime,
   formatClock,
   initialPlaybackState,
   playbackReducer,
@@ -34,6 +35,7 @@ interface AudioPlayerProps {
   recordingId: string;
   /** The stored waveform the scrubber is drawn over. Empty draws a flat line. */
   waveform: number[];
+  asideRanges?: { startTime: number; endTime: number }[];
   /** Length from the recording row, shown until the audio reports its own. */
   durationHint?: number;
   onTimeUpdate?: (currentTime: number) => void;
@@ -70,6 +72,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
   {
     recordingId,
     waveform,
+    asideRanges = [],
     durationHint,
     onTimeUpdate,
     onError,
@@ -80,6 +83,14 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
   const [state, dispatch] = useReducer(playbackReducer, initialPlaybackState);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const tokenRef = useRef<string | null>(null);
+  const [prepareAttempt, retryPreparation] = useReducer((attempt: number) => attempt + 1, 0);
+  const sourceRef = useRef({ recordingId, prepareAttempt });
+  if (sourceRef.current.recordingId !== recordingId || sourceRef.current.prepareAttempt !== prepareAttempt) {
+    sourceRef.current = { recordingId, prepareAttempt };
+  }
+  const source = sourceRef.current;
+  const tokenSourceRef = useRef<typeof source | null>(null);
+  const pendingSeekRef = useRef<{ source: typeof source; time: number } | null>(null);
   const onErrorRef = useRef(onError);
   const onTimeUpdateRef = useRef(onTimeUpdate);
   onErrorRef.current = onError;
@@ -97,6 +108,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
           void releaseRecordingPlayback(prepared.token).catch(() => {});
           return;
         }
+        tokenSourceRef.current = source;
         tokenRef.current = prepared.token;
         dispatch({
           type: "prepared",
@@ -114,20 +126,22 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
             ? error.message
             : typeof error === "string"
               ? error
-              : "Couldn't prepare this meeting's audio for playback.";
+              : "Couldn't prepare this recording's audio for playback.";
         dispatch({ type: "failed", message });
         onErrorRef.current?.(message);
       });
     return () => {
       cancelled = true;
+      pendingSeekRef.current = null;
       const token = tokenRef.current;
       tokenRef.current = null;
+      tokenSourceRef.current = null;
       if (token) {
         void releaseRecordingPlayback(token).catch(() => {});
       }
       dispatch({ type: "released" });
     };
-  }, [recordingId]);
+  }, [recordingId, prepareAttempt]);
 
   // Locking the vault deletes the decrypted temp under a live token; the
   // sidecar says so and the player stops claiming it can play.
@@ -136,6 +150,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
     let unlisten: (() => void) | undefined;
     void listen<RevokedEvent>("recording-playback-revoked", (event) => {
       if (event.payload?.token && event.payload.token === tokenRef.current) {
+        pendingSeekRef.current = null;
         audioRef.current?.pause();
         dispatch({ type: "failed", message: REVOKED_MESSAGE });
         onErrorRef.current?.(REVOKED_MESSAGE);
@@ -162,32 +177,58 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
   const duration = state.duration > 0 ? state.duration : (durationHint ?? 0);
   const canPlay = state.status === "ready" || state.status === "playing" || state.status === "paused";
 
+  const isCurrentAudio = (audio: HTMLAudioElement) =>
+    sourceRef.current === source &&
+    audioRef.current === audio &&
+    tokenSourceRef.current === source &&
+    state.token !== null &&
+    tokenRef.current === state.token &&
+    audio.getAttribute("src") === state.url;
+
+  const applyPendingSeek = (audio: HTMLAudioElement) => {
+    const pending = pendingSeekRef.current;
+    if (!isCurrentAudio(audio) || !pending || pending.source !== source || audio.readyState < 1) {
+      return;
+    }
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
+      return;
+    }
+    const time = clampTime(pending.time, audio.duration);
+    audio.currentTime = time;
+    pendingSeekRef.current = null;
+    dispatch({ type: "duration", duration: audio.duration });
+    dispatch({ type: "seek", time });
+  };
+
   const seekTo = useCallback(
     (time: number) => {
-      const audio = audioRef.current;
-      if (!audio || !canPlay) {
+      if (!Number.isFinite(time) || sourceRef.current !== source || state.status === "error") {
         return;
       }
-      const clamped = Math.max(0, Math.min(time, duration > 0 ? duration : time));
-      // The element fires `timeupdate` for the new position itself, which is
-      // how the transcript learns of it. Reporting here as well would push a
-      // clamped value over a cue the caller just set deliberately.
-      audio.currentTime = clamped;
-      dispatch({ type: "seek", time: clamped });
+      const audio = audioRef.current;
+      pendingSeekRef.current = { source, time: Math.max(0, time) };
+      if (!audio || !canPlay || audio.readyState < 1 || !isCurrentAudio(audio)) {
+        return;
+      }
+      applyPendingSeek(audio);
     },
-    [canPlay, duration]
+    [canPlay, source, state.status, state.token, state.url]
   );
 
   const seekBy = useCallback(
     (delta: number) => {
-      seekTo((audioRef.current?.currentTime ?? state.currentTime) + delta);
+      const pending = pendingSeekRef.current;
+      const current = pending?.source === source
+        ? pending.time
+        : audioRef.current?.currentTime ?? state.currentTime;
+      seekTo(current + delta);
     },
-    [seekTo, state.currentTime]
+    [seekTo, source, state.currentTime]
   );
 
   const togglePlayback = useCallback(() => {
     const audio = audioRef.current;
-    if (!audio || !canPlay) {
+    if (!audio || !canPlay || !isCurrentAudio(audio)) {
       return;
     }
     if (state.status === "playing") {
@@ -197,6 +238,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
     const attempt = audio.play();
     if (attempt && typeof attempt.catch === "function") {
       attempt.catch((error: unknown) => {
+        if (!isCurrentAudio(audio)) return;
         const message =
           error instanceof Error && error.message
             ? `Couldn't play this audio: ${error.message}`
@@ -205,7 +247,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
         onErrorRef.current?.(message);
       });
     }
-  }, [canPlay, state.status]);
+  }, [canPlay, source, state.status, state.token, state.url]);
 
   useImperativeHandle(ref, () => ({ seekTo, seekBy, togglePlayback }), [
     seekTo,
@@ -214,7 +256,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
   ]);
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (isInteractiveTarget(event.target)) {
+    if (event.defaultPrevented || isInteractiveTarget(event.target)) {
       return;
     }
     if (event.key === " " || event.key === "Spacebar") {
@@ -239,7 +281,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
       tabIndex={0}
       onKeyDown={handleKeyDown}
       className={cn(
-        "rounded-md border border-border/70 bg-card px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "rounded-md border border-border/70 bg-card px-4 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         className
       )}
     >
@@ -247,33 +289,52 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
           player. `preload="metadata"` fetches the header only, so opening a
           long meeting does not pull its whole audio before the first play. */}
       <audio
+        key={`${recordingId}:${prepareAttempt}:${state.url ?? ""}`}
         ref={audioRef}
         src={state.url ?? undefined}
         preload="metadata"
         data-testid="meeting-audio"
-        onLoadedMetadata={(event) =>
-          dispatch({ type: "duration", duration: event.currentTarget.duration })
-        }
-        onDurationChange={(event) =>
-          dispatch({ type: "duration", duration: event.currentTarget.duration })
-        }
+        onLoadedMetadata={(event) => {
+          if (!isCurrentAudio(event.currentTarget)) return;
+          dispatch({ type: "duration", duration: event.currentTarget.duration });
+          applyPendingSeek(event.currentTarget);
+        }}
+        onDurationChange={(event) => {
+          if (!isCurrentAudio(event.currentTarget)) return;
+          dispatch({ type: "duration", duration: event.currentTarget.duration });
+          applyPendingSeek(event.currentTarget);
+        }}
+        onCanPlay={(event) => applyPendingSeek(event.currentTarget)}
         onTimeUpdate={(event) => {
+          if (!isCurrentAudio(event.currentTarget)) return;
           const time = event.currentTarget.currentTime;
           dispatch({ type: "time", currentTime: time });
           onTimeUpdateRef.current?.(time);
         }}
-        onPlay={() => dispatch({ type: "play" })}
-        onPause={() => dispatch({ type: "pause" })}
-        onEnded={() => dispatch({ type: "ended" })}
-        onError={() => {
-          const message = "This meeting's audio could not be read for playback.";
+        onPlay={(event) => {
+          if (isCurrentAudio(event.currentTarget)) dispatch({ type: "play" });
+        }}
+        onPause={(event) => {
+          if (isCurrentAudio(event.currentTarget)) dispatch({ type: "pause" });
+        }}
+        onEnded={(event) => {
+          if (isCurrentAudio(event.currentTarget)) dispatch({ type: "ended" });
+        }}
+        onError={(event) => {
+          if (!isCurrentAudio(event.currentTarget)) return;
+          pendingSeekRef.current = null;
+          const message = "This recording's audio could not be read for playback.";
           dispatch({ type: "failed", message });
           onErrorRef.current?.(message);
         }}
       />
 
       <div className="relative">
-        <WaveformVisualizer data={waveform} height={56} />
+        <WaveformVisualizer data={waveform} height={32} />
+        {duration > 0 ? asideRanges.map((range, index) => (
+          <div key={index} aria-hidden="true" className="pointer-events-none absolute inset-y-0 border-x border-muted-foreground/40 bg-muted-foreground/20"
+            style={{ left: `${Math.min(1, range.startTime / duration) * 100}%`, width: `${Math.max(0, Math.min(duration, range.endTime) - range.startTime) / duration * 100}%` }} />
+        )) : null}
         {/* Played portion and the playhead, over the stored waveform. */}
         <div
           aria-hidden="true"
@@ -307,7 +368,7 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
         />
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-2">
         <Button
           type="button"
           size="sm"
@@ -366,10 +427,24 @@ export const AudioPlayer = forwardRef<AudioPlayerHandle, AudioPlayerProps>(funct
       </div>
 
       {state.status === "error" && state.error ? (
-        <p className="mt-2 inline-flex items-start gap-2 text-sm text-rust" role="status">
-          <span className="neume neume-hollow mt-1.5 shrink-0" aria-hidden="true" />
-          <span>{state.error}</span>
-        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <p className="mt-2 inline-flex items-start gap-2 text-sm text-rust" role="status">
+            <span className="neume neume-hollow mt-1.5 shrink-0" aria-hidden="true" />
+            <span>{state.error}</span>
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              pendingSeekRef.current = null;
+              audioRef.current?.pause();
+              retryPreparation();
+            }}
+          >
+            Retry audio
+          </Button>
+        </div>
       ) : null}
     </div>
   );

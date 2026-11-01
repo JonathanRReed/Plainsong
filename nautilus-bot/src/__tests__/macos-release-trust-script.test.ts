@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -25,8 +26,8 @@ function createTempRepo(scriptName: string) {
   copyFileSync(sourceScript, tempScript);
   mkdirSync(path.join(tempScriptsDir, "lib"), { recursive: true });
   copyFileSync(
-    path.resolve(process.cwd(), "scripts/lib/release-candidate-identity.mjs"),
-    path.join(tempScriptsDir, "lib/release-candidate-identity.mjs"),
+    path.resolve(process.cwd(), "scripts/lib/release-candidate-identity.ts"),
+    path.join(tempScriptsDir, "lib/release-candidate-identity.ts"),
   );
 
   return { tempRoot, tempScript };
@@ -138,6 +139,18 @@ function createFakeMacosApp(
     calendarHelperDir,
     "plainsong-native-calendar-helper",
   );
+
+  for (const relative of [
+    "sidecar/plainsong-cli",
+    "language-model-helper/plainsong-native-language-model-helper",
+    "asr-helper/plainsong-native-asr-helper",
+    "text-helper/plainsong-text-helper",
+  ]) {
+    const target = path.join(resourcesDir, relative);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, "");
+    chmodSync(target, 0o755);
+  }
 
   writeFileSync(mainExecutable, "", "utf8");
   writeFileSync(sidecarExecutable, "", "utf8");
@@ -261,11 +274,48 @@ function commandResult(status, stdout = "", stderr = "") {
   };
 }
 
-childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
+childProcess.spawnSync = function mockedSpawnSync(command, args = [], options = {}) {
   fs.appendFileSync(
     process.env.MOCK_APPLE_TOOLS_TRACE_LOG,
     [command, ...args].join(" ") + "\n",
   );
+
+  if (command === "/usr/bin/hdiutil") {
+    const mountPoint = String(args.at(-1) ?? "");
+    if (args[0] === "attach") {
+      if (process.env.MOCK_DMG_DEFECT === "attach") {
+        return commandResult(1, "", "controlled attach failure");
+      }
+      if (process.env.MOCK_DMG_DEFECT === "empty") {
+        return commandResult(0, JSON.stringify({ "system-entities": [{ "mount-point": mountPoint }] }));
+      }
+      fs.cpSync(process.env.MOCK_DMG_APP_PATH, path.join(mountPoint, "Plainsong.app"), { recursive: true });
+      if (process.env.MOCK_DMG_DEFECT === "multiple") {
+        fs.cpSync(process.env.MOCK_DMG_APP_PATH, path.join(mountPoint, "nested", "Plainsong.app"), { recursive: true });
+      }
+      return commandResult(0, JSON.stringify({ "system-entities": [{ "mount-point": mountPoint }] }));
+    }
+    if (args[0] === "detach") {
+      if (process.env.MOCK_DMG_DEFECT === "detach") {
+        return commandResult(1, "", "controlled detach failure");
+      }
+      for (const name of fs.readdirSync(mountPoint)) {
+        fs.rmSync(path.join(mountPoint, name), { recursive: true, force: true });
+      }
+      return commandResult(0);
+    }
+    return commandResult(1, "", "unexpected hdiutil invocation");
+  }
+
+  if (command === "/usr/bin/plutil") {
+    if (process.env.MOCK_DMG_DEFECT === "metadata") return commandResult(1, "", "invalid plist");
+    if (process.env.MOCK_DMG_DEFECT === "wrong-mount") {
+      const metadata = JSON.parse(options.input);
+      metadata["system-entities"][0]["mount-point"] += "/unexpected";
+      return commandResult(0, JSON.stringify(metadata));
+    }
+    return commandResult(0, String(options.input ?? ""));
+  }
 
   if (command === "/usr/bin/ditto") {
     const extractionRoot = String(args.at(-1) ?? "");
@@ -278,7 +328,12 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
     return commandResult(0);
   }
 
+  const target = String(args.at(-1) ?? "");
+  const injected = path.basename(target) === process.env.EXTRA_HELPER_TARGET &&
+    (!process.env.EXTRA_HELPER_ZIP_ONLY || target.includes("zip-temp"));
+  const defect = injected ? process.env.EXTRA_HELPER_DEFECT : "";
   if (command === "/usr/bin/codesign") {
+    if (args.includes("--verify") && (defect === "signature" || (target.endsWith(".dmg") && process.env.MOCK_DMG_DEFECT === "signature"))) return commandResult(1);
     if (args.includes("--entitlements")) {
       const target = String(args.at(-1) ?? "");
       const basename = path.basename(target);
@@ -290,7 +345,7 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
       // The read-only EventKit helper holds exactly one entitlement; an extra
       // one can be injected through the environment to exercise the failure.
       const calendarEntitlement = isCalendarHelper
-        ? "<key>com.apple.security.personal-information.calendars</key><true/>"
+        ? "<key>com.apple.security.personal-information.addressbook</key><true/>\n<key>com.apple.security.personal-information.calendars</key><true/>"
         : "";
       const unrelatedCalendarPrivilege =
         isCalendarHelper && process.env.CALENDAR_HELPER_ENTITLEMENT
@@ -339,11 +394,18 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
         basename === "Plainsong.app" && process.env.APP_ENTITLEMENT
           ? "<key>" + process.env.APP_ENTITLEMENT + "</key><true/>"
           : "";
+      // The app carries the calendar entitlement so macOS will show the
+      // prompt its helper asks for; it can be withheld to exercise the gate.
+      const appCalendarEntitlement =
+        basename === "Plainsong.app" && !process.env.APP_WITHOUT_CALENDAR
+          ? "<key>com.apple.security.personal-information.addressbook</key><true/>\n<key>com.apple.security.personal-information.calendars</key><true/>"
+          : "";
       return commandResult(
         0,
         [
           "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
           "<plist version=\"1.0\"><dict>",
+          defect === "entitlement" ? "<key>unexpected.privilege</key><true/>" : "",
           speechEntitlement,
           unrelatedSpeechPrivilege,
           calendarEntitlement,
@@ -354,6 +416,7 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
           restrictedHelperPrivilege,
           genericHelperPrivilege,
           appPrivilege,
+          appCalendarEntitlement,
           "</dict></plist>",
           "",
         ].join("\n"),
@@ -368,12 +431,12 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
         "",
         [
           "Executable=/private/tmp/Plainsong.app/Contents/MacOS/Plainsong",
-          "Authority=Developer ID Application: Jonathan Reed (AJ9VWBRNZN)",
+          defect === "developerId" ? "Authority=Apple Development: Test" : "Authority=Developer ID Application: Jonathan Reed (AJ9VWBRNZN)",
           "Authority=Apple Root CA",
-          "TeamIdentifier=AJ9VWBRNZN",
-          "Runtime Version=14.0.0",
-          "Timestamp=Thu Jul 23 00:00:00 UTC 2026",
-          "Flags=0x10000(runtime)",
+          defect === "team" ? "TeamIdentifier=OTHERTEAM" : "TeamIdentifier=AJ9VWBRNZN",
+          defect === "runtime" ? "" : "Runtime Version=14.0.0",
+          defect === "timestamp" ? "" : "Timestamp=Thu Jul 23 00:00:00 UTC 2026",
+          defect === "runtime" ? "Flags=0x0" : "Flags=0x10000(runtime)",
           "",
         ].join("\n"),
       );
@@ -382,17 +445,19 @@ childProcess.spawnSync = function mockedSpawnSync(command, args = []) {
   }
 
   if (command === "/usr/bin/lipo") {
-    return commandResult(0, "arm64\n");
+    return commandResult(0, defect === "architecture" ? "x86_64\n" : "arm64\n");
   }
 
   if (command === "/usr/bin/xcrun") {
     if (args[0] === "stapler" && args[1] === "validate") {
+      if (target.endsWith(".dmg") && process.env.MOCK_DMG_DEFECT === "stapler") return commandResult(1);
       return commandResult(0, "The validate action worked!\n");
     }
     return commandResult(1, "", "unexpected xcrun invocation\n");
   }
 
   if (command === "/usr/sbin/spctl") {
+    if (process.env.MOCK_DMG_DEFECT === "gatekeeper" && target.endsWith(".dmg")) return commandResult(1, "", "DMG rejected");
     if (process.env.TRUST_SPCTL_RESULT === "reject") {
       return commandResult(1, "", "rejected\nsource=no usable signature\n");
     }
@@ -425,7 +490,14 @@ function runTrustScript(
     restricted?: string;
     generic?: string;
     app?: string;
+    appWithoutCalendar?: boolean;
     calendar?: string;
+    extraTarget?: string;
+    extraDefect?: string;
+    zipOnly?: boolean;
+    zipAppPath?: string;
+    dmgAppPath?: string;
+    dmgDefect?: string;
   } = {},
 ) {
   const outPath = path.join(tempRoot, "artifacts", "qa", "macos", `${mode}-trust.json`);
@@ -442,12 +514,18 @@ function runTrustScript(
     PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
     TMPDIR: zipTempParent,
     MOCK_APPLE_TOOLS_TRACE_LOG: mockedTools?.tracePath ?? "",
-    MOCK_ZIP_APP_PATH: appPath,
+    MOCK_ZIP_APP_PATH: helperEntitlements.zipAppPath ?? appPath,
+    MOCK_DMG_APP_PATH: helperEntitlements.dmgAppPath ?? appPath,
+    MOCK_DMG_DEFECT: helperEntitlements.dmgDefect ?? "",
     SHORTCUT_HELPER_ENTITLEMENT: shortcutHelperEntitlement,
     SIDECAR_ENTITLEMENT: sidecarEntitlement,
     RESTRICTED_HELPER_ENTITLEMENT: helperEntitlements.restricted ?? "",
     GENERIC_HELPER_ENTITLEMENT: helperEntitlements.generic ?? "",
     APP_ENTITLEMENT: helperEntitlements.app ?? "",
+    APP_WITHOUT_CALENDAR: helperEntitlements.appWithoutCalendar ? "1" : "",
+    EXTRA_HELPER_TARGET: helperEntitlements.extraTarget ?? "",
+    EXTRA_HELPER_DEFECT: helperEntitlements.extraDefect ?? "",
+    EXTRA_HELPER_ZIP_ONLY: helperEntitlements.zipOnly ? "1" : "",
     CALENDAR_HELPER_ENTITLEMENT: helperEntitlements.calendar ?? "",
     SPOOFED_PATH_TRACE_LOG: spoofedPathTracePath,
     SPEECH_HELPER_ENTITLEMENTS: speechHelperEntitlements,
@@ -460,11 +538,11 @@ function runTrustScript(
     CSC_NAME: "Developer ID Application: Dummy",
   };
 
-  const nodeArgs = [];
+  const bunArgs: string[] = [];
   if (mockedTools) {
-    nodeArgs.push("--require", mockedTools.preloadPath);
+    bunArgs.push("--require", mockedTools.preloadPath);
   }
-  nodeArgs.push(
+  bunArgs.push(
     tempScript,
     "--app",
     appPath,
@@ -476,12 +554,12 @@ function runTrustScript(
     markdownPath,
   );
   if (releaseDir) {
-    nodeArgs.push("--release-dir", releaseDir);
+    bunArgs.push("--release-dir", releaseDir);
   }
 
   const result = spawnSync(
-    process.execPath,
-    nodeArgs,
+    "bun",
+    bunArgs,
     {
       encoding: "utf8",
       env,
@@ -498,13 +576,147 @@ function runTrustScript(
   };
 }
 
-// Every case here spawns the gate as a real Node process against a fabricated
+// Every case here spawns the gate as a real Bun process against a fabricated
 // app bundle, and the gate now inspects the four Electron child bundles as well.
 // The default 5s per test is not enough for that under parallel load.
-describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
+describe("verify-macos-release-trust.ts", { timeout: 30_000 }, () => {
+  it("rejects an independently trusted DMG app with a different payload", () => {
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const dmgAppPath = path.join(tempRoot, "alternate", "Plainsong.app");
+      cpSync(appPath, dmgAppPath, { recursive: true });
+      writeFileSync(path.join(dmgAppPath, "Contents/Resources/different.txt"), "different app");
+      const { result, outPath, zipTempParent } = runTrustScript(
+        tempScript, tempRoot, appPath, "accept", "AJ9VWBRNZN",
+        "mock-apple-tools", "minimal", "", "", null, { dmgAppPath },
+      );
+      const artifact = JSON.parse(readFileSync(outPath, "utf8"));
+      expect(artifact.checks.dmgSignatureValid).toBe(true);
+      expect(artifact.checks.dmgGatekeeperAccepted).toBe(true);
+      expect(artifact.checks.dmgTicketStapled).toBe(true);
+      expect(artifact.checks.dmgArchiveMounted).toBe(true);
+      expect(result.status).toBe(1);
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.dmgAppMatchesReleaseApp).toBe(false);
+      expect(readdirSync(zipTempParent)).toEqual([]);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["attach", "dmgArchiveMounted"],
+    ["empty", "dmgContainsSinglePlainsongApp"],
+    ["multiple", "dmgContainsSinglePlainsongApp"],
+    ["detach", "dmgUnmounted"],
+    ["metadata", "dmgMountPointVerified"],
+    ["wrong-mount", "dmgMountPointVerified"],
+    ["gatekeeper", "dmgGatekeeperAccepted"],
+    ["signature", "dmgSignatureValid"],
+    ["stapler", "dmgTicketStapled"],
+  ])("rejects a DMG with %s failure", (dmgDefect, check) => {
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const { result, outPath, mockedToolsTracePath } = runTrustScript(
+        tempScript, tempRoot, appPath, "accept", "AJ9VWBRNZN",
+        "mock-apple-tools", "minimal", "", "", null, { dmgDefect },
+      );
+      const artifact = JSON.parse(readFileSync(outPath, "utf8"));
+      expect(artifact.checks.dmgSignatureValid).toBe(dmgDefect !== "signature");
+      expect(result.status).toBe(1);
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks[check]).toBe(false);
+      if (["signature", "stapler", "gatekeeper"].includes(dmgDefect)) {
+        expect(artifact.checks.dmgArchiveMounted).toBe(false);
+        expect(artifact.paths.dmgMountPoint).toBeNull();
+        expect(artifact.diagnostics.dmgInspectionError).toContain("DMG inspection skipped");
+        expect(mockedToolsTracePath).not.toBeNull();
+        expect(readFileSync(mockedToolsTracePath ?? "", "utf8")).not.toContain("/usr/bin/hdiutil");
+      }
+      if (dmgDefect === "detach") {
+        expect(artifact.checks.dmgMountDirectoryCleaned).toBe(false);
+        expect(existsSync(path.join(artifact.paths.dmgMountPoint, "Plainsong.app"))).toBe(true);
+      }
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an independently trusted ZIP app with a different payload", () => {
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
+    try {
+      const { appPath } = createFakeMacosApp(tempRoot);
+      const zipAppPath = path.join(tempRoot, "alternate", "Plainsong.app");
+      cpSync(appPath, zipAppPath, { recursive: true });
+      writeFileSync(path.join(zipAppPath, "Contents/Resources/different.txt"), "different app");
+      const { result, outPath, zipTempParent } = runTrustScript(
+        tempScript, tempRoot, appPath, "accept", "AJ9VWBRNZN",
+        "mock-apple-tools", "minimal", "", "", null, { zipAppPath },
+      );
+      const artifact = JSON.parse(readFileSync(outPath, "utf8"));
+      expect(artifact.checks.appSignatureValid).toBe(true);
+      expect(artifact.checks.zipAppSignatureValid).toBe(true);
+      expect(artifact.checks.zipGatekeeperAccepted).toBe(true);
+      expect(result.status).toBe(1);
+      expect(artifact.pass).toBe(false);
+      expect(artifact.checks.zipAppMatchesReleaseApp).toBe(false);
+      expect(readdirSync(zipTempParent)).toEqual([]);
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  for (const [key, relative] of [
+    ["cli", "sidecar/plainsong-cli"],
+    ["languageModelHelper", "language-model-helper/plainsong-native-language-model-helper"],
+    ["asrHelper", "asr-helper/plainsong-native-asr-helper"],
+    ["textHelper", "text-helper/plainsong-text-helper"],
+  ]) {
+    for (const [defect, check] of [
+      ["signature", "SignatureValid"], ["developerId", "UsesDeveloperId"],
+      ["team", "TeamMatchesExpected"], ["runtime", "UsesHardenedRuntime"],
+      ["timestamp", "HasSecureTimestamp"], ["architecture", "IsArm64"],
+      ["entitlement", "HasEmptyEntitlements"], ["missing", "ExecutablePresent"],
+    ]) {
+      it(`rejects shipped ${key} with ${defect}`, () => {
+        const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
+        try {
+          const { appPath } = createFakeMacosApp(tempRoot);
+          if (defect === "missing") rmSync(path.join(appPath, "Contents/Resources", relative));
+          const { result, outPath } = runTrustScript(tempScript, tempRoot, appPath, "accept", "AJ9VWBRNZN", "mock-apple-tools", "minimal", "", "", null, {
+            extraTarget: path.basename(relative), extraDefect: defect,
+          });
+          const report = JSON.parse(readFileSync(outPath, "utf8"));
+          expect(result.status).toBe(1);
+          expect(report.checks.appSignatureValid).toBe(true);
+          expect(report.checks.sidecarSignatureValid).toBe(true);
+          expect(report.checks[`${key}${check}`]).toBe(false);
+          expect(report.checks[`zip${key[0].toUpperCase()}${key.slice(1)}${check}`]).toBe(false);
+          expect(report.pass).toBe(false);
+        } finally { rmSync(tempRoot, { recursive: true, force: true }); }
+      });
+    }
+    it(`rejects shipped ${key} corrupted only in the extracted ZIP`, () => {
+      const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
+      try {
+        const { appPath } = createFakeMacosApp(tempRoot);
+        const { result, outPath } = runTrustScript(tempScript, tempRoot, appPath, "accept", "AJ9VWBRNZN", "mock-apple-tools", "minimal", "", "", null, {
+          extraTarget: path.basename(relative), extraDefect: "signature", zipOnly: true,
+        });
+        const report = JSON.parse(readFileSync(outPath, "utf8"));
+        expect(report.checks[`${key}SignatureValid`]).toBe(true);
+        expect(report.checks[`zip${key[0].toUpperCase()}${key.slice(1)}SignatureValid`]).toBe(false);
+        expect(result.status).toBe(1);
+        expect(report.pass).toBe(false);
+      } finally { rmSync(tempRoot, { recursive: true, force: true }); }
+    });
+  }
+
   it("resolves DMG and ZIP artifacts only from the requested release directory", () => {
     const { tempRoot, tempScript } = createTempRepo(
-      "verify-macos-release-trust.mjs",
+      "verify-macos-release-trust.ts",
     );
     try {
       const { appPath, dmgPath, zipPath } = createFakeMacosApp(tempRoot, {
@@ -535,7 +747,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
   });
 
   it("writes secret-safe PASS artifacts for a trusted fake app bundle", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const {
         appPath,
@@ -642,6 +854,13 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       expect(artifact.checks.fuseFileProtocolPrivilegesDisabled).toBe(true);
       expect(artifact.checks.dmgSignatureValid).toBe(true);
       expect(artifact.checks.dmgTicketStapled).toBe(true);
+      expect(artifact.checks.dmgArchiveMounted).toBe(true);
+      expect(artifact.checks.dmgMountPointVerified).toBe(true);
+      expect(artifact.checks.dmgAppMatchesReleaseApp).toBe(true);
+      expect(artifact.checks.dmgPayloadAppSignatureValid).toBe(true);
+      expect(artifact.checks.dmgUnmounted).toBe(true);
+      expect(artifact.checks.dmgMountDirectoryCleaned).toBe(true);
+      expect(existsSync(artifact.paths.dmgMountPoint)).toBe(false);
       expect(artifact.checks.appHasSecureTimestamp).toBe(true);
       expect(artifact.checks.sidecarHasSecureTimestamp).toBe(true);
       expect(artifact.checks.shortcutHelperHasSecureTimestamp).toBe(true);
@@ -661,6 +880,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       expect(artifact.checks.zipPresent).toBe(true);
       expect(artifact.checks.zipArchiveExtracted).toBe(true);
       expect(artifact.checks.zipContainsSinglePlainsongApp).toBe(true);
+      expect(artifact.checks.zipAppMatchesReleaseApp).toBe(true);
       expect(artifact.checks.zipExtractionDirectoryCleaned).toBe(true);
       expect(artifact.checks.zipAppExists).toBe(true);
       expect(artifact.checks.zipMainExecutablePresent).toBe(true);
@@ -762,7 +982,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
     // Developer ID carrying microphone and Apple Events entitlements plus the
     // app's Accessibility grant — and notarization cannot
     // be retracted. Valid signatures everywhere must NOT be enough to pass.
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot, {
         fuseWire: PERMISSIVE_FUSE_WIRE,
@@ -805,7 +1025,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
     // the signature carrying the microphone and the Accessibility grant. A
     // helper that quietly acquired one of those back would defeat the split
     // while passing every other check in this gate.
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       const { outPath, result } = runTrustScript(
@@ -835,8 +1055,8 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
     }
   });
 
-  it("fails closed when the app takes the calendar entitlement back", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+  it("fails closed when the app lacks the calendar entitlement", () => {
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       const { outPath, result } = runTrustScript(
@@ -850,23 +1070,25 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
         "",
         "",
         null,
-        { app: "com.apple.security.personal-information.calendars" },
+        { appWithoutCalendar: true },
       );
 
+      // Without it TCC refuses to prompt for the helper's request, and
+      // Connect calendar does nothing (0.9.0-beta.6).
       expect(result.status).not.toBe(0);
       const artifact = JSON.parse(readFileSync(outPath, "utf8")) as {
         checks: Record<string, boolean>;
         pass: boolean;
       };
       expect(artifact.pass).toBe(false);
-      expect(artifact.checks.appHasNoCalendarEntitlement).toBe(false);
+      expect(artifact.checks.appHasCalendarEntitlement).toBe(false);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   });
 
   it("fails closed when the Speech helper inherits unrelated privileges", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       const { outPath, result } = runTrustScript(
@@ -903,7 +1125,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
     "com.apple.security.cs.disable-library-validation",
     "com.apple.security.personal-information.speech-recognition",
   ])("fails closed when the shortcut helper receives %s", (forbiddenEntitlement) => {
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       const { outPath, result } = runTrustScript(
@@ -959,7 +1181,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
     "com.apple.security.cs.disable-library-validation",
     "com.apple.security.personal-information.speech-recognition",
   ])("fails closed when the sidecar receives %s", (forbiddenEntitlement) => {
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       const { outPath, result } = runTrustScript(
@@ -1019,7 +1241,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
       // main app's entitlements. None of them opens a device or drives another
       // application.
       const { tempRoot, tempScript } = createTempRepo(
-        "verify-macos-release-trust.mjs",
+        "verify-macos-release-trust.ts",
       );
       try {
         const { appPath } = createFakeMacosApp(tempRoot);
@@ -1071,7 +1293,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
     "fails closed when the generic Electron helper receives %s",
     (forbiddenEntitlement) => {
       const { tempRoot, tempScript } = createTempRepo(
-        "verify-macos-release-trust.mjs",
+        "verify-macos-release-trust.ts",
       );
       try {
         const { appPath } = createFakeMacosApp(tempRoot);
@@ -1112,7 +1334,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
     // grant that lets Plainsong inject keystrokes anywhere. Library validation
     // is what stops that signature also being a loader for someone else's
     // dylib, and notarization cannot be retracted once it has shipped.
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       const { outPath, result } = runTrustScript(
@@ -1148,7 +1370,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
   it("fails closed when an Electron helper bundle is missing entirely", () => {
     // A productName change would move these paths; without a presence check the
     // entitlement checks above would go quietly unenforced.
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       rmSync(
@@ -1171,7 +1393,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
   });
 
   it("fails closed when Gatekeeper rejects the app bundle", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       const {
@@ -1223,7 +1445,7 @@ describe("verify-macos-release-trust.mjs", { timeout: 30_000 }, () => {
   });
 
   it("cannot be forged by trusted-looking Apple tools prepended to PATH", () => {
-    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.mjs");
+    const { tempRoot, tempScript } = createTempRepo("verify-macos-release-trust.ts");
     try {
       const { appPath } = createFakeMacosApp(tempRoot);
       const {

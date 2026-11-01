@@ -57,9 +57,10 @@ describe("privileged native dialog admission", () => {
     // begin_meeting_capture already had both; these did not.
     const handler = localCommandHandler();
 
-    expect(
-      caseBody(handler, "select_export_location", "select_backup_location"),
-    ).toContain('requireMainWindowGesture("Choosing an export folder")');
+    const exportCase = caseBody(handler, "select_export_location", "select_backup_location");
+    expect(exportCase).toContain("requireMainWindowGesture(");
+    // One picker serves the export folder and the notes folder.
+    expect(exportCase).toContain('"Choosing a notes folder" : "Choosing an export folder"');
     expect(
       caseBody(handler, "select_backup_location", "select_cloud_backup_location"),
     ).toContain('requireMainWindowGesture("Choosing a backup folder")');
@@ -108,6 +109,15 @@ describe("privileged native dialog admission", () => {
     expect(consumeAt).toBeGreaterThanOrEqual(0);
     expect(registerAt).toBeGreaterThan(consumeAt);
     expect(startAt).toBeGreaterThan(registerAt);
+  });
+
+  it("opens the calendar link only after admitted capture succeeds", () => {
+    const capture = caseBody(localCommandHandler(), "begin_calendar_meeting_capture", "end_meeting_capture");
+    expect(capture).toContain("calendarConferenceUrl(calendarPayload.conferenceUrl)");
+    expect(capture.indexOf("calendarConferenceUrl(")).toBeLessThan(capture.indexOf("captureAdmission.consume("));
+    expect(capture.indexOf("shell.openExternal(")).toBeGreaterThan(capture.indexOf('invoke("start_recording"'));
+    expect(capture).toContain("activeMeetingRecordingId === result.recordingId");
+    expect(capture).toContain("joinOpened = false");
   });
 
   it("rejects a stale, reused, cross-window or cross-route gesture", () => {
@@ -171,6 +181,7 @@ describe("privileged native dialog admission", () => {
         // The support-bundle save dialog: the reader picks the file, and the
         // path goes from the dialog straight to the sidecar.
         "create_support_bundle",
+        "begin_meeting_capture",
         "open_calendar_privacy_settings",
         // The audio-import picker: a native open dialog like the storage
         // ones, and gated the same way.
@@ -227,15 +238,13 @@ describe("privileged native dialog admission", () => {
     expect(NATIVE_SURFACE.test(snapshot)).toBe(false);
   });
 
-  it("keeps shell.openExternal out of every other local command", () => {
-    // Everything else leaves the app through the vetted https allowlist in
-    // electron/external-url-policy.ts. A second raw egress point in this
-    // handler would bypass it entirely.
+  it("limits direct external opens to calendar privacy and admitted join", () => {
+    // Calendar join validates its URL and shares the capture admission grant.
     const openExternalCases = caseBodies(localCommandHandler())
       .filter(({ body }) => body.includes("shell.openExternal("))
       .map(({ command }) => command);
 
-    expect(openExternalCases).toEqual(["open_calendar_privacy_settings"]);
+    expect(openExternalCases).toEqual(["open_calendar_privacy_settings", "begin_meeting_capture"]);
   });
 
   it("parseCloudLocationRequest rejects null bytes and Windows drive specifiers as unsafe paths", () => {

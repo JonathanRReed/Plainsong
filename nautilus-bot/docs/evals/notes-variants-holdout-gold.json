@@ -1,0 +1,488 @@
+{
+  "schema": "plainsong-notes-variants-gold-v1",
+  "description": "Meaning annotations for notes-variants-holdout-fixtures.json, in the format of notes-variants-gold.json.",
+  "families": {
+    "holdout-vendor-onboarding": {
+      "fixtures": [
+        "holdout-vendor-onboarding"
+      ],
+      "commitments": [
+        {
+          "id": "sign",
+          "owner": null,
+          "verb": [
+            "sign"
+          ],
+          "object": [
+            "contract",
+            "vendor"
+          ],
+          "condition": [
+            "legal",
+            "clear"
+          ],
+          "dates": [
+            "21"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "draft",
+          "owner": "Marco",
+          "verb": [
+            "draft"
+          ],
+          "object": [
+            "checklist"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "send",
+          "owner": "Marco",
+          "verb": [
+            "send",
+            "sent"
+          ],
+          "object": [
+            "checklist"
+          ],
+          "condition": null,
+          "dates": [
+            "monday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "kickoff",
+          "owner": "Ade",
+          "verb": [
+            "schedul"
+          ],
+          "object": [
+            "kickoff"
+          ],
+          "condition": [
+            "marco",
+            "send"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "licenses",
+          "owner": null,
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "licens"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "security",
+            "review"
+          ],
+          "status": [
+            "complet",
+            "done",
+            "finish"
+          ]
+        }
+      ]
+    },
+    "holdout-clinic-shifts": {
+      "fixtures": [
+        "holdout-clinic-shifts"
+      ],
+      "commitments": [
+        {
+          "id": "cover",
+          "owner": "Tomas",
+          "verb": [
+            "cover"
+          ],
+          "object": [
+            "shift",
+            "evening"
+          ],
+          "condition": [
+            "hana",
+            "take"
+          ],
+          "dates": [
+            "saturday"
+          ],
+          "conditionDates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "take",
+          "owner": "Hana",
+          "verb": [
+            "take",
+            "took"
+          ],
+          "object": [
+            "rota",
+            "friday"
+          ],
+          "condition": [
+            "rosa",
+            "approv"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "close",
+          "owner": null,
+          "verb": [
+            "clos"
+          ],
+          "object": [
+            "clinic"
+          ],
+          "condition": null,
+          "dates": [
+            "3"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "booking"
+          ],
+          "status": [
+            "ready"
+          ]
+        }
+      ]
+    },
+    "holdout-data-migration": {
+      "fixtures": [
+        "holdout-data-migration"
+      ],
+      "commitments": [
+        {
+          "id": "migrate",
+          "owner": null,
+          "verb": [
+            "migrat"
+          ],
+          "object": [
+            "archive"
+          ],
+          "condition": [
+            "backup"
+          ],
+          "dates": [
+            "june 4"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "update",
+          "owner": "Bea",
+          "verb": [
+            "updat"
+          ],
+          "object": [
+            "runbook"
+          ],
+          "condition": null,
+          "dates": [
+            "thursday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "delete",
+          "owner": "Omar",
+          "verb": [
+            "delet"
+          ],
+          "object": [
+            "archive"
+          ],
+          "condition": [
+            "kai",
+            "confirm"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "runbook"
+          ],
+          "status": [
+            "outdat"
+          ]
+        }
+      ]
+    },
+    "holdout2-lab-equipment": {
+      "fixtures": [
+        "holdout2-lab-equipment"
+      ],
+      "commitments": [
+        {
+          "id": "buy",
+          "owner": null,
+          "verb": [
+            "buy",
+            "purchas"
+          ],
+          "object": [
+            "centrifuge"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": false
+        },
+        {
+          "id": "calibrate",
+          "owner": "Jun",
+          "verb": [
+            "calibrat"
+          ],
+          "object": [
+            "spectrometer"
+          ],
+          "condition": [
+            "service",
+            "visit"
+          ],
+          "dates": [
+            "wednesday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "order",
+          "owner": "Jun",
+          "verb": [
+            "order"
+          ],
+          "object": [
+            "reagent"
+          ],
+          "condition": null,
+          "dates": [
+            "12"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "approve",
+          "owner": "Ines",
+          "verb": [
+            "approv"
+          ],
+          "object": [
+            "invoice"
+          ],
+          "condition": [
+            "audit"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        }
+      ],
+      "statuses": []
+    },
+    "holdout2-school-trip": {
+      "fixtures": [
+        "holdout2-school-trip"
+      ],
+      "commitments": [
+        {
+          "id": "book",
+          "owner": null,
+          "verb": [
+            "book"
+          ],
+          "object": [
+            "coach"
+          ],
+          "condition": [
+            "parent",
+            "sign"
+          ],
+          "dates": [
+            "9"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "collect",
+          "owner": "Pete",
+          "verb": [
+            "collect"
+          ],
+          "object": [
+            "consent",
+            "form"
+          ],
+          "condition": null,
+          "dates": [
+            "friday"
+          ],
+          "negated": false,
+          "key": false,
+          "action": true
+        },
+        {
+          "id": "siblings",
+          "owner": null,
+          "verb": [
+            "bring"
+          ],
+          "object": [
+            "sibling"
+          ],
+          "condition": null,
+          "dates": [],
+          "negated": true,
+          "key": false,
+          "action": false
+        },
+        {
+          "id": "email",
+          "owner": "Pete",
+          "verb": [
+            "email",
+            "send",
+            "sent"
+          ],
+          "object": [
+            "itinerary"
+          ],
+          "condition": [
+            "coach",
+            "book"
+          ],
+          "dates": [],
+          "negated": false,
+          "key": true,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "coach"
+          ],
+          "status": [
+            "book"
+          ],
+          "conditionOnly": true
+        }
+      ]
+    },
+    "holdout2-office-move": {
+      "fixtures": [
+        "holdout2-office-move"
+      ],
+      "commitments": [
+        {
+          "id": "pack",
+          "owner": "Raf",
+          "verb": [
+            "pack"
+          ],
+          "object": [
+            "server",
+            "rack"
+          ],
+          "condition": [
+            "facilit",
+            "confirm"
+          ],
+          "dates": [
+            "monday"
+          ],
+          "negated": false,
+          "key": true,
+          "action": true
+        },
+        {
+          "id": "unplug",
+          "owner": "Raf",
+          "verb": [
+            "unplug"
+          ],
+          "object": [
+            "router"
+          ],
+          "condition": [
+            "uma",
+            "sign"
+          ],
+          "dates": [],
+          "negated": true,
+          "key": true,
+          "action": true
+        }
+      ],
+      "statuses": [
+        {
+          "subject": [
+            "lease"
+          ],
+          "status": [
+            "unsign",
+            "sign"
+          ]
+        }
+      ]
+    }
+  }
+}

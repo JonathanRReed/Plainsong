@@ -131,3 +131,40 @@ describe("meetingElapsedSeconds", () => {
     expect(formatElapsedClock(-3)).toBe("00:00");
   });
 });
+
+describe("lifecycle messages in the meeting lifecycle reducer", () => {
+  it("replaces a raw processing error with the plain next step", () => {
+    const state = reduceMeetingLifecycleState(recording({ phase: "processing" }), {
+      phase: "error",
+      recordingId: "rec-1",
+      message:
+        "Transcription failed: all 3 chunk(s) failed (last error: Chunk 3 failed at 180.0s: NVIDIA Parakeet failed: Could not verify native memory headroom)",
+    });
+
+    expect(state.message).not.toMatch(/headroom|chunk/i);
+    expect(state.message).toMatch(/memory/i);
+  });
+
+  it("keeps a plain sidecar sentence as written", () => {
+    const message = "Meeting processing failed. Open Meetings to retry transcription from the saved audio.";
+    const state = reduceMeetingLifecycleState(recording({ phase: "processing" }), {
+      phase: "error",
+      recordingId: "rec-1",
+      message,
+    });
+
+    expect(state.message).toBe(message);
+  });
+
+  it("falls back to a plain sentence for a model-internals error", () => {
+    const state = reduceMeetingLifecycleState(recording({ phase: "processing" }), {
+      phase: "error",
+      recordingId: "rec-1",
+      message: "transcribe.cpp GGUF load failed: tensor shape mismatch",
+    });
+
+    expect(state.message).toBe(
+      "Plainsong could not finish this meeting. The recording is saved; open the meeting to transcribe it again.",
+    );
+  });
+});

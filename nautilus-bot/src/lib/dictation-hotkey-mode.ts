@@ -1,15 +1,9 @@
-/**
- * The single resolver for "what does the dictation hotkey do right now".
- *
- * Two booleans in settings (`dictationPushToTalk`, `dictationHandsFreeEnabled`)
- * describe three behaviors, so every surface that renders the behavior has to
- * collapse them the same way. The Dictation page used to collapse them twice —
- * once for the header chip and once for the instruction line — which let the
- * page assert two different behaviors at the same time. Resolve once, here.
- */
+import type { DictationBinding } from "@/types/settings";
+import { normalizeShortcut } from "./shortcuts";
+
 export type DictationHotkeyMode = "hold_to_talk" | "toggle" | "hands_free";
 
-export function resolveDictationHotkeyMode(
+function resolveDictationHotkeyMode(
   pushToTalk: boolean,
   handsFreeEnabled: boolean,
 ): DictationHotkeyMode {
@@ -17,6 +11,25 @@ export function resolveDictationHotkeyMode(
     return "hands_free";
   }
   return pushToTalk ? "hold_to_talk" : "toggle";
+}
+
+export function resolveDisplayedDictationHotkeyMode(input: {
+  shortcut: string;
+  bindings: readonly DictationBinding[] | undefined;
+  pushToTalk: boolean;
+  handsFreeEnabled: boolean;
+}): DictationHotkeyMode {
+  const shortcut = normalizeShortcut(input.shortcut);
+  const binding = shortcut ? input.bindings?.find((candidate) =>
+    candidate.trigger.kind === "key" &&
+    candidate.action.kind === "dictation" &&
+    normalizeShortcut(candidate.trigger.accelerator) === shortcut,
+  ) : undefined;
+  if (binding?.action.kind === "dictation") {
+    if (binding.action.behavior === "hold") return "hold_to_talk";
+    if (binding.action.behavior === "toggle") return "toggle";
+  }
+  return resolveDictationHotkeyMode(input.pushToTalk, input.handsFreeEnabled);
 }
 
 /** Compact label for the header chip beside the keycap. */

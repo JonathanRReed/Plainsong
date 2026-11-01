@@ -1,0 +1,430 @@
+{
+  "schema": "plainsong-notes-fidelity-v1",
+  "description": "Held-out synthetic meetings for the variant robustness eval. They were written after the verifier changes and are not used by Rust tests, so they measure whether commitment parsing generalizes beyond the development fixtures.",
+  "meetings": [
+    {
+      "id": "holdout-vendor-onboarding",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Lena",
+          "text": "We agreed to sign the vendor contract on the 21st if legal clears the indemnity clause, and Marco will draft the onboarding checklist."
+        },
+        {
+          "start": 10.0,
+          "end": 16.0,
+          "speaker": "Marco",
+          "text": "I'll send the checklist to Ade by Monday."
+        },
+        {
+          "start": 17.0,
+          "end": 24.0,
+          "speaker": "Ade",
+          "text": "I won't schedule the kickoff until Marco sends the checklist."
+        },
+        {
+          "start": 25.0,
+          "end": 33.0,
+          "speaker": "Lena",
+          "text": "The security review is already complete. We have not approved the extra licenses."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "sign",
+            "vendor",
+            "contract",
+            "if",
+            "legal",
+            "clears"
+          ],
+          "owner": null,
+          "due": [
+            "the 21st",
+            "the twenty-first"
+          ]
+        },
+        {
+          "task": [
+            "draft",
+            "onboarding",
+            "checklist"
+          ],
+          "owner": "Marco",
+          "due": []
+        },
+        {
+          "task": [
+            "send",
+            "checklist"
+          ],
+          "owner": "Marco",
+          "due": [
+            "Monday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "schedule",
+            "kickoff",
+            "until",
+            "sends"
+          ],
+          "owner": "Ade",
+          "due": []
+        }
+      ],
+      "names": [
+        "Lena",
+        "Marco",
+        "Ade"
+      ],
+      "numbers": [
+        [
+          "21st",
+          "twenty-first"
+        ]
+      ]
+    },
+    {
+      "id": "holdout-clinic-shifts",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 8.0,
+          "speaker": "Rosa",
+          "text": "Tomas will cover the evening shift on Saturday only if Hana takes the Friday rota."
+        },
+        {
+          "start": 9.0,
+          "end": 15.0,
+          "speaker": "Hana",
+          "text": "I'll take the Friday rota if Rosa approves the swap."
+        },
+        {
+          "start": 16.0,
+          "end": 24.0,
+          "speaker": "Rosa",
+          "text": "We decided to close the clinic early on the 3rd. The new booking system is not ready."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "cover",
+            "evening",
+            "shift",
+            "only if",
+            "takes"
+          ],
+          "owner": "Tomas",
+          "due": [
+            "Saturday"
+          ]
+        },
+        {
+          "task": [
+            "take",
+            "friday",
+            "rota",
+            "if",
+            "approves"
+          ],
+          "owner": "Hana",
+          "due": []
+        },
+        {
+          "task": [
+            "close",
+            "clinic",
+            "early"
+          ],
+          "owner": null,
+          "due": [
+            "the 3rd",
+            "the third"
+          ]
+        }
+      ],
+      "names": [
+        "Rosa",
+        "Tomas",
+        "Hana"
+      ],
+      "numbers": [
+        [
+          "3rd",
+          "third"
+        ]
+      ]
+    },
+    {
+      "id": "holdout-data-migration",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 9.0,
+          "speaker": "Kai",
+          "text": "We will migrate the archive on June 4 if the backup check passes, and Bea will update the runbook."
+        },
+        {
+          "start": 10.0,
+          "end": 16.0,
+          "speaker": "Bea",
+          "text": "I'll update the runbook by Thursday. The old runbook is outdated."
+        },
+        {
+          "start": 17.0,
+          "end": 25.0,
+          "speaker": "Omar",
+          "text": "I will not delete the old archive until Kai confirms the restore test."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "migrate",
+            "archive",
+            "if",
+            "backup",
+            "passes"
+          ],
+          "owner": null,
+          "due": [
+            "June 4"
+          ]
+        },
+        {
+          "task": [
+            "update",
+            "runbook"
+          ],
+          "owner": "Bea",
+          "due": [
+            "Thursday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "delete",
+            "archive",
+            "until",
+            "confirms"
+          ],
+          "owner": "Omar",
+          "due": []
+        }
+      ],
+      "names": [
+        "Kai",
+        "Bea",
+        "Omar"
+      ],
+      "numbers": [
+        [
+          "June 4"
+        ]
+      ]
+    },
+    {
+      "id": "holdout2-lab-equipment",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 7.0,
+          "speaker": "Ines",
+          "text": "We decided not to buy the second centrifuge this quarter."
+        },
+        {
+          "start": 8.0,
+          "end": 15.0,
+          "speaker": "Jun",
+          "text": "I'm going to calibrate the spectrometer on Wednesday unless the service visit moves."
+        },
+        {
+          "start": 16.0,
+          "end": 25.0,
+          "speaker": "Ines",
+          "text": "Jun will order the reagents by the 12th, but I will approve the invoice only after the audit closes."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "calibrate",
+            "spectrometer",
+            "unless",
+            "service"
+          ],
+          "owner": "Jun",
+          "due": [
+            "Wednesday"
+          ]
+        },
+        {
+          "task": [
+            "order",
+            "reagents"
+          ],
+          "owner": "Jun",
+          "due": [
+            "the 12th",
+            "the twelfth"
+          ]
+        },
+        {
+          "task": [
+            "approve",
+            "invoice",
+            "after",
+            "audit"
+          ],
+          "owner": "Ines",
+          "due": []
+        }
+      ],
+      "names": [
+        "Ines",
+        "Jun"
+      ],
+      "numbers": [
+        [
+          "12th",
+          "twelfth"
+        ]
+      ]
+    },
+    {
+      "id": "holdout2-school-trip",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 8.0,
+          "speaker": "Ola",
+          "text": "We agreed to book the coach for the 9th as long as twenty parents sign the consent form."
+        },
+        {
+          "start": 9.0,
+          "end": 15.0,
+          "speaker": "Pete",
+          "text": "I'll collect the consent forms by Friday. Parents must not bring siblings."
+        },
+        {
+          "start": 16.0,
+          "end": 22.0,
+          "speaker": "Ola",
+          "text": "Once the coach is booked, Pete will email the itinerary."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "book",
+            "coach",
+            "as long as",
+            "parents",
+            "sign"
+          ],
+          "owner": null,
+          "due": [
+            "the 9th",
+            "the ninth"
+          ]
+        },
+        {
+          "task": [
+            "collect",
+            "consent",
+            "forms"
+          ],
+          "owner": "Pete",
+          "due": [
+            "Friday"
+          ]
+        },
+        {
+          "task": [
+            "email",
+            "itinerary",
+            "once",
+            "booked"
+          ],
+          "owner": "Pete",
+          "due": []
+        }
+      ],
+      "names": [
+        "Ola",
+        "Pete"
+      ],
+      "numbers": [
+        [
+          "9th",
+          "ninth"
+        ],
+        [
+          "twenty",
+          "20"
+        ]
+      ]
+    },
+    {
+      "id": "holdout2-office-move",
+      "segments": [
+        {
+          "start": 0.0,
+          "end": 8.0,
+          "speaker": "Uma",
+          "text": "Raf will pack the server rack on Monday provided that facilities confirms the elevator booking."
+        },
+        {
+          "start": 9.0,
+          "end": 15.0,
+          "speaker": "Raf",
+          "text": "Yes, and I won't unplug the router until Uma signs off."
+        },
+        {
+          "start": 16.0,
+          "end": 21.0,
+          "speaker": "Uma",
+          "text": "The lease extension is still unsigned."
+        }
+      ],
+      "actions": [
+        {
+          "task": [
+            "pack",
+            "server",
+            "rack",
+            "provided",
+            "confirms"
+          ],
+          "owner": "Raf",
+          "due": [
+            "Monday"
+          ]
+        },
+        {
+          "task": [
+            "not",
+            "unplug",
+            "router",
+            "until",
+            "signs"
+          ],
+          "owner": "Raf",
+          "due": []
+        }
+      ],
+      "names": [
+        "Uma",
+        "Raf"
+      ],
+      "numbers": []
+    }
+  ]
+}

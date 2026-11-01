@@ -80,7 +80,14 @@ const MAX_CHUNK_SECONDS: f64 = 10.0;
 const FORCED_CUT_LOOKBACK_SECONDS: f64 = 0.5;
 
 /// Depth of the ring buffer holding captured audio awaiting decode.
-const RING_BUFFER_SECONDS: usize = 300;
+///
+/// Chunks are cut every 5-10 s and decode faster than real time, so the
+/// backlog normally stays under one chunk. Two minutes still lets a stalled
+/// decoder fall 90 s behind (the stale fraction below) before a gap is
+/// reported, and the saved recording is transcribed in full after the call
+/// either way. At a 48 kHz capture rate this is 23 MB instead of the 58 MB the
+/// previous five-minute ring filled to in any meeting longer than five minutes.
+const RING_BUFFER_SECONDS: usize = 120;
 
 /// Fraction of the ring the undecoded backlog may reach before the session
 /// gives up on the oldest audio and reports a gap. Deliberately well below 1.0:
@@ -854,6 +861,9 @@ async fn decode_and_emit(
     span: DecodeSpan,
     is_final: bool,
 ) {
+    if !session.provider_type.is_remote() {
+        crate::llm::local_model_load::yield_to_dictation().await;
+    }
     let wav_bytes = samples_to_wav(&span.samples, session.sample_rate);
 
     let (decoded_text, confidence) = if wav_bytes.is_empty() {
