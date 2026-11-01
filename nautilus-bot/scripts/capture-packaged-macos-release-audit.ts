@@ -113,7 +113,11 @@ function plistScalar(filePath: string, key: string): string | null {
     ["-extract", key, "raw", "-o", "-", filePath],
     { encoding: "utf8" },
   );
-  return result.status === 0 ? String(result.stdout).trim() || null : null;
+  if (!result.error) return result.status === 0 ? String(result.stdout).trim() || null : null;
+  // plutil exists only on macOS; read XML plists directly elsewhere, such as Linux CI.
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = fs.readFileSync(filePath, "utf8").match(new RegExp(`<key>${escaped}</key>\\s*<string>([^<]*)</string>`));
+  return match?.[1].trim() || null;
 }
 
 function sha256(filePath: string): string {
