@@ -105,7 +105,8 @@ jobs:
     name: Rust format, clippy, and tests
     needs: verify-web
     runs-on: macos-latest
-    timeout-minutes: 45
+    # A cold Rust cache needs about 45 minutes before the feature-combination checks.
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
